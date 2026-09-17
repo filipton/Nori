@@ -18,7 +18,7 @@ threads() {
   adb shell "for p in $(pids); do for d in /proc/\$p/task/*; do set -- \$(cat \$d/stat 2>/dev/null | sed 's/.*) //'); echo \$(cat \$d/comm | tr ' ' '_'):\${d##*/} \$((\${12:-0} + \${13:-0})); done; done" | tr -d '\r' | sort
 }
 
-state=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_]+" | head -1 | tr -d "{" || true)
+state=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_0-9]+" | head -1 | tr -d "{" | sed -E "s/=3$/=PLAYING/; s/=2$/=PAUSED/" || true)
 echo "package: $pkg   session: ${state:-none}   window: ${secs}s   screen: $screen"
 if [ "$screen" = off ]; then adb shell input keyevent 223; else adb shell input keyevent 224; adb shell svc power stayon true; fi
 sleep 15
@@ -38,6 +38,6 @@ echo "wakelocks: $(adb shell dumpsys power | grep -E '^ +[A-Z_]+_WAKE_LOCK' | gr
 echo "busiest threads (ms):"
 join /tmp/bench-a.$$ /tmp/bench-b.$$ 2>/dev/null | awk '$3-$2>0 {sub(/:[0-9]+$/,"",$1); print "  " ($3-$2)*10, $1}' | sort -rn | head -8
 rm -f /tmp/bench-a.$$ /tmp/bench-b.$$
-after=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_]+" | head -1 | tr -d "{" || true)
+after=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_0-9]+" | head -1 | tr -d "{" | sed -E "s/=3$/=PLAYING/; s/=2$/=PAUSED/" || true)
 echo "session after: ${after:-none}"
 [ "$screen" = on ] && adb shell svc power stayon false || true

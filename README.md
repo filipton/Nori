@@ -49,29 +49,25 @@ output (media3's sink emits 16-bit or float only; needs a custom `AudioOutputPro
 
 ## Measured
 
-Same emulator (API 34 x86_64, no offload hardware), same 320 kbps MP3 from a local Navidrome,
-release builds, `tools/bench.sh <package> <seconds> <off|on>` and `tools/scroll.sh <package>`:
+Full results, including an Android 11 versus Android 14 comparison and the package checks, are in
+[perf-results.md](perf-results.md); reproduce them with `tools/perf-suite.sh <serial> <server-url>`.
+The short version, API 34 emulator (software GPU, no audio offload, so these are worst cases):
 
-| | flint | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 | Symfonium 15.1.0B6 |
-|---|---|---|---|---|---|
-| screen off: CPU (% of a core) | **1.4** (+0.5 system decoder) | 2.4–3.3 (+0.5) | 4.6 (+0.5) | 10.5 (decodes in-process) | 9.1 |
-| screen off: seconds with no wakeups, of 90 | **73–76** | 1 | 0 | 0 | 0 |
-| screen off: app main thread, ms/min | ~10 | 530–840 | 100 | 370 | 350 |
-| player visible: CPU | **2.7** | 90 | 146 | 185 | 177 |
-| memory (PSS, MB) | 82–105 | 120–137 | 132–148 | 119–136 | 130–144 |
-| cold start | ~0.95 s | ~1.9 s | — | — | — |
-| album grid fling, 300 albums: median / p99 frame | 48 / 73 ms (system Settings: 44 / 73) | 61–65 / 101–250 ms | — | — | — |
+| | flint | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 |
+|---|---|---|---|---|
+| Screen off, CPU | **1.1-1.7 %** of a core | 2.4-3.3 % | 4.6 % | 10.5 % |
+| Screen off, seconds asleep (of 90) | **70-75** | 1 | 0 | 0 |
+| Player visible, CPU | **3.2 %** | 90 % | 146 % | 185 % |
+| Cold start | **0.74-1.0 s** | ~1.9 s | - | - |
+| Memory | 72-121 MB | 120-137 MB | 132-148 MB | 119-136 MB |
 
-Caveats, so the table is not over-read. "Player visible" is dominated by GPU work that this emulator
-does in software: the ranking is real (flint redraws once a second, the others animate every frame),
-the absolute numbers are far higher than on a phone. flint, Navic and Musly decode through the
-platform codec, whose cost (~0.5 % here) lands in `media.swcodec`; Symfonium decodes inside its own
-process with its own engine, which also resamples and runs a DSP chain, so part of its number is work
-the others do not do at all. Nothing here has audio offload; on a phone MP3/AAC/Opus move to the DSP
-for apps that use it. Musly was built from its v2.0.2 tag with its own Dockerfile and one change (its
-emulator check returns false); Symfonium is the official universal APK in trial mode.
-For numbers that settle the question, run `tools/compare.sh` with a phone attached: it adds Android's
-per-app battery estimate.
+Equalizer, crossfeed and crossfade cost nothing extra with the screen off (1.7 % with all three on),
+because the DSP runs inside the same bursts. The word-by-word lyric sweep is the one exception at
+44 % while that tab is open on this emulator, which is why it has a switch (2.9 % off).
+
+Musly refuses to start on an emulator, so it was built from its v2.0.2 tag with the check removed;
+Symfonium is the official universal APK in trial mode. Both were measured on the same emulator and
+track as the rows above.
 
 ## Build
 

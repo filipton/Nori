@@ -50,6 +50,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
@@ -65,7 +67,8 @@ import kotlinx.coroutines.isActive
 fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
-    Surface(tonalElevation = 3.dp, modifier = Modifier.clickable(onClick = onOpen)) {
+    // A real clickable surface, so the whole bar is one labelled target for a screen reader (and for tools/perf-suite.sh).
+    Surface(onClick = onOpen, tonalElevation = 3.dp, modifier = Modifier.semantics { contentDescription = "Now playing bar" }) {
         // No progress bar here on purpose: it would tick for as long as the app is open.
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 44.dp)
