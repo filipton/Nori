@@ -8,6 +8,7 @@ mod api;
 mod db;
 pub mod dsp;
 mod history;
+mod mixes;
 mod model;
 
 use std::sync::Arc;
