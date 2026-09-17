@@ -423,3 +423,27 @@ pub struct M3uEntry {
     pub title: String,
     pub path: String,
 }
+
+/// One headphone measurement in the AutoEQ database.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct AutoEqEntry {
+    pub name: String,
+    /// Who measured it: oratory1990, crinacle, ...
+    pub source: String,
+    /// over-ear, in-ear, earbud, ...
+    pub form: String,
+    /// The target curve it was equalised to.
+    pub target: String,
+    /// Path inside the AutoEQ results tree; the core turns it into a download url.
+    pub path: String,
+}
+
+/// A saved sound setting: the whole chain under a name, optionally bound to output devices.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct SoundProfile {
+    pub name: String,
+    /// The settings as JSON, written and read by the Kotlin side.
+    pub json: String,
+    /// Output devices this profile applies to automatically, one per line.
+    pub outputs: Vec<String>,
+}

@@ -14,6 +14,12 @@ import dev.flint.music.settings.BandChannel
 import dev.flint.music.ffi.parseEqPreset
 import dev.flint.music.ffi.eqPresets
 import dev.flint.music.ffi.NamedPreset
+import dev.flint.music.ffi.AutoEqEntry
+import dev.flint.music.ffi.SoundProfile
+import dev.flint.music.settings.Sound
+import dev.flint.music.settings.withSound
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +27,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
+data class AutoEqUi(val count: Int = 0, val query: String = "", val hits: List<AutoEqEntry> = emptyList(), val busy: Boolean = false, val applied: String? = null, val error: String? = null)
+
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
 class SettingsViewModel(app: Application) : FlintViewModel(app) {
@@ -102,6 +110,68 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
             )
         }
         return preset.bands.size
+    }
+
+    // ---- saved profiles and the AutoEQ database ----
+
+    private val _profiles = MutableStateFlow<List<SoundProfile>>(emptyList())
+    val profiles: StateFlow<List<SoundProfile>> = _profiles
+    val outputs: StateFlow<List<String>> = flint.outputs.known
+    val currentOutput: StateFlow<String> = flint.outputs.current
+
+    init { refreshProfiles() }
+    private fun refreshProfiles() = viewModelScope.launch { _profiles.value = runCatching { flint.core.profiles() }.getOrDefault(emptyList()) }
+
+    /** Saves the sound settings as they are now under [name]. */
+    fun saveProfile(name: String, outputs: List<String> = emptyList()) = viewModelScope.launch {
+        runCatching { flint.core.profileSave(SoundProfile(name.trim(), Sound.of(prefs.value).toJson(), outputs)) }
+        refreshProfiles()
+    }
+
+    fun applyProfile(p: SoundProfile) = Sound.fromJson(p.json)?.let { s -> update { it.withSound(s) } }
+    fun deleteProfile(name: String) = viewModelScope.launch { runCatching { flint.core.profileDelete(name) }; refreshProfiles() }
+
+    /** Binds or unbinds an output device to a profile; the service applies it when that device becomes active. */
+    fun bindProfile(p: SoundProfile, output: String, bound: Boolean) = viewModelScope.launch {
+        val outs = if (bound) (p.outputs + output).distinct() else p.outputs - output
+        runCatching { flint.core.profileSave(p.copy(outputs = outs)) }
+        refreshProfiles()
+    }
+
+    private val _autoEq = MutableStateFlow(AutoEqUi())
+    val autoEq: StateFlow<AutoEqUi> = _autoEq
+
+    init { viewModelScope.launch { _autoEq.update { it.copy(count = runCatching { flint.core.autoeqCount() }.getOrDefault(0u).toInt()) } } }
+
+    /** Downloads the AutoEQ index once (850 kB) so searching is local afterwards. */
+    fun downloadAutoEqIndex() = viewModelScope.launch {
+        if (!prefs.value.thirdPartyLookups) return@launch _autoEq.update { it.copy(error = "Turn on \"Third-party lookups\" first: this downloads from github.com.") }
+        _autoEq.update { it.copy(busy = true, error = null) }
+        _autoEq.value = try {
+            val text = withContext(Dispatchers.IO) { flint.http.get(flint.core.autoeqIndexUrl()).decodeToString() }
+            AutoEqUi(count = withContext(Dispatchers.IO) { flint.core.autoeqStore(text) }.toInt())
+        } catch (e: Exception) {
+            AutoEqUi(error = describeConnectionError(e))
+        }
+    }
+
+    fun searchAutoEq(query: String) = viewModelScope.launch {
+        _autoEq.update { it.copy(query = query) }
+        if (query.length < 2) return@launch _autoEq.update { it.copy(hits = emptyList()) }
+        val hits = withContext(Dispatchers.IO) { runCatching { flint.core.autoeqSearch(query, 40u) }.getOrDefault(emptyList()) }
+        _autoEq.update { if (it.query == query) it.copy(hits = hits) else it }
+    }
+
+    /** Fetches one headphone's parametric preset and makes it the current curve. */
+    fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {
+        _autoEq.update { it.copy(busy = true, error = null) }
+        try {
+            val text = withContext(Dispatchers.IO) { flint.http.get(flint.core.autoeqPresetUrl(entry)).decodeToString() }
+            if (importPreset(text) == 0) throw IllegalStateException("that file had no filters in it")
+            _autoEq.update { it.copy(busy = false, applied = entry.name) }
+        } catch (e: Exception) {
+            _autoEq.update { it.copy(busy = false, error = describeConnectionError(e)) }
+        }
     }
 
     // ---- downloads ----

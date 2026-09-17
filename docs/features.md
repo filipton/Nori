@@ -164,7 +164,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Android 14+ bit-perfect USB | x | | | yes (untested on hardware) | |
 | Hi-res float output | x | | | yes | |
 | 24/32-bit integer output to the DAC | x | | | | add (custom AudioOutputProvider) - needs your DAC to verify |
-| Settings per output device (speaker / wired / each BT device / each DAC): EQ, RG, offload | x | | | | add |
+| Settings per output device (speaker / wired / each BT device / each DAC): EQ, RG, offload | x | | | yes | done as sound profiles bound to outputs |
 | Bypass all processing per output | x | | | bit-perfect only | add (falls out of per-output settings) |
 | Max output sample rate / fixed output format / high-quality resampler | x | | | | ask (resampling on CPU) |
 | USB exclusive mode (own USB stack), DAC volume, warm-up delay | x | | | | ask (large; needs your DAC) |
@@ -179,8 +179,8 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Parametric EQ, peaking + shelves, AutoEQ/APO import, auto pre-amp | x | | | yes | |
 | More filter types: low/high pass, band pass, notch; per-channel filters | x | | | yes | done |
 | Graphic EQ 5/10/15/31 bands | x | gone | system 5-band | part | part: 10 bands plus any number of parametric ones |
-| Built-in presets (bass/treble/vocal, loudness) and named profiles, per-output auto-apply | x | gone | | part | part: presets done; named profiles and per-output pending |
-| AutoEQ database browser (download headphone list) | x | | | part | paste and file import; database browser pending |
+| Built-in presets (bass/treble/vocal, loudness) and named profiles, per-output auto-apply | x | gone | | yes | done |
+| AutoEQ database browser (download headphone list) | x | | | yes | done: 8850 headphones, index cached locally, behind the lookups switch |
 | Crossfeed (levels, cutoff) | x | | | yes (level) | add cutoff |
 | L/R balance, mono | x | | | yes | done |
 | Limiter (so boosts and positive ReplayGain cannot clip) | x | | | yes | done: look-ahead, soft knee, transparent below the ceiling |

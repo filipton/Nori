@@ -154,6 +154,8 @@ data class Prefs(
     val tasteModel: Boolean = true,
     /** Third-party lookups: lyrics from LRCLIB, the AutoEQ headphone list, update checks. */
     val thirdPartyLookups: Boolean = false,
+    /** Apply the profile bound to an output device when that device becomes the active one. */
+    val profilePerOutput: Boolean = true,
     /** "Shuffle" spreads artists and albums apart instead of being purely random. */
     val weightedShuffle: Boolean = true,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
@@ -189,6 +191,44 @@ data class Prefs(
  * SharedPreferences rather than DataStore: the playback service needs its
  * settings synchronously on start, and this is one small file read once.
  */
+/** The part of [Prefs] a sound profile remembers. */
+data class Sound(
+    val eqEnabled: Boolean, val eqBands: List<Band>, val eqPreampDb: Float?, val crossfeedDb: Float,
+    val balance: Float, val mono: Boolean, val limiter: Boolean, val limiterThresholdDb: Float,
+    val replayGain: ReplayGainMode, val preampDb: Float, val crossfadeSec: Int, val hiRes: Boolean, val bitPerfect: Boolean,
+) {
+    fun toJson(): String = JSONObject().apply {
+        put("eqEnabled", eqEnabled); put("eqBands", Band.encode(eqBands)); eqPreampDb?.let { put("eqPreampDb", it.toDouble()) }
+        put("crossfeedDb", crossfeedDb.toDouble()); put("balance", balance.toDouble()); put("mono", mono)
+        put("limiter", limiter); put("limiterThresholdDb", limiterThresholdDb.toDouble())
+        put("replayGain", replayGain.ordinal); put("preampDb", preampDb.toDouble()); put("crossfadeSec", crossfadeSec)
+        put("hiRes", hiRes); put("bitPerfect", bitPerfect)
+    }.toString()
+
+    companion object {
+        fun of(p: Prefs) = Sound(p.eqEnabled, p.eqBands, p.eqPreampDb, p.crossfeedDb, p.balance, p.mono, p.limiter, p.limiterThresholdDb, p.replayGain, p.preampDb, p.crossfadeSec, p.hiRes, p.bitPerfect)
+
+        fun fromJson(json: String): Sound? = runCatching {
+            val o = JSONObject(json)
+            val d = Prefs()
+            Sound(
+                o.optBoolean("eqEnabled"), Band.decode(o.optString("eqBands")) ?: d.eqBands,
+                if (o.has("eqPreampDb")) o.getDouble("eqPreampDb").toFloat() else null,
+                o.optDouble("crossfeedDb", 0.0).toFloat(), o.optDouble("balance", 0.0).toFloat(), o.optBoolean("mono"),
+                o.optBoolean("limiter"), o.optDouble("limiterThresholdDb", -1.0).toFloat(),
+                ReplayGainMode.entries[o.optInt("replayGain").coerceIn(0, 3)], o.optDouble("preampDb", 0.0).toFloat(),
+                o.optInt("crossfadeSec"), o.optBoolean("hiRes"), o.optBoolean("bitPerfect"),
+            )
+        }.getOrNull()
+    }
+}
+
+fun Prefs.withSound(s: Sound) = copy(
+    eqEnabled = s.eqEnabled, eqBands = s.eqBands, eqPreampDb = s.eqPreampDb, crossfeedDb = s.crossfeedDb,
+    balance = s.balance, mono = s.mono, limiter = s.limiter, limiterThresholdDb = s.limiterThresholdDb,
+    replayGain = s.replayGain, preampDb = s.preampDb, crossfadeSec = s.crossfadeSec, hiRes = s.hiRes, bitPerfect = s.bitPerfect,
+)
+
 class Settings(context: Context) {
     private val sp: SharedPreferences = context.getSharedPreferences("flint", Context.MODE_PRIVATE)
     private val state = MutableStateFlow(load())
@@ -244,6 +284,7 @@ class Settings(context: Context) {
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
+            profilePerOutput = sp.getBoolean("profilePerOutput", true),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
             lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
@@ -275,7 +316,7 @@ class Settings(context: Context) {
         run { }; putInt("crossfadeSec", p.crossfadeSec)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
-        putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
+        putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })

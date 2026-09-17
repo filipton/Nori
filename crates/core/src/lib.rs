@@ -5,6 +5,7 @@
 uniffi::setup_scaffolding!();
 
 mod api;
+mod autoeq;
 mod db;
 mod lyrics;
 pub mod dsp;
@@ -620,6 +621,62 @@ impl Core {
         let mut st = c.prepare_cached("SELECT json FROM downloads WHERE done=?1 ORDER BY ts DESC")?;
         let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
+    }
+
+    // ---- AutoEQ headphone database (only fetched when the user opens the browser) ----
+
+    /// The url of the index the caller should download and hand to [autoeq_store].
+    pub fn autoeq_index_url(&self) -> String {
+        autoeq::INDEX_URL.to_string()
+    }
+
+    /// Parses `INDEX.md` into the local table; returns how many headphones it holds.
+    pub fn autoeq_store(&self, markdown: String) -> Result<u32> {
+        Ok(autoeq::store(&mut self.db.lock(), &markdown)?)
+    }
+
+    pub fn autoeq_search(&self, query: String, limit: u32) -> Result<Vec<AutoEqEntry>> {
+        Ok(autoeq::search(&self.db.lock(), &query, limit)?)
+    }
+
+    pub fn autoeq_count(&self) -> Result<u32> {
+        Ok(autoeq::count(&self.db.lock())?)
+    }
+
+    pub fn autoeq_preset_url(&self, entry: AutoEqEntry) -> String {
+        autoeq::preset_url(&entry)
+    }
+
+    // ---- saved sound profiles ----
+
+    pub fn profile_save(&self, profile: SoundProfile) -> Result<()> {
+        let c = self.db.lock();
+        c.prepare_cached("INSERT OR REPLACE INTO profiles(name, json, outputs) VALUES(?1, ?2, ?3)")?
+            .execute(params![profile.name, profile.json, profile.outputs.join("\n")])?;
+        Ok(())
+    }
+
+    pub fn profiles(&self) -> Result<Vec<SoundProfile>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT name, json, outputs FROM profiles ORDER BY name")?;
+        let rows = st.query_map([], |r| {
+            Ok(SoundProfile {
+                name: r.get(0)?,
+                json: r.get(1)?,
+                outputs: r.get::<_, String>(2)?.lines().filter(|l| !l.is_empty()).map(str::to_string).collect(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn profile_delete(&self, name: String) -> Result<()> {
+        self.db.lock().execute("DELETE FROM profiles WHERE name=?1", [name])?;
+        Ok(())
+    }
+
+    /// The profile bound to [output], if any: what to apply when that device becomes the active one.
+    pub fn profile_for_output(&self, output: String) -> Result<Option<SoundProfile>> {
+        Ok(self.profiles()?.into_iter().find(|p| p.outputs.iter().any(|o| *o == output)))
     }
 
     // ---- search history ----

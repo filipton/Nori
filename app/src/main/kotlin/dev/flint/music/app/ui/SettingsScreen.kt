@@ -119,6 +119,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Text("Anything switched off here is not even started: no listener, no socket, no audio processing.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Toggle("Listening history and taste model", "Kept on this device only. Feeds mixes, smart playlists and the listening stats. One small write when a track ends.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
         Toggle("Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row", p.weightedShuffle) { on -> vm.update { it.copy(weightedShuffle = on) } }
+        Toggle("Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them", p.profilePerOutput) { on -> vm.update { it.copy(profilePerOutput = on) } }
         Toggle("Third-party lookups", "Lyrics from lrclib.net when the server has none, the AutoEQ headphone list, update checks. Sends artist and title to those services.", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on) } }
 
         SectionTitle("Playback behaviour")

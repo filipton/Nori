@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -83,7 +85,8 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         }
         Row(Modifier.padding(horizontal = 8.dp)) {
             TextButton(vm::addBand) { Text("Add band") }
-            TextButton({ importing = true }) { Text("Import AutoEQ / APO") }
+            TextButton({ importing = true }) { Text("Paste a preset") }
+            TextButton(LocalNav.current::autoEq) { Text("Headphone presets") }
             TextButton(vm::resetBands) { Text("Reset") }
         }
         SectionTitle("Presets")
@@ -112,6 +115,36 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
             Slider(p.limiterThresholdDb, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = 16.dp), valueRange = -12f..0f)
         }
+
+        SectionTitle("Profiles")
+        val profiles by vm.profiles.collectAsStateWithLifecycle()
+        val outputs by vm.outputs.collectAsStateWithLifecycle()
+        val output by vm.currentOutput.collectAsStateWithLifecycle()
+        var naming by remember { mutableStateOf(false) }
+        var newName by remember { mutableStateOf("") }
+        if (naming) AlertDialog(
+            onDismissRequest = { naming = false }, title = { Text("Save these settings") },
+            text = { OutlinedTextField(newName, { newName = it }, singleLine = true, label = { Text("Name") }) },
+            confirmButton = { TextButton({ vm.saveProfile(newName); newName = ""; naming = false }, enabled = newName.isNotBlank()) { Text("Save") } },
+            dismissButton = { TextButton({ naming = false }) { Text("Cancel") } },
+        )
+        Text("Playing through: $output", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        profiles.forEach { profile ->
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(profile.name, Modifier.weight(1f).clickable { vm.applyProfile(profile) })
+                    TextButton({ vm.applyProfile(profile) }) { Text("Apply") }
+                    TextButton({ vm.deleteProfile(profile.name) }) { Text("Delete") }
+                }
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(outputs) { o ->
+                        FilterChip(o in profile.outputs, { vm.bindProfile(profile, o, o !in profile.outputs) }, { Text(o, style = MaterialTheme.typography.labelSmall) })
+                    }
+                }
+            }
+        }
+        TextButton({ naming = true }, Modifier.padding(horizontal = 8.dp)) { Text("Save current settings as a profile") }
+        Text("A profile bound to an output is applied when that output becomes active; switch that off in Settings → Features.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         SectionTitle("Crossfeed")
         Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

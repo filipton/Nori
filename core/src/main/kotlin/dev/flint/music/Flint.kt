@@ -10,6 +10,7 @@ import dev.flint.music.ffi.CoreException
 import dev.flint.music.ffi.ServerConfig
 import dev.flint.music.net.Http
 import dev.flint.music.playback.BitPerfect
+import dev.flint.music.playback.Outputs
 import dev.flint.music.playback.MediaSources
 import dev.flint.music.playback.PlayerConnection
 import dev.flint.music.settings.ServerProfile
@@ -50,6 +51,7 @@ class Flint private constructor(private val context: Context) {
     val library = Library(::core, { http }, { settings.value.server?.musicFolderId.orEmpty() }, ::chooseAddress)
     val downloads = Downloads(context, ::core, lazySources)
     val dac = BitPerfect(context)
+    val outputs = Outputs(context)
     val player = PlayerConnection(context, this)
 
     /** True while requests go to the profile's second address; stream quality is capped then. */

@@ -55,6 +55,7 @@ class Nav(private val c: NavHostController) {
     fun stats() = c.navigate("stats")
     fun player() = c.navigate("player") { launchSingleTop = true }
     fun equalizer() = c.navigate("equalizer")
+    fun autoEq() = c.navigate("autoeq")
     fun back() { c.popBackStack() }
     fun tab(route: String) = c.navigate(route) {
         popUpTo(c.graph.startDestinationId) { saveState = true }
@@ -111,6 +112,7 @@ fun App() {
                     composable("library") { LibraryScreen(actions) }
                     composable("settings") { SettingsScreen(settings) }
                     composable("equalizer") { EqualizerScreen(settings) }
+                    composable("autoeq") { AutoEqScreen(settings) }
                     composable("player") { PlayerScreen(player, actions) }
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }

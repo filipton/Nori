@@ -42,6 +42,7 @@ import dev.flint.music.data.AlbumSort
 import dev.flint.music.ffi.PlayQueue
 import dev.flint.music.ffi.Song
 import dev.flint.music.settings.Prefs
+import dev.flint.music.settings.withSound
 import dev.flint.music.settings.ReplayGainMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -148,6 +149,15 @@ class PlaybackService : MediaLibraryService() {
 
         flint.dac.onChanged = { applyAudio(flint.settings.value); applyGain() }
         flint.dac.start()
+        flint.outputs.start()
+        // Plugging in headphones or a DAC swaps the whole sound chain, if a profile is bound to it.
+        scope.launch {
+            flint.outputs.current.collect { output ->
+                if (!flint.settings.value.profilePerOutput) return@collect
+                val sound = withContext(Dispatchers.IO) { runCatching { flint.core.profileForOutput(output) }.getOrNull() }?.let { dev.flint.music.settings.Sound.fromJson(it.json) } ?: return@collect
+                flint.settings.update { it.withSound(sound) }
+            }
+        }
         applyAudio(flint.settings.value)
         scope.launch {
             var last = flint.settings.value
@@ -181,6 +191,7 @@ class PlaybackService : MediaLibraryService() {
         precacher.release()
         flint.dac.onChanged = {}
         flint.dac.stop()
+        flint.outputs.stop()
         if (wifiLock.isHeld) wifiLock.release()
         session.release()
         player.release()
