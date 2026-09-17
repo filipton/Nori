@@ -7,6 +7,7 @@ uniffi::setup_scaffolding!();
 mod api;
 mod db;
 pub mod dsp;
+mod history;
 mod model;
 
 use std::sync::Arc;

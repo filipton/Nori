@@ -246,3 +246,84 @@ pub struct IngestStats {
     pub albums: u32,
     pub songs: u32,
 }
+
+// ---- play history, listening stats, smart playlists, m3u ----
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct HistoryEntry {
+    pub song: Song,
+    pub started_ms: i64,
+    pub heard_ms: i64,
+    pub completed: bool,
+    pub skipped: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct SongStat {
+    pub song_id: String,
+    /// Listens that were not skips.
+    pub plays: u32,
+    pub skips: u32,
+    /// 0 when the song was only ever skipped.
+    pub last_played_ms: i64,
+    pub heard_ms_total: i64,
+    /// The taste score as of now; see `history.rs`. Around 1 per recent full listen.
+    pub taste: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct TopSong {
+    pub song: Song,
+    pub plays: u32,
+    pub listened_ms: i64,
+}
+
+/// An artist, album or genre in a top list. `id` is empty for genres and for artists the server gave no id.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct TopEntry {
+    pub id: String,
+    pub name: String,
+    /// Cover of the most played song of the entry.
+    pub cover_art: Option<String>,
+    pub plays: u32,
+    pub listened_ms: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct ListeningStats {
+    pub plays: u32,
+    pub skips: u32,
+    /// Everything heard, skipped plays included.
+    pub listened_ms: i64,
+    pub distinct_songs: u32,
+    pub distinct_artists: u32,
+    pub distinct_albums: u32,
+    pub top_songs: Vec<TopSong>,
+    pub top_artists: Vec<TopEntry>,
+    pub top_albums: Vec<TopEntry>,
+    pub top_genres: Vec<TopEntry>,
+    /// 24 entries, local hour of day.
+    pub plays_per_hour: Vec<u32>,
+    /// 7 entries, Monday first.
+    pub plays_per_weekday: Vec<u32>,
+    pub active_days: u32,
+    pub longest_streak_days: u32,
+    pub first_play: Option<HistoryEntry>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct SmartPlaylist {
+    pub id: String,
+    pub name: String,
+    /// The definition; schema in `smart.rs`.
+    pub json: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct M3uEntry {
+    /// -1 when the playlist does not say.
+    pub duration_s: i32,
+    pub artist: String,
+    pub title: String,
+    pub path: String,
+}

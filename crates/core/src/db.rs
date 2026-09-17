@@ -23,6 +23,16 @@ CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT
 CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, endpoint TEXT NOT NULL, params TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS downloads(id TEXT PRIMARY KEY, json TEXT NOT NULL, ts INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS searches(query TEXT PRIMARY KEY, ts INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS plays(rowid INTEGER PRIMARY KEY, song_id TEXT NOT NULL, started_ms INTEGER NOT NULL, heard_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL, completed INTEGER NOT NULL, skipped INTEGER NOT NULL, hour INTEGER NOT NULL, day INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS plays_started ON plays(started_ms);
+CREATE TABLE IF NOT EXISTS song_stats(song_id TEXT PRIMARY KEY, plays INTEGER NOT NULL DEFAULT 0, skips INTEGER NOT NULL DEFAULT 0, last_played_ms INTEGER NOT NULL DEFAULT 0, heard_ms_total INTEGER NOT NULL DEFAULT 0, taste REAL NOT NULL DEFAULT 0) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS mix_excluded(song_id TEXT PRIMARY KEY) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS smart_playlists(id TEXT PRIMARY KEY, name TEXT NOT NULL, json TEXT NOT NULL, updated_ms INTEGER NOT NULL) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS items_genre ON items(json_extract(json,'$.genre') COLLATE NOCASE) WHERE kind=2;
+CREATE INDEX IF NOT EXISTS items_artist ON items(json_extract(json,'$.artistId')) WHERE kind=2;
+CREATE INDEX IF NOT EXISTS items_year ON items(json_extract(json,'$.year')) WHERE kind=2;
+CREATE INDEX IF NOT EXISTS items_starred ON items(json_extract(json,'$.starred')) WHERE kind=2 AND json_extract(json,'$.starred')=1;
+CREATE INDEX IF NOT EXISTS items_rated ON items(json_extract(json,'$.userRating')) WHERE kind=2 AND json_extract(json,'$.userRating')>=4;
 ";
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
@@ -37,7 +47,7 @@ pub fn now_ms() -> i64 {
 
 /// Provider items from octo-fiesta are not library rows: they change id once
 /// downloaded, so they are never indexed.
-fn external(id: &str) -> bool {
+pub fn external(id: &str) -> bool {
     id.starts_with("ext-") || id.starts_with("pl-")
 }
 
