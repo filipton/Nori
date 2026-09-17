@@ -184,5 +184,15 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
 
     suspend fun indexSize(): IngestStats = withContext(Dispatchers.IO) { core.indexSize() }
 
-    fun coverUrl(id: String?, size: Int): String? = id?.let { core.coverUrl(it, size.toUInt()) }
+    @Volatile private var coverPrefix: String? = null
+
+    /** Called for every row a list draws, on the UI thread: plain string work, no FFI. */
+    fun coverUrl(id: String?, size: Int): String? {
+        if (id == null) return null
+        val prefix = coverPrefix ?: core.urlPrefix("getCoverArt").also { coverPrefix = it }
+        return "$prefix&id=${android.net.Uri.encode(id)}&size=$size"
+    }
+
+    /** The signed prefix changes with the server or the credentials. */
+    fun onServerChanged() { coverPrefix = null }
 }

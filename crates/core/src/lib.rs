@@ -242,6 +242,12 @@ impl Core {
         self.server.read().url(&endpoint, &p)
     }
 
+    /// Signed url of `endpoint` with no parameters; callers that build many urls (cover art, per list row)
+    /// append `&id=..` themselves instead of crossing the FFI for each one.
+    pub fn url_prefix(&self, endpoint: String) -> String {
+        self.server.read().url(&endpoint, &[])
+    }
+
     /// `max_bit_rate` 0 and empty `format` mean the original file.
     pub fn stream_url(&self, id: String, max_bit_rate: u32, format: String) -> String {
         let mut p = vec![("id".to_string(), id)];

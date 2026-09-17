@@ -38,6 +38,8 @@ Run `cargo test` and a build before committing.
   audio path with `tools/bench.sh dev.flint.music 90 off`: "quiet" should stay around 80 %.
 - Anything that touches samples (equalizer) disables audio offload; keep the default path free of
   audio processors. ReplayGain is applied as player volume for that reason.
+- The UI thread never waits for the core: `Flint` builds `core`, `http` and `sources` lazily and the
+  application warms them on a background thread. Keep FFI and OkHttp out of constructors and composition.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct
   buffers, never uniffi.
 - octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never

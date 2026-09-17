@@ -55,8 +55,10 @@ class Flint private constructor(context: Context) {
             library.ping()
         } catch (e: Exception) {
             if (old.loggedIn) withContext(Dispatchers.IO) { core.configure(old.serverUrl, old.user, old.password) }
+            library.onServerChanged()
             throw e
         }
+        library.onServerChanged()
         settings.update { it.copy(serverUrl = base, user = user, password = password) }
     }
 

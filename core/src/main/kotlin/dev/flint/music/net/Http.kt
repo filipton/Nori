@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -19,6 +20,9 @@ import kotlin.coroutines.resumeWithException
  */
 class Http(context: Context) {
     val api: OkHttpClient = OkHttpClient.Builder()
+        // Idle connections close after 20 s, while the radio is still up from the request that used them. The default
+        // five minutes means every track fetch is followed, minutes later, by a lone FIN that wakes the modem again.
+        .connectionPool(ConnectionPool(4, 20, TimeUnit.SECONDS))
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
