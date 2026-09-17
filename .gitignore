@@ -1,0 +1,13 @@
+/target
+/build
+/app/build
+/core/build
+/.gradle
+/.kotlin
+/local.properties
+/.idea
+*.iml
+/.dev
+/.claude
+*.jks
+/keystore.properties

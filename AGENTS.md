@@ -1,0 +1,53 @@
+# Working in this repo
+
+flint music is an Android client for Navidrome / octo-fiesta (Subsonic API): a Kotlin app over a
+Rust core. Priorities, in order: battery and performance, functionality, and only then looks.
+`CLAUDE.md` points here, so there is one copy of these instructions.
+
+## Where things are
+
+```
+crates/core/    Rust: request signing, response parsing, SQLite/FTS5 index + caches (uniffi),
+                and the equalizer DSP (raw JNI, see dsp.rs)
+core/           Android library, no UI: net/, data/ (Library = the repository), playback/
+                (media3 service, DAC, equalizer, scrobbling), downloads/, settings/, Flint.kt (object graph)
+app/            the UI only: vm/ (ViewModels, all logic and state) and ui/ (Compose, draws state)
+tools/          dev-server.sh: a local Navidrome with generated music for testing
+```
+
+The boundary that matters: `ui/` may be thrown away and rewritten. It must only read ViewModel
+state and call ViewModel functions; it never touches `Flint`, media3, OkHttp or the FFI. `core/`
+must never know a UI exists.
+
+## Build and test
+
+```sh
+./gradlew :app:assembleDebug -PrustTargets=x86_64   # fast build for an emulator
+cargo test                                          # the Rust tests
+tools/dev-server.sh                                 # Navidrome at http://10.0.2.2:4533 from the emulator, admin/admin
+```
+
+Run `cargo test` and a build before committing.
+
+## Performance rules
+
+- Nothing polls or ticks while music plays with the screen off. The seek bar is the only timer,
+  and it runs only while the player screen is resumed.
+- One OkHttp pool for API, covers and audio. URLs are stable (derived salt) so caches hit.
+- Anything that touches samples (equalizer) disables audio offload; keep the default path free of
+  audio processors. ReplayGain is applied as player volume for that reason.
+- FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct
+  buffers, never uniffi.
+- octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never
+  queue or prefetch provider tracks the user did not ask to play. Provider items are never indexed.
+
+## Commit messages
+
+One line, always. No body, no trailers, no attribution, no `Co-Authored-By`.
+
+```
+<type>: <what is different now>
+```
+
+`type` is one of `feat`, `fix`, `perf`, `refactor`, `docs`, `build`, `test`, `chore`. Lowercase
+after the colon, no full stop, well under 72 characters. One commit per piece of work, not per file.

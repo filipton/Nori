@@ -1,0 +1,6 @@
+[bindings.kotlin]
+package_name = "dev.flint.music.ffi"
+cdylib_name = "flintmusic"
+android = true
+android_cleaner = true
+generate_immutable_records = true

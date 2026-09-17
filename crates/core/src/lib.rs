@@ -1,0 +1,502 @@
+//! flint music core: Subsonic request signing, response parsing and the local
+//! SQLite index. No sockets and no threads of its own; every call is coarse
+//! (one response, one page) so the FFI crossing stays off the hot path.
+
+uniffi::setup_scaffolding!();
+
+mod api;
+mod db;
+pub mod dsp;
+mod model;
+
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Deserialize;
+
+pub use model::*;
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum CoreError {
+    #[error("{reason}")]
+    Api { code: i32, reason: String },
+    #[error("bad response: {reason}")]
+    Parse { reason: String },
+    #[error("database: {reason}")]
+    Db { reason: String },
+}
+
+impl From<rusqlite::Error> for CoreError {
+    fn from(e: rusqlite::Error) -> Self {
+        CoreError::Db { reason: e.to_string() }
+    }
+}
+
+type Result<T> = std::result::Result<T, CoreError>;
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Param {
+    pub key: String,
+    pub value: String,
+}
+
+// ---- wire shapes -----------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ApiError {
+    code: i32,
+    message: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Found {
+    artist: Vec<Artist>,
+    album: Vec<Album>,
+    song: Vec<Song>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AlbumWire {
+    #[serde(flatten)]
+    album: Album,
+    song: Vec<Song>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ArtistWire {
+    #[serde(flatten)]
+    artist: Artist,
+    album: Vec<Album>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PlaylistWire {
+    #[serde(flatten)]
+    playlist: Playlist,
+    entry: Vec<Song>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Albums {
+    album: Vec<Album>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Songs {
+    song: Vec<Song>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Index {
+    artist: Vec<Artist>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Artists {
+    index: Vec<Index>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Playlists {
+    playlist: Vec<Playlist>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Genres {
+    genre: Vec<Genre>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Stations {
+    #[serde(rename = "internetRadioStation")]
+    station: Vec<RadioStation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ArtistInfoWire {
+    biography: Option<String>,
+    large_image_url: Option<String>,
+    medium_image_url: Option<String>,
+    similar_artist: Vec<Artist>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Line {
+    start: Option<i64>,
+    value: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Structured {
+    synced: bool,
+    line: Vec<Line>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct LyricsList {
+    structured_lyrics: Vec<Structured>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct QueueWire {
+    entry: Vec<Song>,
+    current: Option<serde_json::Value>,
+    position: u64,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct Response {
+    status: String,
+    version: String,
+    #[serde(rename = "type")]
+    kind: String,
+    server_version: String,
+    open_subsonic: bool,
+    error: Option<ApiError>,
+    search_result3: Option<Found>,
+    starred2: Option<Found>,
+    album: Option<AlbumWire>,
+    artist: Option<ArtistWire>,
+    playlist: Option<PlaylistWire>,
+    album_list2: Option<Albums>,
+    artists: Option<Artists>,
+    playlists: Option<Playlists>,
+    genres: Option<Genres>,
+    random_songs: Option<Songs>,
+    songs_by_genre: Option<Songs>,
+    similar_songs2: Option<Songs>,
+    top_songs: Option<Songs>,
+    song: Option<Song>,
+    internet_radio_stations: Option<Stations>,
+    artist_info2: Option<ArtistInfoWire>,
+    lyrics_list: Option<LyricsList>,
+    play_queue: Option<QueueWire>,
+}
+
+#[derive(Deserialize)]
+struct Envelope {
+    #[serde(rename = "subsonic-response")]
+    response: Response,
+}
+
+fn parse(body: &[u8]) -> Result<Response> {
+    let r = serde_json::from_slice::<Envelope>(body).map_err(|e| CoreError::Parse { reason: e.to_string() })?.response;
+    if r.status != "ok" {
+        let e = r.error.unwrap_or_default();
+        return Err(CoreError::Api { code: e.code, reason: if e.message.is_empty() { "request failed".into() } else { e.message } });
+    }
+    Ok(r)
+}
+
+// ---- the object Kotlin holds -----------------------------------------------
+
+#[derive(uniffi::Object)]
+pub struct Core {
+    db: Mutex<Connection>,
+    server: RwLock<api::Server>,
+}
+
+#[uniffi::export]
+impl Core {
+    /// `db_path` empty opens an in-memory index.
+    #[uniffi::constructor]
+    pub fn new(db_path: String) -> Result<Arc<Self>> {
+        Ok(Arc::new(Core { db: Mutex::new(db::open(&db_path)?), server: RwLock::new(api::Server::default()) }))
+    }
+
+    /// Returns the normalised base url. Changing server drops the index.
+    pub fn configure(&self, url: String, user: String, password: String) -> Result<String> {
+        let s = api::Server::new(&url, &user, &password);
+        let ident = format!("{}|{}", s.base, user);
+        let db = self.db.lock();
+        if db::kv_get(&db, "server")?.as_deref() != Some(&ident) {
+            db::clear_library(&db)?;
+            db::kv_put(&db, "server", &ident)?;
+        }
+        let base = s.base.clone();
+        *self.server.write() = s;
+        Ok(base)
+    }
+
+    pub fn url(&self, endpoint: String, params: Vec<Param>) -> String {
+        let p: Vec<(String, String)> = params.into_iter().map(|p| (p.key, p.value)).collect();
+        self.server.read().url(&endpoint, &p)
+    }
+
+    /// `max_bit_rate` 0 and empty `format` mean the original file.
+    pub fn stream_url(&self, id: String, max_bit_rate: u32, format: String) -> String {
+        let mut p = vec![("id".to_string(), id)];
+        if max_bit_rate > 0 {
+            p.push(("maxBitRate".into(), max_bit_rate.to_string()));
+        }
+        if !format.is_empty() {
+            p.push(("format".into(), format));
+        }
+        self.server.read().url("stream", &p)
+    }
+
+    pub fn cover_url(&self, id: String, size: u32) -> String {
+        let mut p = vec![("id".to_string(), id)];
+        if size > 0 {
+            p.push(("size".into(), size.to_string()));
+        }
+        self.server.read().url("getCoverArt", &p)
+    }
+
+    // ---- parsing; library items seen on the way are indexed ----
+
+    /// Validates any response; used for ping and for calls with no payload.
+    pub fn parse_status(&self, body: Vec<u8>) -> Result<ServerInfo> {
+        let r = parse(&body)?;
+        Ok(ServerInfo { version: r.version, server_type: r.kind, server_version: r.server_version, open_subsonic: r.open_subsonic })
+    }
+
+    pub fn parse_search(&self, body: Vec<u8>) -> Result<SearchResult> {
+        let f = parse(&body)?.search_result3.unwrap_or_default();
+        db::index(&mut self.db.lock(), &f.artist, &f.album, &f.song)?;
+        Ok(SearchResult { artists: f.artist, albums: f.album, songs: f.song })
+    }
+
+    /// Library sync: index a search3 page without sending it back over the FFI.
+    pub fn ingest_search(&self, body: Vec<u8>) -> Result<IngestStats> {
+        let f = parse(&body)?.search_result3.unwrap_or_default();
+        let mut st = db::index(&mut self.db.lock(), &f.artist, &f.album, &f.song)?;
+        // Callers page until a page comes back empty, so report what was seen, not what changed.
+        st.artists = f.artist.len() as u32;
+        st.albums = f.album.len() as u32;
+        st.songs = f.song.len() as u32;
+        Ok(st)
+    }
+
+    pub fn parse_starred(&self, body: Vec<u8>) -> Result<Starred> {
+        let f = parse(&body)?.starred2.unwrap_or_default();
+        db::index(&mut self.db.lock(), &f.artist, &f.album, &f.song)?;
+        Ok(Starred { artists: f.artist, albums: f.album, songs: f.song })
+    }
+
+    pub fn parse_album(&self, body: Vec<u8>) -> Result<AlbumDetail> {
+        let a = parse(&body)?.album.unwrap_or_default();
+        db::index(&mut self.db.lock(), &[], std::slice::from_ref(&a.album), &a.song)?;
+        Ok(AlbumDetail { album: a.album, songs: a.song })
+    }
+
+    pub fn parse_artist(&self, body: Vec<u8>) -> Result<ArtistDetail> {
+        let a = parse(&body)?.artist.unwrap_or_default();
+        db::index(&mut self.db.lock(), std::slice::from_ref(&a.artist), &a.album, &[])?;
+        Ok(ArtistDetail { artist: a.artist, albums: a.album })
+    }
+
+    pub fn parse_artist_info(&self, body: Vec<u8>) -> Result<ArtistInfo> {
+        let i = parse(&body)?.artist_info2.unwrap_or_default();
+        Ok(ArtistInfo {
+            biography: i.biography.filter(|b| !b.trim().is_empty()),
+            image_url: i.large_image_url.or(i.medium_image_url).filter(|u| !u.is_empty()),
+            similar: i.similar_artist,
+        })
+    }
+
+    pub fn parse_album_list(&self, body: Vec<u8>) -> Result<Vec<Album>> {
+        let l = parse(&body)?.album_list2.unwrap_or_default().album;
+        db::index(&mut self.db.lock(), &[], &l, &[])?;
+        Ok(l)
+    }
+
+    pub fn parse_artists(&self, body: Vec<u8>) -> Result<Vec<Artist>> {
+        let l: Vec<Artist> = parse(&body)?.artists.unwrap_or_default().index.into_iter().flat_map(|i| i.artist).collect();
+        db::index(&mut self.db.lock(), &l, &[], &[])?;
+        Ok(l)
+    }
+
+    /// randomSongs, songsByGenre, similarSongs2, topSongs and getSong all land here.
+    pub fn parse_songs(&self, body: Vec<u8>) -> Result<Vec<Song>> {
+        let r = parse(&body)?;
+        let l = r
+            .random_songs
+            .or(r.songs_by_genre)
+            .or(r.similar_songs2)
+            .or(r.top_songs)
+            .map(|s| s.song)
+            .or(r.song.map(|s| vec![s]))
+            .unwrap_or_default();
+        db::index(&mut self.db.lock(), &[], &[], &l)?;
+        Ok(l)
+    }
+
+    pub fn parse_playlists(&self, body: Vec<u8>) -> Result<Vec<Playlist>> {
+        Ok(parse(&body)?.playlists.unwrap_or_default().playlist)
+    }
+
+    pub fn parse_playlist(&self, body: Vec<u8>) -> Result<PlaylistDetail> {
+        let p = parse(&body)?.playlist.unwrap_or_default();
+        db::index(&mut self.db.lock(), &[], &[], &p.entry)?;
+        Ok(PlaylistDetail { playlist: p.playlist, songs: p.entry })
+    }
+
+    pub fn parse_genres(&self, body: Vec<u8>) -> Result<Vec<Genre>> {
+        let mut g = parse(&body)?.genres.unwrap_or_default().genre;
+        g.sort_by(|a, b| b.song_count.cmp(&a.song_count));
+        Ok(g)
+    }
+
+    pub fn parse_radio(&self, body: Vec<u8>) -> Result<Vec<RadioStation>> {
+        Ok(parse(&body)?.internet_radio_stations.unwrap_or_default().station)
+    }
+
+    /// Synced lyrics win over plain ones when the server has both.
+    pub fn parse_lyrics(&self, body: Vec<u8>) -> Result<Lyrics> {
+        let mut all = parse(&body)?.lyrics_list.unwrap_or_default().structured_lyrics;
+        all.sort_by_key(|l| !l.synced);
+        let Some(l) = all.into_iter().next() else { return Ok(Lyrics::default()) };
+        let synced = l.synced;
+        Ok(Lyrics {
+            synced,
+            lines: l.line.into_iter().map(|x| LyricLine { start_ms: if synced { x.start.unwrap_or(0) } else { -1 }, text: x.value }).collect(),
+        })
+    }
+
+    pub fn parse_play_queue(&self, body: Vec<u8>) -> Result<PlayQueue> {
+        let q = parse(&body)?.play_queue.unwrap_or_default();
+        let current = q.current.map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
+        let index = current.and_then(|c| q.entry.iter().position(|s| s.id == c)).unwrap_or(0) as u32;
+        Ok(PlayQueue { songs: q.entry, index, position_ms: q.position })
+    }
+
+    // ---- local index ----
+
+    pub fn local_search(&self, query: String, limit: u32) -> Result<SearchResult> {
+        Ok(db::search(&self.db.lock(), &query, limit)?)
+    }
+
+    pub fn index_size(&self) -> Result<IngestStats> {
+        let c = self.db.lock();
+        Ok(IngestStats { artists: db::count(&c, db::ARTIST)?, albums: db::count(&c, db::ALBUM)?, songs: db::count(&c, db::SONG)? })
+    }
+
+    // ---- response cache (stale-while-revalidate is driven from Kotlin) ----
+
+    pub fn cache_get(&self, key: String) -> Result<Option<Vec<u8>>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT body FROM cache WHERE key=?1")?;
+        Ok(st.query_row([key], |r| r.get(0)).optional()?)
+    }
+
+    pub fn cache_put(&self, key: String, body: Vec<u8>) -> Result<()> {
+        let c = self.db.lock();
+        c.prepare_cached("INSERT OR REPLACE INTO cache(key, body, ts) VALUES(?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;
+        Ok(())
+    }
+
+    /// Drops cached responses whose key starts with `prefix` (after a write to the server).
+    pub fn cache_evict(&self, prefix: String) -> Result<()> {
+        let c = self.db.lock();
+        c.execute("DELETE FROM cache WHERE key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
+        Ok(())
+    }
+
+    // ---- play queue, survives process death ----
+
+    pub fn save_queue(&self, queue: PlayQueue) -> Result<()> {
+        let json = serde_json::json!({ "songs": queue.songs, "index": queue.index, "position": queue.position_ms });
+        Ok(db::kv_put(&self.db.lock(), "queue", &json.to_string())?)
+    }
+
+    pub fn load_queue(&self) -> Result<PlayQueue> {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Q {
+            songs: Vec<Song>,
+            index: u32,
+            position: u64,
+        }
+        let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+        Ok(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position })
+    }
+
+    // ---- scrobbles made while offline ----
+
+    pub fn scrobble_enqueue(&self, song_id: String, time_ms: i64) -> Result<()> {
+        self.db.lock().execute("INSERT INTO scrobbles(song_id, time_ms) VALUES(?1, ?2)", params![song_id, time_ms])?;
+        Ok(())
+    }
+
+    pub fn scrobble_pending(&self) -> Result<Vec<PendingScrobble>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT rowid, song_id, time_ms FROM scrobbles ORDER BY rowid LIMIT 200")?;
+        let rows = st.query_map([], |r| Ok(PendingScrobble { row_id: r.get(0)?, song_id: r.get(1)?, time_ms: r.get(2)? }))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn scrobble_done(&self, row_id: i64) -> Result<()> {
+        self.db.lock().execute("DELETE FROM scrobbles WHERE rowid=?1", [row_id])?;
+        Ok(())
+    }
+
+    // ---- downloads: the metadata side; media3 owns the bytes ----
+
+    /// Queued, not yet complete; [download_done] makes it show up in [downloads].
+    pub fn download_add(&self, song: Song) -> Result<()> {
+        let json = serde_json::to_string(&song).unwrap_or_default();
+        self.db.lock().execute("INSERT OR IGNORE INTO downloads(id, json, ts) VALUES(?1, ?2, ?3)", params![song.id, json, db::now_ms()])?;
+        Ok(())
+    }
+
+    pub fn download_done(&self, id: String) -> Result<()> {
+        self.db.lock().execute("UPDATE downloads SET done=1 WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn download_remove(&self, id: String) -> Result<()> {
+        self.db.lock().execute("DELETE FROM downloads WHERE id=?1", [id])?;
+        Ok(())
+    }
+
+    pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT json FROM downloads WHERE done=?1 ORDER BY ts DESC")?;
+        let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
+    }
+
+    // ---- search history ----
+
+    pub fn search_remember(&self, query: String) -> Result<()> {
+        let c = self.db.lock();
+        c.execute("INSERT OR REPLACE INTO searches(query, ts) VALUES(?1, ?2)", params![query.trim(), db::now_ms()])?;
+        c.execute("DELETE FROM searches WHERE query NOT IN (SELECT query FROM searches ORDER BY ts DESC LIMIT 20)", [])?;
+        Ok(())
+    }
+
+    pub fn search_history(&self) -> Result<Vec<String>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT query FROM searches ORDER BY ts DESC")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn search_forget(&self) -> Result<()> {
+        self.db.lock().execute("DELETE FROM searches", [])?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;

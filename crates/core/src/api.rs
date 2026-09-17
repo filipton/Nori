@@ -1,0 +1,87 @@
+//! Request signing and URL building. Kotlin owns the sockets (one OkHttp pool
+//! shared with the player); this only produces the URLs.
+
+use md5::{Digest, Md5};
+
+pub const CLIENT: &str = "flint";
+pub const API_VERSION: &str = "1.16.1";
+
+#[derive(Debug, Clone, Default)]
+pub struct Server {
+    pub base: String,
+    /// Pre-encoded `u=..&t=..&s=..&v=..&c=..&f=json`
+    auth: String,
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(H[(b >> 4) as usize] as char);
+        s.push(H[(b & 15) as usize] as char);
+    }
+    s
+}
+
+pub fn encode(out: &mut String, v: &str) {
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => {
+                out.push('%');
+                out.push_str(&hex(&[b]).to_uppercase());
+            }
+        }
+    }
+}
+
+impl Server {
+    /// The salt is derived, not random: a stable token keeps every URL stable
+    /// across sessions, so HTTP, image and media caches keep hitting. A token
+    /// is replayable either way; TLS is what protects it.
+    pub fn new(base: &str, user: &str, password: &str) -> Self {
+        let mut base = base.trim().trim_end_matches('/').to_string();
+        if let Some(b) = base.strip_suffix("/rest") {
+            base = b.to_string();
+        }
+        if !base.contains("://") {
+            base = format!("https://{base}");
+        }
+        let salt = &hex(&Md5::digest(format!("flint:{base}:{user}").as_bytes()))[..12];
+        let token = hex(&Md5::digest(format!("{password}{salt}").as_bytes()));
+        let mut auth = String::from("u=");
+        encode(&mut auth, user);
+        auth.push_str(&format!("&t={token}&s={salt}&v={API_VERSION}&c={CLIENT}&f=json"));
+        Server { base, auth }
+    }
+
+    pub fn url(&self, endpoint: &str, params: &[(String, String)]) -> String {
+        let mut u = String::with_capacity(self.base.len() + self.auth.len() + 64);
+        u.push_str(&self.base);
+        u.push_str("/rest/");
+        u.push_str(endpoint);
+        u.push('?');
+        u.push_str(&self.auth);
+        for (k, v) in params {
+            u.push('&');
+            u.push_str(k);
+            u.push('=');
+            encode(&mut u, v);
+        }
+        u
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_is_stable_and_signed() {
+        let s = Server::new("example.com/rest/", "jo e", "sesame");
+        let a = s.url("search3", &[("query".into(), "a b&c".into())]);
+        assert_eq!(a, s.url("search3", &[("query".into(), "a b&c".into())]));
+        assert!(a.starts_with("https://example.com/rest/search3?u=jo%20e&t="));
+        assert!(a.ends_with("&f=json&query=a%20b%26c"));
+    }
+}
