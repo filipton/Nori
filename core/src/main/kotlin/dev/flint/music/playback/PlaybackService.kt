@@ -261,6 +261,7 @@ class PlaybackService : MediaLibraryService() {
         val untouched = hiRes || flint.dac.state.value.bitPerfect
         val processing = p.dsp && !untouched
         equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
+        equalizer.setOutput(p.balance, p.mono, p.limiterThresholdDb, 120f, if (p.limiter) 5f else 0f)
         crossfade?.seconds = if (untouched) 0 else p.crossfadeSec
         player.skipSilenceEnabled = p.skipSilence && !untouched
         player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)

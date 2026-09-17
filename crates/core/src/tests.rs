@@ -74,6 +74,10 @@ fn autoeq_preset_is_read() {
     assert_eq!(p.bands.len(), 2);
     assert_eq!(p.bands[0], EqBand { kind: EqKind::Peaking, freq: 105.0, gain_db: -3.5, q: 0.70 });
     assert_eq!(p.bands[1].kind, EqKind::HighShelf);
+
+    let extra = parse_eq_preset("Filter 1: ON HP Fc 30 Hz Q 0.70\nFilter 2: ON NO Fc 8000 Hz Q 4\nFilter 3: ON PK Fc 100 Hz Q 1".into());
+    assert_eq!(extra.bands.len(), 2, "a peaking line without a gain is not a filter");
+    assert_eq!((extra.bands[0].kind, extra.bands[1].kind), (EqKind::HighPass, EqKind::Notch));
 }
 
 #[test]

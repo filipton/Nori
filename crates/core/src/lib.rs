@@ -656,13 +656,26 @@ pub fn parse_eq_preset(text: String) -> EqPreset {
             preset.preamp_db = t.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
         } else if t.first().is_some_and(|w| w.eq_ignore_ascii_case("filter")) {
             let Some(on) = t.iter().position(|w| w.eq_ignore_ascii_case("ON")) else { continue };
-            let kind = match t.get(on + 1).map(|k| k.to_ascii_uppercase()).as_deref() {
-                Some("PK") | Some("PEQ") => EqKind::Peaking,
-                Some("LS") | Some("LSC") | Some("LSQ") => EqKind::LowShelf,
-                Some("HS") | Some("HSC") | Some("HSQ") => EqKind::HighShelf,
+            let token = t.get(on + 1).map(|k| k.to_ascii_uppercase()).unwrap_or_default();
+            let kind = match token.as_str() {
+                "PK" | "PEQ" | "MODAL" => EqKind::Peaking,
+                "LS" | "LSC" | "LSQ" => EqKind::LowShelf,
+                "HS" | "HSC" | "HSQ" => EqKind::HighShelf,
+                "LSC 6DB" | "LS 6DB" | "LS6" => EqKind::LowShelfSlope,
+                "HSC 6DB" | "HS 6DB" | "HS6" => EqKind::HighShelfSlope,
+                "LP" | "LPQ" => EqKind::LowPass,
+                "HP" | "HPQ" => EqKind::HighPass,
+                "BP" => EqKind::BandPass,
+                "NO" | "NOTCH" => EqKind::Notch,
+                "AP" => EqKind::AllPass,
                 _ => continue,
             };
-            let (Some(freq), Some(gain_db)) = (after("Fc"), after("Gain")) else { continue };
+            // Only the shelving and peaking kinds carry a gain; a pass filter line has none.
+            let Some(freq) = after("Fc") else { continue };
+            let gain_db = after("Gain").unwrap_or(0.0);
+            if matches!(kind, EqKind::Peaking | EqKind::LowShelf | EqKind::HighShelf | EqKind::LowShelfSlope | EqKind::HighShelfSlope) && after("Gain").is_none() {
+                continue;
+            }
             preset.bands.push(EqBand { kind, freq, gain_db, q: after("Q").unwrap_or(0.71) });
         }
     }

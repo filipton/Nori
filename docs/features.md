@@ -177,13 +177,13 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Feature | S | M | N | flint | Plan |
 |---|---|---|---|---|---|
 | Parametric EQ, peaking + shelves, AutoEQ/APO import, auto pre-amp | x | | | yes | |
-| More filter types: low/high pass, band pass, notch; per-channel filters | x | | | | add |
-| Graphic EQ 5/10/15/31 bands | x | gone | system 5-band | 10 | add 15/31 presets of the same engine |
-| Built-in presets (bass/treble/vocal, loudness) and named profiles, per-output auto-apply | x | gone | | | add |
-| AutoEQ database browser (download headphone list) | x | | | paste only | ask (network call to GitHub) |
+| More filter types: low/high pass, band pass, notch; per-channel filters | x | | | yes | done |
+| Graphic EQ 5/10/15/31 bands | x | gone | system 5-band | part | part: 10 bands plus any number of parametric ones |
+| Built-in presets (bass/treble/vocal, loudness) and named profiles, per-output auto-apply | x | gone | | part | part: presets done; named profiles and per-output pending |
+| AutoEQ database browser (download headphone list) | x | | | part | paste and file import; database browser pending |
 | Crossfeed (levels, cutoff) | x | | | yes (level) | add cutoff |
-| L/R balance, mono | x | | | | add |
-| Limiter (so boosts and positive ReplayGain cannot clip) | x | | | auto pre-amp | add |
+| L/R balance, mono | x | | | yes | done |
+| Limiter (so boosts and positive ReplayGain cannot clip) | x | | | yes | done: look-ahead, soft knee, transparent below the ceiling |
 | Compressor / expander / noise gate | x | | | | ask (niche; cost small) |
 | Bass boost, virtualizer, volume boost | x | | | | add bass boost + volume boost as EQ/limiter presets; virtualizer: skip |
 | System equalizer / external EQ session broadcast | x | | x | panel only | add session broadcast |

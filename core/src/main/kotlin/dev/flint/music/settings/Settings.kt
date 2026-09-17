@@ -66,17 +66,28 @@ data class ServerProfile(
     }
 }
 
-enum class BandKind { PEAKING, LOW_SHELF, HIGH_SHELF }
+/** Mirrors `EqKind` in the core; the ordinals are the wire format, so the order must not change. */
+enum class BandKind(val label: String, val usesGain: Boolean = true) {
+    PEAKING("Peak"), LOW_SHELF("Low shelf"), HIGH_SHELF("High shelf"),
+    LOW_PASS("Low pass", false), HIGH_PASS("High pass", false), BAND_PASS("Band pass", false),
+    NOTCH("Notch", false), ALL_PASS("All pass", false),
+    LOW_SHELF_SLOPE("Low shelf (slope)"), HIGH_SHELF_SLOPE("High shelf (slope)"),
+}
+
+/** Which side a band applies to. */
+enum class BandChannel(val label: String) { BOTH("Both"), LEFT("Left"), RIGHT("Right") }
 
 /** One equalizer filter. The ten default bands are peaking filters an octave apart. */
-data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float) {
+data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float, val channel: BandChannel = BandChannel.BOTH) {
     companion object {
         val GRAPHIC = listOf(31f, 62f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f).map { Band(BandKind.PEAKING, it, 0f, 1.41f) }
         fun decode(s: String?): List<Band>? = s?.split(';')?.mapNotNull { b ->
             val p = b.split(':')
-            if (p.size != 4) null else runCatching { Band(BandKind.entries[p[0].toInt()], p[1].toFloat(), p[2].toFloat(), p[3].toFloat()) }.getOrNull()
+            if (p.size < 4) null else runCatching {
+                Band(BandKind.entries[p[0].toInt()], p[1].toFloat(), p[2].toFloat(), p[3].toFloat(), BandChannel.entries[p.getOrNull(4)?.toInt() ?: 0])
+            }.getOrNull()
         }?.takeIf { it.isNotEmpty() }
-        fun encode(bands: List<Band>) = bands.joinToString(";") { "${it.kind.ordinal}:${it.freq}:${it.gainDb}:${it.q}" }
+        fun encode(bands: List<Band>) = bands.joinToString(";") { "${it.kind.ordinal}:${it.freq}:${it.gainDb}:${it.q}:${it.channel.ordinal}" }
     }
 }
 
@@ -123,6 +134,15 @@ data class Prefs(
     val eqPreampDb: Float? = null,
     /** Headphone crossfeed level in dB; 0 is off. */
     val crossfeedDb: Float = 0f,
+    /** −1 hard left, 0 centre, +1 hard right. */
+    val balance: Float = 0f,
+    val mono: Boolean = false,
+    /**
+     * Catches what the pre-amp, the equalizer and a positive ReplayGain would otherwise clip. Costs a few
+     * milliseconds of delay, so it is opt-in; below its threshold the samples come through untouched.
+     */
+    val limiter: Boolean = false,
+    val limiterThresholdDb: Float = -1f,
     val crossfadeSec: Int = 0,
     val speed: Float = 1f,
     val skipSilence: Boolean = false,
@@ -158,11 +178,11 @@ data class Prefs(
     val serverUrl get() = server?.url.orEmpty()
     val user get() = server?.user.orEmpty()
 
-    /** Something in the sample domain is switched on: equalizer or crossfeed. */
-    val dsp get() = eqEnabled || crossfeedDb > 0f
+    /** Something in the sample domain is switched on. Anything here stops audio offload but not burst playback. */
+    val dsp get() = eqEnabled || crossfeedDb > 0f || balance != 0f || mono || limiter
 
     /** What the pre-amp actually is, automatic headroom included. */
-    val effectivePreampDb get() = if (!eqEnabled) 0f else eqPreampDb ?: -(eqBands.maxOfOrNull { it.gainDb } ?: 0f).coerceAtLeast(0f)
+    val effectivePreampDb get() = if (!eqEnabled) 0f else eqPreampDb ?: -(eqBands.filter { it.kind.usesGain }.maxOfOrNull { it.gainDb } ?: 0f).coerceAtLeast(0f)
 }
 
 /**
@@ -217,7 +237,8 @@ class Settings(context: Context) {
             eqEnabled = sp.getBoolean("eqEnabled", false),
             eqBands = Band.decode(sp.getString("eqBands", null)) ?: d.eqBands,
             eqPreampDb = if (sp.contains("eqPreampDb")) sp.getFloat("eqPreampDb", 0f) else null,
-            crossfeedDb = sp.getFloat("crossfeedDb", 0f),
+            crossfeedDb = sp.getFloat("crossfeedDb", 0f), balance = sp.getFloat("balance", 0f), mono = sp.getBoolean("mono", false),
+            limiter = sp.getBoolean("limiter", false), limiterThresholdDb = sp.getFloat("limiterThresholdDb", -1f),
             crossfadeSec = sp.getInt("crossfadeSec", 0),
             speed = sp.getFloat("speed", 1f),
             skipSilence = sp.getBoolean("skipSilence", false),
@@ -249,7 +270,9 @@ class Settings(context: Context) {
         putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqBands", Band.encode(p.eqBands))
         if (p.eqPreampDb == null) remove("eqPreampDb") else putFloat("eqPreampDb", p.eqPreampDb)
-        putFloat("crossfeedDb", p.crossfeedDb); putInt("crossfadeSec", p.crossfadeSec)
+        putFloat("crossfeedDb", p.crossfeedDb); putFloat("balance", p.balance); putBoolean("mono", p.mono)
+        putBoolean("limiter", p.limiter); putFloat("limiterThresholdDb", p.limiterThresholdDb)
+        run { }; putInt("crossfadeSec", p.crossfadeSec)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)

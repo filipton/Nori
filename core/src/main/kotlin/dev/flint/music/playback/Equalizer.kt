@@ -12,8 +12,14 @@ internal object Dsp {
 
     @JvmStatic external fun create(sampleRate: Int, channels: Int): Long
     @JvmStatic external fun destroy(handle: Long)
-    /** [bands] is flat: kind, frequency, gain dB, Q per band. */
+    /** [bands] is flat: kind, frequency, gain dB, Q, channel per band. */
     @JvmStatic external fun configure(handle: Long, bands: FloatArray, preampDb: Float, crossfeedDb: Float)
+
+    /** The stage after the equalizer. [lookaheadMs] 0 or less turns the limiter off. */
+    @JvmStatic external fun configureOutput(handle: Long, balance: Float, mono: Boolean, thresholdDb: Float, releaseMs: Float, lookaheadMs: Float)
+
+    /** Peak gain reduction over the last buffer, in dB. Reads an atomic, so the UI never waits on the audio thread. */
+    @JvmStatic external fun gainReductionDb(handle: Long): Float
     @JvmStatic external fun reset(handle: Long)
     @JvmStatic external fun process(handle: Long, input: ByteBuffer, inPos: Int, output: ByteBuffer, outPos: Int, bytes: Int, encoding: Int): Boolean
 }
@@ -30,17 +36,29 @@ class Equalizer : BaseAudioProcessor() {
     @Volatile private var bands = FloatArray(0)
     @Volatile private var preampDb = 0f
     @Volatile private var crossfeedDb = 0f
+    @Volatile private var output = floatArrayOf(0f, 0f, -1f, 100f, 0f)
     @Volatile private var dirty = true
     private var handle = 0L
 
     fun setChain(bands: List<dev.flint.music.settings.Band>, preampDb: Float, crossfeedDb: Float) {
-        this.bands = FloatArray(bands.size * 4).also { a ->
-            bands.forEachIndexed { i, b -> a[i * 4] = b.kind.ordinal.toFloat(); a[i * 4 + 1] = b.freq; a[i * 4 + 2] = b.gainDb; a[i * 4 + 3] = b.q }
+        this.bands = FloatArray(bands.size * 5).also { a ->
+            bands.forEachIndexed { i, b ->
+                a[i * 5] = b.kind.ordinal.toFloat(); a[i * 5 + 1] = b.freq; a[i * 5 + 2] = b.gainDb; a[i * 5 + 3] = b.q; a[i * 5 + 4] = b.channel.ordinal.toFloat()
+            }
         }
         this.preampDb = preampDb
         this.crossfeedDb = crossfeedDb
         dirty = true
     }
+
+    /** Balance, mono and the limiter; [limiterLookaheadMs] 0 means no limiter. */
+    fun setOutput(balance: Float, mono: Boolean, thresholdDb: Float, releaseMs: Float, limiterLookaheadMs: Float) {
+        output = floatArrayOf(balance, if (mono) 1f else 0f, thresholdDb, releaseMs, limiterLookaheadMs)
+        dirty = true
+    }
+
+    /** What the limiter is doing right now, for a meter. 0 when it is off or idle. */
+    val gainReductionDb: Float get() = handle.takeIf { it != 0L }?.let { Dsp.gainReductionDb(it) } ?: 0f
 
     override fun onConfigure(format: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (!enabled) return AudioProcessor.AudioFormat.NOT_SET
@@ -60,7 +78,11 @@ class Equalizer : BaseAudioProcessor() {
     override fun queueInput(input: ByteBuffer) {
         val n = input.remaining()
         if (n == 0) return
-        if (dirty) { Dsp.configure(handle, bands, preampDb, crossfeedDb); dirty = false }
+        if (dirty) {
+            Dsp.configure(handle, bands, preampDb, crossfeedDb)
+            Dsp.configureOutput(handle, output[0], output[1] > 0.5f, output[2], output[3], output[4])
+            dirty = false
+        }
         val out = replaceOutputBuffer(n)
         if (input.isDirect && Dsp.process(handle, input, input.position(), out, out.position(), n, inputAudioFormat.encoding)) {
             input.position(input.limit())

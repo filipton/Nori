@@ -10,7 +10,10 @@ import dev.flint.music.net.describeConnectionError
 import dev.flint.music.ffi.MusicFolder
 import dev.flint.music.settings.Band
 import dev.flint.music.settings.BandKind
+import dev.flint.music.settings.BandChannel
 import dev.flint.music.ffi.parseEqPreset
+import dev.flint.music.ffi.eqPresets
+import dev.flint.music.ffi.NamedPreset
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,6 +75,16 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
 
     /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
     fun setTuning(on: Boolean) = flint.player.setTuning(on)
+
+    /** The built-in curves, straight from the core so the numbers live in one place. */
+    val presets: List<NamedPreset> by lazy { eqPresets() }
+
+    fun applyPreset(p: NamedPreset) = update { prefs ->
+        prefs.copy(
+            eqEnabled = true, eqPreampDb = p.preampDb.takeIf { it != 0f },
+            eqBands = p.bands.map { Band(BandKind.entries[it.kind.ordinal], it.freq, it.gainDb, it.q) }.ifEmpty { Band.GRAPHIC },
+        )
+    }
 
     fun setBand(index: Int, band: Band) = update { it.copy(eqBands = it.eqBands.toMutableList().also { l -> l[index] = band }) }
     fun addBand() = update { it.copy(eqBands = it.eqBands + Band(BandKind.PEAKING, 1000f, 0f, 1f)) }
