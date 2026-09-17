@@ -282,11 +282,20 @@ pub struct PlayQueue {
     pub position_ms: u64,
 }
 
+/// The order is the wire format: `dsp.rs` reads the ordinal out of the flat band array, so only append.
 #[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
 pub enum EqKind {
     Peaking,
     LowShelf,
     HighShelf,
+    LowPass,
+    HighPass,
+    BandPass,
+    Notch,
+    AllPass,
+    /// Shelves whose `q` is the RBJ slope S (1 is the steepest slope without ripple) rather than a Q.
+    LowShelfSlope,
+    HighShelfSlope,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -299,6 +308,14 @@ pub struct EqBand {
 
 #[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
 pub struct EqPreset {
+    pub preamp_db: f32,
+    pub bands: Vec<EqBand>,
+}
+
+/// One of the built-in curves from `dsp::eq_presets`.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct NamedPreset {
+    pub name: String,
     pub preamp_db: f32,
     pub bands: Vec<EqBand>,
 }
