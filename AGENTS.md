@@ -34,6 +34,8 @@ Run `cargo test` and a build before committing.
 - Nothing polls or ticks while music plays with the screen off. The seek bar is the only timer,
   and it runs only while the player screen is resumed.
 - One OkHttp pool for API, covers and audio. URLs are stable (derived salt) so caches hit.
+- CPU-decoded playback runs in bursts (`BurstSink` + a 10 s AudioTrack buffer). Check changes to the
+  audio path with `tools/bench.sh dev.flint.music 90 off`: "quiet" should stay around 80 %.
 - Anything that touches samples (equalizer) disables audio offload; keep the default path free of
   audio processors. ReplayGain is applied as player volume for that reason.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct

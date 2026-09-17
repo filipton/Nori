@@ -22,6 +22,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.LibraryResult
@@ -68,6 +69,10 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var scrobbler: Scrobbler
     private val equalizer = Equalizer()
     private var hiRes = false
+    private var burst: BurstSink? = null
+    private var offloaded = false
+    private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
+    private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(BurstSink.BUFFER_US).setMaxPcmBufferDurationUs(BurstSink.BUFFER_US).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val main = Handler(Looper.getMainLooper())
     private val served = LruCache<String, MediaItem>(500)
@@ -81,7 +86,15 @@ class PlaybackService : MediaLibraryService() {
 
         val renderers = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer)).setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
+                BurstSink(
+                    DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer))
+                        // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU; see BurstSink.
+                        .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
+                            // Deep for bursts; shallow while the equalizer is on, so that moving a band is heard at once.
+                            (if (equalizer.enabled) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
+                        }
+                        .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
+                ).also { burst = it }
         }
         hiRes = flint.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
@@ -90,6 +103,8 @@ class PlaybackService : MediaLibraryService() {
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
+            // The playback thread sleeps until the renderers can make progress instead of looping every 10 ms.
+            .experimentalSetDynamicSchedulingEnabled(true)
             .setLoadControl(
                 // Fill up to ten minutes (capped at 48 MB) in one go, then leave the network alone until a minute is left.
                 DefaultLoadControl.Builder().setBufferDurationsMs(60_000, 600_000, 1_000, 2_000)
@@ -98,6 +113,9 @@ class PlaybackService : MediaLibraryService() {
             .build()
         player.addListener(listener)
         player.addAnalyticsListener(formats)
+        player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
+            override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
+        })
 
         flint.dac.onChanged = { applyAudio(flint.settings.value); applyGain() }
         flint.dac.start()
@@ -165,6 +183,8 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    private fun updateBurst() { burst?.enabled = !offloaded && !equalizer.enabled }
+
     /** Equalizer, offload and bit-perfect exclude each other; this is where that is decided. */
     private fun applyAudio(p: Prefs) {
         flint.dac.setEnabled(p.bitPerfect)
@@ -178,6 +198,7 @@ class PlaybackService : MediaLibraryService() {
         ).build()
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
+            updateBurst()
             // A processor joins or leaves the chain only when the sink is configured again.
             if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
         }

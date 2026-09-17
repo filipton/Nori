@@ -25,9 +25,10 @@ output (media3's sink emits 16-bit or float only; needs a custom `AudioOutputPro
 
 ## Why it is cheap to run
 
-- With the screen off nothing of ours runs: no timers, no polling, no position updates. Measured
-  on the emulator (no offload hardware, debug build): app main thread ~20 ms CPU per 40 s of
-  playback; everything else is the decoder, which a real phone moves to the audio DSP.
+- With the screen off nothing of ours runs: no timers, no polling, no position updates.
+- Audio the DSP cannot take (FLAC on most phones) is decoded on the CPU in bursts: a 10 s
+  AudioTrack buffer is refilled in one go when it drains to 2 s (`BurstSink`), so the process is
+  completely asleep for ~80 % of every playing minute instead of waking every 10 ms.
 - Offload by default; the only features that need the CPU in the audio path (equalizer) are opt-in
   and say so. ReplayGain is applied as volume, so it keeps offload.
 - The network is used in bursts: up to ten minutes / 48 MB buffered at once, then silence until a
@@ -37,6 +38,23 @@ output (media3's sink emits 16-bit or float only; needs a custom `AudioOutputPro
   server's answer differs.
 - Rust owns the SQLite/FTS5 index and writes to it straight from response bytes: a library sync
   moves three integers per page across the FFI, not 500 objects.
+
+## Measured
+
+Same emulator (API 34 x86_64, no offload hardware), same 320 kbps MP3 from a local Navidrome,
+release builds, `tools/bench.sh <package> <seconds> <off|on>`:
+
+| | flint | Navic 1.0.0-alpha55 |
+|---|---|---|
+| screen off: CPU | 1.1–1.4 % of a core | 2.4–3.3 % |
+| screen off: seconds with no wakeups | 74 of 90 | 1 of 90 |
+| screen off: app main thread | ~10 ms/min | 530–840 ms/min |
+| player visible: CPU | 2.7 % | 90 % (redraws every frame; software GPU inflates this) |
+| memory (PSS) | 82–94 MB | 120–137 MB |
+
+Musly refuses to start on an emulator and Symfonium is Play-Store-only, so those two have to be
+measured on a phone: start playback, then run `tools/bench.sh com.devid.musly 120 off` (or
+`app.symfonik.music.player`). On a real phone, also compare `adb shell dumpsys batterystats`.
 
 ## Build
 

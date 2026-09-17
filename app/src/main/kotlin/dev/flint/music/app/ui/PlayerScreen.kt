@@ -146,7 +146,7 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
 
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
-    val pos = position(vm, playing, 500)
+    val pos = position(vm, playing, 1000)
     var dragging by remember { mutableStateOf(false) }
     var drag by remember { mutableFloatStateOf(0f) }
     val d = durationMs.coerceAtLeast(1)
