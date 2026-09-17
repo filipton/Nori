@@ -72,6 +72,7 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_ON = "on"
         const val ARG_MINUTES = "minutes"
         const val ARG_END_OF_TRACK = "endOfTrack"
+        const val ARG_SONGS = "songs"
     }
 
     private lateinit var flint: Flint
@@ -85,6 +86,14 @@ class PlaybackService : MediaLibraryService() {
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
     private var crossfade: CrossfadeSink? = null
+    private lateinit var precacher: Precacher
+    private val precache = Runnable { precacheAhead() }
+    /** What the volume should be once no fade is running: 1, or the ReplayGain attenuation. */
+    private var targetVolume = 1f
+    private var fade: Runnable? = null
+    private var errorsInARow = 0
+    /** Sleep timer "after N songs": transitions still to go. */
+    private var sleepAfterSongs = 0
     /** The equalizer screen is open: trade the deep buffer for immediate response. */
     private var tuning = false
     private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
@@ -130,6 +139,7 @@ class PlaybackService : MediaLibraryService() {
                     .setTargetBufferBytes(minOf(48, getSystemService(android.app.ActivityManager::class.java).memoryClass / 4).coerceAtLeast(16) * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build()
             )
             .build()
+        precacher = Precacher(flint.sources)
         player.addListener(listener)
         player.addAnalyticsListener(formats)
         player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
@@ -142,14 +152,14 @@ class PlaybackService : MediaLibraryService() {
         scope.launch {
             var last = flint.settings.value
             flint.settings.prefs.collect { p ->
-                if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, scrobblePercent = last.scrobblePercent) != last.copy()) applyAudio(p)
-                if (p.replayGain != last.replayGain || p.preampDb != last.preampDb) applyGain()
+                if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, untaggedGainDb = last.untaggedGainDb, scrobblePercent = last.scrobblePercent, listPrefs = last.listPrefs, homeRows = last.homeRows, pinnedPlaylists = last.pinnedPlaylists) != last) applyAudio(p)
+                if (p.replayGain != last.replayGain || p.preampDb != last.preampDb || p.untaggedGainDb != last.untaggedGainDb) applyGain()
                 last = p
             }
         }
 
         val open = packageManager.getLaunchIntentForPackage(packageName)?.let { PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE) }
-        session = MediaLibrarySession.Builder(this, player, Callback())
+        session = MediaLibrarySession.Builder(this, Controls(player), Callback())
             // Notification and lock-screen art: same connection pool as everything else, last bitmap kept, decoded no larger than needed.
             .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).setDataSourceFactory(flint.sources.network).setMaximumOutputDimension(512).build()))
             // Controllers extrapolate the playhead themselves; a broadcast every few seconds is a wake-up for nothing.
@@ -167,6 +177,8 @@ class PlaybackService : MediaLibraryService() {
     override fun onDestroy() {
         persistQueue(push = false)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
+        main.removeCallbacks(precache)
+        precacher.release()
         flint.dac.onChanged = {}
         flint.dac.stop()
         if (wifiLock.isHeld) wifiLock.release()
@@ -187,6 +199,12 @@ class PlaybackService : MediaLibraryService() {
             scheduleSave()
             autoFill(item)
             announce()
+            errorsInARow = 0
+            crossfade?.keepNextBoundary = flint.settings.value.crossfadeKeepAlbums && followsOnAlbum(item, nextItem())
+            // A few seconds in, the current track has been fetched and the radio is still up: fetch ahead now.
+            main.removeCallbacks(precache)
+            main.postDelayed(precache, 6_000)
+            if (sleepAfterSongs > 0 && --sleepAfterSongs == 0) player.pauseAtEndOfMediaItems = true
         }
 
         override fun onIsLoadingChanged(isLoading: Boolean) {
@@ -201,6 +219,15 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
             if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) scheduleSave()
+        }
+
+        override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            // One unplayable or unreachable track should not end the evening; three in a row probably means the server is gone.
+            if (flint.settings.value.skipOnError && player.hasNextMediaItem() && ++errorsInARow <= 3) {
+                player.seekToNextMediaItem()
+                player.prepare()
+                player.play()
+            }
         }
 
         override fun onPlaybackStateChanged(state: Int) {
@@ -236,9 +263,9 @@ class PlaybackService : MediaLibraryService() {
         equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
         crossfade?.seconds = if (untouched) 0 else p.crossfadeSec
         player.skipSilenceEnabled = p.skipSilence && !untouched
-        player.setPlaybackSpeed(p.speed)
+        player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)
         // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
-        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.skipSilence && p.speed == 1f
+        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.skipSilence && p.speed == 1f && p.pitch == 1f
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
@@ -250,17 +277,84 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    private fun nextItem(): MediaItem? = player.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
+    private fun previousItem(): MediaItem? = player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
+
+    private fun followsOnAlbum(a: MediaItem?, b: MediaItem?): Boolean {
+        val (x, y) = (a?.mediaMetadata?.extras ?: return false) to (b?.mediaMetadata?.extras ?: return false)
+        val album = x.getString("albumId")
+        return album != null && album == y.getString("albumId") && x.getInt("disc") == y.getInt("disc") && y.getInt("track") == x.getInt("track") + 1
+    }
+
     /** ReplayGain as plain volume: costs nothing and survives offload. Attenuation only. */
     private fun applyGain() {
         val p = flint.settings.value
-        val g = player.currentMediaItem?.takeUnless { it.isRadio }?.toSong()?.replayGain
-        if (p.replayGain == ReplayGainMode.OFF || g == null || flint.dac.state.value.bitPerfect) { player.volume = 1f; return }
-        val album = p.replayGain == ReplayGainMode.ALBUM
-        val db = (if (album) g.albumGain ?: g.trackGain else g.trackGain ?: g.albumGain) ?: 0f
-        val peak = (if (album) g.albumPeak ?: g.trackPeak else g.trackPeak ?: g.albumPeak) ?: 0f
-        var v = 10f.pow((db + p.preampDb) / 20f)
-        if (peak > 0f) v = min(v, 1f / peak)
-        player.volume = v.coerceIn(0f, 1f)
+        val item = player.currentMediaItem?.takeUnless { it.isRadio }
+        targetVolume = if (p.replayGain == ReplayGainMode.OFF || item == null || flint.dac.state.value.bitPerfect) 1f else {
+            val g = item.toSong().replayGain
+            val album = when (p.replayGain) {
+                ReplayGainMode.ALBUM -> true
+                // Inside an album played in order the album gain keeps the tracks' relative levels; elsewhere track gain evens things out.
+                ReplayGainMode.AUTO -> followsOnAlbum(item, nextItem()) || followsOnAlbum(previousItem(), item)
+                else -> false
+            }
+            val db = if (g == null) p.untaggedGainDb else ((if (album) g.albumGain ?: g.trackGain else g.trackGain ?: g.albumGain) ?: p.untaggedGainDb) + p.preampDb
+            val peak = g?.let { if (album) it.albumPeak ?: it.trackPeak else it.trackPeak ?: it.albumPeak } ?: 0f
+            var v = 10f.pow(db / 20f)
+            if (peak > 0f) v = min(v, 1f / peak)
+            v.coerceIn(0f, 1f)
+        }
+        if (fade == null) player.volume = targetVolume
+    }
+
+    /** Ramps the volume from where it is to [to] x target over [ms], then runs [then]. Ticks only while it lasts. */
+    private fun ramp(to: Float, ms: Int, then: () -> Unit = {}) {
+        fade?.let(main::removeCallbacks)
+        if (ms <= 0) { fade = null; player.volume = to * targetVolume; then(); return }
+        val from = player.volume
+        val start = SystemClock.uptimeMillis()
+        fade = object : Runnable {
+            override fun run() {
+                val t = ((SystemClock.uptimeMillis() - start) / ms.toFloat()).coerceIn(0f, 1f)
+                player.volume = from + (to * targetVolume - from) * t
+                if (t < 1f) main.postDelayed(this, 16) else { fade = null; then() }
+            }
+        }.also(main::post)
+    }
+
+    /** What the session (notification, headset, our UI, Android Auto) actually controls: the player plus the configured manners. */
+    private inner class Controls(p: ExoPlayer) : androidx.media3.common.ForwardingPlayer(p) {
+        private val ms get() = flint.settings.value.fadeMs
+
+        override fun play() {
+            if (ms > 0 && !wrappedPlayer.isPlaying) wrappedPlayer.volume = 0f
+            super.play()
+            if (ms > 0) ramp(1f, ms)
+        }
+
+        override fun pause() {
+            if (ms > 0 && wrappedPlayer.isPlaying) ramp(0f, ms) { super.pause(); wrappedPlayer.volume = targetVolume } else super.pause()
+        }
+
+        private fun softly(action: () -> Unit) {
+            if (ms > 0 && wrappedPlayer.isPlaying) { wrappedPlayer.volume = 0f; action(); ramp(1f, ms) } else action()
+        }
+
+        override fun seekTo(positionMs: Long) = softly { super.seekTo(positionMs) }
+        override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly { super.seekTo(mediaItemIndex, positionMs) }
+        override fun seekToNext() = softly { super.seekToNext() }
+        override fun seekToNextMediaItem() = softly { super.seekToNextMediaItem() }
+        override fun seekToPreviousMediaItem() = softly { super.seekToPreviousMediaItem() }
+        override fun seekToPrevious() = softly { if (flint.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
+    }
+
+    private fun precacheAhead() {
+        val p = flint.settings.value
+        val count = if (flint.http.metered) p.precacheMobile else p.precacheWifi
+        // The player itself already buffers the very next track; this covers the ones after it.
+        val from = player.currentMediaItemIndex + 2
+        if (count <= 1 || player.shuffleModeEnabled) return precacher.cancel()
+        precacher.update((from until minOf(from + count - 1, player.mediaItemCount)).map(player::getMediaItemAt))
     }
 
     /**
@@ -321,7 +415,9 @@ class PlaybackService : MediaLibraryService() {
             if (command.customAction == CMD_SLEEP) {
                 val alarms = getSystemService(AlarmManager::class.java)
                 alarms.cancel(sleepAlarm)
-                player.pauseAtEndOfMediaItems = args.getBoolean(ARG_END_OF_TRACK)
+                sleepAfterSongs = args.getInt(ARG_SONGS)
+                player.pauseAtEndOfMediaItems = args.getBoolean(ARG_END_OF_TRACK) || sleepAfterSongs == 1
+                if (sleepAfterSongs == 1) sleepAfterSongs = 0 else if (sleepAfterSongs > 1) sleepAfterSongs--
                 val minutes = args.getInt(ARG_MINUTES)
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
                 if (minutes > 0) alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, 15_000L, "flint.sleep", sleepAlarm, main)

@@ -7,7 +7,8 @@ import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 
-enum class ReplayGainMode { OFF, TRACK, ALBUM }
+/** AUTO: album gain while the neighbours in the queue are from the same album, track gain otherwise. */
+enum class ReplayGainMode { OFF, TRACK, ALBUM, AUTO }
 
 /** What a tap on a song in a list does. */
 enum class TapAction { PLAY_LIST, PLAY_ONE, QUEUE, PLAY_NEXT }
@@ -93,6 +94,20 @@ data class Prefs(
     val cacheMb: Int = 1024,
     val replayGain: ReplayGainMode = ReplayGainMode.OFF,
     val preampDb: Float = 0f,
+    /** Applied to files that carry no ReplayGain tags, so they do not jump out next to tagged ones. */
+    val untaggedGainDb: Float = -6f,
+    /** Volume ramp on play, pause, seek and manual skip, in milliseconds; 0 is off. Costs nothing between ramps. */
+    val fadeMs: Int = 0,
+    val pitch: Float = 1f,
+    /** "Previous" always goes to the previous track instead of first rewinding the current one. */
+    val previousAlwaysSkips: Boolean = false,
+    /** Whole tracks fetched ahead into the stream cache, in one go while the radio is already awake. */
+    val precacheWifi: Int = 2,
+    val precacheMobile: Int = 1,
+    /** A track that fails to load is skipped (up to three in a row) instead of stopping playback. */
+    val skipOnError: Boolean = true,
+    /** No crossfade between two tracks that follow each other on the same album. */
+    val crossfadeKeepAlbums: Boolean = true,
     /** Decode on the audio DSP and let the CPU sleep. Only possible while nothing has to touch samples. */
     val offload: Boolean = true,
     /** Ask Android 14+ for an unmixed, unresampled path to a USB DAC. */
@@ -175,8 +190,12 @@ class Settings(context: Context) {
             mobile = quality("mobile", d.mobile),
             download = quality("download", d.download),
             cacheMb = sp.getInt("cacheMb", d.cacheMb),
-            replayGain = ReplayGainMode.entries[sp.getInt("replayGain", 0).coerceIn(0, 2)],
+            replayGain = ReplayGainMode.entries[sp.getInt("replayGain", 0).coerceIn(0, 3)],
             preampDb = sp.getFloat("preampDb", 0f),
+            untaggedGainDb = sp.getFloat("untaggedGainDb", d.untaggedGainDb), fadeMs = sp.getInt("fadeMs", 0), pitch = sp.getFloat("pitch", 1f),
+            previousAlwaysSkips = sp.getBoolean("previousAlwaysSkips", false), precacheWifi = sp.getInt("precacheWifi", d.precacheWifi),
+            precacheMobile = sp.getInt("precacheMobile", d.precacheMobile), skipOnError = sp.getBoolean("skipOnError", true),
+            crossfadeKeepAlbums = sp.getBoolean("crossfadeKeepAlbums", true),
             offload = sp.getBoolean("offload", true),
             bitPerfect = sp.getBoolean("bitPerfect", false),
             hiRes = sp.getBoolean("hiRes", false),
@@ -209,6 +228,9 @@ class Settings(context: Context) {
         }
         putInt("cacheMb", p.cacheMb)
         putInt("replayGain", p.replayGain.ordinal); putFloat("preampDb", p.preampDb)
+        putFloat("untaggedGainDb", p.untaggedGainDb); putInt("fadeMs", p.fadeMs); putFloat("pitch", p.pitch)
+        putBoolean("previousAlwaysSkips", p.previousAlwaysSkips); putInt("precacheWifi", p.precacheWifi); putInt("precacheMobile", p.precacheMobile)
+        putBoolean("skipOnError", p.skipOnError); putBoolean("crossfadeKeepAlbums", p.crossfadeKeepAlbums)
         putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqBands", Band.encode(p.eqBands))
         if (p.eqPreampDb == null) remove("eqPreampDb") else putFloat("eqPreampDb", p.eqPreampDb)

@@ -59,6 +59,9 @@ class CrossfadeSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     /** 0 turns it off; the line then drains and the sink becomes a pass-through. */
     @Volatile var seconds = 0
 
+    /** Set by the service when the coming track change is within one album played in order: that boundary stays gapless. */
+    @Volatile var keepNextBoundary = false
+
     private class Chunk(val data: ByteBuffer, val ptsUs: Long, val startsTrack: Boolean)
 
     private var rate = 0
@@ -155,6 +158,13 @@ class CrossfadeSink(sink: AudioSink) : ForwardingAudioSink(sink) {
 
     override fun handleDiscontinuity() {
         if (!pcm || seconds == 0 || line.isEmpty()) return super.handleDiscontinuity()
+        if (keepNextBoundary) {
+            // Same album, next track: whatever is in the line simply plays out, and the newcomer follows without a fade.
+            keepNextBoundary = false
+            dueBytes = lineBytes
+            nextStartsTrack = true
+            return
+        }
         finishFade()
         // Everything not yet due is the old track's ending: lift it out of the line and mix the newcomer into it.
         val keep = ArrayDeque<Chunk>()

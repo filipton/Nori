@@ -99,7 +99,8 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         val queue = if (queueChanged || !old.connected) (0 until p.mediaItemCount).map { p.getMediaItemAt(it).toSong() } else old.queue
         _state.value = old.copy(
             connected = true, queue = queue, index = if (p.mediaItemCount == 0) -1 else p.currentMediaItemIndex,
-            radio = item?.takeIf { it.isRadio }?.mediaMetadata?.title?.toString(),
+            // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
+            radio = item?.takeIf { it.isRadio }?.let { p.mediaMetadata.title?.toString()?.takeIf(String::isNotBlank) ?: it.mediaMetadata.title?.toString() },
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
             shuffle = p.shuffleModeEnabled,
             repeat = when (p.repeatMode) { Player.REPEAT_MODE_ALL -> Repeat.ALL; Player.REPEAT_MODE_ONE -> Repeat.ONE; else -> Repeat.OFF },
@@ -164,10 +165,10 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     }
 
     /** [minutes] 0 and [endOfTrack] false cancels. */
-    fun sleep(minutes: Int, endOfTrack: Boolean = false) = with { c ->
+    fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = with { c ->
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_SLEEP, Bundle.EMPTY), Bundle().apply {
-            putInt(PlaybackService.ARG_MINUTES, minutes); putBoolean(PlaybackService.ARG_END_OF_TRACK, endOfTrack)
+            putInt(PlaybackService.ARG_MINUTES, minutes); putBoolean(PlaybackService.ARG_END_OF_TRACK, endOfTrack); putInt(PlaybackService.ARG_SONGS, songs)
         })
-        _state.value = _state.value.copy(sleepAt = if (minutes > 0) SystemClock.elapsedRealtime() + minutes * 60_000L else 0, sleepAtEndOfTrack = endOfTrack)
+        _state.value = _state.value.copy(sleepAt = if (minutes > 0) SystemClock.elapsedRealtime() + minutes * 60_000L else 0, sleepAtEndOfTrack = endOfTrack || songs > 0)
     }
 }

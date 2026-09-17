@@ -35,15 +35,30 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
 
     val network: DataSource.Factory = OkHttpDataSource.Factory(http.streamFactory)
 
+    /** The rolling cache over the network; also what the precacher writes through. */
+    val streamCached: CacheDataSource.Factory = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
     private val cached: DataSource.Factory = CacheDataSource.Factory()
         .setCache(downloadCache)
         .setCacheWriteDataSinkFactory(null)
-        .setUpstreamDataSourceFactory(
-            CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
-                .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
-        )
+        .setUpstreamDataSourceFactory(streamCached)
 
     val factory = DataSource.Factory { Switch(cached.createDataSource(), network.createDataSource()) }
+
+    /**
+     * flint://song/<id> becomes a real URL and a cache key, at the moment the bytes are needed: the quality
+     * follows the network the phone is on right then.
+     */
+    fun resolve(dataSpec: DataSpec): DataSpec {
+        val id = dataSpec.uri.lastPathSegment!!
+        if (id in downloaded) return dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
+        var q = if (http.metered) settings.value.mobile else settings.value.wifi
+        // Through the profile's second (usually public) address an optional ceiling applies on top.
+        val cap = settings.value.server?.altMaxBitRate ?: 0
+        if (onSecondAddress() && cap > 0 && (q.bitRate == 0 || q.bitRate > cap)) q = Quality(cap, q.format.ifEmpty { "opus" })
+        return dataSpec.buildUpon().setUri(Uri.parse(core.streamUrl(id, q.bitRate.toUInt(), q.format))).setKey("$id:${q.key}").build()
+    }
 
     fun downloadKey(id: String) = "dl:$id"
 
@@ -59,16 +74,7 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
 
         override fun open(dataSpec: DataSpec): Long {
             if (dataSpec.uri.scheme != SONG_SCHEME) return plain.also { active = it }.open(dataSpec)
-            val id = dataSpec.uri.lastPathSegment!!
-            val resolved = if (id in downloaded) {
-                dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
-            } else {
-                var q = if (http.metered) settings.value.mobile else settings.value.wifi
-                // Through the profile's second (usually public) address an optional ceiling applies on top.
-                val cap = settings.value.server?.altMaxBitRate ?: 0
-                if (onSecondAddress() && cap > 0 && (q.bitRate == 0 || q.bitRate > cap)) q = Quality(cap, q.format.ifEmpty { "opus" })
-                dataSpec.buildUpon().setUri(Uri.parse(core.streamUrl(id, q.bitRate.toUInt(), q.format))).setKey("$id:${q.key}").build()
-            }
+            val resolved = resolve(dataSpec)
             return songs.also { active = it }.open(resolved)
         }
 
