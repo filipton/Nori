@@ -12,6 +12,8 @@ import dev.flint.music.playback.MediaSources
 import dev.flint.music.playback.PlayerConnection
 import dev.flint.music.settings.Settings
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * The object graph, built by hand: there are a dozen long-lived objects and a DI
@@ -21,24 +23,38 @@ import java.io.File
 @OptIn(UnstableApi::class)
 class Flint private constructor(context: Context) {
     val settings = Settings(context)
-    val core = Core(File(context.filesDir, "flint.db").path)
-    val http = Http(context)
-    val library = Library(core, http)
-    val sources = MediaSources(context, core, http, settings)
-    val downloads = Downloads(context, core, sources)
+
+    // Everything below is built on first use. The application warms it up from a background thread, so by the
+    // time anything needs the core it is normally there; the UI thread itself only ever needs [settings] and
+    // the cheap shells ([library], [downloads], [player]) to draw its first frame.
+    private val lazyCore = lazy {
+        Core(File(context.filesDir, "flint.db").path).also { c -> settings.value.let { if (it.loggedIn) c.configure(it.serverUrl, it.user, it.password) } }
+    }
+    private val lazyHttp = lazy { Http(context) }
+    private val lazySources = lazy { MediaSources(context, core, http, settings) }
+    val core: Core by lazyCore
+    val http: Http by lazyHttp
+    val sources: MediaSources by lazySources
+    val library = Library(lazyCore, lazyHttp)
+    val downloads = Downloads(context, lazyCore, lazySources)
     val dac = BitPerfect(context)
     val player = PlayerConnection(context, this)
 
-    init { settings.value.let { if (it.loggedIn) core.configure(it.serverUrl, it.user, it.password) } }
+    /** Called off the main thread at process start. */
+    fun warmUp() {
+        val t = android.os.SystemClock.elapsedRealtime()
+        core; http; sources
+        android.util.Log.i("flint", "core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms")
+    }
 
     /** Checks the credentials against the server before keeping them. */
     suspend fun login(url: String, user: String, password: String) {
         val old = settings.value
-        val base = core.configure(url, user, password)
+        val base = withContext(Dispatchers.IO) { core.configure(url, user, password) }
         try {
             library.ping()
         } catch (e: Exception) {
-            if (old.loggedIn) core.configure(old.serverUrl, old.user, old.password)
+            if (old.loggedIn) withContext(Dispatchers.IO) { core.configure(old.serverUrl, old.user, old.password) }
             throw e
         }
         settings.update { it.copy(serverUrl = base, user = user, password = password) }
@@ -51,11 +67,6 @@ class Flint private constructor(context: Context) {
 
     companion object {
         @Volatile private var instance: Flint? = null
-        fun get(context: Context): Flint = instance ?: synchronized(this) {
-            instance ?: run {
-                val t = android.os.SystemClock.elapsedRealtime()
-                Flint(context.applicationContext).also { instance = it; android.util.Log.i("flint", "core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms") }
-            }
-        }
+        fun get(context: Context): Flint = instance ?: synchronized(this) { instance ?: Flint(context.applicationContext).also { instance = it } }
     }
 }

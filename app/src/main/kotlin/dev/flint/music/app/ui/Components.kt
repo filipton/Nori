@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DownloadDone
@@ -25,7 +24,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.runtime.remember
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import coil3.request.ImageRequest
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -38,11 +41,20 @@ import dev.flint.music.ffi.Song
 /** Cover sizes are bucketed so the server, the HTTP cache and the image cache all see few distinct URLs. */
 object CoverSize { const val ROW = 160; const val CARD = 320; const val FULL = 800 }
 
+/**
+ * Square on purpose: a rounded clip gives every cover its own GPU layer, and a grid has dozens on screen.
+ * The request is remembered and sized up front, so scrolling neither rebuilds it nor waits for layout to size it.
+ */
 @Composable
 fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val px = with(LocalDensity.current) { size.roundToPx() }
+    val request = remember(url, px) {
+        ImageRequest.Builder(context).data(url).apply { if (px > 0) size(px) }.build()
+    }
     AsyncImage(
-        model = url, contentDescription = null, contentScale = ContentScale.Crop,
-        modifier = modifier.size(size).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+        model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
+        modifier = (if (px > 0) modifier.size(size) else modifier).background(MaterialTheme.colorScheme.surfaceVariant),
     )
 }
 

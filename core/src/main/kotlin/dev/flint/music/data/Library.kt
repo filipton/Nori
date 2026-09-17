@@ -38,23 +38,36 @@ enum class StarKind(val param: String) { SONG("id"), ALBUM("albumId"), ARTIST("a
  * through [cached]: the stored response paints the screen at once, the network
  * answer replaces it only when it differs. The UI never sees bytes or URLs.
  */
-class Library(private val core: Core, private val http: Http) {
+private const val HOUR = 3_600_000L
+private const val DAY = 24 * HOUR
+
+class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
+    // Resolved on first use, which is always on an IO thread: building them costs ~100 ms the UI thread should not pay.
+    private val core by lazyCore
+    private val http by lazyHttp
+
 
     private fun params(vararg p: Pair<String, Any?>) = p.mapNotNull { (k, v) -> v?.let { Param(k, it.toString()) } }
 
     private suspend fun <T> call(endpoint: String, params: List<Param>, parse: (ByteArray) -> T): T =
         withContext(Dispatchers.IO) { parse(http.get(core.url(endpoint, params))) }
 
-    private fun <T> cached(endpoint: String, params: List<Param>, parse: (ByteArray) -> T): Flow<T> = flow {
+    /**
+     * [freshMs]: an answer younger than this is not re-asked. Opening the same screens again within
+     * a couple of minutes then costs no request at all, which on mobile data means no radio wake-up.
+     * Writes evict what they change, so the user's own actions are never hidden by this.
+     */
+    private fun <T> cached(endpoint: String, params: List<Param>, freshMs: Long = 2 * 60_000L, parse: (ByteArray) -> T): Flow<T> = flow {
         val key = endpoint + params.joinToString("") { "&${it.key}=${it.value}" }
         val stored = core.cacheGet(key)
-        if (stored != null) runCatching { parse(stored) }.onSuccess { emit(it) }
+        if (stored != null) {
+            val shown = runCatching { parse(stored) }.onSuccess { emit(it) }.isSuccess
+            if (shown && core.cacheFresh(key, freshMs)) return@flow
+        }
         try {
             val fresh = http.get(core.url(endpoint, params))
-            if (stored == null || !fresh.contentEquals(stored)) {
-                emit(parse(fresh))
-                core.cachePut(key, fresh)
-            }
+            if (stored == null || !fresh.contentEquals(stored)) emit(parse(fresh))
+            core.cachePut(key, fresh) // also when unchanged: it restarts the freshness window
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -64,7 +77,7 @@ class Library(private val core: Core, private val http: Http) {
 
     // ---- session ----
 
-    suspend fun ping(): ServerInfo = call("ping", emptyList(), core::parseStatus)
+    suspend fun ping(): ServerInfo = call("ping", emptyList(), { core.parseStatus(it) })
 
     // ---- search ----
 
@@ -73,7 +86,7 @@ class Library(private val core: Core, private val http: Http) {
      * page: the proxy repeats its external results on every offset.
      */
     suspend fun search(query: String, songs: Int = 40, albums: Int = 20, artists: Int = 10): SearchResult =
-        call("search3", params("query" to query, "songCount" to songs, "albumCount" to albums, "artistCount" to artists), core::parseSearch)
+        call("search3", params("query" to query, "songCount" to songs, "albumCount" to albums, "artistCount" to artists), { core.parseSearch(it) })
 
     /** Offline and instant: the FTS index of everything seen so far. */
     suspend fun localSearch(query: String, limit: Int = 30): SearchResult =
@@ -88,39 +101,39 @@ class Library(private val core: Core, private val http: Http) {
     fun albums(sort: AlbumSort, size: Int = 50, offset: Int = 0, genre: String? = null): Flow<List<Album>> {
         val p = params("type" to sort.api, "size" to size, "offset" to offset, "genre" to genre)
         // A cached "random" would be the same shuffle every time.
-        return if (sort == AlbumSort.RANDOM) flow { emit(call("getAlbumList2", p, core::parseAlbumList)) } else cached("getAlbumList2", p, core::parseAlbumList)
+        return if (sort == AlbumSort.RANDOM) flow { emit(call("getAlbumList2", p, { core.parseAlbumList(it) })) } else cached("getAlbumList2", p, parse = { core.parseAlbumList(it) })
     }
 
-    fun artists(): Flow<List<Artist>> = cached("getArtists", emptyList(), core::parseArtists)
-    fun album(id: String): Flow<AlbumDetail> = cached("getAlbum", params("id" to id), core::parseAlbum)
-    fun artist(id: String): Flow<ArtistDetail> = cached("getArtist", params("id" to id), core::parseArtist)
-    fun artistInfo(id: String): Flow<ArtistInfo> = cached("getArtistInfo2", params("id" to id, "count" to 10), core::parseArtistInfo)
-    fun topSongs(artist: String): Flow<List<Song>> = cached("getTopSongs", params("artist" to artist, "count" to 20), core::parseSongs)
-    fun playlists(): Flow<List<Playlist>> = cached("getPlaylists", emptyList(), core::parsePlaylists)
-    fun playlist(id: String): Flow<PlaylistDetail> = cached("getPlaylist", params("id" to id), core::parsePlaylist)
-    fun starred(): Flow<Starred> = cached("getStarred2", emptyList(), core::parseStarred)
-    fun genres(): Flow<List<Genre>> = cached("getGenres", emptyList(), core::parseGenres)
-    fun radio(): Flow<List<RadioStation>> = cached("getInternetRadioStations", emptyList(), core::parseRadio)
-    fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId), core::parseLyrics)
+    fun artists(): Flow<List<Artist>> = cached("getArtists", emptyList(), parse = { core.parseArtists(it) })
+    fun album(id: String): Flow<AlbumDetail> = cached("getAlbum", params("id" to id), parse = { core.parseAlbum(it) })
+    fun artist(id: String): Flow<ArtistDetail> = cached("getArtist", params("id" to id), parse = { core.parseArtist(it) })
+    fun artistInfo(id: String): Flow<ArtistInfo> = cached("getArtistInfo2", params("id" to id, "count" to 10), DAY, { core.parseArtistInfo(it) })
+    fun topSongs(artist: String): Flow<List<Song>> = cached("getTopSongs", params("artist" to artist, "count" to 20), DAY, { core.parseSongs(it) })
+    fun playlists(): Flow<List<Playlist>> = cached("getPlaylists", emptyList(), parse = { core.parsePlaylists(it) })
+    fun playlist(id: String): Flow<PlaylistDetail> = cached("getPlaylist", params("id" to id), parse = { core.parsePlaylist(it) })
+    fun starred(): Flow<Starred> = cached("getStarred2", emptyList(), parse = { core.parseStarred(it) })
+    fun genres(): Flow<List<Genre>> = cached("getGenres", emptyList(), HOUR, { core.parseGenres(it) })
+    fun radio(): Flow<List<RadioStation>> = cached("getInternetRadioStations", emptyList(), HOUR, { core.parseRadio(it) })
+    fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId), HOUR, { core.parseLyrics(it) })
 
     suspend fun randomSongs(size: Int = 100, genre: String? = null): List<Song> =
-        call("getRandomSongs", params("size" to size, "genre" to genre), core::parseSongs)
+        call("getRandomSongs", params("size" to size, "genre" to genre), { core.parseSongs(it) })
 
     suspend fun songsByGenre(genre: String, count: Int = 200): List<Song> =
-        call("getSongsByGenre", params("genre" to genre, "count" to count), core::parseSongs)
+        call("getSongsByGenre", params("genre" to genre, "count" to count), { core.parseSongs(it) })
 
     suspend fun similarSongs(id: String, count: Int = 50): List<Song> =
-        call("getSimilarSongs2", params("id" to id, "count" to count), core::parseSongs)
+        call("getSimilarSongs2", params("id" to id, "count" to count), { core.parseSongs(it) })
 
-    suspend fun song(id: String): Song? = call("getSong", params("id" to id), core::parseSongs).firstOrNull()
-    suspend fun albumSongs(id: String): List<Song> = call("getAlbum", params("id" to id), core::parseAlbum).songs
-    suspend fun playlistSongs(id: String): List<Song> = call("getPlaylist", params("id" to id), core::parsePlaylist).songs
+    suspend fun song(id: String): Song? = call("getSong", params("id" to id), { core.parseSongs(it) }).firstOrNull()
+    suspend fun albumSongs(id: String): List<Song> = call("getAlbum", params("id" to id), { core.parseAlbum(it) }).songs
+    suspend fun playlistSongs(id: String): List<Song> = call("getPlaylist", params("id" to id), { core.parsePlaylist(it) }).songs
 
     // ---- writes; each drops the cached reads it makes stale ----
 
     private suspend fun write(endpoint: String, params: List<Param>, vararg stale: String) {
-        call(endpoint, params, core::parseStatus)
-        stale.forEach(core::cacheEvict)
+        call(endpoint, params, { core.parseStatus(it) })
+        stale.forEach({ core.cacheEvict(it) })
     }
 
     suspend fun star(kind: StarKind, id: String, on: Boolean) =
@@ -148,7 +161,7 @@ class Library(private val core: Core, private val http: Http) {
     suspend fun pushQueue(ids: List<String>, current: String?, positionMs: Long) =
         write("savePlayQueue", ids.map { Param("id", it) } + params("current" to current, "position" to positionMs))
 
-    suspend fun pullQueue(): PlayQueue = call("getPlayQueue", emptyList(), core::parsePlayQueue)
+    suspend fun pullQueue(): PlayQueue = call("getPlayQueue", emptyList(), { core.parsePlayQueue(it) })
 
     // ---- offline index ----
 

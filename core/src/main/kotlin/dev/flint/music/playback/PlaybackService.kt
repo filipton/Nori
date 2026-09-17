@@ -25,6 +25,10 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.DecoderReuseEvaluation
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.datasource.DataSourceBitmapLoader
+import androidx.media3.session.CacheBitmapLoader
+import android.net.wifi.WifiManager
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
@@ -70,6 +74,8 @@ class PlaybackService : MediaLibraryService() {
     private val equalizer = Equalizer()
     private var hiRes = false
     private var burst: BurstSink? = null
+    @Suppress("DEPRECATION")
+    private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
     private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
     private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(BurstSink.BUFFER_US).setMaxPcmBufferDurationUs(BurstSink.BUFFER_US).build()
@@ -99,16 +105,19 @@ class PlaybackService : MediaLibraryService() {
         hiRes = flint.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
         player = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(flint.sources.factory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)).setDataSourceFactory(flint.sources.factory))
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
             .setHandleAudioBecomingNoisy(true)
-            .setWakeMode(C.WAKE_MODE_NETWORK)
+            // The CPU lock only. media3's network mode would pin Wi-Fi out of power save for as long as music plays;
+            // a track is fetched in seconds and then played from memory, so the Wi-Fi lock is held just while loading.
+            .setWakeMode(C.WAKE_MODE_LOCAL)
             // The playback thread sleeps until the renderers can make progress instead of looping every 10 ms.
             .experimentalSetDynamicSchedulingEnabled(true)
             .setLoadControl(
-                // Fill up to ten minutes (capped at 48 MB) in one go, then leave the network alone until a minute is left.
+                // Fill up to ten minutes in one go, then leave the network alone until a minute is left. The cap is a
+                // quarter of the app's heap class, at most 48 MB: a whole MP3/Opus track everywhere, FLAC in two or three fetches.
                 DefaultLoadControl.Builder().setBufferDurationsMs(60_000, 600_000, 1_000, 2_000)
-                    .setTargetBufferBytes(48 * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build()
+                    .setTargetBufferBytes(minOf(48, getSystemService(android.app.ActivityManager::class.java).memoryClass / 4).coerceAtLeast(16) * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build()
             )
             .build()
         player.addListener(listener)
@@ -130,7 +139,12 @@ class PlaybackService : MediaLibraryService() {
         }
 
         val open = packageManager.getLaunchIntentForPackage(packageName)?.let { PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE) }
-        session = MediaLibrarySession.Builder(this, player, Callback()).apply { open?.let(::setSessionActivity) }.build()
+        session = MediaLibrarySession.Builder(this, player, Callback())
+            // Notification and lock-screen art: same connection pool as everything else, last bitmap kept, decoded no larger than needed.
+            .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).setDataSourceFactory(flint.sources.network).setMaximumOutputDimension(512).build()))
+            // Controllers extrapolate the playhead themselves; a broadcast every few seconds is a wake-up for nothing.
+            .setPeriodicPositionUpdateEnabled(false)
+            .apply { open?.let(::setSessionActivity) }.build()
         restoreQueue()
     }
 
@@ -145,6 +159,7 @@ class PlaybackService : MediaLibraryService() {
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
         flint.dac.onChanged = {}
         flint.dac.stop()
+        if (wifiLock.isHeld) wifiLock.release()
         session.release()
         player.release()
         scope.cancel()
@@ -160,6 +175,10 @@ class PlaybackService : MediaLibraryService() {
             applyGain()
             scheduleSave()
             autoFill(item)
+        }
+
+        override fun onIsLoadingChanged(isLoading: Boolean) {
+            if (isLoading && !wifiLock.isHeld) wifiLock.acquire() else if (!isLoading && wifiLock.isHeld) wifiLock.release()
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {

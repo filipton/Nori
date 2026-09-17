@@ -2,8 +2,6 @@ package dev.flint.music.net
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
@@ -13,8 +11,6 @@ import okhttp3.Response
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlin.coroutines.resumeWithException
 
 /**
@@ -33,24 +29,13 @@ class Http(context: Context) {
      */
     val stream: OkHttpClient = api.newBuilder().readTimeout(4, TimeUnit.MINUTES).build()
 
-    private val network = MutableStateFlow(Net(online = true, metered = false))
-    val net: StateFlow<Net> = network
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
 
-    data class Net(val online: Boolean, val metered: Boolean)
-
-    init {
-        // A callback instead of asking ConnectivityManager on every request: no binder call on the hot path.
-        val cm = context.getSystemService(ConnectivityManager::class.java)
-        cm.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-            override fun onCapabilitiesChanged(n: Network, caps: NetworkCapabilities) {
-                network.value = Net(true, !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
-            }
-
-            override fun onLost(n: Network) {
-                network.value = network.value.copy(online = false)
-            }
-        })
-    }
+    /**
+     * Asked once per track, when its quality is chosen. A registered network callback would be woken
+     * for every signal-strength change for as long as the process lives; this costs one binder call.
+     */
+    val metered: Boolean get() = connectivity.isActiveNetworkMetered
 
     /** Cancelling the coroutine cancels the call, which is what makes live search cheap. */
     suspend fun get(url: String): ByteArray = suspendCancellableCoroutine { cont ->

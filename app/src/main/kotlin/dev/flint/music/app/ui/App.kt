@@ -74,7 +74,6 @@ fun App() {
         val player: PlayerViewModel = viewModel()
         val snackbar = remember { SnackbarHostState() }
         var menuSong by remember { mutableStateOf<Song?>(null) }
-        LaunchedEffect(Unit) { player.connect() }
         LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
 
         CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {

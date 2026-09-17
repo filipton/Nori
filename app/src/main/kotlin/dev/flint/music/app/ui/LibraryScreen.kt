@@ -81,7 +81,7 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
             }
         }
         LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            itemsIndexed(albums, key = { _, a -> a.id }) { i, a ->
+            itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
                 AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth())
             }

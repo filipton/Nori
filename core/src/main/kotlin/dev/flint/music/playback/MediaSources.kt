@@ -61,7 +61,7 @@ class MediaSources(context: Context, private val core: Core, private val http: H
             val resolved = if (id in downloaded) {
                 dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
             } else {
-                val q = if (http.net.value.metered) settings.value.mobile else settings.value.wifi
+                val q = if (http.metered) settings.value.mobile else settings.value.wifi
                 dataSpec.buildUpon().setUri(Uri.parse(core.streamUrl(id, q.bitRate.toUInt(), q.format))).setKey("$id:${q.key}").build()
             }
             return songs.also { active = it }.open(resolved)

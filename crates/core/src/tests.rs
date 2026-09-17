@@ -48,6 +48,9 @@ fn queue_and_cache_round_trip() {
 
     core.cache_put("getAlbum?id=1".into(), vec![1, 2]).unwrap();
     core.cache_put("getArtist?id=1".into(), vec![3]).unwrap();
+    assert!(core.cache_fresh("getAlbum?id=1".into(), 60_000).unwrap());
+    assert!(!core.cache_fresh("getAlbum?id=1".into(), 0).unwrap());
+    assert!(!core.cache_fresh("missing".into(), 60_000).unwrap());
     core.cache_evict("getAlbum".into()).unwrap();
     assert_eq!(core.cache_get("getAlbum?id=1".into()).unwrap(), None);
     assert_eq!(core.cache_get("getArtist?id=1".into()).unwrap(), Some(vec![3]));

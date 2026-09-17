@@ -399,6 +399,13 @@ impl Core {
         Ok(st.query_row([key], |r| r.get(0)).optional()?)
     }
 
+    /// True when `key` was stored less than `max_age_ms` ago: the caller can skip asking the server again.
+    pub fn cache_fresh(&self, key: String, max_age_ms: i64) -> Result<bool> {
+        let c = self.db.lock();
+        let ts: Option<i64> = c.prepare_cached("SELECT ts FROM cache WHERE key=?1")?.query_row([key], |r| r.get(0)).optional()?;
+        Ok(ts.is_some_and(|t| db::now_ms() - t < max_age_ms))
+    }
+
     pub fn cache_put(&self, key: String, body: Vec<u8>) -> Result<()> {
         let c = self.db.lock();
         c.prepare_cached("INSERT OR REPLACE INTO cache(key, body, ts) VALUES(?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;

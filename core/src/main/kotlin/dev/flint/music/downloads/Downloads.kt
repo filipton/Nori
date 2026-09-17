@@ -25,7 +25,9 @@ data class DownloadState(val done: List<Song> = emptyList(), val pending: List<S
 
 /** media3 moves and stores the bytes; the index in Rust remembers what each file is. */
 @UnstableApi
-class Downloads(private val context: Context, private val core: Core, private val sources: MediaSources) {
+class Downloads(private val context: Context, lazyCore: Lazy<Core>, lazySources: Lazy<MediaSources>) {
+    private val core by lazyCore
+    private val sources by lazySources
     private val io = Executors.newFixedThreadPool(2)
     private val _state = MutableStateFlow(DownloadState())
     val state: StateFlow<DownloadState> = _state
