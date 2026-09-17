@@ -35,6 +35,16 @@ impl From<rusqlite::Error> for CoreError {
 
 type Result<T> = std::result::Result<T, CoreError>;
 
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct ServerConfig {
+    pub url: String,
+    pub user: String,
+    pub password: String,
+    /// OpenSubsonic API key; when set it is used instead of user and password.
+    pub api_key: Option<String>,
+    pub legacy_auth: bool,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct PendingCall {
     pub row_id: i64,
@@ -162,6 +172,12 @@ struct LyricsList {
 }
 
 #[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct Folders {
+    music_folder: Vec<MusicFolder>,
+}
+
+#[derive(Deserialize, Default)]
 #[serde(default)]
 struct Share {
     url: String,
@@ -210,6 +226,7 @@ struct Response {
     lyrics_list: Option<LyricsList>,
     play_queue: Option<QueueWire>,
     shares: Option<Shares>,
+    music_folders: Option<Folders>,
 }
 
 #[derive(Deserialize)]
@@ -243,10 +260,16 @@ impl Core {
         Ok(Arc::new(Core { db: Mutex::new(db::open(&db_path)?), server: RwLock::new(api::Server::default()) }))
     }
 
-    /// Returns the normalised base url. Changing server drops the index.
-    pub fn configure(&self, url: String, user: String, password: String) -> Result<String> {
-        let s = api::Server::new(&url, &user, &password);
-        let ident = format!("{}|{}", s.base, user);
+    /// Returns the normalised base url. Each server profile has its own database file, so the
+    /// index is only dropped when the same file is pointed at a different server or user.
+    pub fn configure(&self, config: ServerConfig) -> Result<String> {
+        let auth = match (&config.api_key, config.legacy_auth) {
+            (Some(k), _) if !k.is_empty() => api::Auth::ApiKey(k),
+            (_, true) => api::Auth::Legacy { user: &config.user, password: &config.password },
+            _ => api::Auth::Token { user: &config.user, password: &config.password },
+        };
+        let s = api::Server::with(&config.url, auth);
+        let ident = format!("{}|{}", s.base, config.user);
         let db = self.db.lock();
         if db::kv_get(&db, "server")?.as_deref() != Some(&ident) {
             db::clear_library(&db)?;
@@ -255,6 +278,16 @@ impl Core {
         let base = s.base.clone();
         *self.server.write() = s;
         Ok(base)
+    }
+
+    /// Points requests at another address of the same server (LAN vs WAN) without touching the index.
+    pub fn use_address(&self, url: String) {
+        let next = self.server.read().rebased(&url);
+        *self.server.write() = next;
+    }
+
+    pub fn parse_music_folders(&self, body: Vec<u8>) -> Result<Vec<MusicFolder>> {
+        Ok(parse(&body)?.music_folders.unwrap_or_default().music_folder)
     }
 
     pub fn url(&self, endpoint: String, params: Vec<Param>) -> String {

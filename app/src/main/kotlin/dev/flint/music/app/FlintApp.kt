@@ -23,7 +23,7 @@ class FlintApp : Application(), SingletonImageLoader.Factory {
 
     /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. */
     override fun newImageLoader(context: PlatformContext): ImageLoader = ImageLoader.Builder(context)
-        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Flint.get(this@FlintApp).http.api })) }
+        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Flint.get(this@FlintApp).http.callFactory })) }
         .memoryCache { MemoryCache.Builder().maxSizePercent(context, 0.15).build() }
         .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers").toOkioPath()).maxSizeBytes(256L * 1024 * 1024).build() }
         .crossfade(false)

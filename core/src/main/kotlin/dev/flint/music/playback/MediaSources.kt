@@ -15,6 +15,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import dev.flint.music.ffi.Core
 import dev.flint.music.net.Http
 import dev.flint.music.settings.Settings
+import dev.flint.music.settings.Quality
 import java.io.File
 
 /**
@@ -23,7 +24,8 @@ import java.io.File
  * by URL, so a replayed track costs no radio time at all.
  */
 @UnstableApi
-class MediaSources(context: Context, private val core: Core, private val http: Http, private val settings: Settings) {
+class MediaSources(context: Context, private val coreOf: () -> Core, private val http: Http, private val settings: Settings, private val onSecondAddress: () -> Boolean = { false }) {
+    private val core get() = coreOf()
     val database = StandaloneDatabaseProvider(context)
     val streamCache = SimpleCache(File(context.cacheDir, "stream"), LeastRecentlyUsedCacheEvictor(settings.value.cacheMb * 1024L * 1024L), database)
     val downloadCache = SimpleCache(File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads"), NoOpCacheEvictor(), database)
@@ -31,7 +33,7 @@ class MediaSources(context: Context, private val core: Core, private val http: H
     /** Ids whose download is complete; kept by [dev.flint.music.downloads.Downloads]. */
     @Volatile var downloaded: Set<String> = emptySet()
 
-    val network: DataSource.Factory = OkHttpDataSource.Factory(http.stream)
+    val network: DataSource.Factory = OkHttpDataSource.Factory(http.streamFactory)
 
     private val cached: DataSource.Factory = CacheDataSource.Factory()
         .setCache(downloadCache)
@@ -61,7 +63,10 @@ class MediaSources(context: Context, private val core: Core, private val http: H
             val resolved = if (id in downloaded) {
                 dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
             } else {
-                val q = if (http.metered) settings.value.mobile else settings.value.wifi
+                var q = if (http.metered) settings.value.mobile else settings.value.wifi
+                // Through the profile's second (usually public) address an optional ceiling applies on top.
+                val cap = settings.value.server?.altMaxBitRate ?: 0
+                if (onSecondAddress() && cap > 0 && (q.bitRate == 0 || q.bitRate > cap)) q = Quality(cap, q.format.ifEmpty { "opus" })
                 dataSpec.buildUpon().setUri(Uri.parse(core.streamUrl(id, q.bitRate.toUInt(), q.format))).setKey("$id:${q.key}").build()
             }
             return songs.also { active = it }.open(resolved)

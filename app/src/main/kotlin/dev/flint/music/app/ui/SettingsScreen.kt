@@ -34,6 +34,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.playback.Equalizer
 import dev.flint.music.settings.Quality
+import dev.flint.music.settings.ServerProfile
+import androidx.compose.runtime.LaunchedEffect
 import dev.flint.music.settings.ReplayGainMode
 
 @Composable
@@ -66,6 +68,10 @@ fun SettingsScreen(vm: SettingsViewModel) {
     val sync by vm.sync.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     val context = LocalContext.current
+    val folders by vm.musicFolders.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf<ServerProfile?>(null) }
+    LaunchedEffect(p.activeServerId) { vm.loadMusicFolders() }
+    editing?.let { e -> androidx.compose.ui.window.Dialog({ editing = null }, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) { LoginScreen(vm, e) { editing = null } }; }
     Column(Modifier.verticalScroll(rememberScrollState())) {
         SectionTitle("Streaming quality")
         Choice("On Wi-Fi", p.wifi, qualities) { q -> vm.update { it.copy(wifi = q) } }
@@ -125,9 +131,21 @@ fun SettingsScreen(vm: SettingsViewModel) {
             TextButton({ vm.downloadLibrary() }, enabled = sync.indexed.songs > 0u) { Text("Download") }
         }
 
-        SectionTitle("Server")
-        Text("${p.user} @ ${p.serverUrl}", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
-        TextButton(vm::logout, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
+        SectionTitle("Servers")
+        p.servers.forEach { server ->
+            val active = server.id == p.activeServerId
+            Row(Modifier.fillMaxWidth().clickable(enabled = !active) { vm.switchServer(server) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(server.label, color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                    Text(listOfNotNull(server.user.ifEmpty { "API key" }, if (active) "active" else "tap to switch", "Wi-Fi only".takeIf { server.wifiOnly }, "second address".takeIf { server.altUrl.isNotBlank() }).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton({ editing = server }) { Text("Edit") }
+                TextButton({ vm.removeServer(server.id) }) { Text("Remove") }
+            }
+        }
+        TextButton({ editing = vm.newProfile() }, Modifier.padding(horizontal = 8.dp)) { Text("Add server") }
+        if (folders.size > 1) Choice("Music folder", p.server?.musicFolderId.orEmpty(), listOf("" to "All") + folders.map { it.id to it.name }) { id -> p.server?.let { vm.updateServer(it.copy(musicFolderId = id)) } }
+        if (p.server?.altUrl?.isNotBlank() == true) Choice("Max bitrate on the second address", p.server?.altMaxBitRate ?: 0, listOf(0 to "No limit", 320 to "320 kbps", 192 to "192 kbps", 128 to "128 kbps", 96 to "96 kbps")) { v -> p.server?.let { vm.updateServer(it.copy(altMaxBitRate = v)) } }
     }
 }
 

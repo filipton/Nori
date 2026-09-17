@@ -9,6 +9,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import dev.flint.music.Flint
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import dev.flint.music.app.ui.App
 
 class MainActivity : ComponentActivity() {
@@ -25,9 +27,12 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         // Binding starts the playback service, which builds a player on this thread. Let the first frame out first.
-        window.decorView.post { Looper.myQueue().addIdleHandler { if (started && Flint.get(this).settings.value.loggedIn) Flint.get(this).player.connect(); false } }
+        window.decorView.post { Looper.myQueue().addIdleHandler { if (started && Flint.get(this).settings.value.loggedIn) { Flint.get(this).player.connect(); pickAddress() }; false } }
         started = true
     }
+
+    /** Coming to the foreground is when the network may have changed (home Wi-Fi vs. outside). */
+    private fun pickAddress() = lifecycleScope.launch { runCatching { Flint.get(this@MainActivity).chooseAddress() } }
 
     override fun onStop() {
         super.onStop()

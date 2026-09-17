@@ -41,16 +41,40 @@ enum class StarKind(val param: String) { SONG("id"), ALBUM("albumId"), ARTIST("a
 private const val HOUR = 3_600_000L
 private const val DAY = 24 * HOUR
 
-class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
-    // Resolved on first use, which is always on an IO thread: building them costs ~100 ms the UI thread should not pay.
-    private val core by lazyCore
-    private val http by lazyHttp
+class Library(
+    private val coreOf: () -> Core,
+    private val httpOf: () -> Http,
+    /** The music folder browsing is restricted to, or empty. */
+    private val folder: () -> String = { "" },
+    /** Called when the server did not answer: may switch to the profile's other address. True when it did. */
+    private val onUnreachable: suspend () -> Boolean = { false },
+) {
+    // Resolved on every use, which is always on an IO thread: the core belongs to the active server profile
+    // and building it costs ~100 ms the UI thread should not pay.
+    private val core get() = coreOf()
+    private val http get() = httpOf()
 
+    /** The endpoints that take `musicFolderId`. */
+    private val foldered = setOf("getAlbumList2", "getArtists", "search3", "getRandomSongs", "getStarred2", "getSongsByGenre", "getIndexes")
+
+    private fun scoped(endpoint: String, params: List<Param>): List<Param> =
+        folder().let { f -> if (f.isEmpty() || endpoint !in foldered) params else params + Param("musicFolderId", f) }
+
+    /** One request; if the server is unreachable and the profile has a second address, that is tried once. */
+    private suspend fun fetch(endpoint: String, params: List<Param>): ByteArray {
+        val p = scoped(endpoint, params)
+        return try {
+            http.get(core.url(endpoint, p))
+        } catch (e: java.io.IOException) {
+            if (e is dev.flint.music.net.MeteredNetworkException || !onUnreachable()) throw e
+            http.get(core.url(endpoint, p))
+        }
+    }
 
     private fun params(vararg p: Pair<String, Any?>) = p.mapNotNull { (k, v) -> v?.let { Param(k, it.toString()) } }
 
     private suspend fun <T> call(endpoint: String, params: List<Param>, parse: (ByteArray) -> T): T =
-        withContext(Dispatchers.IO) { parse(http.get(core.url(endpoint, params))) }
+        withContext(Dispatchers.IO) { parse(fetch(endpoint, params)) }
 
     /**
      * [freshMs]: an answer younger than this is not re-asked. Opening the same screens again within
@@ -58,14 +82,14 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
      * Writes evict what they change, so the user's own actions are never hidden by this.
      */
     private fun <T> cached(endpoint: String, params: List<Param>, freshMs: Long = 2 * 60_000L, parse: (ByteArray) -> T): Flow<T> = flow {
-        val key = endpoint + params.joinToString("") { "&${it.key}=${it.value}" }
+        val key = endpoint + scoped(endpoint, params).joinToString("") { "&${it.key}=${it.value}" }
         val stored = core.cacheGet(key)
         if (stored != null) {
             val shown = runCatching { parse(stored) }.onSuccess { emit(it) }.isSuccess
             if (shown && core.cacheFresh(key, freshMs)) return@flow
         }
         try {
-            val fresh = http.get(core.url(endpoint, params))
+            val fresh = fetch(endpoint, params)
             if (stored == null || !fresh.contentEquals(stored)) emit(parse(fresh))
             core.cachePut(key, fresh) // also when unchanged: it restarts the freshness window
         } catch (e: CancellationException) {
@@ -76,6 +100,8 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
     }.flowOn(Dispatchers.IO)
 
     // ---- session ----
+
+    suspend fun musicFolders(): List<dev.flint.music.ffi.MusicFolder> = call("getMusicFolders", emptyList()) { core.parseMusicFolders(it) }
 
     suspend fun ping(): ServerInfo = call("ping", emptyList(), { core.parseStatus(it) })
 
@@ -137,7 +163,7 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
      */
     private suspend fun write(endpoint: String, params: List<Param>, vararg stale: String) = withContext(Dispatchers.IO) {
         try {
-            core.parseStatus(http.get(core.url(endpoint, params)))
+            core.parseStatus(fetch(endpoint, params))
             flushPending()
         } catch (e: java.io.IOException) {
             core.pendingAdd(endpoint, params)
@@ -209,7 +235,7 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
         var total = IngestStats(0u, 0u, 0u)
         while (true) {
             val p = params("query" to "", "songCount" to page, "songOffset" to offset, "albumCount" to page, "albumOffset" to offset, "artistCount" to page, "artistOffset" to offset)
-            val seen = core.ingestSearch(http.get(core.url("search3", p)))
+            val seen = core.ingestSearch(fetch("search3", p))
             total = IngestStats(total.artists + seen.artists, total.albums + seen.albums, total.songs + seen.songs)
             emit(total)
             if (seen.songs == 0u && seen.albums == 0u && seen.artists == 0u) break

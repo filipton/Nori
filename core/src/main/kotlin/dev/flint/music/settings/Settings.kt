@@ -4,8 +4,58 @@ import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import org.json.JSONArray
+import org.json.JSONObject
 
 enum class ReplayGainMode { OFF, TRACK, ALBUM }
+
+/**
+ * One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
+ */
+data class ServerProfile(
+    val id: String,
+    val name: String = "",
+    val url: String = "",
+    /** A second address of the same server (typically the public one); tried when [url] does not answer. */
+    val altUrl: String = "",
+    val user: String = "",
+    val password: String = "",
+    /** OpenSubsonic API key; replaces user and password when set. */
+    val apiKey: String = "",
+    /** Plain `p=enc:` auth for servers without token auth. Found out automatically at login. */
+    val legacyAuth: Boolean = false,
+    /** Sent with every request: reverse-proxy auth, Cloudflare Access service tokens, basic auth. */
+    val headers: Map<String, String> = emptyMap(),
+    val allowSelfSigned: Boolean = false,
+    /** File name (under files/certs) of an imported PKCS#12 client certificate, for mutual TLS. */
+    val clientCert: String = "",
+    val clientCertPassword: String = "",
+    /** Never talk to this server over a metered network. */
+    val wifiOnly: Boolean = false,
+    /** Restrict browsing and search to one music folder; empty means all. */
+    val musicFolderId: String = "",
+    /** Bitrate ceiling while connected through [altUrl]; 0 means none. */
+    val altMaxBitRate: Int = 0,
+) {
+    val label get() = name.ifBlank { url.substringAfter("://").substringBefore('/') }
+
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("id", id); put("name", name); put("url", url); put("altUrl", altUrl); put("user", user); put("password", password)
+        put("apiKey", apiKey); put("legacyAuth", legacyAuth); put("headers", JSONObject(headers)); put("allowSelfSigned", allowSelfSigned)
+        put("clientCert", clientCert); put("clientCertPassword", clientCertPassword); put("wifiOnly", wifiOnly)
+        put("musicFolderId", musicFolderId); put("altMaxBitRate", altMaxBitRate)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = ServerProfile(
+            id = o.getString("id"), name = o.optString("name"), url = o.optString("url"), altUrl = o.optString("altUrl"),
+            user = o.optString("user"), password = o.optString("password"), apiKey = o.optString("apiKey"), legacyAuth = o.optBoolean("legacyAuth"),
+            headers = o.optJSONObject("headers")?.let { h -> h.keys().asSequence().associateWith { h.getString(it) } } ?: emptyMap(),
+            allowSelfSigned = o.optBoolean("allowSelfSigned"), clientCert = o.optString("clientCert"), clientCertPassword = o.optString("clientCertPassword"),
+            wifiOnly = o.optBoolean("wifiOnly"), musicFolderId = o.optString("musicFolderId"), altMaxBitRate = o.optInt("altMaxBitRate"),
+        )
+    }
+}
 
 enum class BandKind { PEAKING, LOW_SHELF, HIGH_SHELF }
 
@@ -27,9 +77,8 @@ data class Quality(val bitRate: Int = 0, val format: String = "") {
 }
 
 data class Prefs(
-    val serverUrl: String = "",
-    val user: String = "",
-    val password: String = "",
+    val servers: List<ServerProfile> = emptyList(),
+    val activeServerId: String = "",
     val wifi: Quality = Quality(),
     val mobile: Quality = Quality(192, "opus"),
     val download: Quality = Quality(),
@@ -58,7 +107,10 @@ data class Prefs(
     val scrobblePercent: Int = 50,
     val liveSearchDelayMs: Int = 350,
 ) {
-    val loggedIn get() = serverUrl.isNotEmpty() && user.isNotEmpty()
+    val server: ServerProfile? get() = servers.firstOrNull { it.id == activeServerId }
+    val loggedIn get() = server != null
+    val serverUrl get() = server?.url.orEmpty()
+    val user get() = server?.user.orEmpty()
 
     /** Something in the sample domain is switched on: equalizer or crossfeed. */
     val dsp get() = eqEnabled || crossfeedDb > 0f
@@ -84,15 +136,23 @@ class Settings(context: Context) {
         save(next)
     }
 
+    /** Before profiles existed there was one server in three keys; it becomes the profile "default". */
+    private fun servers(): List<ServerProfile> {
+        sp.getString("servers", null)?.let { json ->
+            return runCatching { JSONArray(json).let { a -> (0 until a.length()).map { ServerProfile.fromJson(a.getJSONObject(it)) } } }.getOrDefault(emptyList())
+        }
+        val url = sp.getString("serverUrl", "").orEmpty()
+        return if (url.isEmpty()) emptyList() else listOf(ServerProfile("default", url = url, user = sp.getString("user", "").orEmpty(), password = sp.getString("password", "").orEmpty()))
+    }
+
     private fun quality(name: String, def: Quality) =
         Quality(sp.getInt("${name}BitRate", def.bitRate), sp.getString("${name}Format", def.format)!!)
 
     private fun load(): Prefs {
         val d = Prefs()
         return Prefs(
-            serverUrl = sp.getString("serverUrl", "")!!,
-            user = sp.getString("user", "")!!,
-            password = sp.getString("password", "")!!,
+            servers = servers(),
+            activeServerId = sp.getString("activeServerId", null) ?: if (sp.getString("serverUrl", "").isNullOrEmpty()) "" else "default",
             wifi = quality("wifi", d.wifi),
             mobile = quality("mobile", d.mobile),
             download = quality("download", d.download),
@@ -117,7 +177,8 @@ class Settings(context: Context) {
     }
 
     private fun save(p: Prefs) = sp.edit().apply {
-        putString("serverUrl", p.serverUrl); putString("user", p.user); putString("password", p.password)
+        putString("servers", JSONArray(p.servers.map { it.toJson() }).toString()); putString("activeServerId", p.activeServerId)
+        remove("serverUrl"); remove("user"); remove("password")
         for ((n, q) in listOf("wifi" to p.wifi, "mobile" to p.mobile, "download" to p.download)) {
             putInt("${n}BitRate", q.bitRate); putString("${n}Format", q.format)
         }

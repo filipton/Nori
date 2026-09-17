@@ -246,3 +246,11 @@ pub struct IngestStats {
     pub albums: u32,
     pub songs: u32,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(default)]
+pub struct MusicFolder {
+    #[serde(deserialize_with = "id")]
+    pub id: String,
+    pub name: String,
+}

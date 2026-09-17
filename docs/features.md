@@ -37,19 +37,19 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Feature | S | M | N | flint | Plan |
 |---|---|---|---|---|---|
 | Subsonic token auth | x | x | x | yes | |
-| Legacy (plaintext/enc) auth for old servers, auto-detected | x | x | | | add |
-| OpenSubsonic API-key auth | x | | | | add (octo-fiesta itself has none) |
+| Legacy (plaintext/enc) auth for old servers, auto-detected | x | x | | yes | done |
+| OpenSubsonic API-key auth | x | | | yes | done |
 | Stable salt so URLs stay cacheable | | x | | yes | |
-| Custom HTTP headers (reverse proxy, Cloudflare Access) | x | | x | | add |
-| Basic-auth for reverse proxies | x | | | | add (same mechanism as headers) |
-| Accept self-signed certificate / custom CA / mTLS client cert | x | x | x(user CA) | | add self-signed + user CA; mTLS: ask |
-| Two addresses per server (LAN first, WAN fallback), bitrate cap on the second | x | x | | | add |
-| "Wi-Fi only" per server | x | | | | add |
-| Multiple saved servers / profiles, switcher | x | x | | | add |
-| Music-folder (library) selection | x | x | | | add |
-| URL help: prepend https, http/https chips, reverse-proxy subpath | x | | x | part | add |
+| Custom HTTP headers (reverse proxy, Cloudflare Access) | x | | x | yes | done |
+| Basic-auth for reverse proxies | x | | | yes | done |
+| Accept self-signed certificate / custom CA / mTLS client cert | x | x | x(user CA) | yes | done |
+| Two addresses per server (LAN first, WAN fallback), bitrate cap on the second | x | x | | yes | done |
+| "Wi-Fi only" per server | x | | | yes | done |
+| Multiple saved servers / profiles, switcher | x | x | | yes | done |
+| Music-folder (library) selection | x | x | | yes | done |
+| URL help: prepend https, http/https chips, reverse-proxy subpath | x | | x | yes | done |
 | Server type/version shown, octo-fiesta detected | | x | | part | add |
-| Categorised login errors, retry, "open offline" | | x | | | add |
+| Categorised login errors, retry, "open offline" | | x | | yes | done |
 | Zstandard / gzip response compression | x | | | gzip (OkHttp) | skip: server side does not offer zstd |
 | Other sources: Jellyfin/Emby, Plex, Kodi, Audiobookshelf | x | x(J/E) | | | ask |
 | Local files on the device | x | x | | | ask |

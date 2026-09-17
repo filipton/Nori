@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import dev.flint.music.ffi.IngestStats
 import dev.flint.music.playback.DacState
 import dev.flint.music.settings.Prefs
+import dev.flint.music.settings.ServerProfile
+import dev.flint.music.net.describeConnectionError
+import dev.flint.music.ffi.MusicFolder
 import dev.flint.music.settings.Band
 import dev.flint.music.settings.BandKind
 import dev.flint.music.ffi.parseEqPreset
@@ -14,7 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-data class LoginUi(val busy: Boolean = false, val error: String? = null)
+data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
 class SettingsViewModel(app: Application) : FlintViewModel(app) {
@@ -30,18 +33,38 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
 
     fun update(change: (Prefs) -> Prefs) = flint.settings.update(change)
 
-    fun login(url: String, user: String, password: String) {
+    /** A blank profile for the "add server" form. */
+    fun newProfile() = ServerProfile(id = java.util.UUID.randomUUID().toString().take(8))
+
+    fun login(profile: ServerProfile) {
         if (_login.value.busy) return
         _login.value = LoginUi(busy = true)
         viewModelScope.launch {
             _login.value = try {
-                flint.login(url, user, password)
-                LoginUi()
+                flint.login(profile)
+                LoginUi(done = true)
             } catch (e: Exception) {
-                LoginUi(error = e.message ?: "Could not reach the server")
+                LoginUi(error = describeConnectionError(e))
             }
         }
     }
+
+    fun clearLoginResult() { _login.value = LoginUi() }
+    fun switchServer(profile: ServerProfile) = flint.activate(profile)
+    fun updateServer(profile: ServerProfile) = flint.updateServer(profile)
+    fun removeServer(id: String) = flint.removeServer(id)
+
+    /** Copies a picked PKCS#12 file into the app and returns the profile that uses it. */
+    fun importClientCert(profile: ServerProfile, uri: android.net.Uri, password: String): ServerProfile {
+        val name = "${profile.id}.p12"
+        val dir = java.io.File(getApplication<Application>().filesDir, "certs").apply { mkdirs() }
+        getApplication<Application>().contentResolver.openInputStream(uri)?.use { input -> java.io.File(dir, name).outputStream().use { input.copyTo(it) } }
+        return profile.copy(clientCert = name, clientCertPassword = password)
+    }
+
+    private val _folders = MutableStateFlow<List<MusicFolder>>(emptyList())
+    val musicFolders: StateFlow<List<MusicFolder>> = _folders
+    fun loadMusicFolders() = viewModelScope.launch { runCatching { flint.library.musicFolders() }.onSuccess { _folders.value = it } }
 
     fun logout() = flint.logout()
 

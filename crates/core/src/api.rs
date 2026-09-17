@@ -35,24 +35,64 @@ pub fn encode(out: &mut String, v: &str) {
     }
 }
 
+/// How a request proves who it is from.
+pub enum Auth<'a> {
+    /// `t` + `s`: md5(password + salt). What every current server takes.
+    Token { user: &'a str, password: &'a str },
+    /// `p=enc:<hex>`: for servers that cannot do token auth (they say so with error 41).
+    Legacy { user: &'a str, password: &'a str },
+    /// OpenSubsonic `apiKey`, which replaces the user name too.
+    ApiKey(&'a str),
+}
+
+pub fn normalize(base: &str) -> String {
+    let mut base = base.trim().trim_end_matches('/').to_string();
+    if let Some(b) = base.strip_suffix("/rest") {
+        base = b.to_string();
+    }
+    if !base.is_empty() && !base.contains("://") {
+        base = format!("https://{base}");
+    }
+    base
+}
+
 impl Server {
     /// The salt is derived, not random: a stable token keeps every URL stable
     /// across sessions, so HTTP, image and media caches keep hitting. A token
     /// is replayable either way; TLS is what protects it.
     pub fn new(base: &str, user: &str, password: &str) -> Self {
-        let mut base = base.trim().trim_end_matches('/').to_string();
-        if let Some(b) = base.strip_suffix("/rest") {
-            base = b.to_string();
+        Self::with(base, Auth::Token { user, password })
+    }
+
+    pub fn with(base: &str, auth: Auth) -> Self {
+        let base = normalize(base);
+        let mut q = String::new();
+        match auth {
+            Auth::Token { user, password } => {
+                let salt = &hex(&Md5::digest(format!("flint:{base}:{user}").as_bytes()))[..12];
+                let token = hex(&Md5::digest(format!("{password}{salt}").as_bytes()));
+                q.push_str("u=");
+                encode(&mut q, user);
+                q.push_str(&format!("&t={token}&s={salt}"));
+            }
+            Auth::Legacy { user, password } => {
+                q.push_str("u=");
+                encode(&mut q, user);
+                q.push_str("&p=enc:");
+                q.push_str(&hex(password.as_bytes()));
+            }
+            Auth::ApiKey(key) => {
+                q.push_str("apiKey=");
+                encode(&mut q, key);
+            }
         }
-        if !base.contains("://") {
-            base = format!("https://{base}");
-        }
-        let salt = &hex(&Md5::digest(format!("flint:{base}:{user}").as_bytes()))[..12];
-        let token = hex(&Md5::digest(format!("{password}{salt}").as_bytes()));
-        let mut auth = String::from("u=");
-        encode(&mut auth, user);
-        auth.push_str(&format!("&t={token}&s={salt}&v={API_VERSION}&c={CLIENT}&f=json"));
-        Server { base, auth }
+        q.push_str(&format!("&v={API_VERSION}&c={CLIENT}&f=json"));
+        Server { base, auth: q }
+    }
+
+    /// Same credentials, other address: the LAN / WAN switch.
+    pub fn rebased(&self, base: &str) -> Self {
+        Server { base: normalize(base), auth: self.auth.clone() }
     }
 
     pub fn url(&self, endpoint: &str, params: &[(String, String)]) -> String {
@@ -83,5 +123,11 @@ mod tests {
         assert_eq!(a, s.url("search3", &[("query".into(), "a b&c".into())]));
         assert!(a.starts_with("https://example.com/rest/search3?u=jo%20e&t="));
         assert!(a.ends_with("&f=json&query=a%20b%26c"));
+
+        let legacy = Server::with("http://h", Auth::Legacy { user: "u", password: "ab" }).url("ping", &[]);
+        assert!(legacy.contains("u=u&p=enc:6162&v="));
+        let key = Server::with("http://h", Auth::ApiKey("k y")).url("ping", &[]);
+        assert!(key.contains("/rest/ping?apiKey=k%20y&v=") && !key.contains("u="));
+        assert_eq!(Server::new("h", "u", "p").rebased("http://lan:4533/").url("ping", &[]).split('?').next(), Some("http://lan:4533/rest/ping"));
     }
 }
