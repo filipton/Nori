@@ -28,7 +28,7 @@ import kotlinx.coroutines.withContext
 
 enum class AlbumSort(val api: String) {
     NEWEST("newest"), RECENT("recent"), FREQUENT("frequent"), RANDOM("random"),
-    BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"),
+    BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"), HIGHEST("highest"), BY_YEAR("byYear"),
 }
 
 enum class StarKind(val param: String) { SONG("id"), ALBUM("albumId"), ARTIST("artistId") }
@@ -127,6 +127,7 @@ class Library(
     fun albums(sort: AlbumSort, size: Int = 50, offset: Int = 0, genre: String? = null): Flow<List<Album>> {
         val p = params("type" to sort.api, "size" to size, "offset" to offset, "genre" to genre)
         // A cached "random" would be the same shuffle every time.
+        if (sort == AlbumSort.BY_YEAR) return albumsByYear(java.time.Year.now().value, 0, size, offset)
         return if (sort == AlbumSort.RANDOM) flow { emit(call("getAlbumList2", p, { core.parseAlbumList(it) })) } else cached("getAlbumList2", p, parse = { core.parseAlbumList(it) })
     }
 
@@ -141,6 +142,20 @@ class Library(
     fun genres(): Flow<List<Genre>> = cached("getGenres", emptyList(), HOUR, { core.parseGenres(it) })
     fun radio(): Flow<List<RadioStation>> = cached("getInternetRadioStations", emptyList(), HOUR, { core.parseRadio(it) })
     fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId), HOUR, { core.parseLyrics(it) })
+
+    /** The server's folder tree, for libraries organised by directory rather than by tags. */
+    fun folders(): Flow<List<Artist>> = cached("getIndexes", emptyList(), HOUR) { core.parseIndexes(it) }
+    fun folder(id: String): Flow<dev.flint.music.ffi.Directory> = cached("getMusicDirectory", params("id" to id)) { core.parseDirectory(it) }
+
+    /** Sorted pages of the offline index: the "all songs" and "by decade" lists. */
+    suspend fun browseSongs(sort: String, descending: Boolean, starredOnly: Boolean, years: IntRange?, offset: Int, limit: Int): List<Song> = withContext(Dispatchers.IO) {
+        core.browseSongs(sort, descending, starredOnly, (years?.first ?: 0).toUInt(), (years?.last ?: 0).toUInt(), offset.toUInt(), limit.toUInt())
+    }
+
+    suspend fun decades(): List<Genre> = withContext(Dispatchers.IO) { core.browseDecades() }
+
+    fun albumsByYear(from: Int, to: Int, size: Int = 50, offset: Int = 0): Flow<List<Album>> =
+        cached("getAlbumList2", params("type" to "byYear", "fromYear" to from, "toYear" to to, "size" to size, "offset" to offset)) { core.parseAlbumList(it) }
 
     suspend fun randomSongs(size: Int = 100, genre: String? = null): List<Song> =
         call("getRandomSongs", params("size" to size, "genre" to genre), { core.parseSongs(it) })

@@ -22,16 +22,20 @@ import dev.flint.music.ffi.Album
 @Composable
 fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val load by vm.ui.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
     LoadBox(load) { ui ->
         LazyColumn {
             item(key = "actions") {
                 Row(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) { FilledTonalButton(actions::shuffleAll) { Text("Shuffle everything") }
                     FilledTonalButton(actions::resumeFromServer) { Text("Resume from server") } }
             }
-            shelf("Recently played", ui.recent, vm)
-            shelf("Recently added", ui.newest, vm)
-            shelf("Most played", ui.frequent, vm)
-            shelf("Random", ui.random, vm)
+            if (ui.pinned.isNotEmpty()) item(key = "pinned") {
+                SectionTitle("Pinned playlists")
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 136.dp, { nav.playlist(p.id) }) }
+                }
+            }
+            ui.rows.forEach { (row, albums) -> shelf(row.title, albums, vm) }
         }
     }
 }

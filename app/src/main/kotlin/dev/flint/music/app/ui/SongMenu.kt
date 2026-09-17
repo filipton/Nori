@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,6 +46,8 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
     val nav = LocalNav.current
     val downloads by actions.downloads.collectAsState()
     var picking by remember { mutableStateOf(false) }
+    var details by remember { mutableStateOf(false) }
+    if (details) { TrackInfo(song) { details = false; onDismiss() }; return }
     if (picking) { PlaylistPicker(listOf(song), actions) { picking = false; onDismiss() }; return }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
@@ -70,7 +73,9 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
             else Item("Download") { actions.download(listOf(song)); onDismiss() }
             if (!song.isExternal) Item("Share link") { actions.share(song.id); onDismiss() }
             song.albumId?.let { id -> Item("Go to album") { nav.album(id); onDismiss() } }
-            song.artistId?.let { id -> Item("Go to artist") { nav.artist(id); onDismiss() } }
+            if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a -> Item("Go to ${a.name}") { nav.artist(a.id); onDismiss() } }
+            else song.artistId?.let { id -> Item("Go to artist") { nav.artist(id); onDismiss() } }
+            Item("Details") { details = true }
         }
     }
 }
@@ -92,4 +97,45 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
         confirmButton = { TextButton({ actions.addToNewPlaylist(name.trim(), songs); onDone() }, enabled = name.isNotBlank()) { Text("Create") } },
         dismissButton = { TextButton(onDone) { Text("Cancel") } },
     )
+}
+
+/** Everything the server said about one file. */
+@Composable
+fun TrackInfo(song: Song, onDone: () -> Unit) {
+    val rows = listOfNotNull(
+        "Title" to song.title, "Artist" to song.artists.joinToString(", ") { it.name }.ifEmpty { song.artist }, "Album" to song.album,
+        "Track" to listOfNotNull(song.discNumber.takeIf { it > 0u }?.let { "disc $it" }, song.track.takeIf { it > 0u }?.let { "track $it" }).joinToString(", "),
+        "Year" to song.year.takeIf { it > 0u }?.toString(), "Genre" to song.genre, "Duration" to duration(song.duration.toLong()),
+        "Format" to listOfNotNull(song.suffix.uppercase().ifEmpty { null }, song.contentType.ifEmpty { null }).joinToString(" · "),
+        "Quality" to listOfNotNull(song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }, song.channelCount.takeIf { it > 0u }?.let { "$it ch" }).joinToString(" · "),
+        "Size" to song.size.takeIf { it > 0u }?.let { "%.1f MB".format(it.toDouble() / 1_048_576) },
+        "ReplayGain" to song.replayGain?.let { g -> listOfNotNull(g.trackGain?.let { "track %+.2f dB".format(it) }, g.albumGain?.let { "album %+.2f dB".format(it) }, g.trackPeak?.let { "peak %.3f".format(it) }).joinToString(" · ") },
+        "BPM" to song.bpm.takeIf { it > 0u }?.toString(), "Plays (server)" to song.playCount.takeIf { it > 0u }?.toString(), "Last played" to song.played?.take(16)?.replace('T', ' '),
+        "Added" to song.created?.take(10), "Path" to song.path, "MusicBrainz" to song.musicBrainzId, "Comment" to song.comment, "Id" to song.id,
+    ).filter { !it.second.isNullOrBlank() }
+    AlertDialog(
+        onDismissRequest = onDone, title = { Text("Details") },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { (k, v) -> Text(k, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(v!!, Modifier.padding(bottom = 8.dp)) } } },
+        confirmButton = { TextButton(onDone) { Text("Close") } },
+    )
+}
+
+/** Shown instead of nothing while songs are selected: the batch actions. */
+@Composable
+fun SelectionBar(actions: ActionsViewModel) {
+    val selection by actions.selection.collectAsState()
+    if (selection.isEmpty()) return
+    var picking by remember { mutableStateOf(false) }
+    if (picking) PlaylistPicker(selection, actions) { picking = false; actions.clearSelection() }
+    androidx.compose.material3.Surface(tonalElevation = 6.dp) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text("${selection.size} selected", Modifier.weight(1f).padding(start = 8.dp))
+            TextButton({ actions.play(selection); actions.clearSelection() }) { Text("Play") }
+            TextButton({ actions.playNext(selection); actions.clearSelection() }) { Text("Next") }
+            TextButton({ actions.enqueue(selection); actions.clearSelection() }) { Text("Queue") }
+            TextButton({ picking = true }) { Text("Playlist") }
+            TextButton({ actions.download(selection); actions.clearSelection() }) { Text("Get") }
+            IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, "Clear selection") }
+        }
+    }
 }

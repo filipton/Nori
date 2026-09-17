@@ -23,7 +23,7 @@ fun Song.toMediaItem(coverUrl: String?): MediaItem {
         putInt("duration", duration.toInt()); putInt("track", track.toInt()); putInt("disc", discNumber.toInt()); putInt("year", year.toInt())
         putString("suffix", suffix); putString("contentType", contentType); putInt("bitRate", bitRate.toInt()); putLong("size", size.toLong())
         putInt("samplingRate", samplingRate.toInt()); putInt("bitDepth", bitDepth.toInt())
-        putBoolean("starred", starred); putInt("rating", userRating.toInt()); putBoolean("external", isExternal)
+        putBoolean("starred", starred); putInt("rating", userRating.toInt()); putBoolean("external", isExternal); putString("explicit", explicitStatus)
         replayGain?.let { g ->
             g.trackGain?.let { putFloat("trackGain", it) }; g.albumGain?.let { putFloat("albumGain", it) }
             g.trackPeak?.let { putFloat("trackPeak", it) }; g.albumPeak?.let { putFloat("albumPeak", it) }
@@ -60,6 +60,8 @@ fun MediaItem.toSong(): Song {
         samplingRate = e.getInt("samplingRate").toUInt(), bitDepth = e.getInt("bitDepth").toUInt(),
         userRating = e.getInt("rating").toUByte(), starred = e.getBoolean("starred"), isExternal = e.getBoolean("external"),
         replayGain = gain.takeIf { it.trackGain != null || it.albumGain != null },
+        artists = emptyList(), created = null, playCount = 0u, played = null, path = null, explicitStatus = e.getString("explicit").orEmpty(),
+        channelCount = 0u, musicBrainzId = null, bpm = 0u, comment = null,
     )
 }
 

@@ -48,6 +48,8 @@ class Nav(private val c: NavHostController) {
     fun artist(id: String) = c.navigate("artist/${Uri.encode(id)}")
     fun playlist(id: String) = c.navigate("playlist/${Uri.encode(id)}")
     fun genre(name: String) = c.navigate("genre/${Uri.encode(name)}")
+    fun folder(id: String) = c.navigate("folder/${Uri.encode(id)}")
+    fun decade(year: Int) = c.navigate("decade/$year")
     fun player() = c.navigate("player") { launchSingleTop = true }
     fun equalizer() = c.navigate("equalizer")
     fun back() { c.popBackStack() }
@@ -90,6 +92,7 @@ fun App() {
                 snackbarHost = { SnackbarHost(snackbar) },
                 bottomBar = {
                     if (route != "player") Column {
+                        SelectionBar(actions)
                         MiniPlayer(player, onOpen = nav::player)
                         NavigationBar {
                             tabs.forEach { (r, label, icon) ->
@@ -110,6 +113,8 @@ fun App() {
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("genre/{id}") { GenreScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("folder/{id}") { FolderScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("decade/{year}") { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) }
                 }
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }) }

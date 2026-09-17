@@ -81,6 +81,8 @@ struct AlbumWire {
     #[serde(flatten)]
     album: Album,
     song: Vec<Song>,
+    #[serde(rename = "discTitles")]
+    disc_titles: Vec<DiscTitle>,
 }
 
 #[derive(Deserialize, Default)]
@@ -146,6 +148,8 @@ struct Stations {
 #[serde(default, rename_all = "camelCase")]
 struct ArtistInfoWire {
     biography: Option<String>,
+    last_fm_url: Option<String>,
+    music_brainz_id: Option<String>,
     large_image_url: Option<String>,
     medium_image_url: Option<String>,
     similar_artist: Vec<Artist>,
@@ -175,6 +179,16 @@ struct LyricsList {
 #[serde(default, rename_all = "camelCase")]
 struct Folders {
     music_folder: Vec<MusicFolder>,
+}
+
+/// getMusicDirectory mixes folders and songs in one `child` list, told apart by `isDir`.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct DirectoryWire {
+    #[serde(deserialize_with = "crate::model::id_string")]
+    id: String,
+    name: String,
+    child: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -227,6 +241,8 @@ struct Response {
     play_queue: Option<QueueWire>,
     shares: Option<Shares>,
     music_folders: Option<Folders>,
+    indexes: Option<Artists>,
+    directory: Option<DirectoryWire>,
 }
 
 #[derive(Deserialize)]
@@ -284,6 +300,29 @@ impl Core {
     pub fn use_address(&self, url: String) {
         let next = self.server.read().rebased(&url);
         *self.server.write() = next;
+    }
+
+    /// getIndexes: the top of the folder tree.
+    pub fn parse_indexes(&self, body: Vec<u8>) -> Result<Vec<Artist>> {
+        Ok(parse(&body)?.indexes.unwrap_or_default().index.into_iter().flat_map(|i| i.artist).collect())
+    }
+
+    pub fn parse_directory(&self, body: Vec<u8>) -> Result<Directory> {
+        let d = parse(&body)?.directory.unwrap_or_default();
+        let mut out = Directory { id: d.id, name: d.name, ..Default::default() };
+        for c in d.child {
+            if c.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if let Ok(mut a) = serde_json::from_value::<Artist>(c.clone()) {
+                    if a.name.is_empty() {
+                        a.name = c.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                    }
+                    out.folders.push(a);
+                }
+            } else if let Ok(s) = serde_json::from_value::<Song>(c) {
+                out.songs.push(s);
+            }
+        }
+        Ok(out)
     }
 
     pub fn parse_music_folders(&self, body: Vec<u8>) -> Result<Vec<MusicFolder>> {
@@ -355,7 +394,7 @@ impl Core {
     pub fn parse_album(&self, body: Vec<u8>) -> Result<AlbumDetail> {
         let a = parse(&body)?.album.unwrap_or_default();
         db::index(&mut self.db.lock(), &[], std::slice::from_ref(&a.album), &a.song)?;
-        Ok(AlbumDetail { album: a.album, songs: a.song })
+        Ok(AlbumDetail { album: a.album, songs: a.song, disc_titles: a.disc_titles })
     }
 
     pub fn parse_artist(&self, body: Vec<u8>) -> Result<ArtistDetail> {
@@ -370,6 +409,8 @@ impl Core {
             biography: i.biography.filter(|b| !b.trim().is_empty()),
             image_url: i.large_image_url.or(i.medium_image_url).filter(|u| !u.is_empty()),
             similar: i.similar_artist,
+            last_fm_url: i.last_fm_url.filter(|u| u.starts_with("http")),
+            music_brainz_id: i.music_brainz_id.filter(|m| !m.is_empty()),
         })
     }
 
@@ -525,6 +566,41 @@ impl Core {
     pub fn pending_done(&self, row_id: i64) -> Result<()> {
         self.db.lock().execute("DELETE FROM pending WHERE rowid=?1", [row_id])?;
         Ok(())
+    }
+
+    /// The "all songs" list: a sorted, optionally filtered page of the index. `sort` is one of
+    /// title, artist, album, year, duration, created, playCount, userRating; anything else means index order.
+    pub fn browse_songs(&self, sort: String, descending: bool, starred_only: bool, year_from: u32, year_to: u32, offset: u32, limit: u32) -> Result<Vec<Song>> {
+        let key = match sort.as_str() {
+            "title" | "artist" | "album" => format!("json_extract(json, '$.{sort}') COLLATE NOCASE"),
+            "year" | "duration" | "created" | "playCount" | "userRating" => format!("json_extract(json, '$.{sort}')"),
+            _ => "rowid".to_string(),
+        };
+        let mut sql = String::from("SELECT json FROM items WHERE kind=?1");
+        if starred_only {
+            sql.push_str(" AND json_extract(json, '$.starred') = 1");
+        }
+        if year_to > 0 {
+            sql.push_str(" AND json_extract(json, '$.year') BETWEEN ?4 AND ?5");
+        }
+        sql.push_str(&format!(" ORDER BY {key} {} LIMIT ?3 OFFSET ?2", if descending { "DESC" } else { "ASC" }));
+        let c = self.db.lock();
+        let mut st = c.prepare_cached(&sql)?;
+        let map = |r: &rusqlite::Row| r.get::<_, String>(0);
+        let rows: Vec<String> = if year_to > 0 {
+            st.query_map(params![db::SONG, offset, limit, year_from, year_to], map)?.filter_map(|r| r.ok()).collect()
+        } else {
+            st.query_map(params![db::SONG, offset, limit], map)?.filter_map(|r| r.ok()).collect()
+        };
+        Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
+    }
+
+    /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
+    pub fn browse_decades(&self) -> Result<Vec<Genre>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
+        let rows = st.query_map([db::SONG], |r| Ok(Genre { name: r.get::<_, i64>(0)?.to_string(), song_count: r.get(1)?, album_count: 0 }))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     /// A page of every indexed song, for "download the whole library".

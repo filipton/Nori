@@ -9,6 +9,14 @@ import org.json.JSONObject
 
 enum class ReplayGainMode { OFF, TRACK, ALBUM }
 
+/** What a tap on a song in a list does. */
+enum class TapAction { PLAY_LIST, PLAY_ONE, QUEUE, PLAY_NEXT }
+
+/** What dragging a song row sideways does. */
+enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
+
+enum class HomeRow(val title: String) { PINNED("Pinned playlists"), RECENT("Recently played"), NEWEST("Recently added"), FREQUENT("Most played"), RANDOM("Random"), STARRED("Favourite albums") }
+
 /**
  * One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
  */
@@ -106,6 +114,16 @@ data class Prefs(
     /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
     val scrobblePercent: Int = 50,
     val liveSearchDelayMs: Int = 350,
+    val tapAction: TapAction = TapAction.PLAY_LIST,
+    val swipeRight: SwipeAction = SwipeAction.QUEUE,
+    val swipeLeft: SwipeAction = SwipeAction.PLAY_NEXT,
+    /** Songs the server marks explicit are skipped instead of played. */
+    val skipExplicit: Boolean = false,
+    /** Home shelves, in order; a row that is not listed is hidden. */
+    val homeRows: List<HomeRow> = HomeRow.entries,
+    val pinnedPlaylists: List<String> = emptyList(),
+    /** Remembered per list: sort order, grid or list, filters. Keys are list names. */
+    val listPrefs: Map<String, String> = emptyMap(),
 ) {
     val server: ServerProfile? get() = servers.firstOrNull { it.id == activeServerId }
     val loggedIn get() = server != null
@@ -173,6 +191,13 @@ class Settings(context: Context) {
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
+            tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
+            swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
+            swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
+            skipExplicit = sp.getBoolean("skipExplicit", false),
+            homeRows = sp.getString("homeRows", null)?.split(',')?.mapNotNull { n -> HomeRow.entries.firstOrNull { it.name == n } } ?: d.homeRows,
+            pinnedPlaylists = sp.getString("pinnedPlaylists", null)?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
+            listPrefs = sp.getString("listPrefs", null)?.let { j -> runCatching { JSONObject(j).let { o -> o.keys().asSequence().associateWith { o.getString(it) } } }.getOrNull() } ?: emptyMap(),
         )
     }
 
@@ -190,5 +215,8 @@ class Settings(context: Context) {
         putFloat("crossfeedDb", p.crossfeedDb); putInt("crossfadeSec", p.crossfadeSec)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
+        putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
+        putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
+        putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())
     }.apply()
 }

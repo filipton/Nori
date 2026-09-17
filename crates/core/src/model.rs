@@ -32,6 +32,10 @@ fn opt_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     }))
 }
 
+pub(crate) fn id_string<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    id(d)
+}
+
 fn id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(opt_id(d)?.unwrap_or_default())
 }
@@ -43,6 +47,14 @@ pub struct ReplayGain {
     pub album_gain: Option<f32>,
     pub track_peak: Option<f32>,
     pub album_peak: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(default)]
+pub struct ArtistRef {
+    #[serde(deserialize_with = "id")]
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
@@ -76,6 +88,20 @@ pub struct Song {
     /// Set by octo-fiesta for provider items that are not in the library yet.
     pub is_external: bool,
     pub replay_gain: Option<ReplayGain>,
+    /// Every credited artist (OpenSubsonic); `artist` stays the display string.
+    pub artists: Vec<ArtistRef>,
+    /// When the server first saw the file.
+    pub created: Option<String>,
+    /// Server-side play count and last play, across all clients.
+    pub play_count: u32,
+    pub played: Option<String>,
+    pub path: Option<String>,
+    /// "explicit", "clean" or empty.
+    pub explicit_status: String,
+    pub channel_count: u32,
+    pub music_brainz_id: Option<String>,
+    pub bpm: u32,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
@@ -98,6 +124,14 @@ pub struct Album {
     pub starred: bool,
     /// Set by octo-fiesta for provider items that are not in the library yet.
     pub is_external: bool,
+    /// OpenSubsonic: "Album", "EP", "Single", "Compilation", "Live", ... Empty on older servers.
+    pub release_types: Vec<String>,
+    pub is_compilation: bool,
+    pub user_rating: u8,
+    pub play_count: u32,
+    pub created: Option<String>,
+    pub explicit_status: String,
+    pub music_brainz_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
@@ -163,6 +197,24 @@ pub struct SearchResult {
 pub struct AlbumDetail {
     pub album: Album,
     pub songs: Vec<Song>,
+    /// Names of discs that have one (OpenSubsonic `discTitles`).
+    pub disc_titles: Vec<DiscTitle>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[serde(default)]
+pub struct DiscTitle {
+    pub disc: u32,
+    pub title: String,
+}
+
+/// One level of the server's folder tree.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct Directory {
+    pub id: String,
+    pub name: String,
+    pub folders: Vec<Artist>,
+    pub songs: Vec<Song>,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
@@ -173,6 +225,8 @@ pub struct ArtistDetail {
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct ArtistInfo {
+    pub last_fm_url: Option<String>,
+    pub music_brainz_id: Option<String>,
     pub biography: Option<String>,
     pub image_url: Option<String>,
     pub similar: Vec<Artist>,

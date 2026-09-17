@@ -43,13 +43,24 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.AlbumsViewModel
 import dev.flint.music.app.vm.ArtistsViewModel
+import dev.flint.music.app.vm.DecadesViewModel
+import dev.flint.music.app.vm.FoldersViewModel
+import dev.flint.music.app.vm.SongSort
+import dev.flint.music.app.vm.SongsViewModel
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.launch
 import dev.flint.music.app.vm.GenresViewModel
 import dev.flint.music.app.vm.PlaylistsViewModel
 import dev.flint.music.app.vm.RadioViewModel
 import dev.flint.music.app.vm.StarredViewModel
 import dev.flint.music.data.AlbumSort
 
-private val sections = listOf("Albums", "Artists", "Playlists", "Favourites", "Genres", "Radio", "Downloads")
+private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Favourites", "Genres", "Decades", "Folders", "Radio", "Downloads")
 
 @Composable
 fun LibraryScreen(actions: ActionsViewModel) {
@@ -57,14 +68,17 @@ fun LibraryScreen(actions: ActionsViewModel) {
     Column {
         PrimaryScrollableTabRow(tab, edgePadding = 8.dp) { sections.forEachIndexed { i, s -> Tab(tab == i, { tab = i }, text = { Text(s) }) } }
         // Only the visible section is composed, so only its view model loads anything.
-        when (tab) {
-            0 -> Albums()
-            1 -> Artists()
-            2 -> Playlists(actions)
-            3 -> Favourites(actions)
-            4 -> Genres()
-            5 -> Radio()
-            6 -> Downloads(actions)
+        when (sections[tab]) {
+            "Albums" -> Albums()
+            "Artists" -> Artists()
+            "Songs" -> SongsScreen(actions, null)
+            "Playlists" -> Playlists(actions)
+            "Favourites" -> Favourites(actions)
+            "Genres" -> Genres()
+            "Decades" -> Decades()
+            "Folders" -> Folders()
+            "Radio" -> Radio()
+            "Downloads" -> Downloads(actions)
         }
     }
 }
@@ -76,7 +90,7 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
     val nav = LocalNav.current
     Column {
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites")) { (s, label) ->
+            items(listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random")) { (s, label) ->
                 FilterChip(sort == s, { vm.setSort(s) }, { Text(label) })
             }
         }
@@ -93,19 +107,83 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
 private fun Artists(vm: ArtistsViewModel = viewModel()) {
     val load by vm.artists.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    LoadBox(load) { artists ->
-        LazyColumn {
-            items(artists, key = { it.id }, contentType = { "artist" }) { a ->
-                Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp)
-                    Column(Modifier.padding(start = 12.dp)) {
-                        Text(a.name)
-                        Text("${a.albumCount} albums", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    var filter by remember { mutableStateOf("") }
+    val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    LoadBox(load) { all ->
+        val artists = remember(all, filter) { if (filter.isBlank()) all else all.filter { it.name.contains(filter, true) } }
+        // First row of each initial, for the index on the right edge.
+        val letters = remember(artists) { artists.withIndex().groupBy { it.value.name.firstOrNull()?.uppercaseChar()?.takeIf(Char::isLetter) ?: '#' }.mapValues { it.value.first().index }.toSortedMap() }
+        Column {
+            OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), singleLine = true, placeholder = { Text("Filter artists") })
+            Row {
+                LazyColumn(Modifier.weight(1f), state = list) {
+                    items(artists, key = { it.id }, contentType = { "artist" }) { a ->
+                        Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp)
+                            Column(Modifier.padding(start = 12.dp)) {
+                                Text(a.name)
+                                Text("${a.albumCount} albums", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
+                }
+                if (letters.size > 3) Column(Modifier.padding(end = 2.dp).verticalScroll(rememberScrollState())) {
+                    letters.forEach { (c, index) -> Text("$c", Modifier.clickable { scope.launch { list.scrollToItem(index) } }.padding(horizontal = 8.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
                 }
             }
         }
     }
+}
+
+/** Every indexed song, sorted; with [decade] set, only that decade. Reads the offline index, never the network. */
+@Composable
+fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = viewModel(key = "songs-$decade")) {
+    LaunchedEffect(decade) { vm.setYears(decade?.let { it..it + 9 }) }
+    val songs by vm.songs.collectAsStateWithLifecycle()
+    val sort by vm.sort.collectAsStateWithLifecycle()
+    val starred by vm.starredOnly.collectAsStateWithLifecycle()
+    val done = actions.downloads.collectAsState().value.doneIds
+    val selection by actions.selection.collectAsStateWithLifecycle()
+    val selected = remember(selection) { selection.mapTo(HashSet()) { it.id } }
+    val player: dev.flint.music.app.vm.PlayerViewModel = viewModel()
+    val playing by player.currentId.collectAsStateWithLifecycle()
+    val menu = LocalSongMenu.current
+    val list = rememberLazyListState()
+    // Ask for the next page a screenful before the end, from a snapshot observer rather than from inside item composition.
+    LaunchedEffect(list, songs.size) { snapshotFlow { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= songs.size - 40 }.collect { if (it) vm.loadMore() } }
+    Column {
+        if (decade != null) SectionTitle("${decade}s")
+        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { FilterChip(starred, { vm.setStarredOnly(!starred) }, { Text("★") }) }
+            items(SongSort.entries) { s -> FilterChip(sort == s, { vm.setSort(s) }, { Text(s.label) }) }
+        }
+        if (songs.isEmpty()) Text("Nothing in the offline index yet. Settings → Sync all fills it.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LazyColumn(state = list) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
+    }
+}
+
+@Composable
+private fun Decades(vm: DecadesViewModel = viewModel()) {
+    val load by vm.decades.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
+    LoadBox(load) { decades ->
+        LazyColumn {
+            if (decades.isEmpty()) item { Text("Nothing in the offline index yet. Settings → Sync all fills it.", Modifier.padding(16.dp)) }
+            items(decades, key = { it.name }) { d ->
+                Row(Modifier.fillMaxWidth().clickable { nav.decade(d.name.toInt()) }.padding(16.dp)) {
+                    Text("${d.name}s", Modifier.weight(1f)); Text("${d.songCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Folders(vm: FoldersViewModel = viewModel()) {
+    val load by vm.roots.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
+    LoadBox(load) { roots -> LazyColumn { items(roots, key = { it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) } } }
 }
 
 @Composable
@@ -149,9 +227,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
                 }
             }
             items(s.artists, key = { "ar" + it.id }) { a -> Text(a.name, Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(16.dp)) }
-            itemsIndexed(s.songs, key = { _, x -> x.id }, contentType = { _, _ -> "song" }) { i, x ->
-                SongRow(x, vm.cover(x.coverArt, CoverSize.ROW), { actions.play(s.songs, i) }, { menu(x) })
-            }
+            songRows(s.songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }
 }
@@ -204,8 +280,6 @@ private fun Downloads(actions: ActionsViewModel) {
     LazyColumn {
         if (d.pending.isNotEmpty()) item(key = "pending") { Text("${d.pending.size} downloading…", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (d.done.isEmpty() && d.pending.isEmpty()) item { Text("Nothing downloaded yet", Modifier.padding(16.dp)) }
-        itemsIndexed(d.done, key = { _, s -> s.id }, contentType = { _, _ -> "song" }) { i, s ->
-            SongRow(s, vm.cover(s.coverArt, CoverSize.ROW), { actions.play(d.done, i) }, { menu(s) }, downloaded = true)
-        }
+        songRows(d.done, actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }

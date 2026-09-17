@@ -34,6 +34,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.playback.Equalizer
 import dev.flint.music.settings.Quality
+import dev.flint.music.settings.HomeRow
+import dev.flint.music.settings.SwipeAction
+import dev.flint.music.settings.TapAction
 import dev.flint.music.settings.ServerProfile
 import androidx.compose.runtime.LaunchedEffect
 import dev.flint.music.settings.ReplayGainMode
@@ -109,6 +112,22 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Text("System audio effects", Modifier.fillMaxWidth().clickable {
             runCatching { context.startActivity(Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName).putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)) }
         }.padding(horizontal = 16.dp, vertical = 14.dp))
+
+        SectionTitle("Lists")
+        Choice("Tapping a song", p.tapAction, listOf(TapAction.PLAY_LIST to "Plays the list from there", TapAction.PLAY_ONE to "Plays only that song", TapAction.QUEUE to "Adds it to the queue", TapAction.PLAY_NEXT to "Plays it next")) { v -> vm.update { it.copy(tapAction = v) } }
+        val swipes = listOf(SwipeAction.NONE to "Nothing", SwipeAction.QUEUE to "Add to queue", SwipeAction.PLAY_NEXT to "Play next", SwipeAction.FAVOURITE to "Favourite", SwipeAction.DOWNLOAD to "Download")
+        Choice("Swipe right", p.swipeRight, swipes) { v -> vm.update { it.copy(swipeRight = v) } }
+        Choice("Swipe left", p.swipeLeft, swipes) { v -> vm.update { it.copy(swipeLeft = v) } }
+        Toggle("Skip explicit songs", "Songs the server marks explicit are skipped during playback", p.skipExplicit) { on -> vm.update { it.copy(skipExplicit = on) } }
+        Text("Home shelves", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.titleSmall)
+        HomeRow.entries.forEach { row ->
+            val on = row in p.homeRows
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(row.title, Modifier.weight(1f))
+                if (on) TextButton({ vm.update { s -> s.copy(homeRows = s.homeRows.toMutableList().also { l -> val i = l.indexOf(row); if (i > 0) { l.removeAt(i); l.add(i - 1, row) } }) } }) { Text("Up") }
+                Switch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } }, Modifier.padding(end = 16.dp))
+            }
+        }
 
         SectionTitle("Library")
         Toggle("Scrobble", "Report plays and the play queue to the server", p.scrobble) { on -> vm.update { it.copy(scrobble = on) } }

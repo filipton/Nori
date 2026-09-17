@@ -180,6 +180,7 @@ class PlaybackService : MediaLibraryService() {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            if (item != null && flint.settings.value.skipExplicit && item.mediaMetadata.extras?.getString("explicit") == "explicit" && player.hasNextMediaItem()) return player.seekToNextMediaItem()
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && item != null) return scrobbler.onTrack(item.toSong(), player.isPlaying)
             scrobbler.onTrack(item?.takeUnless { it.isRadio }?.toSong(), player.isPlaying)
             applyGain()

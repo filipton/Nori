@@ -9,6 +9,10 @@ import dev.flint.music.ffi.Playlist
 import dev.flint.music.ffi.Song
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.update
+import dev.flint.music.settings.SwipeAction
+import dev.flint.music.settings.TapAction
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -23,6 +27,42 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
         try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.message ?: "Failed") }
     }
+
+    // ---- selection mode: long-press a song anywhere, then act on the whole selection ----
+
+    private val _selection = MutableStateFlow<List<Song>>(emptyList())
+    val selection: StateFlow<List<Song>> = _selection
+    fun toggleSelected(song: Song) = _selection.update { s -> if (s.any { it.id == song.id }) s.filterNot { it.id == song.id } else s + song }
+    fun clearSelection() { _selection.value = emptyList() }
+
+    /** What a plain tap on row [index] of [songs] does, as configured. */
+    fun tap(songs: List<Song>, index: Int) {
+        if (_selection.value.isNotEmpty()) return toggleSelected(songs[index])
+        when (flint.settings.value.tapAction) {
+            TapAction.PLAY_LIST -> flint.player.play(songs, index)
+            TapAction.PLAY_ONE -> flint.player.play(listOf(songs[index]))
+            TapAction.QUEUE -> enqueue(listOf(songs[index]))
+            TapAction.PLAY_NEXT -> playNext(listOf(songs[index]))
+        }
+    }
+
+    fun swipe(song: Song, right: Boolean) {
+        when (if (right) flint.settings.value.swipeRight else flint.settings.value.swipeLeft) {
+            SwipeAction.NONE -> {}
+            SwipeAction.QUEUE -> enqueue(listOf(song))
+            SwipeAction.PLAY_NEXT -> playNext(listOf(song))
+            SwipeAction.FAVOURITE -> star(song, !song.starred)
+            SwipeAction.DOWNLOAD -> download(listOf(song))
+        }
+    }
+
+    val swipeEnabled: Boolean get() = flint.settings.value.let { it.swipeLeft != SwipeAction.NONE || it.swipeRight != SwipeAction.NONE }
+
+    /** Every album of an artist, in order, as one list of songs. */
+    private suspend fun artistSongs(albums: List<Album>): List<Song> = albums.filterNot { it.isExternal }.flatMap { runCatching { flint.library.albumSongs(it.id) }.getOrDefault(emptyList()) }
+    fun playArtist(albums: List<Album>, shuffle: Boolean = false) = attempt(null) { flint.player.play(artistSongs(albums), shuffle = shuffle) }
+    fun queueArtist(albums: List<Album>) = attempt(null) { enqueue(artistSongs(albums)) }
+    fun downloadArtist(albums: List<Album>) = attempt(null) { download(artistSongs(albums)) }
 
     fun play(songs: List<Song>, index: Int = 0) = flint.player.play(songs, index)
     fun shuffle(songs: List<Song>) = flint.player.play(songs, shuffle = true)

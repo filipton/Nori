@@ -86,3 +86,16 @@ fn pending_calls_replay_in_order() {
     core.pending_done(l[0].row_id).unwrap();
     assert_eq!(core.pending_list().unwrap()[0].endpoint, "scrobble");
 }
+
+#[test]
+fn browse_sorts_filters_and_groups_by_decade() {
+    let core = Core::new(String::new()).unwrap();
+    core.parse_search(r#"{"subsonic-response":{"status":"ok","searchResult3":{"song":[
+      {"id":"a","title":"beta","year":1994,"starred":"2020-01-01"},{"id":"b","title":"Alpha","year":2003},{"id":"c","title":"gamma","year":1999}]}}}"#.into()).unwrap();
+    let by_title: Vec<String> = core.browse_songs("title".into(), false, false, 0, 0, 0, 10).unwrap().into_iter().map(|s| s.title).collect();
+    assert_eq!(by_title, ["Alpha", "beta", "gamma"]);
+    assert_eq!(core.browse_songs("year".into(), true, false, 1990, 1999, 0, 10).unwrap().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["c", "a"]);
+    assert_eq!(core.browse_songs("title".into(), false, true, 0, 0, 0, 10).unwrap().len(), 1);
+    let d = core.browse_decades().unwrap();
+    assert_eq!((d[0].name.as_str(), d[0].song_count, d[1].name.as_str(), d[1].song_count), ("2000", 1, "1990", 2));
+}

@@ -71,32 +71,32 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Feature | S | M | N | flint | Plan |
 |---|---|---|---|---|---|
 | Albums, artists, playlists, genres, favourites, radio, downloads | x | x | x | yes | |
-| All-songs list with sorts | x | x | x | | add (from the index) |
-| Browse by year / decade | x | | | | add |
-| Browse by folder (getIndexes / getMusicDirectory) | x | | | | add |
+| All-songs list with sorts | x | x | x | yes | done |
+| Browse by year / decade | x | | | yes | done |
+| Browse by folder (getIndexes / getMusicDirectory) | x | | | yes | done |
 | Album sorts: name, artist, added, played, most played, starred | x | x | x | yes | |
-| More sorts: year, rating, random, release date; asc/desc | x | | x | | add |
-| Sort + view remembered per list | x | | x | | add |
+| More sorts: year, rating, random, release date; asc/desc | x | | x | yes | done |
+| Sort + view remembered per list | x | | x | part | part: sort |
 | Grid / list toggle, grid size | x | x | x | | add (UI-light) |
-| Filters: starred only, downloaded only, quick text filter | x | x | x | | add |
-| A-Z fast scroller | x | x | x | | add |
-| Tracks grouped by disc, disc subtitles | x | | x | | add |
-| Album: "more by artist", quality badge, in-album filter | x | x | x | part | add |
-| Artist: albums grouped album/EP/single, "appears on", top songs, similar, bio | x | x | x | part | add grouping + appears-on |
-| Artist: play all, shuffle, queue artist, download all albums | x | x | x | | add |
-| last.fm / MusicBrainz links (behind a confirmation) | | | x | | add |
-| Multiple artists per track with artist picker | x | x | x | | add |
-| Track info sheet (path, codec, rate, bits, channels, ReplayGain, MBID) | x | | x | part (menu header) | add |
-| Fullscreen cover with save / share | | | x | | add |
-| Swipe a row: queue / play next / favourite (configurable) | x | x | x | | add |
-| Default tap action configurable (play list / play one / queue) | x | | | | add |
-| Multi-select with batch actions | x | x | | | add |
+| Filters: starred only, downloaded only, quick text filter | x | x | x | part | part: artists, songs, album/playlist tracks |
+| A-Z fast scroller | x | x | x | part | part: artists |
+| Tracks grouped by disc, disc subtitles | x | | x | yes | done |
+| Album: "more by artist", quality badge, in-album filter | x | x | x | yes | done |
+| Artist: albums grouped album/EP/single, "appears on", top songs, similar, bio | x | x | x | part | part: no appears-on |
+| Artist: play all, shuffle, queue artist, download all albums | x | x | x | yes | done |
+| last.fm / MusicBrainz links (behind a confirmation) | | | x | yes | done |
+| Multiple artists per track with artist picker | x | x | x | yes | done |
+| Track info sheet (path, codec, rate, bits, channels, ReplayGain, MBID) | x | | x | yes | done |
+| Fullscreen cover with save / share | | | x | part | part: view only |
+| Swipe a row: queue / play next / favourite (configurable) | x | x | x | yes | done |
+| Default tap action configurable (play list / play one / queue) | x | | | yes | done |
+| Multi-select with batch actions | x | x | | yes | done |
 | Drag and drop onto play/queue targets | x | | | | skip: UI-heavy, no function gained |
 | Playing row highlighted | x | x | x | yes | |
-| Explicit badge; explicit content: allow / skip | x | | x | | add |
+| Explicit badge; explicit content: allow / skip | x | | x | yes | done |
 | Listening history screen | x | x | | | add (local table, one row per play) |
 | Home: fixed shelves | | | x | yes | |
-| Home: configurable rows / order / pinned playlists | x | | | | add (order + hide + pin playlist) |
+| Home: configurable rows / order / pinned playlists | x | | | yes | done |
 | Tablet two-pane layout, landscape layouts | x | x | x | | skip for now: UI pass belongs to the UI rewrite |
 | Open audio files sent from other apps | x | | | | skip: no local-file source |
 
@@ -215,7 +215,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Add to several playlists at once; "already in playlist" hint | x | x | x | | add |
 | Remove duplicates / missing | x | | | | add |
 | M3U/M3U8 import and export | x | | | | add |
-| Pin playlist to home; launcher shortcuts (play / shuffle) | x | x | | | add |
+| Pin playlist to home; launcher shortcuts (play / shuffle) | x | x | | part | part: pin |
 | Smart playlists: rule groups (AND/OR, nested) over index fields, limit, sort, stable random | x | | | | add (rules evaluated in Rust over the index) |
 | Default smart playlists (most played, recently played, never played, ...) | x | | | | add |
 | Composite 2x2 covers | | x | | server-made | skip: Navidrome already serves them |
