@@ -181,24 +181,3 @@ private fun Queue(vm: PlayerViewModel) {
     }
 }
 
-@Composable
-private fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
-    val load by vm.lyrics.collectAsStateWithLifecycle()
-    val lyrics = (load as? Load.Ready)?.data
-    if (lyrics == null || lyrics.lines.isEmpty()) {
-        Box(Modifier.fillMaxSize(), Alignment.Center) { Text(if (load is Load.Loading) "Loading…" else "No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        return
-    }
-    val pos = if (lyrics.synced) position(vm, playing, 300) else 0
-    val active = if (lyrics.synced) lyrics.lines.indexOfLast { it.startMs <= pos } else -1
-    val list = rememberLazyListState()
-    LaunchedEffect(active) { if (active > 2) list.animateScrollToItem(active - 2) }
-    LazyColumn(state = list, contentPadding = androidx.compose.foundation.layout.PaddingValues(24.dp)) {
-        itemsIndexed(lyrics.lines) { i, line ->
-            Text(
-                line.text, Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(line.startMs) }.padding(vertical = 6.dp),
-                style = MaterialTheme.typography.titleMedium, color = if (i == active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}

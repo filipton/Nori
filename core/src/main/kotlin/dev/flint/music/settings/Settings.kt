@@ -136,6 +136,12 @@ data class Prefs(
     val thirdPartyLookups: Boolean = false,
     /** "Shuffle" spreads artists and albums apart instead of being purely random. */
     val weightedShuffle: Boolean = true,
+    /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
+    val lyricsSweep: Boolean = true,
+    val lyricsKeepScreenOn: Boolean = true,
+    val lyricsTranslation: Boolean = true,
+    /** 0 small, 1 medium, 2 large. */
+    val lyricsSize: Int = 1,
     val tapAction: TapAction = TapAction.PLAY_LIST,
     val swipeRight: SwipeAction = SwipeAction.QUEUE,
     val swipeLeft: SwipeAction = SwipeAction.PLAY_NEXT,
@@ -218,6 +224,7 @@ class Settings(context: Context) {
             scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
+            lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
             swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
             swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
@@ -246,6 +253,7 @@ class Settings(context: Context) {
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
+        putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
         putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())

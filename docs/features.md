@@ -244,10 +244,10 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Feature | S | M | N | flint | Plan |
 |---|---|---|---|---|---|
 | Server synced + plain lyrics, tap to seek | x | x | x | yes | |
-| Word-by-word (karaoke) cues from OpenSubsonic enhanced lyrics | x | stub | x | | add parsing; rendering: ask (cost: 60 fps redraw while the lyrics tab is open and the screen is on; zero otherwise) |
-| Translations | x | | | | add |
+| Word-by-word (karaoke) cues from OpenSubsonic enhanced lyrics | x | stub | x | yes | done: server cues, inline LRC tags, or estimated per line; swept in the draw phase at 30 fps, only while visible; switchable |
+| Translations | x | | | yes | done |
 | LRCLIB / LyricsPlus fallback providers, ordered | | x | x | via octo-fiesta | ask (privacy: sends artist+title to a third party) |
-| Offset adjust; keep screen on; text size / alignment | x | x | x | | add |
+| Offset adjust; keep screen on; text size / alignment | x | x | x | yes | done (alignment: no) |
 | Lyrics cached with downloads | x | x | x | | add |
 | Share lyrics as image / text | | | x | | add (text); image: skip |
 | Lyric line under artwork / over cover | x | x | | | skip: UI rewrite |
@@ -303,7 +303,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | In-app log viewer / send logs, crash screen | x | | x | | add log viewer |
 | Update checker (GitHub releases) | | x | x | | ask (a network call to GitHub on open) |
 | Discord presence, donation nags, easter eggs, emulator block, analytics | | x | | | skip |
-| Translations | 20 | 27 | 28 | en | skip until the UI is rewritten; strings are not yet resources |
+| Translations | 20 | 27 | 28 | yes | done |
 
 ## Look and feel
 

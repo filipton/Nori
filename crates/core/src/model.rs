@@ -245,16 +245,33 @@ pub struct Starred {
     pub songs: Vec<Song>,
 }
 
+/// One word (or syllable) of a lyric line and when it is sung. `start`/`end` index the line's text in UTF-16 units.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct LyricWord {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct LyricLine {
     /// Milliseconds from track start; -1 when the lyrics are unsynced.
     pub start_ms: i64,
+    pub end_ms: i64,
     pub text: String,
+    /// Empty for unsynced lyrics. See [Lyrics::word_timed] for whether these are real or estimated.
+    pub words: Vec<LyricWord>,
+    pub translation: Option<String>,
+    /// A backing-vocal line, where the server says so.
+    pub background: bool,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]
 pub struct Lyrics {
     pub synced: bool,
+    /// True when the word timing came from the server; false when it was spread over each line by the core.
+    pub word_timed: bool,
     pub lines: Vec<LyricLine>,
 }
 

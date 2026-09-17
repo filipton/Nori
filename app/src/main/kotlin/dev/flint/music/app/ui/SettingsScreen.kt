@@ -129,6 +129,12 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Choice("Fetch ahead on mobile data", p.precacheMobile, listOf(1 to "Next track", 2 to "2 tracks", 3 to "3 tracks", 5 to "5 tracks")) { v -> vm.update { it.copy(precacheMobile = v) } }
         if (p.replayGain != ReplayGainMode.OFF) Choice("Gain for files without ReplayGain tags", p.untaggedGainDb, listOf(0f to "0 dB", -3f to "−3 dB", -6f to "−6 dB", -9f to "−9 dB", -12f to "−12 dB")) { v -> vm.update { it.copy(untaggedGainDb = v) } }
 
+        SectionTitle("Lyrics")
+        Toggle("Word-by-word sweep", "The line being sung fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen; off means the line just lights up.", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
+        Toggle("Keep the screen on", "While lyrics are showing and music is playing", p.lyricsKeepScreenOn) { on -> vm.update { it.copy(lyricsKeepScreenOn = on) } }
+        Toggle("Show translations", "When the server has a translation layer", p.lyricsTranslation) { on -> vm.update { it.copy(lyricsTranslation = on) } }
+        Choice("Text size", p.lyricsSize, listOf(0 to "Small", 1 to "Medium", 2 to "Large")) { v -> vm.update { it.copy(lyricsSize = v) } }
+
         SectionTitle("Lists")
         Choice("Tapping a song", p.tapAction, listOf(TapAction.PLAY_LIST to "Plays the list from there", TapAction.PLAY_ONE to "Plays only that song", TapAction.QUEUE to "Adds it to the queue", TapAction.PLAY_NEXT to "Plays it next")) { v -> vm.update { it.copy(tapAction = v) } }
         val swipes = listOf(SwipeAction.NONE to "Nothing", SwipeAction.QUEUE to "Add to queue", SwipeAction.PLAY_NEXT to "Play next", SwipeAction.FAVOURITE to "Favourite", SwipeAction.DOWNLOAD to "Download")

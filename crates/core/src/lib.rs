@@ -6,6 +6,7 @@ uniffi::setup_scaffolding!();
 
 mod api;
 mod db;
+mod lyrics;
 pub mod dsp;
 mod history;
 mod m3u;
@@ -160,24 +161,11 @@ struct ArtistInfoWire {
 }
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
-struct Line {
-    start: Option<i64>,
-    value: String,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Structured {
-    synced: bool,
-    line: Vec<Line>,
-}
-
-#[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct LyricsList {
-    structured_lyrics: Vec<Structured>,
+    structured_lyrics: Vec<lyrics::Structured>,
 }
+
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -465,16 +453,9 @@ impl Core {
         Ok(parse(&body)?.internet_radio_stations.unwrap_or_default().station)
     }
 
-    /// Synced lyrics win over plain ones when the server has both.
+    /// Synced lyrics win over plain ones; words are timed from the server's cues or estimated (see lyrics.rs).
     pub fn parse_lyrics(&self, body: Vec<u8>) -> Result<Lyrics> {
-        let mut all = parse(&body)?.lyrics_list.unwrap_or_default().structured_lyrics;
-        all.sort_by_key(|l| !l.synced);
-        let Some(l) = all.into_iter().next() else { return Ok(Lyrics::default()) };
-        let synced = l.synced;
-        Ok(Lyrics {
-            synced,
-            lines: l.line.into_iter().map(|x| LyricLine { start_ms: if synced { x.start.unwrap_or(0) } else { -1 }, text: x.value }).collect(),
-        })
+        Ok(lyrics::build(parse(&body)?.lyrics_list.unwrap_or_default().structured_lyrics))
     }
 
     pub fn parse_share(&self, body: Vec<u8>) -> Result<String> {

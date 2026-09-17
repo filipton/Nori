@@ -23,7 +23,7 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     /** Lyrics of whatever is playing; fetched only while a lyrics view is collecting. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<Lyrics>> = state.map { it.current?.id }.distinctUntilChanged()
-        .flatMapLatest { if (it == null) flowOf(Lyrics(false, emptyList())) else flint.library.lyrics(it) }.asLoad()
+        .flatMapLatest { if (it == null) flowOf(Lyrics(synced = false, wordTimed = false, lines = emptyList())) else flint.library.lyrics(it) }.asLoad()
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs

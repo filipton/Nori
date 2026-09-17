@@ -64,7 +64,7 @@ fn synced_lyrics_preferred() {
           {"synced":false,"line":[{"value":"plain"}]},{"synced":true,"line":[{"start":1500,"value":"timed"}]}]}}}"#.into())
         .unwrap();
     assert!(l.synced);
-    assert_eq!((l.lines[0].start_ms, l.lines[0].text.as_str()), (1500, "timed"));
+    assert_eq!((l.lines[0].start_ms, l.lines[0].text.as_str(), l.lines[0].words.len()), (1500, "timed", 1));
 }
 
 #[test]
