@@ -10,6 +10,7 @@ pub mod dsp;
 mod history;
 mod mixes;
 mod model;
+mod smart;
 
 use std::sync::Arc;
 
