@@ -47,6 +47,14 @@ Run `cargo test` and a build before committing.
 - octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never
   queue or prefetch provider tracks the user did not ask to play. Provider items are never indexed.
 
+## Optional features
+
+`docs/features.md` is the checklist of what is planned, with the owner's decisions at the top. Every
+optional subsystem (casting, FFmpeg decoder, resampler, smart fades, third-party lookups, taste model,
+...) sits behind a switch in `Prefs`, and a switched-off feature must cost nothing: not initialised,
+no listener, no socket, no audio processor. Check with `tools/bench.sh` that the default screen-off
+numbers do not move when a feature is added.
+
 ## Commit messages
 
 One line, always. No body, no trailers, no attribution, no `Co-Authored-By`.

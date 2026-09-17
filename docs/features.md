@@ -11,6 +11,27 @@ flint column: `yes` have it, `part` partly. Plan column: **add** = clean win, wi
 **skip** = see reason. "cost" notes say what a feature costs *while music plays with the screen off*,
 because that is the budget this app protects.
 
+## Decisions (2026-09-17)
+
+The owner answered the **ask** rows:
+
+- Sources: Subsonic only. No Jellyfin/Emby, local files or yt-dlp.
+- Audio engine: bundled FFmpeg decoder, USB exclusive driver + DSD output, resampler / fixed output
+  rate (+ compressor), smart fades + waveform bar: **all yes, each behind a switch that is off by default.**
+- Network: UPnP/DLNA, Chromecast, third-party lookups (LRCLIB, AutoEQ database, update check), mTLS:
+  **all yes, each can be disabled.**
+- Extras: on-device taste model + mixes + Wrapped: yes. Word-by-word lyrics that scroll smoothly: yes,
+  explicitly wanted. Wear OS / Android TV, audiobook mode, Bluetooth lyrics: no.
+
+The rule that follows: **an optional subsystem that is switched off costs nothing** - it is not
+initialised, holds no listener, opens no socket and adds no audio processor. Settings has one
+"Features" page listing them all.
+
+Build order: 1 connection and servers, 2 library and browsing, 3 queue / playlists / smart playlists /
+mixes / taste model, 4 playback behaviour, 5 downloads and storage, 6 lyrics, 7 DSP extras and
+per-output profiles, 8 casting, 9 FFmpeg + waveform + smart fades, 10 USB exclusive + DSD (needs the
+owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, Wrapped.
+
 ## Servers and connection
 
 | Feature | S | M | N | flint | Plan |
