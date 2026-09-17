@@ -47,7 +47,8 @@ class SearchViewModel(app: Application) : FlintViewModel(app) {
             query.debounce { if (it.isBlank()) 0L else flint.settings.value.liveSearchDelayMs.toLong() }.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
                 try {
-                    val remote = flint.library.search(q)
+                    // A merged provider result may repeat an id, and lists are keyed by id.
+                    val remote = flint.library.search(q).let { r -> r.copy(artists = r.artists.distinctBy { it.id }, albums = r.albums.distinctBy { it.id }, songs = r.songs.distinctBy { it.id }) }
                     _ui.update { if (it.query.trim() == q) it.copy(result = remote, fromServer = true, searching = false, error = null) else it }
                 } catch (e: CancellationException) {
                     throw e
