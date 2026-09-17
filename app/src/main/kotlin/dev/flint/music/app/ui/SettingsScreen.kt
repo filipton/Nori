@@ -85,6 +85,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
             },
             p.bitPerfect,
         ) { on -> vm.update { it.copy(bitPerfect = on) } }
+        Toggle("Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
         Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album")) { m -> vm.update { it.copy(replayGain = m) } }
         if (p.replayGain != ReplayGainMode.OFF) {
             Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)

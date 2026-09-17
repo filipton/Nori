@@ -50,6 +50,7 @@ class Equalizer : BaseAudioProcessor() {
     override fun onFlush() {
         if (handle != 0L) Dsp.destroy(handle)
         handle = Dsp.create(inputAudioFormat.sampleRate, inputAudioFormat.channelCount)
+        android.util.Log.i("flint", "equalizer in chain: ${inputAudioFormat.sampleRate} Hz x${inputAudioFormat.channelCount}")
         dirty = true
     }
 

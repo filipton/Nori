@@ -67,6 +67,7 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var session: MediaLibrarySession
     private lateinit var scrobbler: Scrobbler
     private val equalizer = Equalizer()
+    private var hiRes = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val main = Handler(Looper.getMainLooper())
     private val served = LruCache<String, MediaItem>(500)
@@ -80,8 +81,10 @@ class PlaybackService : MediaLibraryService() {
 
         val renderers = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer)).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
+                DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer)).setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
         }
+        hiRes = flint.settings.value.hiRes
+        renderers.setEnableAudioFloatOutput(hiRes)
         player = ExoPlayer.Builder(this, renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(flint.sources.factory))
             .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
@@ -156,15 +159,15 @@ class PlaybackService : MediaLibraryService() {
 
     private val formats = object : AnalyticsListener {
         override fun onAudioInputFormatChanged(t: AnalyticsListener.EventTime, format: Format, reuse: DecoderReuseEvaluation?) {
-            // The sink is opened as 16-bit PCM at the source rate; that is what the DAC has to be set to.
-            flint.dac.onFormat(format.sampleRate, AudioFormat.ENCODING_PCM_16BIT)
+            // The sink is opened at the source rate, as 16-bit PCM or float; the DAC has to be set to exactly that.
+            flint.dac.onFormat(format.sampleRate, if (hiRes) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT)
         }
     }
 
     /** Equalizer, offload and bit-perfect exclude each other; this is where that is decided. */
     private fun applyAudio(p: Prefs) {
         flint.dac.setEnabled(p.bitPerfect)
-        val processing = p.eqEnabled && !flint.dac.state.value.bitPerfect
+        val processing = p.eqEnabled && !hiRes && !flint.dac.state.value.bitPerfect
         equalizer.setGains(p.eqGains)
         val offload = p.offload && !processing
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(

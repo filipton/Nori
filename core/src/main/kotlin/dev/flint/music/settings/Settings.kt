@@ -26,6 +26,8 @@ data class Prefs(
     val offload: Boolean = true,
     /** Ask Android 14+ for an unmixed, unresampled path to a USB DAC. */
     val bitPerfect: Boolean = false,
+    /** 32-bit float to the mixer so 24-bit files are not cut to 16. media3 skips audio processors in this mode, so no equalizer. Read when the service starts. */
+    val hiRes: Boolean = false,
     val scrobble: Boolean = true,
     val eqEnabled: Boolean = false,
     /** Gains in dB for [dev.flint.music.playback.Equalizer.FREQUENCIES]. */
@@ -69,6 +71,7 @@ class Settings(context: Context) {
             preampDb = sp.getFloat("preampDb", 0f),
             offload = sp.getBoolean("offload", true),
             bitPerfect = sp.getBoolean("bitPerfect", false),
+            hiRes = sp.getBoolean("hiRes", false),
             scrobble = sp.getBoolean("scrobble", true),
             eqEnabled = sp.getBoolean("eqEnabled", false),
             eqGains = sp.getString("eqGains", null)?.split(',')?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.size == 10 } ?: d.eqGains,
@@ -83,7 +86,7 @@ class Settings(context: Context) {
         }
         putInt("cacheMb", p.cacheMb)
         putInt("replayGain", p.replayGain.ordinal); putFloat("preampDb", p.preampDb)
-        putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble)
+        putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqGains", p.eqGains.joinToString(","))
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
     }.apply()

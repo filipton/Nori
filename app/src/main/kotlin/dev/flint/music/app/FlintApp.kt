@@ -13,6 +13,12 @@ import dev.flint.music.Flint
 import okio.Path.Companion.toOkioPath
 
 class FlintApp : Application(), SingletonImageLoader.Factory {
+    override fun onCreate() {
+        super.onCreate()
+        // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
+        Thread { Flint.get(this) }.start()
+    }
+
     /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. */
     override fun newImageLoader(context: PlatformContext): ImageLoader = ImageLoader.Builder(context)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { Flint.get(this@FlintApp).http.api })) }

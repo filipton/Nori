@@ -51,6 +51,11 @@ class Flint private constructor(context: Context) {
 
     companion object {
         @Volatile private var instance: Flint? = null
-        fun get(context: Context): Flint = instance ?: synchronized(this) { instance ?: Flint(context.applicationContext).also { instance = it } }
+        fun get(context: Context): Flint = instance ?: synchronized(this) {
+            instance ?: run {
+                val t = android.os.SystemClock.elapsedRealtime()
+                Flint(context.applicationContext).also { instance = it; android.util.Log.i("flint", "core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms") }
+            }
+        }
     }
 }
