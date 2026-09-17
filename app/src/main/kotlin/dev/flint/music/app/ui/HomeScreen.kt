@@ -25,7 +25,8 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     LoadBox(load) { ui ->
         LazyColumn {
             item(key = "actions") {
-                Row(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) { FilledTonalButton(actions::shuffleAll) { Text("Shuffle everything") } }
+                Row(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) { FilledTonalButton(actions::shuffleAll) { Text("Shuffle everything") }
+                    FilledTonalButton(actions::resumeFromServer) { Text("Resume from server") } }
             }
             shelf("Recently played", ui.recent, vm)
             shelf("Recently added", ui.newest, vm)

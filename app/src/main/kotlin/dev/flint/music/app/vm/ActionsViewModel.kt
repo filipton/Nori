@@ -39,6 +39,12 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
         flint.player.play(listOf(song) + similar.ifEmpty { flint.library.randomSongs(50, song.genre) })
     }
 
+    /** Picks up the queue another device (or the web player) left on the server. */
+    fun resumeFromServer() = attempt(null) {
+        val q = flint.library.pullQueue()
+        if (q.songs.isEmpty()) _messages.send("No queue saved on the server") else { flint.player.play(q.songs, q.index.toInt()); flint.player.seekTo(q.positionMs.toLong()) }
+    }
+
     fun star(song: Song, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.SONG, song.id, on) }
     fun starAlbum(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ALBUM, id, on) }
     fun starArtist(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ARTIST, id, on) }

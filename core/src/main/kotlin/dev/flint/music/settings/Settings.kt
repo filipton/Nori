@@ -29,6 +29,8 @@ data class Prefs(
     /** 32-bit float to the mixer so 24-bit files are not cut to 16. media3 skips audio processors in this mode, so no equalizer. Read when the service starts. */
     val hiRes: Boolean = false,
     val scrobble: Boolean = true,
+    /** When the last queued song starts, queue songs similar to it. */
+    val autoFill: Boolean = true,
     val eqEnabled: Boolean = false,
     /** Gains in dB for [dev.flint.music.playback.Equalizer.FREQUENCIES]. */
     val eqGains: List<Float> = List(10) { 0f },
@@ -73,6 +75,7 @@ class Settings(context: Context) {
             bitPerfect = sp.getBoolean("bitPerfect", false),
             hiRes = sp.getBoolean("hiRes", false),
             scrobble = sp.getBoolean("scrobble", true),
+            autoFill = sp.getBoolean("autoFill", true),
             eqEnabled = sp.getBoolean("eqEnabled", false),
             eqGains = sp.getString("eqGains", null)?.split(',')?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.size == 10 } ?: d.eqGains,
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
@@ -86,7 +89,7 @@ class Settings(context: Context) {
         }
         putInt("cacheMb", p.cacheMb)
         putInt("replayGain", p.replayGain.ordinal); putFloat("preampDb", p.preampDb)
-        putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes)
+        putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqGains", p.eqGains.joinToString(","))
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
     }.apply()

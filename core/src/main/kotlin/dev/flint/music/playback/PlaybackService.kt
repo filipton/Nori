@@ -141,6 +141,7 @@ class PlaybackService : MediaLibraryService() {
             scrobbler.onTrack(item?.takeUnless { it.isRadio }?.toSong(), player.isPlaying)
             applyGain()
             scheduleSave()
+            autoFill(item)
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -193,6 +194,23 @@ class PlaybackService : MediaLibraryService() {
         var v = 10f.pow((db + p.preampDb) / 20f)
         if (peak > 0f) v = min(v, 1f / peak)
         player.volume = v.coerceIn(0f, 1f)
+    }
+
+    /**
+     * Keeps the music going past the end of the queue. Runs once, when the last
+     * song starts: the radio is up for that song anyway. Only library songs come
+     * back from getSimilarSongs2, so this never makes octo-fiesta download anything.
+     */
+    private fun autoFill(item: MediaItem?) {
+        if (item == null || item.isRadio || player.hasNextMediaItem() || player.repeatMode != Player.REPEAT_MODE_OFF || !flint.settings.value.autoFill) return
+        val seed = item.toSong()
+        if (seed.isExternal) return
+        scope.launch {
+            val more = runCatching { flint.library.similarSongs(seed.id, 25) }.getOrNull().orEmpty()
+            val queued = (0 until player.mediaItemCount).mapTo(HashSet()) { player.getMediaItemAt(it).mediaId }
+            val fresh = more.filter { it.id !in queued && !it.isExternal }.take(15)
+            if (fresh.isNotEmpty() && !player.hasNextMediaItem()) player.addMediaItems(fresh.map(::item))
+        }
     }
 
     // ---- the queue outlives the process ----
