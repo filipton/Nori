@@ -48,19 +48,26 @@ output (media3's sink emits 16-bit or float only; needs a custom `AudioOutputPro
 Same emulator (API 34 x86_64, no offload hardware), same 320 kbps MP3 from a local Navidrome,
 release builds, `tools/bench.sh <package> <seconds> <off|on>` and `tools/scroll.sh <package>`:
 
-| | flint | Navic 1.0.0-alpha55 |
-|---|---|---|
-| screen off: CPU | 1.1–1.4 % of a core | 2.4–3.3 % |
-| screen off: seconds with no wakeups | 74 of 90 | 1 of 90 |
-| screen off: app main thread | ~10 ms/min | 530–840 ms/min |
-| player visible: CPU | 2.7 % | 90 % (redraws every frame; software GPU inflates this) |
-| memory (PSS) | 82–105 MB | 120–137 MB |
-| cold start | ~0.95 s (≈0.6 s of it is the emulator's software GPU) | ~1.9 s |
-| album grid fling, 300 albums: median / p99 frame | 48 / 73 ms (system Settings app on this emulator: 44 / 73) | 61–65 / 101–250 ms |
+| | flint | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 | Symfonium 15.1.0B6 |
+|---|---|---|---|---|---|
+| screen off: CPU (% of a core) | **1.4** (+0.5 system decoder) | 2.4–3.3 (+0.5) | 4.6 (+0.5) | 10.5 (decodes in-process) | 9.1 |
+| screen off: seconds with no wakeups, of 90 | **73–76** | 1 | 0 | 0 | 0 |
+| screen off: app main thread, ms/min | ~10 | 530–840 | 100 | 370 | 350 |
+| player visible: CPU | **2.7** | 90 | 146 | 185 | 177 |
+| memory (PSS, MB) | 82–105 | 120–137 | 132–148 | 119–136 | 130–144 |
+| cold start | ~0.95 s | ~1.9 s | — | — | — |
+| album grid fling, 300 albums: median / p99 frame | 48 / 73 ms (system Settings: 44 / 73) | 61–65 / 101–250 ms | — | — | — |
 
-Musly refuses to start on an emulator and Symfonium is Play-Store-only, so those two have to be
-measured on a phone: start playback, then run `tools/bench.sh com.devid.musly 120 off` (or
-`app.symfonik.music.player`). On a real phone, also compare `adb shell dumpsys batterystats`.
+Caveats, so the table is not over-read. "Player visible" is dominated by GPU work that this emulator
+does in software: the ranking is real (flint redraws once a second, the others animate every frame),
+the absolute numbers are far higher than on a phone. flint, Navic and Musly decode through the
+platform codec, whose cost (~0.5 % here) lands in `media.swcodec`; Symfonium decodes inside its own
+process with its own engine, which also resamples and runs a DSP chain, so part of its number is work
+the others do not do at all. Nothing here has audio offload; on a phone MP3/AAC/Opus move to the DSP
+for apps that use it. Musly was built from its v2.0.2 tag with its own Dockerfile and one change (its
+emulator check returns false); Symfonium is the official universal APK in trial mode.
+For numbers that settle the question, run `tools/compare.sh` with a phone attached: it adds Android's
+per-app battery estimate.
 
 ## Build
 
