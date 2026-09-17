@@ -17,6 +17,8 @@ use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use parking_lot::Mutex;
 
+use crate::{EqBand, EqKind, NamedPreset};
+
 pub const PEAKING: i32 = 0;
 pub const LOW_SHELF: i32 = 1;
 pub const HIGH_SHELF: i32 = 2;
@@ -554,10 +556,50 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_process(
     true
 }
 
+fn band(kind: EqKind, freq: f32, gain_db: f32, q: f32) -> EqBand {
+    EqBand { kind, freq, gain_db, q }
+}
+
+/// The built-in curves, as data, so the UI (and the settings store) never holds a frequency of its own.
+/// Every preset that boosts carries a pre-amp that pays the boost back, so a preset cannot clip on its own.
+#[uniffi::export]
+pub fn eq_presets() -> Vec<NamedPreset> {
+    let preset = |name: &str, preamp_db: f32, bands: Vec<EqBand>| NamedPreset { name: name.to_string(), preamp_db, bands };
+    vec![
+        preset("Flat", 0.0, vec![]),
+        preset("Bass boost", -6.0, vec![band(EqKind::LowShelf, 100.0, 6.0, 0.7), band(EqKind::Peaking, 60.0, 3.0, 1.0)]),
+        preset("Bass cut", 0.0, vec![band(EqKind::LowShelf, 110.0, -6.0, 0.7)]),
+        preset("Treble boost", -5.0, vec![band(EqKind::HighShelf, 6000.0, 5.0, 0.7)]),
+        preset("Treble cut", 0.0, vec![band(EqKind::HighShelf, 6000.0, -5.0, 0.7)]),
+        preset(
+            "Vocal boost",
+            -4.0,
+            vec![band(EqKind::Peaking, 300.0, -2.0, 1.0), band(EqKind::Peaking, 2500.0, 4.0, 1.2), band(EqKind::Peaking, 5000.0, 2.0, 1.5)],
+        ),
+        // The equal-loudness smile: what quiet listening takes away at both ends.
+        preset(
+            "Loudness",
+            -7.0,
+            vec![band(EqKind::LowShelfSlope, 80.0, 7.0, 0.8), band(EqKind::Peaking, 1000.0, -2.0, 1.0), band(EqKind::HighShelfSlope, 10000.0, 5.0, 0.8)],
+        ),
+        // Phone and laptop drivers: throw away what they can only rattle on, then put the body back an octave up.
+        preset(
+            "Small speakers",
+            -4.0,
+            vec![band(EqKind::HighPass, 90.0, 0.0, 0.71), band(EqKind::Peaking, 220.0, 4.0, 1.0), band(EqKind::Peaking, 3000.0, 2.0, 1.2)],
+        ),
+    ]
+}
+
+impl From<&EqBand> for Band {
+    fn from(b: &EqBand) -> Self {
+        Band { kind: b.kind as i32, freq: b.freq as f64, gain_db: b.gain_db as f64, q: b.q as f64, channel: CH_BOTH }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EqKind;
 
     fn rms(x: &[f32]) -> f64 {
         (x.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / x.len() as f64).sqrt()
@@ -843,6 +885,36 @@ mod tests {
         let mut y = vec![0f32; x.len()];
         eq.process_f32(&x, &mut y);
         assert!(y.iter().all(|v| v.is_finite()), "bad settings must not poison the output");
+    }
+
+    #[test]
+    fn presets_are_sane_and_flat_really_is_flat() {
+        let presets = eq_presets();
+        assert!(presets.iter().any(|p| p.name == "Flat" && p.bands.is_empty()));
+        let mut names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), presets.len(), "preset names are unique");
+
+        for p in &presets {
+            assert!((-12.0..=0.0).contains(&p.preamp_db), "{} pre-amp {}", p.name, p.preamp_db);
+            let boost = p.bands.iter().fold(0f32, |m, b| m.max(b.gain_db));
+            assert!(p.preamp_db <= -boost, "{} boosts {boost} dB but only pays back {}", p.name, p.preamp_db);
+            let mut eq = Equalizer::new(48000, 2);
+            let bands: Vec<Band> = p.bands.iter().map(Band::from).collect();
+            for band in &bands {
+                assert!((20.0..=20000.0).contains(&band.freq), "{} band at {} Hz", p.name, band.freq);
+                assert!(band.q > 0.0 && band.q <= 10.0, "{} band Q {}", p.name, band.q);
+                assert!(band.gain_db.abs() <= 12.0, "{} band gain {}", p.name, band.gain_db);
+            }
+            eq.configure(&bands, p.preamp_db as f64, 0.0);
+            assert_eq!(eq.is_identity(), p.bands.is_empty() && p.preamp_db == 0.0, "{}", p.name);
+            // With its own pre-amp a preset must stay near unity everywhere, so picking one cannot clip on its own.
+            for f in [30.0, 60.0, 100.0, 220.0, 440.0, 1000.0, 2500.0, 4000.0, 8000.0, 12000.0] {
+                let g = gain_at(&mut eq, f);
+                assert!(g.is_finite() && g < 3.5, "{} is {g} dB at {f} Hz", p.name);
+            }
+        }
     }
 
     /// The `kind` field crossing the JNI boundary is an `EqKind` ordinal; the two lists must not drift apart.
