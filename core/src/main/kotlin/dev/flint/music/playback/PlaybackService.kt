@@ -64,6 +64,11 @@ class PlaybackService : MediaLibraryService() {
     companion object {
         const val CMD_SLEEP = "flint.sleep"
         const val CMD_TUNING = "flint.tuning"
+        /** Broadcast inside the package on every track or play-state change; what a home-screen widget listens to. */
+        const val ACTION_STATE = "dev.flint.music.STATE"
+        const val EXTRA_TITLE = "title"
+        const val EXTRA_ARTIST = "artist"
+        const val EXTRA_PLAYING = "playing"
         const val ARG_ON = "on"
         const val ARG_MINUTES = "minutes"
         const val ARG_END_OF_TRACK = "endOfTrack"
@@ -180,6 +185,7 @@ class PlaybackService : MediaLibraryService() {
             applyGain()
             scheduleSave()
             autoFill(item)
+            announce()
         }
 
         override fun onIsLoadingChanged(isLoading: Boolean) {
@@ -187,6 +193,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            announce()
             scrobbler.onPlaying(isPlaying)
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
         }
@@ -208,6 +215,12 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private fun updateBurst() { burst?.enabled = !offloaded && !tuning }
+
+    private fun announce() {
+        val m = player.currentMediaItem?.mediaMetadata
+        sendBroadcast(android.content.Intent(ACTION_STATE).setPackage(packageName)
+            .putExtra(EXTRA_TITLE, m?.title?.toString()).putExtra(EXTRA_ARTIST, m?.artist?.toString()).putExtra(EXTRA_PLAYING, player.isPlaying))
+    }
 
     /** A processor joins or leaves the chain, and the buffer depth changes, only when the sink is configured again. */
     private fun reconfigureSink() {

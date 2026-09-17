@@ -36,8 +36,10 @@ Run `cargo test` and a build before committing.
 - One OkHttp pool for API, covers and audio. URLs are stable (derived salt) so caches hit.
 - CPU-decoded playback runs in bursts (`BurstSink` + a 10 s AudioTrack buffer). Check changes to the
   audio path with `tools/bench.sh dev.flint.music 90 off`: "quiet" should stay around 80 %.
-- Anything that touches samples (equalizer) disables audio offload; keep the default path free of
-  audio processors. ReplayGain is applied as player volume for that reason.
+- Anything that touches samples disables audio offload, so the default path has no audio processors
+  and ReplayGain is player volume. Sample-domain features must keep working under `BurstSink` (deep
+  buffer); only the equalizer screen (`CMD_TUNING`) may trade it for latency. The sink chain is
+  renderer -> `CrossfadeSink` -> `BurstSink` -> `DefaultAudioSink` (with the Rust `Equalizer` processor).
 - The UI thread never waits for the core: `Flint` builds `core`, `http` and `sources` lazily and the
   application warms them on a background thread. Keep FFI and OkHttp out of constructors and composition.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct
