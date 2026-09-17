@@ -87,13 +87,15 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Toggle(
             "Bit-perfect USB DAC",
             when {
-                dac.bitPerfect -> "Active: ${dac.device} at ${dac.sampleRate / 1000.0} kHz / ${dac.bits} bit, no mixing or resampling"
+                dac.bitPerfect -> "Active: ${dac.device} at ${dac.sampleRate / 1000.0} kHz / ${dac.bits} bit, no mixing, resampling or volume scaling"
+                dac.blockedBy != null -> "${dac.device ?: "USB DAC"}: ${dac.blockedBy}"
                 dac.device != null && dac.supported -> "${dac.device} connected; engages when playback starts"
                 dac.device != null -> "${dac.device} connected, but this phone offers no bit-perfect mode for it"
                 else -> "Android 14+: sends audio to a USB DAC untouched, at the track's own sample rate. Equalizer and ReplayGain are bypassed."
             },
             p.bitPerfect,
         ) { on -> vm.update { it.copy(bitPerfect = on) } }
+        if (dac.modes.isNotEmpty()) Text("This DAC offers: " + dac.modes.joinToString(", ") + (dac.playing?.let { "  ·  now playing $it" } ?: ""), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Toggle("Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
         Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
         if (p.replayGain != ReplayGainMode.OFF) {

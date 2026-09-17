@@ -14,8 +14,24 @@ import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
-/** What the output path looks like right now; shown to the user so they can verify it. */
-data class DacState(val device: String? = null, val bitPerfect: Boolean = false, val sampleRate: Int = 0, val bits: Int = 0, val supported: Boolean = false)
+/**
+ * What the output path looks like right now; shown to the user so they can verify it, and so a DAC that
+ * cannot be driven bit-perfect says why rather than silently doing nothing.
+ */
+data class DacState(
+    val device: String? = null,
+    val bitPerfect: Boolean = false,
+    val sampleRate: Int = 0,
+    val bits: Int = 0,
+    /** The device offers at least one bit-perfect mode. */
+    val supported: Boolean = false,
+    /** Every bit-perfect mode the device offers, as "44.1 kHz / 24 bit". */
+    val modes: List<String> = emptyList(),
+    /** Set when a mode exists for the playing rate but not in a sample format this app can write. */
+    val blockedBy: String? = null,
+    /** The format currently being played, for the diagnostic line. */
+    val playing: String? = null,
+)
 
 /**
  * Hands a USB DAC to the app: on Android 14+ the framework can route media to a
@@ -72,31 +88,41 @@ class BitPerfect(context: Context) {
         val before = _state.value
         if (Build.VERSION.SDK_INT < 34 || dac == null) {
             clear()
-            _state.value = DacState(device = dac?.productName?.toString())
+            _state.value = DacState(device = dac?.productName?.toString(), blockedBy = if (dac != null && Build.VERSION.SDK_INT < 34) "bit-perfect output needs Android 14 or newer; USB exclusive mode would be the way in" else null)
         } else {
             _state.value = apply34(dac)
         }
         if (before.bitPerfect != _state.value.bitPerfect) onChanged()
     }
 
+    private fun label(f: AudioFormat) = "%.1f kHz / %d bit".format(f.sampleRate / 1000.0, bits(f.encoding))
+
     @androidx.annotation.RequiresApi(34)
     private fun apply34(dac: AudioDeviceInfo): DacState {
         val name = dac.productName?.toString()
         val modes = audio.getSupportedMixerAttributes(dac).filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
+        val labels = modes.map { label(it.format) }
+        val playing = if (sampleRate == 0) null else "%.1f kHz / %d bit".format(sampleRate / 1000.0, bits(encoding))
         if (!enabled || modes.isEmpty() || sampleRate == 0) {
             clear()
-            return DacState(name, supported = modes.isNotEmpty())
+            return DacState(name, supported = modes.isNotEmpty(), modes = labels, playing = playing)
         }
         val match = modes.firstOrNull { it.format.sampleRate == sampleRate && it.format.encoding == encoding }
         if (match == null) {
-            // The DAC cannot take this rate or sample format untouched; fall back to the mixer rather than play nothing.
-            Log.w("BitPerfect", "no bit-perfect mode for $sampleRate Hz enc=$encoding among ${modes.map { it.format }}")
+            // Either the DAC cannot take this rate at all, or it can but only in a sample format this app
+            // cannot write yet: media3's sink emits 16-bit or float, never 24- or 32-bit integer.
+            val sameRate = modes.filter { it.format.sampleRate == sampleRate }
+            val why = when {
+                sameRate.isEmpty() -> "this DAC has no bit-perfect mode at ${playing?.substringBefore(" /")}"
+                else -> "this DAC wants ${sameRate.joinToString(" or ") { "${bits(it.format.encoding)} bit" }} at ${playing?.substringBefore(" /")}, which needs the integer output path (not built yet)"
+            }
+            Log.w("BitPerfect", "no usable bit-perfect mode: $why; offered ${modes.map { it.format }}")
             clear()
-            return DacState(name, supported = true)
+            return DacState(name, supported = true, modes = labels, blockedBy = why, playing = playing)
         }
         val ok = runCatching { audio.setPreferredMixerAttributes(media, dac, match) }.getOrDefault(false)
         applied = dac.takeIf { ok }
-        return DacState(name, ok, sampleRate, bits(encoding), true)
+        return DacState(name, ok, sampleRate, bits(encoding), true, labels, if (ok) null else "the system refused the preferred mixer attributes", playing)
     }
 
     private fun clear() {
