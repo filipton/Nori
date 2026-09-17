@@ -7,7 +7,11 @@ uniffi::setup_scaffolding!();
 mod api;
 mod db;
 pub mod dsp;
+mod history;
+mod m3u;
+mod mixes;
 mod model;
+mod smart;
 
 use std::sync::Arc;
 
