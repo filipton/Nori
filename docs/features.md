@@ -94,7 +94,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Drag and drop onto play/queue targets | x | | | | skip: UI-heavy, no function gained |
 | Playing row highlighted | x | x | x | yes | |
 | Explicit badge; explicit content: allow / skip | x | | x | yes | done |
-| Listening history screen | x | x | | | add (local table, one row per play) |
+| Listening history screen | x | x | | yes | done |
 | Home: fixed shelves | | | x | yes | |
 | Home: configurable rows / order / pinned playlists | x | | | yes | done |
 | Tablet two-pane layout, landscape layouts | x | x | x | | skip for now: UI pass belongs to the UI rewrite |
@@ -122,38 +122,38 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Hardware offload | x | | x | yes | |
 | Burst playback from a deep buffer (CPU asleep ~80 %) | | | | yes | |
 | Crossfade with real overlap | x | fade-out only | | yes | |
-| Crossfade: separate in/out length, curves, "mix only", off for albums in order | x | | | | add (cost: none beyond crossfade) |
+| Crossfade: separate in/out length, curves, "mix only", off for albums in order | x | | | part | part: off inside albums |
 | Smart fades (waveform-analysed fade points) | x | | | | ask (cost: decode-ahead analysis per track) |
-| Fade on play / pause / seek / skip | x | x | | | add (volume ramp, no samples touched; keeps offload) |
+| Fade on play / pause / seek / skip | x | x | | yes | done |
 | Speed | x | x | x | yes | |
-| Pitch control / preserve pitch | x | stub | | | add (media3 Sonic) |
+| Pitch control / preserve pitch | x | stub | | yes | done |
 | Skip silence; only for audiobooks | x | | | yes | |
 | ReplayGain track / album | x | x | x | yes | |
-| ReplayGain automatic (album when queue is one album), fallback gain for untagged, clipping guard | x | x | x | part | add |
+| ReplayGain automatic (album when queue is one album), fallback gain for untagged, clipping guard | x | x | x | yes | done |
 | ReplayGain with positive gain (needs DSP path) | x | | x | | add: through the Rust chain with a limiter when DSP is already on |
 | Loudness normalisation to LUFS target | x | | | | skip: needs R128 tags the server does not expose |
 | Repeat, shuffle, shuffle order restored, previous follows history | x | x | x | part | add history-aware previous |
-| Weighted shuffle (spread artists/albums) | x | | | | add (in Rust) |
+| Weighted shuffle (spread artists/albums) | x | | | yes | done |
 | Queue + position survive process death | x | x | x | yes | |
 | Server play-queue sync (other devices) | bookmarks | | | yes | |
 | Bookmarks / resume points for long tracks | x | | | | add |
 | Audiobook mode: chapters, rollback, mark played | x | | | | ask (scope) |
-| Play / skip counts, thresholds | x | | x | part | add skip count + thresholds |
+| Play / skip counts, thresholds | x | | x | yes | done (local history) |
 | Audio focus: duck / pause / ignore; resume after call | x | x | | default | add |
 | Auto-play on headset/Bluetooth connect; pause at volume 0 | x | | | | add (broadcast-driven, no polling) |
 | Headset single/double/triple click mapping, long-press = next album | x | | | | add |
-| "Previous" rewinds first toggle; seek step sizes | x | | | | add |
-| Pre-cache next N tracks, separate Wi-Fi / mobile | x | x | | next 1 | add |
+| "Previous" rewinds first toggle; seek step sizes | x | | | part | part: previous rule |
+| Pre-cache next N tracks, separate Wi-Fi / mobile | x | x | | yes | done |
 | Bitrate by network; metered Wi-Fi/VPN counts as mobile; re-transcode when Wi-Fi drops | x | x | x | part | add |
 | Prefer original over cached transcode on Wi-Fi | x | | | | add |
-| Keep skipping on server errors / faster skip offline | x | | | | add |
+| Keep skipping on server errors / faster skip offline | x | | | yes | done |
 | Buffered position in seek bar | x | | | | add |
 | Waveform seek bar | x | | | | ask (cost: decode whole track once, or server call) |
 | Notification: shuffle / repeat / favourite / custom buttons | x | | x | | add |
 | Media session options (queue exposure, explicit marks) | x | | | default | skip: niche |
 | Sleep timer: minutes, end of track | x | x | x | yes | |
-| Sleep timer: after N songs, end of queue, fade out, custom duration | x | x | x | | add |
-| Internet radio playback, ICY now-playing titles | x | x | x | part | add ICY metadata |
+| Sleep timer: after N songs, end of queue, fade out, custom duration | x | x | x | part | part: after N songs |
+| Internet radio playback, ICY now-playing titles | x | x | x | yes | done |
 | Formats Android cannot decode (DSD, APE, WavPack, WMA, MPC, TTA) via bundled FFmpeg | x | | | | ask (cost: +5-8 MB, those formats decode on CPU) |
 | CUE sheets | x | | | | skip: file providers only |
 
@@ -201,8 +201,8 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Multiple saved queues (last 15) | x | | | | add |
 | Auto-continue with similar songs | x | x | 1 random | yes | |
 | Auto-continue modes: random, same genre, same artist, similar; how many | x | x | | similar only | add |
-| Mixes: instant mix from track/artist, decade, genre; "exclude from mixes" | x | x | | song radio | add (from the index, in Rust) |
-| On-device taste model (plays, skips, completion, hour of day) feeding mixes | x | x | | | ask (cost: a DB row per play; nothing while playing) |
+| Mixes: instant mix from track/artist, decade, genre; "exclude from mixes" | x | x | | yes | done |
+| On-device taste model (plays, skips, completion, hour of day) feeding mixes | x | x | | yes | done |
 | Live queue reshaping ("Smart Flow") | x | | | | skip: opaque behaviour, little demand |
 
 ## Playlists
@@ -214,10 +214,10 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Reorder tracks, multi-select remove | x | x | | | add |
 | Add to several playlists at once; "already in playlist" hint | x | x | x | | add |
 | Remove duplicates / missing | x | | | | add |
-| M3U/M3U8 import and export | x | | | | add |
+| M3U/M3U8 import and export | x | | | yes | done |
 | Pin playlist to home; launcher shortcuts (play / shuffle) | x | x | | part | part: pin |
-| Smart playlists: rule groups (AND/OR, nested) over index fields, limit, sort, stable random | x | | | | add (rules evaluated in Rust over the index) |
-| Default smart playlists (most played, recently played, never played, ...) | x | | | | add |
+| Smart playlists: rule groups (AND/OR, nested) over index fields, limit, sort, stable random | x | | | yes | done (editor: one group; nesting via the core's JSON) |
+| Default smart playlists (most played, recently played, never played, ...) | x | | | yes | done |
 | Composite 2x2 covers | | x | | server-made | skip: Navidrome already serves them |
 
 ## Downloads and caches
@@ -286,7 +286,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Scrobble + now playing, threshold %, offline queue | x | x | x | yes | |
 | Minimum duration to scrobble | | | x | 10 s fixed | add |
 | OpenSubsonic playbackReport | x | | | | add (octo-fiesta handles it) |
-| Year-in-review ("Wrapped") | | x | | | ask (pure UI over the history table) |
+| Year-in-review ("Wrapped") | | x | | yes | done as listening stats for any period |
 | Direct Last.fm / ListenBrainz | | | | | skip: Navidrome does this server-side |
 
 ## Shares, radio, misc

@@ -39,5 +39,5 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     fun clearQueue() = player.clear()
     fun toggleShuffle() = player.setShuffle(!state.value.shuffle)
     fun cycleRepeat() = player.cycleRepeat()
-    fun sleep(minutes: Int, endOfTrack: Boolean = false) = player.sleep(minutes, endOfTrack)
+    fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = player.sleep(minutes, endOfTrack, songs)
 }

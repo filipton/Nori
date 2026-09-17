@@ -60,7 +60,7 @@ import dev.flint.music.app.vm.RadioViewModel
 import dev.flint.music.app.vm.StarredViewModel
 import dev.flint.music.data.AlbumSort
 
-private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Favourites", "Genres", "Decades", "Folders", "Radio", "Downloads")
+private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Smart", "Favourites", "History", "Genres", "Decades", "Folders", "Radio", "Downloads")
 
 @Composable
 fun LibraryScreen(actions: ActionsViewModel) {
@@ -73,6 +73,8 @@ fun LibraryScreen(actions: ActionsViewModel) {
             "Artists" -> Artists()
             "Songs" -> SongsScreen(actions, null)
             "Playlists" -> Playlists(actions)
+            "Smart" -> SmartList()
+            "History" -> HistoryList(actions)
             "Favourites" -> Favourites(actions)
             "Genres" -> Genres()
             "Decades" -> Decades()
@@ -192,6 +194,12 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
     val nav = LocalNav.current
     var creating by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val pickM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } }.getOrNull()?.let { text ->
+            actions.importM3u(uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.') ?: "Imported", text)
+        }
+    }
     if (creating) AlertDialog(
         onDismissRequest = { creating = false }, title = { Text("New playlist") },
         text = { OutlinedTextField(name, { name = it }, singleLine = true) },
@@ -200,6 +208,7 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
     LoadBox(load) { playlists ->
         LazyColumn {
             item { Row(Modifier.fillMaxWidth().clickable { creating = true }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New playlist", Modifier.padding(start = 12.dp)) } }
+            item { Text("Import M3U…", Modifier.fillMaxWidth().clickable { pickM3u.launch(arrayOf("*/*")) }.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.primary) }
             items(playlists, key = { it.id }) { p ->
                 Row(Modifier.fillMaxWidth().clickable { nav.playlist(p.id) }.padding(start = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp)

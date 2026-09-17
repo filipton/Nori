@@ -31,6 +31,11 @@ enum class AlbumSort(val api: String) {
     BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"), HIGHEST("highest"), BY_YEAR("byYear"),
 }
 
+enum class Mix(val title: String) {
+    QUICK_PICKS("Quick picks"), DISCOVER("Discover"), LISTEN_AGAIN("Listen again"), TOP("Your top songs"),
+    GENRE("Genre mix"), ARTIST("Artist mix"), DECADE("Decade mix"), INSTANT("Instant mix"),
+}
+
 enum class StarKind(val param: String) { SONG("id"), ALBUM("albumId"), ARTIST("artistId") }
 
 /**
@@ -142,6 +147,35 @@ class Library(
     fun genres(): Flow<List<Genre>> = cached("getGenres", emptyList(), HOUR, { core.parseGenres(it) })
     fun radio(): Flow<List<RadioStation>> = cached("getInternetRadioStations", emptyList(), HOUR, { core.parseRadio(it) })
     fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId), HOUR, { core.parseLyrics(it) })
+
+    // ---- local only: history, mixes, smart playlists (all computed in the Rust core from the index) ----
+
+    suspend fun history(limit: Int, offset: Int) = withContext(Dispatchers.IO) { core.historyRecent(limit.toUInt(), offset.toUInt(), false) }
+    suspend fun clearHistory() = withContext(Dispatchers.IO) { core.historyClear() }
+    suspend fun stats(fromMs: Long, toMs: Long) = withContext(Dispatchers.IO) { core.statsSummary(fromMs, toMs, 10u) }
+
+    suspend fun mix(kind: Mix, seed: Long, arg: String = "", limit: Int = 50): List<Song> = withContext(Dispatchers.IO) {
+        val (n, s) = limit.toUInt() to seed.toULong()
+        when (kind) {
+            Mix.QUICK_PICKS -> core.mixQuickPicks(n, s); Mix.DISCOVER -> core.mixDiscover(n, s); Mix.LISTEN_AGAIN -> core.mixListenAgain(n, s)
+            Mix.TOP -> core.mixTop(n); Mix.GENRE -> core.mixGenre(arg, n, s); Mix.ARTIST -> core.mixArtist(arg, n, s)
+            Mix.DECADE -> core.mixDecade(arg.toUIntOrNull() ?: 0u, n, s); Mix.INSTANT -> core.mixInstant(arg, n, s)
+        }
+    }
+
+    suspend fun excludeFromMixes(songId: String, excluded: Boolean) = withContext(Dispatchers.IO) { core.mixExcludedSet(songId, excluded) }
+    fun shuffled(songs: List<Song>, seed: Long): List<Song> = dev.flint.music.ffi.weightedShuffle(songs, seed.toULong())
+
+    suspend fun smartPlaylists() = withContext(Dispatchers.IO) { core.smartList() }
+    fun smartDefaults() = dev.flint.music.ffi.smartDefaults()
+    suspend fun smartSave(id: String, name: String, json: String): String = withContext(Dispatchers.IO) { core.smartSave(id, name, json) }
+    suspend fun smartDelete(id: String) = withContext(Dispatchers.IO) { core.smartDelete(id) }
+    suspend fun smartSongs(json: String, downloaded: Set<String>, offset: Int = 0, limit: Int = 500): List<Song> =
+        withContext(Dispatchers.IO) { core.smartEvaluate(json, downloaded.toList(), offset.toUInt(), limit.toUInt()) }
+    fun smartCheck(json: String): String? = runCatching { dev.flint.music.ffi.smartValidate(json) }.exceptionOrNull()?.message
+
+    fun m3uExport(name: String, songs: List<Song>): String = dev.flint.music.ffi.m3uExport(name, songs)
+    suspend fun m3uImport(text: String): List<Song?> = withContext(Dispatchers.IO) { core.m3uMatch(dev.flint.music.ffi.m3uParse(text)) }
 
     /** The server's folder tree, for libraries organised by directory rather than by tags. */
     fun folders(): Flow<List<Artist>> = cached("getIndexes", emptyList(), HOUR) { core.parseIndexes(it) }

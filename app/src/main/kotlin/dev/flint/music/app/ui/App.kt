@@ -50,6 +50,9 @@ class Nav(private val c: NavHostController) {
     fun genre(name: String) = c.navigate("genre/${Uri.encode(name)}")
     fun folder(id: String) = c.navigate("folder/${Uri.encode(id)}")
     fun decade(year: Int) = c.navigate("decade/$year")
+    fun smart(id: String) = c.navigate("smart/${Uri.encode(id)}")
+    fun smartEdit(id: String) = c.navigate("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
+    fun stats() = c.navigate("stats")
     fun player() = c.navigate("player") { launchSingleTop = true }
     fun equalizer() = c.navigate("equalizer")
     fun back() { c.popBackStack() }
@@ -113,6 +116,9 @@ fun App() {
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("genre/{id}") { GenreScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("smart/{id}") { SmartScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("smartEdit/{id}") { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) }
+                    composable("stats") { StatsScreen() }
                     composable("folder/{id}") { FolderScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("decade/{year}") { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) }
                 }

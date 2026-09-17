@@ -95,7 +95,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
             p.bitPerfect,
         ) { on -> vm.update { it.copy(bitPerfect = on) } }
         Toggle("Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
-        Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album")) { m -> vm.update { it.copy(replayGain = m) } }
+        Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
         if (p.replayGain != ReplayGainMode.OFF) {
             Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
             Slider(p.preampDb, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), valueRange = -12f..6f)
@@ -112,6 +112,22 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Text("System audio effects", Modifier.fillMaxWidth().clickable {
             runCatching { context.startActivity(Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName).putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)) }
         }.padding(horizontal = 16.dp, vertical = 14.dp))
+
+        SectionTitle("Features")
+        Text("Anything switched off here is not even started: no listener, no socket, no audio processing.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Toggle("Listening history and taste model", "Kept on this device only. Feeds mixes, smart playlists and the listening stats. One small write when a track ends.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
+        Toggle("Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row", p.weightedShuffle) { on -> vm.update { it.copy(weightedShuffle = on) } }
+        Toggle("Third-party lookups", "Lyrics from lrclib.net when the server has none, the AutoEQ headphone list, update checks. Sends artist and title to those services.", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on) } }
+
+        SectionTitle("Playback behaviour")
+        Choice("Fade on play, pause, seek and skip", p.fadeMs, listOf(0 to "Off", 150 to "150 ms", 300 to "300 ms", 500 to "500 ms", 1000 to "1 s")) { v -> vm.update { it.copy(fadeMs = v) } }
+        Toggle("No crossfade inside an album", "Tracks that follow each other on the same album stay gapless", p.crossfadeKeepAlbums) { on -> vm.update { it.copy(crossfadeKeepAlbums = on) } }
+        Choice("Pitch", p.pitch, listOf(0.9f to "−10 %", 0.95f to "−5 %", 1f to "Normal", 1.05f to "+5 %", 1.1f to "+10 %")) { v -> vm.update { it.copy(pitch = v) } }
+        Toggle("Previous always goes back a track", "Instead of first rewinding the current one", p.previousAlwaysSkips) { on -> vm.update { it.copy(previousAlwaysSkips = on) } }
+        Toggle("Skip tracks that fail to load", "Up to three in a row, then playback stops", p.skipOnError) { on -> vm.update { it.copy(skipOnError = on) } }
+        Choice("Fetch ahead on Wi-Fi", p.precacheWifi, listOf(1 to "Next track", 2 to "2 tracks", 3 to "3 tracks", 5 to "5 tracks", 10 to "10 tracks")) { v -> vm.update { it.copy(precacheWifi = v) } }
+        Choice("Fetch ahead on mobile data", p.precacheMobile, listOf(1 to "Next track", 2 to "2 tracks", 3 to "3 tracks", 5 to "5 tracks")) { v -> vm.update { it.copy(precacheMobile = v) } }
+        if (p.replayGain != ReplayGainMode.OFF) Choice("Gain for files without ReplayGain tags", p.untaggedGainDb, listOf(0f to "0 dB", -3f to "−3 dB", -6f to "−6 dB", -9f to "−9 dB", -12f to "−12 dB")) { v -> vm.update { it.copy(untaggedGainDb = v) } }
 
         SectionTitle("Lists")
         Choice("Tapping a song", p.tapAction, listOf(TapAction.PLAY_LIST to "Plays the list from there", TapAction.PLAY_ONE to "Plays only that song", TapAction.QUEUE to "Adds it to the queue", TapAction.PLAY_NEXT to "Plays it next")) { v -> vm.update { it.copy(tapAction = v) } }

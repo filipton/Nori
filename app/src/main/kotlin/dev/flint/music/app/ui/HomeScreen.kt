@@ -23,12 +23,15 @@ import dev.flint.music.ffi.Album
 fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val load by vm.ui.collectAsStateWithLifecycle()
     val nav = LocalNav.current
+    val settings: dev.flint.music.app.vm.SettingsViewModel = viewModel()
+    val mixes = settings.prefs.collectAsStateWithLifecycle().value.tasteModel
     LoadBox(load) { ui ->
         LazyColumn {
             item(key = "actions") {
                 Row(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) { FilledTonalButton(actions::shuffleAll) { Text("Shuffle everything") }
                     FilledTonalButton(actions::resumeFromServer) { Text("Resume from server") } }
             }
+            if (mixes) item(key = "mixes") { SectionTitle("For you"); MixTiles() }
             if (ui.pinned.isNotEmpty()) item(key = "pinned") {
                 SectionTitle("Pinned playlists")
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

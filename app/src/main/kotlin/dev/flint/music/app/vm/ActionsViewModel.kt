@@ -65,7 +65,28 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     fun downloadArtist(albums: List<Album>) = attempt(null) { download(artistSongs(albums)) }
 
     fun play(songs: List<Song>, index: Int = 0) = flint.player.play(songs, index)
-    fun shuffle(songs: List<Song>) = flint.player.play(songs, shuffle = true)
+    /** Spreads artists and albums apart (in the core) unless the user prefers a plain random order. */
+    fun shuffle(songs: List<Song>) {
+        if (flint.settings.value.weightedShuffle && songs.size > 2) flint.player.play(flint.library.shuffled(songs, System.nanoTime()))
+        else flint.player.play(songs, shuffle = true)
+    }
+
+    fun instantMix(song: Song) = attempt(null) {
+        val mix = flint.library.mix(dev.flint.music.data.Mix.INSTANT, System.nanoTime(), song.id)
+        if (mix.isEmpty()) startRadio(song) else flint.player.play(mix)
+    }
+
+    fun excludeFromMixes(song: Song) = attempt("Excluded from mixes") { flint.library.excludeFromMixes(song.id, true) }
+
+    fun exportM3u(name: String, songs: List<Song>): String = flint.library.m3uExport(name, songs)
+
+    /** Creates a server playlist from an M3U file; tracks that are not in the index are reported, not guessed. */
+    fun importM3u(name: String, text: String) = attempt(null) {
+        val matched = flint.library.m3uImport(text)
+        val found = matched.filterNotNull()
+        if (found.isEmpty()) _messages.send("None of the ${matched.size} entries are in the offline index. Sync it first.")
+        else { flint.library.createPlaylist(name, found.map { it.id }); _messages.send("Imported ${found.size} of ${matched.size} tracks into $name") }
+    }
     fun playNext(songs: List<Song>) { flint.player.playNext(songs); _messages.trySend("Playing next") }
     fun enqueue(songs: List<Song>) { flint.player.enqueue(songs); _messages.trySend("Added to queue") }
 

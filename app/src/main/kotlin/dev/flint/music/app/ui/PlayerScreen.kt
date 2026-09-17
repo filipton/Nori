@@ -97,6 +97,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 DropdownMenu(sleepMenu, { sleepMenu = false }) {
                     for (m in listOf(15, 30, 45, 60)) DropdownMenuItem({ Text("$m minutes") }, { vm.sleep(m); sleepMenu = false })
                     DropdownMenuItem({ Text("End of track") }, { vm.sleep(0, endOfTrack = true); sleepMenu = false })
+                    for (n in listOf(2, 3, 5, 10)) DropdownMenuItem({ Text("After $n songs") }, { vm.sleep(0, songs = n); sleepMenu = false })
                     DropdownMenuItem({ Text("Off") }, { vm.sleep(0); sleepMenu = false })
                 }
             }

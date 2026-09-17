@@ -34,6 +34,11 @@ class Scrobbler(private val flint: Flint, private val scope: CoroutineScope) {
         heardMs = 0
         startedAt = System.currentTimeMillis()
         onPlaying(playing)
+        // The local history is what the taste model, the mixes and the smart playlists feed on. One small
+        // transaction when a track is left; nothing runs while it plays.
+        if (done != null && flint.settings.value.tasteModel) scope.launch(Dispatchers.IO) {
+            runCatching { flint.core.historyRecord(done, at, heard, java.util.TimeZone.getDefault().getOffset(at)) }
+        }
         if (!flint.settings.value.scrobble) return
         val percent = flint.settings.value.scrobblePercent.coerceIn(10, 100)
         scope.launch(Dispatchers.IO) {

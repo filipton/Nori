@@ -212,6 +212,11 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
     val menu = LocalSongMenu.current
     val playing = playingId()
     var filter by remember { mutableStateOf("") }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val current = (load as? dev.flint.music.app.vm.Load.Ready)?.data
+    val exportM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("audio/x-mpegurl")) { uri ->
+        if (uri != null && current != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(current.playlist.name, current.songs).toByteArray()) } }
+    }
     LoadBox(load) { d ->
         val shown = remember(d, filter) { d.songs.matching(filter) }
         LazyColumn {
@@ -223,6 +228,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
                     }
                 }
                 PlayButtons(d.songs, actions, filter) { filter = it }
+                TextButton({ exportM3u.launch("${d.playlist.name}.m3u8") }, Modifier.padding(horizontal = 8.dp)) { Text("Export M3U") }
             }
             songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }

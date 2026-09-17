@@ -129,6 +129,13 @@ data class Prefs(
     /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
     val scrobblePercent: Int = 50,
     val liveSearchDelayMs: Int = 350,
+    // ---- optional subsystems; one that is off is never initialised and costs nothing ----
+    /** Keeps a local play history and a taste score per song; feeds mixes, smart playlists and the year in review. */
+    val tasteModel: Boolean = true,
+    /** Third-party lookups: lyrics from LRCLIB, the AutoEQ headphone list, update checks. */
+    val thirdPartyLookups: Boolean = false,
+    /** "Shuffle" spreads artists and albums apart instead of being purely random. */
+    val weightedShuffle: Boolean = true,
     val tapAction: TapAction = TapAction.PLAY_LIST,
     val swipeRight: SwipeAction = SwipeAction.QUEUE,
     val swipeLeft: SwipeAction = SwipeAction.PLAY_NEXT,
@@ -210,6 +217,7 @@ class Settings(context: Context) {
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
+            tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
             swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
             swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
@@ -237,6 +245,7 @@ class Settings(context: Context) {
         putFloat("crossfeedDb", p.crossfeedDb); putInt("crossfadeSec", p.crossfadeSec)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
+        putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
         putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())
