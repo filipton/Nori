@@ -63,6 +63,8 @@ import kotlin.math.pow
 class PlaybackService : MediaLibraryService() {
     companion object {
         const val CMD_SLEEP = "flint.sleep"
+        const val CMD_TUNING = "flint.tuning"
+        const val ARG_ON = "on"
         const val ARG_MINUTES = "minutes"
         const val ARG_END_OF_TRACK = "endOfTrack"
     }
@@ -77,6 +79,9 @@ class PlaybackService : MediaLibraryService() {
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
+    private var crossfade: CrossfadeSink? = null
+    /** The equalizer screen is open: trade the deep buffer for immediate response. */
+    private var tuning = false
     private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
     private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(BurstSink.BUFFER_US).setMaxPcmBufferDurationUs(BurstSink.BUFFER_US).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -92,15 +97,15 @@ class PlaybackService : MediaLibraryService() {
 
         val renderers = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                BurstSink(
+                CrossfadeSink(BurstSink(
                     DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer))
                         // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU; see BurstSink.
                         .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
-                            // Deep for bursts; shallow while the equalizer is on, so that moving a band is heard at once.
-                            (if (equalizer.enabled) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
+                            // Deep for bursts; shallow only while the equalizer screen is open, so that moving a band is heard at once.
+                            (if (tuning) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
                         }
                         .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
-                ).also { burst = it }
+                ).also { burst = it }).also { crossfade = it }
         }
         hiRes = flint.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
@@ -132,7 +137,7 @@ class PlaybackService : MediaLibraryService() {
         scope.launch {
             var last = flint.settings.value
             flint.settings.prefs.collect { p ->
-                if (p.eqEnabled != last.eqEnabled || p.eqGains != last.eqGains || p.offload != last.offload || p.bitPerfect != last.bitPerfect) applyAudio(p)
+                if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, scrobblePercent = last.scrobblePercent) != last.copy()) applyAudio(p)
                 if (p.replayGain != last.replayGain || p.preampDb != last.preampDb) applyGain()
                 last = p
             }
@@ -202,14 +207,24 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    private fun updateBurst() { burst?.enabled = !offloaded && !equalizer.enabled }
+    private fun updateBurst() { burst?.enabled = !offloaded && !tuning }
 
-    /** Equalizer, offload and bit-perfect exclude each other; this is where that is decided. */
+    /** A processor joins or leaves the chain, and the buffer depth changes, only when the sink is configured again. */
+    private fun reconfigureSink() {
+        if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+    }
+
+    /** DSP, crossfade, speed, offload and bit-perfect constrain each other; this is where that is decided. */
     private fun applyAudio(p: Prefs) {
         flint.dac.setEnabled(p.bitPerfect)
-        val processing = p.eqEnabled && !hiRes && !flint.dac.state.value.bitPerfect
-        equalizer.setGains(p.eqGains)
-        val offload = p.offload && !processing
+        val untouched = hiRes || flint.dac.state.value.bitPerfect
+        val processing = p.dsp && !untouched
+        equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
+        crossfade?.seconds = if (untouched) 0 else p.crossfadeSec
+        player.skipSilenceEnabled = p.skipSilence && !untouched
+        player.setPlaybackSpeed(p.speed)
+        // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
+        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.skipSilence && p.speed == 1f
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
@@ -217,9 +232,7 @@ class PlaybackService : MediaLibraryService() {
         ).build()
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
-            updateBurst()
-            // A processor joins or leaves the chain only when the sink is configured again.
-            if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+            reconfigureSink()
         }
     }
 
@@ -286,7 +299,7 @@ class PlaybackService : MediaLibraryService() {
 
     private inner class Callback : MediaLibrarySession.Callback {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
-            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(SessionCommand(CMD_SLEEP, Bundle.EMPTY)).build()
+            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(SessionCommand(CMD_SLEEP, Bundle.EMPTY)).add(SessionCommand(CMD_TUNING, Bundle.EMPTY)).build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(commands).build()
         }
 
@@ -298,6 +311,11 @@ class PlaybackService : MediaLibraryService() {
                 val minutes = args.getInt(ARG_MINUTES)
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
                 if (minutes > 0) alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, 15_000L, "flint.sleep", sleepAlarm, main)
+            }
+            if (command.customAction == CMD_TUNING && tuning != args.getBoolean(ARG_ON)) {
+                tuning = args.getBoolean(ARG_ON)
+                updateBurst()
+                reconfigureSink()
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }

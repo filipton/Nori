@@ -158,6 +158,11 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         }
     }
 
+    /** While true the service trades its deep audio buffer for immediate response; for the equalizer screen. */
+    fun setTuning(on: Boolean) = with { c ->
+        c.sendCustomCommand(SessionCommand(PlaybackService.CMD_TUNING, Bundle.EMPTY), Bundle().apply { putBoolean(PlaybackService.ARG_ON, on) })
+    }
+
     /** [minutes] 0 and [endOfTrack] false cancels. */
     fun sleep(minutes: Int, endOfTrack: Boolean = false) = with { c ->
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_SLEEP, Bundle.EMPTY), Bundle().apply {

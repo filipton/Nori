@@ -211,11 +211,25 @@ pub struct PlayQueue {
     pub position_ms: u64,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct PendingScrobble {
-    pub row_id: i64,
-    pub song_id: String,
-    pub time_ms: i64,
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+pub enum EqKind {
+    Peaking,
+    LowShelf,
+    HighShelf,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct EqBand {
+    pub kind: EqKind,
+    pub freq: f32,
+    pub gain_db: f32,
+    pub q: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct EqPreset {
+    pub preamp_db: f32,
+    pub bands: Vec<EqBand>,
 }
 
 #[derive(Debug, Clone, Default, uniffi::Record)]

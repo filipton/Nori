@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import dev.flint.music.ffi.IngestStats
 import dev.flint.music.playback.DacState
 import dev.flint.music.settings.Prefs
+import dev.flint.music.settings.Band
+import dev.flint.music.settings.BandKind
+import dev.flint.music.ffi.parseEqPreset
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +44,42 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
     }
 
     fun logout() = flint.logout()
+
+    // ---- equalizer ----
+
+    /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
+    fun setTuning(on: Boolean) = flint.player.setTuning(on)
+
+    fun setBand(index: Int, band: Band) = update { it.copy(eqBands = it.eqBands.toMutableList().also { l -> l[index] = band }) }
+    fun addBand() = update { it.copy(eqBands = it.eqBands + Band(BandKind.PEAKING, 1000f, 0f, 1f)) }
+    fun removeBand(index: Int) = update { it.copy(eqBands = it.eqBands.filterIndexed { i, _ -> i != index }.ifEmpty { Band.GRAPHIC }) }
+    fun resetBands() = update { it.copy(eqBands = Band.GRAPHIC, eqPreampDb = null) }
+
+    /** AutoEQ "ParametricEQ.txt" / Equalizer APO text. Returns how many filters were found. */
+    fun importPreset(text: String): Int {
+        val preset = parseEqPreset(text)
+        if (preset.bands.isEmpty()) return 0
+        update { p ->
+            p.copy(
+                eqEnabled = true, eqPreampDb = preset.preampDb,
+                eqBands = preset.bands.map { Band(BandKind.entries[it.kind.ordinal], it.freq, it.gainDb, it.q) },
+            )
+        }
+        return preset.bands.size
+    }
+
+    // ---- downloads ----
+
+    /** Queues every song of the offline index for download; run [syncLibrary] first so the index is complete. */
+    fun downloadLibrary() = viewModelScope.launch {
+        var offset = 0
+        while (true) {
+            val page = flint.library.indexedSongs(offset, 500)
+            if (page.isEmpty()) break
+            flint.downloads.download(page)
+            offset += page.size
+        }
+    }
 
     /** Fills the offline search index with the whole library. Optional: the app works without it. */
     fun syncLibrary() {

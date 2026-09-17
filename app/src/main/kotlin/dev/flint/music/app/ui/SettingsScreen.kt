@@ -92,7 +92,13 @@ fun SettingsScreen(vm: SettingsViewModel) {
             Slider(p.preampDb, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), valueRange = -12f..6f)
         }
         Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 14.dp)) {
-            Text("Equalizer", Modifier.weight(1f)); Text(if (p.eqEnabled) "On" else "Off", color = MaterialTheme.colorScheme.primary)
+            Text("Equalizer and crossfeed", Modifier.weight(1f)); Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
+        }
+        Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s")) { v -> vm.update { it.copy(crossfadeSec = v) } }
+        Choice("Playback speed", p.speed, listOf(0.75f to "0.75×", 1f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2f to "2×")) { v -> vm.update { it.copy(speed = v) } }
+        Toggle("Skip silence", "Cuts silent stretches inside and between tracks", p.skipSilence) { on -> vm.update { it.copy(skipSilence = on) } }
+        if (p.offload && (p.dsp || p.crossfadeSec > 0 || p.skipSilence || p.speed != 1f)) {
+            Text("Something above needs the decoded audio, so hardware offload is paused. Playback still runs in bursts from a deep buffer.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text("System audio effects", Modifier.fillMaxWidth().clickable {
             runCatching { context.startActivity(Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName).putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)) }
@@ -100,6 +106,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
 
         SectionTitle("Library")
         Toggle("Scrobble", "Report plays and the play queue to the server", p.scrobble) { on -> vm.update { it.copy(scrobble = on) } }
+        if (p.scrobble) Choice("Count a play after", p.scrobblePercent, listOf(25 to "25 %", 50 to "50 %", 75 to "75 %", 90 to "90 %", 100 to "the whole track")) { v -> vm.update { it.copy(scrobblePercent = v) } }
         Toggle("Keep playing", "When the queue runs out, continue with similar songs from the library", p.autoFill) { on -> vm.update { it.copy(autoFill = on) } }
         Choice("Live search delay", p.liveSearchDelayMs, listOf(150 to "150 ms", 250 to "250 ms", 350 to "350 ms", 500 to "500 ms", 800 to "800 ms")) { ms -> vm.update { it.copy(liveSearchDelayMs = ms) } }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -110,29 +117,17 @@ fun SettingsScreen(vm: SettingsViewModel) {
             TextButton(vm::syncLibrary, enabled = !sync.running) { Text(if (sync.running) "Syncing…" else "Sync all") }
         }
 
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Download whole library")
+                Text("Every song in the offline index, at the download quality above", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TextButton({ vm.downloadLibrary() }, enabled = sync.indexed.songs > 0u) { Text("Download") }
+        }
+
         SectionTitle("Server")
         Text("${p.user} @ ${p.serverUrl}", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         TextButton(vm::logout, Modifier.padding(horizontal = 8.dp)) { Text("Log out") }
     }
 }
 
-@Composable
-fun EqualizerScreen(vm: SettingsViewModel) {
-    val p by vm.prefs.collectAsStateWithLifecycle()
-    val nav = LocalNav.current
-    Column(Modifier.verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Equalizer", style = MaterialTheme.typography.titleLarge)
-        }
-        Toggle("Enabled", "Runs in the Rust core on the playback thread. Costs battery: offload is off while this is on.", p.eqEnabled) { on -> vm.update { it.copy(eqEnabled = on) } }
-        Equalizer.FREQUENCIES.forEachIndexed { i, hz ->
-            Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(if (hz >= 1000) "${hz / 1000}k" else "$hz", Modifier.padding(end = 4.dp), style = MaterialTheme.typography.labelMedium)
-                Slider(p.eqGains[i], { v -> vm.update { it.copy(eqGains = it.eqGains.toMutableList().also { g -> g[i] = v }) } }, Modifier.weight(1f), enabled = p.eqEnabled, valueRange = -12f..12f)
-                Text("%+.0f".format(p.eqGains[i]), style = MaterialTheme.typography.labelMedium)
-            }
-        }
-        TextButton({ vm.update { it.copy(eqGains = List(10) { 0f }) } }, Modifier.padding(8.dp)) { Text("Reset") }
-    }
-}

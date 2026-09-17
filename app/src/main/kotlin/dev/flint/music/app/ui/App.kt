@@ -1,6 +1,8 @@
 package dev.flint.music.app.ui
 
+import android.content.Intent
 import android.net.Uri
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
@@ -75,6 +77,12 @@ fun App() {
         val snackbar = remember { SnackbarHostState() }
         var menuSong by remember { mutableStateOf<Song?>(null) }
         LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
+        val context = LocalContext.current
+        LaunchedEffect(Unit) {
+            actions.shares.collect { url ->
+                context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, url), null))
+            }
+        }
 
         CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route

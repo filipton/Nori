@@ -12,30 +12,33 @@ internal object Dsp {
 
     @JvmStatic external fun create(sampleRate: Int, channels: Int): Long
     @JvmStatic external fun destroy(handle: Long)
-    @JvmStatic external fun setGains(handle: Long, gains: FloatArray)
+    /** [bands] is flat: kind, frequency, gain dB, Q per band. */
+    @JvmStatic external fun configure(handle: Long, bands: FloatArray, preampDb: Float, crossfeedDb: Float)
     @JvmStatic external fun reset(handle: Long)
     @JvmStatic external fun process(handle: Long, input: ByteBuffer, inPos: Int, output: ByteBuffer, outPos: Int, bytes: Int, encoding: Int): Boolean
 }
 
 /**
- * Ten-band equalizer. While [enabled] is false the processor reports itself
- * inactive and media3 leaves it out of the chain entirely, which is also what
- * lets playback stay offloaded. Flipping [enabled] takes effect the next time
- * the sink is configured; the service re-prepares the player to force that.
+ * The sample-domain chain: pre-amp, parametric equalizer, crossfeed. While [enabled] is false the
+ * processor reports itself inactive and media3 leaves it out of the chain entirely, which is also
+ * what lets playback stay offloaded. Flipping [enabled] takes effect the next time the sink is
+ * configured; the service re-prepares the player to force that. Changing the curve is live.
  */
 @UnstableApi
 class Equalizer : BaseAudioProcessor() {
-    companion object {
-        val FREQUENCIES = intArrayOf(31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
-    }
-
     @Volatile var enabled = false
-    @Volatile private var gains = FloatArray(FREQUENCIES.size)
+    @Volatile private var bands = FloatArray(0)
+    @Volatile private var preampDb = 0f
+    @Volatile private var crossfeedDb = 0f
     @Volatile private var dirty = true
     private var handle = 0L
 
-    fun setGains(db: List<Float>) {
-        gains = db.toFloatArray()
+    fun setChain(bands: List<dev.flint.music.settings.Band>, preampDb: Float, crossfeedDb: Float) {
+        this.bands = FloatArray(bands.size * 4).also { a ->
+            bands.forEachIndexed { i, b -> a[i * 4] = b.kind.ordinal.toFloat(); a[i * 4 + 1] = b.freq; a[i * 4 + 2] = b.gainDb; a[i * 4 + 3] = b.q }
+        }
+        this.preampDb = preampDb
+        this.crossfeedDb = crossfeedDb
         dirty = true
     }
 
@@ -57,7 +60,7 @@ class Equalizer : BaseAudioProcessor() {
     override fun queueInput(input: ByteBuffer) {
         val n = input.remaining()
         if (n == 0) return
-        if (dirty) { Dsp.setGains(handle, gains); dirty = false }
+        if (dirty) { Dsp.configure(handle, bands, preampDb, crossfeedDb); dirty = false }
         val out = replaceOutputBuffer(n)
         if (input.isDirect && Dsp.process(handle, input, input.position(), out, out.position(), n, inputAudioFormat.encoding)) {
             input.position(input.limit())

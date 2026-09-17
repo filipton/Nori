@@ -1,20 +1,28 @@
-//! Ten-band equalizer, called once per audio buffer from the media3
+//! The sample-domain chain (pre-amp, parametric equalizer, crossfeed), called once per audio buffer from the media3
 //! AudioProcessor. This is raw JNI on direct ByteBuffers rather than uniffi:
 //! it runs on the playback thread every few milliseconds and must not
 //! allocate, copy or serialise anything.
 
 use jni::objects::{JByteBuffer, JClass, JFloatArray};
-use jni::sys::{jint, jlong};
+use jni::sys::{jfloat, jint, jlong};
 use jni::JNIEnv;
 use parking_lot::Mutex;
 
-pub const BANDS: usize = 10;
-pub const FREQUENCIES: [f64; BANDS] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
-const Q: f64 = 1.41;
+pub const PEAKING: i32 = 0;
+pub const LOW_SHELF: i32 = 1;
+pub const HIGH_SHELF: i32 = 2;
 const MAX_CHANNELS: usize = 8;
 
 const PCM_16: jint = 2; // C.ENCODING_PCM_16BIT
 const PCM_FLOAT: jint = 4; // C.ENCODING_PCM_FLOAT
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Band {
+    pub kind: i32,
+    pub freq: f64,
+    pub gain_db: f64,
+    pub q: f64,
+}
 
 #[derive(Clone, Copy, Default)]
 struct Biquad {
@@ -26,16 +34,89 @@ struct Biquad {
 }
 
 impl Biquad {
-    /// RBJ peaking filter.
-    fn peaking(rate: f64, freq: f64, gain_db: f64) -> Self {
-        let a = 10f64.powf(gain_db / 40.0);
-        let w = 2.0 * std::f64::consts::PI * freq / rate;
-        let alpha = w.sin() / (2.0 * Q);
-        let a0 = 1.0 + alpha / a;
-        Biquad { b0: (1.0 + alpha * a) / a0, b1: -2.0 * w.cos() / a0, b2: (1.0 - alpha * a) / a0, a1: -2.0 * w.cos() / a0, a2: (1.0 - alpha / a) / a0 }
+    /// RBJ cookbook filters.
+    fn new(rate: f64, band: &Band) -> Self {
+        let a = 10f64.powf(band.gain_db / 40.0);
+        let w = 2.0 * std::f64::consts::PI * band.freq / rate;
+        let (sin, cos) = (w.sin(), w.cos());
+        let alpha = sin / (2.0 * band.q.max(0.05));
+        let (b0, b1, b2, a0, a1, a2) = match band.kind {
+            LOW_SHELF => {
+                let k = 2.0 * a.sqrt() * alpha;
+                (
+                    a * ((a + 1.0) - (a - 1.0) * cos + k),
+                    2.0 * a * ((a - 1.0) - (a + 1.0) * cos),
+                    a * ((a + 1.0) - (a - 1.0) * cos - k),
+                    (a + 1.0) + (a - 1.0) * cos + k,
+                    -2.0 * ((a - 1.0) + (a + 1.0) * cos),
+                    (a + 1.0) + (a - 1.0) * cos - k,
+                )
+            }
+            HIGH_SHELF => {
+                let k = 2.0 * a.sqrt() * alpha;
+                (
+                    a * ((a + 1.0) + (a - 1.0) * cos + k),
+                    -2.0 * a * ((a - 1.0) + (a + 1.0) * cos),
+                    a * ((a + 1.0) + (a - 1.0) * cos - k),
+                    (a + 1.0) - (a - 1.0) * cos + k,
+                    2.0 * ((a - 1.0) - (a + 1.0) * cos),
+                    (a + 1.0) - (a - 1.0) * cos - k,
+                )
+            }
+            _ => (1.0 + alpha * a, -2.0 * cos, 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * cos, 1.0 - alpha / a),
+        };
+        Biquad { b0: b0 / a0, b1: b1 / a0, b2: b2 / a0, a1: a1 / a0, a2: a2 / a0 }
     }
 }
 
+/// Headphone crossfeed after Boris Mikhaylov's bs2b: each ear also gets the other channel, low-passed and
+/// attenuated, the way a loudspeaker would reach it. Stereo only.
+#[derive(Clone, Copy, Default)]
+struct Crossfeed {
+    a0_lo: f64,
+    b1_lo: f64,
+    a0_hi: f64,
+    a1_hi: f64,
+    b1_hi: f64,
+    gain: f64,
+    lo: [f64; 2],
+    hi: [f64; 2],
+    last: [f64; 2],
+}
+
+impl Crossfeed {
+    fn new(rate: f64, level_db: f64, cut_hz: f64) -> Self {
+        let gb_lo = level_db * -5.0 / 6.0 - 3.0;
+        let gb_hi = level_db / 6.0 - 3.0;
+        let g_lo = 10f64.powf(gb_lo / 20.0);
+        let g_hi = 1.0 - 10f64.powf(gb_hi / 20.0);
+        let cut_hi = cut_hz * 2f64.powf((gb_lo - 20.0 * g_hi.log10()) / 12.0);
+        let x_lo = (-2.0 * std::f64::consts::PI * cut_hz / rate).exp();
+        let x_hi = (-2.0 * std::f64::consts::PI * cut_hi / rate).exp();
+        Crossfeed {
+            a0_lo: g_lo * (1.0 - x_lo),
+            b1_lo: x_lo,
+            a0_hi: 1.0 - g_hi * (1.0 - x_hi),
+            a1_hi: -x_hi,
+            b1_hi: x_hi,
+            gain: 1.0 / (1.0 - g_hi + g_lo),
+            ..Default::default()
+        }
+    }
+
+    #[inline]
+    fn frame(&mut self, l: f64, r: f64) -> (f64, f64) {
+        let x = [l, r];
+        for c in 0..2 {
+            self.lo[c] = self.a0_lo * x[c] + self.b1_lo * self.lo[c];
+            self.hi[c] = self.a0_hi * x[c] + self.a1_hi * self.last[c] + self.b1_hi * self.hi[c];
+            self.last[c] = x[c];
+        }
+        ((self.hi[0] + self.lo[1]) * self.gain, (self.hi[1] + self.lo[0]) * self.gain)
+    }
+}
+
+/// The whole sample-domain chain: pre-amp, parametric equalizer, crossfeed.
 pub struct Equalizer {
     rate: f64,
     channels: usize,
@@ -43,27 +124,31 @@ pub struct Equalizer {
     filters: Vec<Biquad>,
     /// Transposed direct form II state, per filter per channel.
     state: Vec<[[f64; 2]; MAX_CHANNELS]>,
-    /// Pulls the signal down by the largest boost so the curve cannot clip.
     preamp: f64,
+    crossfeed: Option<Crossfeed>,
 }
 
 impl Equalizer {
     pub fn new(rate: u32, channels: usize) -> Self {
-        Equalizer { rate: rate as f64, channels: channels.clamp(1, MAX_CHANNELS), filters: Vec::new(), state: Vec::new(), preamp: 1.0 }
+        Equalizer { rate: rate as f64, channels: channels.clamp(1, MAX_CHANNELS), filters: Vec::new(), state: Vec::new(), preamp: 1.0, crossfeed: None }
     }
 
-    pub fn set_gains(&mut self, gains: &[f32]) {
+    /// `crossfeed_db` 0 turns crossfeed off; typical values are 3 to 6.
+    pub fn configure(&mut self, bands: &[Band], preamp_db: f64, crossfeed_db: f64) {
         self.filters.clear();
-        let mut boost = 0f64;
-        for (i, &g) in gains.iter().take(BANDS).enumerate() {
-            let g = (g as f64).clamp(-15.0, 15.0);
-            if g.abs() >= 0.05 && FREQUENCIES[i] < self.rate / 2.0 {
-                self.filters.push(Biquad::peaking(self.rate, FREQUENCIES[i], g));
-                boost = boost.max(g);
+        for b in bands {
+            if b.gain_db.abs() >= 0.05 && b.freq > 0.0 && b.freq < self.rate / 2.0 {
+                self.filters.push(Biquad::new(self.rate, &Band { gain_db: b.gain_db.clamp(-24.0, 24.0), ..*b }));
             }
         }
         self.state.resize(self.filters.len(), [[0.0; 2]; MAX_CHANNELS]);
-        self.preamp = 10f64.powf(-boost / 20.0);
+        self.preamp = 10f64.powf(preamp_db.clamp(-30.0, 12.0) / 20.0);
+        self.crossfeed = (crossfeed_db > 0.0 && self.channels == 2).then(|| Crossfeed::new(self.rate, crossfeed_db.clamp(1.0, 15.0), 700.0));
+    }
+
+    /// True when the chain would not change a single sample.
+    pub fn is_identity(&self) -> bool {
+        self.filters.is_empty() && self.crossfeed.is_none() && (self.preamp - 1.0).abs() < 1e-6
     }
 
     #[inline]
@@ -79,22 +164,39 @@ impl Equalizer {
         x
     }
 
-    pub fn process_i16(&mut self, input: &[i16], output: &mut [i16]) {
+    /// One generic loop; `load` and `store` are the only things that differ between sample formats.
+    #[inline]
+    fn run<T: Copy>(&mut self, input: &[T], output: &mut [T], load: impl Fn(T) -> f64, store: impl Fn(f64) -> T) {
         let n = self.channels;
-        for (i, (x, y)) in input.iter().zip(output.iter_mut()).enumerate() {
-            *y = self.sample(i % n, *x as f64).round().clamp(-32768.0, 32767.0) as i16;
+        if self.is_identity() {
+            output[..input.len()].copy_from_slice(input);
+        } else if n == 2 && self.crossfeed.is_some() {
+            for (x, y) in input.chunks_exact(2).zip(output.chunks_exact_mut(2)) {
+                let (l, r) = (self.sample(0, load(x[0])), self.sample(1, load(x[1])));
+                let (l, r) = self.crossfeed.as_mut().unwrap().frame(l, r);
+                y[0] = store(l);
+                y[1] = store(r);
+            }
+        } else {
+            for (i, (x, y)) in input.iter().zip(output.iter_mut()).enumerate() {
+                *y = store(self.sample(i % n, load(*x)));
+            }
         }
     }
 
+    pub fn process_i16(&mut self, input: &[i16], output: &mut [i16]) {
+        self.run(input, output, |x| x as f64, |y| y.round().clamp(-32768.0, 32767.0) as i16);
+    }
+
     pub fn process_f32(&mut self, input: &[f32], output: &mut [f32]) {
-        let n = self.channels;
-        for (i, (x, y)) in input.iter().zip(output.iter_mut()).enumerate() {
-            *y = self.sample(i % n, *x as f64) as f32;
-        }
+        self.run(input, output, |x| x as f64, |y| y as f32);
     }
 
     pub fn reset(&mut self) {
         self.state.iter_mut().for_each(|s| *s = [[0.0; 2]; MAX_CHANNELS]);
+        if let Some(c) = self.crossfeed.as_mut() {
+            (c.lo, c.hi, c.last) = ([0.0; 2], [0.0; 2], [0.0; 2]);
+        }
     }
 }
 
@@ -112,13 +214,19 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_destroy(_: JNIEnv, _: J
     }
 }
 
+/// `bands` is flat: kind, frequency, gain dB, Q for each band.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_setGains(env: JNIEnv, _: JClass, handle: jlong, gains: JFloatArray) {
-    let mut g = [0f32; BANDS];
-    let n = env.get_array_length(&gains).unwrap_or(0).clamp(0, BANDS as i32) as usize;
-    if handle != 0 && env.get_float_array_region(&gains, 0, &mut g[..n]).is_ok() {
-        unsafe { &*(handle as *const Handle) }.lock().set_gains(&g[..n]);
+pub extern "system" fn Java_dev_flint_music_playback_Dsp_configure(env: JNIEnv, _: JClass, handle: jlong, bands: JFloatArray, preamp_db: jfloat, crossfeed_db: jfloat) {
+    if handle == 0 {
+        return;
     }
+    let n = env.get_array_length(&bands).unwrap_or(0).clamp(0, 4 * 64) as usize;
+    let mut flat = vec![0f32; n];
+    if env.get_float_array_region(&bands, 0, &mut flat).is_err() {
+        return;
+    }
+    let bands: Vec<Band> = flat.chunks_exact(4).map(|b| Band { kind: b[0] as i32, freq: b[1] as f64, gain_db: b[2] as f64, q: b[3] as f64 }).collect();
+    unsafe { &*(handle as *const Handle) }.lock().configure(&bands, preamp_db as f64, crossfeed_db as f64);
 }
 
 #[no_mangle]
@@ -165,26 +273,56 @@ mod tests {
         (0..48000).map(|i| (0.25 * (2.0 * std::f64::consts::PI * freq * i as f64 / 48000.0).sin()) as f32).collect()
     }
 
+    fn gain_at(eq: &mut Equalizer, freq: f64) -> f64 {
+        let x = tone(freq);
+        let mut y = vec![0f32; x.len()];
+        eq.reset();
+        eq.process_f32(&x, &mut y);
+        20.0 * (rms(&y[9600..]) / rms(&x[9600..])).log10()
+    }
+
     #[test]
-    fn flat_is_identity_and_cut_attenuates_its_band() {
+    fn flat_is_identity_and_a_band_moves_only_its_neighbourhood() {
         let mut eq = Equalizer::new(48000, 1);
+        eq.configure(&[], 0.0, 0.0);
+        assert!(eq.is_identity());
         let x = tone(1000.0);
         let mut y = vec![0f32; x.len()];
-        eq.set_gains(&[0.0; BANDS]);
         eq.process_f32(&x, &mut y);
         assert_eq!(x, y);
 
-        let mut g = [0f32; BANDS];
-        g[5] = -12.0;
-        eq.set_gains(&g);
-        eq.process_f32(&x, &mut y);
-        let db = 20.0 * (rms(&y[4800..]) / rms(&x[4800..])).log10();
-        assert!((db + 12.0).abs() < 0.5, "1 kHz moved by {db} dB");
+        eq.configure(&[Band { kind: PEAKING, freq: 1000.0, gain_db: -12.0, q: 1.41 }], 0.0, 0.0);
+        assert!((gain_at(&mut eq, 1000.0) + 12.0).abs() < 0.5);
+        assert!(gain_at(&mut eq, 8000.0).abs() < 0.5);
+    }
 
-        let far = tone(8000.0);
+    #[test]
+    fn shelves_and_preamp() {
+        let mut eq = Equalizer::new(48000, 1);
+        eq.configure(&[Band { kind: LOW_SHELF, freq: 200.0, gain_db: 6.0, q: 0.71 }], -3.0, 0.0);
+        assert!((gain_at(&mut eq, 40.0) - 3.0).abs() < 0.5, "low shelf + preamp at 40 Hz");
+        assert!((gain_at(&mut eq, 5000.0) + 3.0).abs() < 0.5, "only the preamp at 5 kHz");
+        eq.configure(&[Band { kind: HIGH_SHELF, freq: 4000.0, gain_db: -6.0, q: 0.71 }], 0.0, 0.0);
+        assert!((gain_at(&mut eq, 16000.0) + 6.0).abs() < 0.6);
+        assert!(gain_at(&mut eq, 200.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn crossfeed_leaks_bass_to_the_other_ear_and_keeps_mono_level() {
+        let mut eq = Equalizer::new(48000, 2);
+        eq.configure(&[], 0.0, 4.5);
+        let left_only: Vec<f32> = tone(150.0).iter().flat_map(|s| [*s, 0.0]).collect();
+        let mut y = vec![0f32; left_only.len()];
+        eq.process_f32(&left_only, &mut y);
+        let l: Vec<f32> = y.iter().step_by(2).copied().collect();
+        let r: Vec<f32> = y.iter().skip(1).step_by(2).copied().collect();
+        let leak = 20.0 * (rms(&r[9600..]) / rms(&l[9600..])).log10();
+        assert!(leak < -2.0 && leak > -12.0, "right ear is {leak} dB below left");
+
+        let mono: Vec<f32> = tone(150.0).iter().flat_map(|s| [*s, *s]).collect();
         eq.reset();
-        eq.process_f32(&far, &mut y);
-        let db = 20.0 * (rms(&y[4800..]) / rms(&far[4800..])).log10();
-        assert!(db.abs() < 0.5, "8 kHz moved by {db} dB");
+        eq.process_f32(&mono, &mut y);
+        let db = 20.0 * (rms(&y[19200..]) / rms(&mono[19200..])).log10();
+        assert!(db.abs() < 1.0, "mono level moved by {db} dB");
     }
 }

@@ -66,3 +66,23 @@ fn synced_lyrics_preferred() {
     assert!(l.synced);
     assert_eq!((l.lines[0].start_ms, l.lines[0].text.as_str()), (1500, "timed"));
 }
+
+#[test]
+fn autoeq_preset_is_read() {
+    let p = parse_eq_preset("Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\nFilter 2: OFF PK Fc 500 Hz Gain 2 dB Q 1\nFilter 3: ON HSC Fc 10000 Hz Gain 4.0 dB Q 0.7\nnonsense".into());
+    assert_eq!(p.preamp_db, -6.2);
+    assert_eq!(p.bands.len(), 2);
+    assert_eq!(p.bands[0], EqBand { kind: EqKind::Peaking, freq: 105.0, gain_db: -3.5, q: 0.70 });
+    assert_eq!(p.bands[1].kind, EqKind::HighShelf);
+}
+
+#[test]
+fn pending_calls_replay_in_order() {
+    let core = Core::new(String::new()).unwrap();
+    core.pending_add("star".into(), vec![Param { key: "id".into(), value: "a b".into() }]).unwrap();
+    core.pending_add("scrobble".into(), vec![]).unwrap();
+    let l = core.pending_list().unwrap();
+    assert_eq!((l.len(), l[0].endpoint.as_str(), l[0].params[0].value.as_str()), (2, "star", "a b"));
+    core.pending_done(l[0].row_id).unwrap();
+    assert_eq!(core.pending_list().unwrap()[0].endpoint, "scrobble");
+}

@@ -36,6 +36,13 @@ impl From<rusqlite::Error> for CoreError {
 type Result<T> = std::result::Result<T, CoreError>;
 
 #[derive(Debug, Clone, uniffi::Record)]
+pub struct PendingCall {
+    pub row_id: i64,
+    pub endpoint: String,
+    pub params: Vec<Param>,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct Param {
     pub key: String,
     pub value: String,
@@ -156,6 +163,18 @@ struct LyricsList {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct Share {
+    url: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Shares {
+    share: Vec<Share>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct QueueWire {
     entry: Vec<Song>,
     current: Option<serde_json::Value>,
@@ -190,6 +209,7 @@ struct Response {
     artist_info2: Option<ArtistInfoWire>,
     lyrics_list: Option<LyricsList>,
     play_queue: Option<QueueWire>,
+    shares: Option<Shares>,
 }
 
 #[derive(Deserialize)]
@@ -379,6 +399,10 @@ impl Core {
         })
     }
 
+    pub fn parse_share(&self, body: Vec<u8>) -> Result<String> {
+        parse(&body)?.shares.and_then(|s| s.share.into_iter().next()).map(|s| s.url).filter(|u| !u.is_empty()).ok_or(CoreError::Parse { reason: "no share in response".into() })
+    }
+
     pub fn parse_play_queue(&self, body: Vec<u8>) -> Result<PlayQueue> {
         let q = parse(&body)?.play_queue.unwrap_or_default();
         let current = q.current.map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
@@ -444,23 +468,38 @@ impl Core {
         Ok(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position })
     }
 
-    // ---- scrobbles made while offline ----
+    // ---- writes made while offline (stars, ratings, playlist edits, scrobbles), replayed in order ----
 
-    pub fn scrobble_enqueue(&self, song_id: String, time_ms: i64) -> Result<()> {
-        self.db.lock().execute("INSERT INTO scrobbles(song_id, time_ms) VALUES(?1, ?2)", params![song_id, time_ms])?;
+    pub fn pending_add(&self, endpoint: String, params: Vec<Param>) -> Result<()> {
+        let json = serde_json::to_string(&params.iter().map(|p| (&p.key, &p.value)).collect::<Vec<_>>()).unwrap_or_default();
+        self.db.lock().execute("INSERT INTO pending(endpoint, params) VALUES(?1, ?2)", params![endpoint, json])?;
         Ok(())
     }
 
-    pub fn scrobble_pending(&self) -> Result<Vec<PendingScrobble>> {
+    pub fn pending_list(&self) -> Result<Vec<PendingCall>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT rowid, song_id, time_ms FROM scrobbles ORDER BY rowid LIMIT 200")?;
-        let rows = st.query_map([], |r| Ok(PendingScrobble { row_id: r.get(0)?, song_id: r.get(1)?, time_ms: r.get(2)? }))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut st = c.prepare_cached("SELECT rowid, endpoint, params FROM pending ORDER BY rowid LIMIT 200")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .map(|(row_id, endpoint, json)| {
+                let pairs: Vec<(String, String)> = serde_json::from_str(&json).unwrap_or_default();
+                PendingCall { row_id, endpoint, params: pairs.into_iter().map(|(key, value)| Param { key, value }).collect() }
+            })
+            .collect())
     }
 
-    pub fn scrobble_done(&self, row_id: i64) -> Result<()> {
-        self.db.lock().execute("DELETE FROM scrobbles WHERE rowid=?1", [row_id])?;
+    pub fn pending_done(&self, row_id: i64) -> Result<()> {
+        self.db.lock().execute("DELETE FROM pending WHERE rowid=?1", [row_id])?;
         Ok(())
+    }
+
+    /// A page of every indexed song, for "download the whole library".
+    pub fn indexed_songs(&self, offset: u32, limit: u32) -> Result<Vec<Song>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT json FROM items WHERE kind=?1 ORDER BY rowid LIMIT ?3 OFFSET ?2")?;
+        let rows = st.query_map(params![db::SONG, offset, limit], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
     }
 
     // ---- downloads: the metadata side; media3 owns the bytes ----
@@ -509,6 +548,31 @@ impl Core {
         self.db.lock().execute("DELETE FROM searches", [])?;
         Ok(())
     }
+}
+
+/// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
+/// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
+#[uniffi::export]
+pub fn parse_eq_preset(text: String) -> EqPreset {
+    let mut preset = EqPreset::default();
+    for line in text.lines() {
+        let t: Vec<&str> = line.split_whitespace().collect();
+        let after = |key: &str| t.iter().position(|w| w.eq_ignore_ascii_case(key)).and_then(|i| t.get(i + 1)).and_then(|v| v.parse::<f32>().ok());
+        if t.first().is_some_and(|w| w.eq_ignore_ascii_case("preamp:")) {
+            preset.preamp_db = t.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
+        } else if t.first().is_some_and(|w| w.eq_ignore_ascii_case("filter")) {
+            let Some(on) = t.iter().position(|w| w.eq_ignore_ascii_case("ON")) else { continue };
+            let kind = match t.get(on + 1).map(|k| k.to_ascii_uppercase()).as_deref() {
+                Some("PK") | Some("PEQ") => EqKind::Peaking,
+                Some("LS") | Some("LSC") | Some("LSQ") => EqKind::LowShelf,
+                Some("HS") | Some("HSC") | Some("HSQ") => EqKind::HighShelf,
+                _ => continue,
+            };
+            let (Some(freq), Some(gain_db)) = (after("Fc"), after("Gain")) else { continue };
+            preset.bands.push(EqBand { kind, freq, gain_db, q: after("Q").unwrap_or(0.71) });
+        }
+    }
+    preset
 }
 
 #[cfg(test)]

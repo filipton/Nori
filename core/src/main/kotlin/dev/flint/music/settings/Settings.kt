@@ -7,6 +7,20 @@ import kotlinx.coroutines.flow.StateFlow
 
 enum class ReplayGainMode { OFF, TRACK, ALBUM }
 
+enum class BandKind { PEAKING, LOW_SHELF, HIGH_SHELF }
+
+/** One equalizer filter. The ten default bands are peaking filters an octave apart. */
+data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float) {
+    companion object {
+        val GRAPHIC = listOf(31f, 62f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f).map { Band(BandKind.PEAKING, it, 0f, 1.41f) }
+        fun decode(s: String?): List<Band>? = s?.split(';')?.mapNotNull { b ->
+            val p = b.split(':')
+            if (p.size != 4) null else runCatching { Band(BandKind.entries[p[0].toInt()], p[1].toFloat(), p[2].toFloat(), p[3].toFloat()) }.getOrNull()
+        }?.takeIf { it.isNotEmpty() }
+        fun encode(bands: List<Band>) = bands.joinToString(";") { "${it.kind.ordinal}:${it.freq}:${it.gainDb}:${it.q}" }
+    }
+}
+
 /** One stream quality: [bitRate] 0 and empty [format] mean the original file. */
 data class Quality(val bitRate: Int = 0, val format: String = "") {
     val key get() = "$bitRate$format"
@@ -22,7 +36,7 @@ data class Prefs(
     val cacheMb: Int = 1024,
     val replayGain: ReplayGainMode = ReplayGainMode.OFF,
     val preampDb: Float = 0f,
-    /** Decode on the audio DSP and let the CPU sleep. Off whenever the equalizer is on. */
+    /** Decode on the audio DSP and let the CPU sleep. Only possible while nothing has to touch samples. */
     val offload: Boolean = true,
     /** Ask Android 14+ for an unmixed, unresampled path to a USB DAC. */
     val bitPerfect: Boolean = false,
@@ -32,11 +46,25 @@ data class Prefs(
     /** When the last queued song starts, queue songs similar to it. */
     val autoFill: Boolean = true,
     val eqEnabled: Boolean = false,
-    /** Gains in dB for [dev.flint.music.playback.Equalizer.FREQUENCIES]. */
-    val eqGains: List<Float> = List(10) { 0f },
+    val eqBands: List<Band> = Band.GRAPHIC,
+    /** Null: pulled down automatically by the largest boost, so the curve cannot clip. */
+    val eqPreampDb: Float? = null,
+    /** Headphone crossfeed level in dB; 0 is off. */
+    val crossfeedDb: Float = 0f,
+    val crossfadeSec: Int = 0,
+    val speed: Float = 1f,
+    val skipSilence: Boolean = false,
+    /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
+    val scrobblePercent: Int = 50,
     val liveSearchDelayMs: Int = 350,
 ) {
     val loggedIn get() = serverUrl.isNotEmpty() && user.isNotEmpty()
+
+    /** Something in the sample domain is switched on: equalizer or crossfeed. */
+    val dsp get() = eqEnabled || crossfeedDb > 0f
+
+    /** What the pre-amp actually is, automatic headroom included. */
+    val effectivePreampDb get() = if (!eqEnabled) 0f else eqPreampDb ?: -(eqBands.maxOfOrNull { it.gainDb } ?: 0f).coerceAtLeast(0f)
 }
 
 /**
@@ -77,7 +105,13 @@ class Settings(context: Context) {
             scrobble = sp.getBoolean("scrobble", true),
             autoFill = sp.getBoolean("autoFill", true),
             eqEnabled = sp.getBoolean("eqEnabled", false),
-            eqGains = sp.getString("eqGains", null)?.split(',')?.mapNotNull { it.toFloatOrNull() }?.takeIf { it.size == 10 } ?: d.eqGains,
+            eqBands = Band.decode(sp.getString("eqBands", null)) ?: d.eqBands,
+            eqPreampDb = if (sp.contains("eqPreampDb")) sp.getFloat("eqPreampDb", 0f) else null,
+            crossfeedDb = sp.getFloat("crossfeedDb", 0f),
+            crossfadeSec = sp.getInt("crossfadeSec", 0),
+            speed = sp.getFloat("speed", 1f),
+            skipSilence = sp.getBoolean("skipSilence", false),
+            scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
         )
     }
@@ -90,7 +124,10 @@ class Settings(context: Context) {
         putInt("cacheMb", p.cacheMb)
         putInt("replayGain", p.replayGain.ordinal); putFloat("preampDb", p.preampDb)
         putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
-        putBoolean("eqEnabled", p.eqEnabled); putString("eqGains", p.eqGains.joinToString(","))
+        putBoolean("eqEnabled", p.eqEnabled); putString("eqBands", Band.encode(p.eqBands))
+        if (p.eqPreampDb == null) remove("eqPreampDb") else putFloat("eqPreampDb", p.eqPreampDb)
+        putFloat("crossfeedDb", p.crossfeedDb); putInt("crossfadeSec", p.crossfadeSec)
+        putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
     }.apply()
 }

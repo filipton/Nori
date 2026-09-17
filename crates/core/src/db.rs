@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS items(rowid INTEGER PRIMARY KEY, kind INTEGER NOT NUL
 CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(text, tokenize='unicode61 remove_diacritics 2', prefix='2 3');
 CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, body BLOB NOT NULL, ts INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS scrobbles(rowid INTEGER PRIMARY KEY, song_id TEXT NOT NULL, time_ms INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, endpoint TEXT NOT NULL, params TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS downloads(id TEXT PRIMARY KEY, json TEXT NOT NULL, ts INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS searches(query TEXT PRIMARY KEY, ts INTEGER NOT NULL) WITHOUT ROWID;
 ";
@@ -120,7 +120,7 @@ pub fn count(c: &Connection, kind: i64) -> rusqlite::Result<u32> {
 }
 
 pub fn clear_library(c: &Connection) -> rusqlite::Result<()> {
-    c.execute_batch("DELETE FROM items; DELETE FROM fts; DELETE FROM cache; DELETE FROM scrobbles; DELETE FROM kv WHERE key='queue';")
+    c.execute_batch("DELETE FROM items; DELETE FROM fts; DELETE FROM cache; DELETE FROM pending; DELETE FROM kv WHERE key='queue';")
 }
 
 pub fn kv_get(c: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

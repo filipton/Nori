@@ -50,6 +50,11 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     fun starArtist(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ARTIST, id, on) }
     fun rate(song: Song, rating: Int) = attempt("Rated") { flint.library.rate(song.id, rating) }
 
+    private val _shares = Channel<String>(Channel.BUFFERED)
+    /** Links ready to hand to the system share sheet. */
+    val shares = _shares.receiveAsFlow()
+    fun share(id: String) = attempt(null) { _shares.send(flint.library.share(id)) }
+
     fun download(songs: List<Song>) { flint.downloads.download(songs); _messages.trySend("Downloading ${songs.size} song${if (songs.size == 1) "" else "s"}") }
     fun downloadAlbum(a: Album) = attempt(null) { download(flint.library.albumSongs(a.id)) }
     fun removeDownloads(ids: List<String>) = flint.downloads.remove(ids)

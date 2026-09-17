@@ -175,10 +175,23 @@ private fun Genres(vm: GenresViewModel = viewModel()) {
 @Composable
 private fun Radio(vm: RadioViewModel = viewModel()) {
     val load by vm.stations.collectAsStateWithLifecycle()
+    var adding by remember { mutableStateOf(false) }
+    var name by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+    if (adding) AlertDialog(
+        onDismissRequest = { adding = false }, title = { Text("New station") },
+        text = { Column { OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true); OutlinedTextField(url, { url = it }, label = { Text("Stream URL") }, singleLine = true) } },
+        confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = name.isNotBlank() && url.startsWith("http")) { Text("Add") } },
+    )
     LoadBox(load) { stations ->
         LazyColumn {
-            if (stations.isEmpty()) item { Text("No internet radio stations on this server", Modifier.padding(16.dp)) }
-            items(stations, key = { it.id }) { s -> Text(s.name, Modifier.fillMaxWidth().clickable { vm.play(s) }.padding(16.dp)) }
+            item { Row(Modifier.fillMaxWidth().clickable { adding = true }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New station", Modifier.padding(start = 12.dp)) } }
+            items(stations, key = { it.id }) { s ->
+                Row(Modifier.fillMaxWidth().clickable { vm.play(s) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(s.name, Modifier.weight(1f))
+                    IconButton({ vm.delete(s.id) }) { Icon(Icons.Filled.Delete, "Delete") }
+                }
+            }
         }
     }
 }

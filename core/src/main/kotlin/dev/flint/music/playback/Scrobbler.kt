@@ -8,7 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Counts a play once half the track (or four minutes) has actually been heard.
+ * Counts a play once the configured share of the track (or four minutes) has actually been heard.
  * There is no timer: listening time is summed from play/pause edges and judged
  * when the track ends, which is a moment the radio is awake anyway.
  */
@@ -35,22 +35,11 @@ class Scrobbler(private val flint: Flint, private val scope: CoroutineScope) {
         startedAt = System.currentTimeMillis()
         onPlaying(playing)
         if (!flint.settings.value.scrobble) return
+        val percent = flint.settings.value.scrobblePercent.coerceIn(10, 100)
         scope.launch(Dispatchers.IO) {
-            if (done != null && heard >= minOf(done.duration.toLong() * 500, 240_000L).coerceAtLeast(10_000L)) submit(done.id, at)
-            if (next != null) runCatching { flint.library.scrobble(next.id, submission = false) }
-        }
-    }
-
-    private suspend fun submit(id: String, at: Long) {
-        try {
-            flint.library.scrobble(id, submission = true, timeMs = at)
-            for (p in flint.core.scrobblePending()) {
-                flint.library.scrobble(p.songId, submission = true, timeMs = p.timeMs)
-                flint.core.scrobbleDone(p.rowId)
-            }
-        } catch (e: Exception) {
-            // Offline: keep it for the next time a scrobble gets through.
-            runCatching { flint.core.scrobbleEnqueue(id, at) }
+            // Both are writes: made offline, they wait in the pending queue and keep their original time.
+            if (done != null && heard >= minOf(done.duration.toLong() * 10 * percent, 240_000L).coerceAtLeast(10_000L)) runCatching { flint.library.scrobble(done.id, submission = true, timeMs = at) }
+            if (next != null) runCatching { flint.library.nowPlaying(next.id) }
         }
     }
 }

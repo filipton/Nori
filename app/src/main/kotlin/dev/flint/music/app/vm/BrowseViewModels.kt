@@ -29,6 +29,9 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 data class HomeUi(val recent: List<Album> = emptyList(), val newest: List<Album> = emptyList(), val frequent: List<Album> = emptyList(), val random: List<Album> = emptyList())
 
 class HomeViewModel(app: Application) : FlintViewModel(app) {
+    // The app was opened: a good moment to replay whatever was starred, rated or played while offline.
+    init { viewModelScope.launch { runCatching { flint.library.flushPending() } } }
+
     private fun row(sort: AlbumSort) = flint.library.albums(sort, size = 20).catch { emit(emptyList()) }.onStart { emit(emptyList()) }
 
     val ui: StateFlow<Load<HomeUi>> =
@@ -95,8 +98,12 @@ class GenresViewModel(app: Application) : FlintViewModel(app) {
 }
 
 class RadioViewModel(app: Application) : FlintViewModel(app) {
-    val stations: StateFlow<Load<List<RadioStation>>> = flint.library.radio().asLoad()
+    private val refresh = MutableStateFlow(0)
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val stations: StateFlow<Load<List<RadioStation>>> = refresh.flatMapLatest { flint.library.radio() }.asLoad()
     fun play(s: RadioStation) = flint.player.playRadio(s)
+    fun add(name: String, url: String) = viewModelScope.launch { runCatching { flint.library.createRadio(name, url) }; refresh.value++ }
+    fun delete(id: String) = viewModelScope.launch { runCatching { flint.library.deleteRadio(id) }; refresh.value++ }
 }
 
 // ---- detail screens; ids arrive through [open] because the UI layer owns navigation ----

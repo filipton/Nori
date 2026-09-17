@@ -68,6 +68,7 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
             Item("Add to playlist…") { picking = true }
             if (song.id in downloads.doneIds || song.id in downloads.pendingIds) Item("Remove download") { actions.removeDownloads(listOf(song.id)); onDismiss() }
             else Item("Download") { actions.download(listOf(song)); onDismiss() }
+            if (!song.isExternal) Item("Share link") { actions.share(song.id); onDismiss() }
             song.albumId?.let { id -> Item("Go to album") { nav.album(id); onDismiss() } }
             song.artistId?.let { id -> Item("Go to artist") { nav.artist(id); onDismiss() } }
         }

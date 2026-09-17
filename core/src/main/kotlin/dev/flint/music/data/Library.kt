@@ -131,9 +131,32 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
 
     // ---- writes; each drops the cached reads it makes stale ----
 
-    private suspend fun write(endpoint: String, params: List<Param>, vararg stale: String) {
-        call(endpoint, params, { core.parseStatus(it) })
-        stale.forEach({ core.cacheEvict(it) })
+    /**
+     * A write that cannot reach the server is kept and replayed later, in order, so stars, ratings,
+     * playlist edits and plays made offline are not lost. The UI is told it worked either way.
+     */
+    private suspend fun write(endpoint: String, params: List<Param>, vararg stale: String) = withContext(Dispatchers.IO) {
+        try {
+            core.parseStatus(http.get(core.url(endpoint, params)))
+            flushPending()
+        } catch (e: java.io.IOException) {
+            core.pendingAdd(endpoint, params)
+        }
+        stale.forEach(core::cacheEvict)
+    }
+
+    /** Replays queued writes. Stops at the first network failure; a write the server rejects is dropped. */
+    suspend fun flushPending() = withContext(Dispatchers.IO) {
+        for (p in core.pendingList()) {
+            try {
+                core.parseStatus(http.get(core.url(p.endpoint, p.params)))
+            } catch (e: java.io.IOException) {
+                return@withContext
+            } catch (e: Exception) {
+                // rejected: replaying it again would not help
+            }
+            core.pendingDone(p.rowId)
+        }
     }
 
     suspend fun star(kind: StarKind, id: String, on: Boolean) =
@@ -151,6 +174,18 @@ class Library(lazyCore: Lazy<Core>, lazyHttp: Lazy<Http>) {
         write("updatePlaylist", params("playlistId" to id, "songIndexToRemove" to index), "getPlaylist")
 
     suspend fun deletePlaylist(id: String) = write("deletePlaylist", params("id" to id), "getPlaylist")
+
+    /** Not worth queueing: by the time it could be replayed it is no longer true. */
+    suspend fun nowPlaying(id: String) { call("scrobble", params("id" to id, "submission" to false)) { core.parseStatus(it) } }
+
+    suspend fun createRadio(name: String, streamUrl: String) = write("createInternetRadioStation", params("name" to name, "streamUrl" to streamUrl), "getInternetRadioStations")
+    suspend fun deleteRadio(id: String) = write("deleteInternetRadioStation", params("id" to id), "getInternetRadioStations")
+
+    /** A public link to a song or album; the server must have sharing enabled. */
+    suspend fun share(id: String): String = call("createShare", params("id" to id)) { core.parseShare(it) }
+
+    /** Every song in the offline index, a page at a time. */
+    suspend fun indexedSongs(offset: Int, limit: Int): List<Song> = withContext(Dispatchers.IO) { core.indexedSongs(offset.toUInt(), limit.toUInt()) }
 
     /** [submission] false marks "now playing"; true counts the play. */
     suspend fun scrobble(id: String, submission: Boolean, timeMs: Long? = null) =
