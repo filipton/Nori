@@ -29,6 +29,19 @@ tools/dev-server.sh                                 # Navidrome at http://10.0.2
 
 Run `cargo test` and a build before committing.
 
+## Building an APK
+
+`tools/apk.sh` builds a release APK for a phone: arm64 by default, `tools/apk.sh x86_64` for an
+emulator, `tools/apk.sh --install` to push it straight to whatever is connected. It lands in
+`build/flint-music-<version>-<abi>.apk` and prints which ABIs are inside. The signature is the Android
+debug key, which installs and updates on your own device but cannot be published.
+
+`tools/app.sh` drives a **debug** build over adb without touching the screen - `open <route>`,
+`play "search:…"`, `do download album:<id>`, `set limiter true`, `state` (one JSON line of route,
+playback, DSP and download state). `tools/audio-e2e.sh` and `tools/feature-e2e.sh` are built on it and
+check playback and the rest of the app against a real server. When adding a feature, add its check
+there: a screenshot proves a screen renders, not that the feature works.
+
 ## Performance rules
 
 - Nothing polls or ticks while music plays with the screen off. The seek bar is the only timer,
