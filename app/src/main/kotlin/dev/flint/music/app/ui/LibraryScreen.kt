@@ -7,6 +7,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -22,6 +24,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Radio
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
@@ -198,7 +203,7 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
             item { Chip("★ Favourites", starred) { vm.setStarredOnly(!starred) } }
             items(SongSort.entries) { s -> Chip(s.label, sort == s) { vm.setSort(s) } }
         }
-        if (songs.isEmpty()) Text("Nothing in the offline index yet. Settings → Sync all fills it.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (songs.isEmpty()) EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.")
         LazyColumn(state = list) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
     }
 }
@@ -209,11 +214,9 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
     val nav = LocalNav.current
     LoadBox(load) { decades ->
         LazyColumn {
-            if (decades.isEmpty()) item { Text("Nothing in the offline index yet. Settings → Sync all fills it.", Modifier.padding(16.dp)) }
+            if (decades.isEmpty()) item { EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.") }
             items(decades, key = { it.name }) { d ->
-                Row(Modifier.fillMaxWidth().clickable { nav.decade(d.name.toInt()) }.padding(16.dp)) {
-                    Text("${d.name}s", Modifier.weight(1f)); Text("${d.songCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                NavRow("${d.name}s", { nav.decade(d.name.toInt()) }, trailing = "${d.songCount}", chevron = true)
             }
         }
     }
@@ -223,7 +226,16 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
 private fun Folders(vm: FoldersViewModel = viewModel()) {
     val load by vm.roots.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    LoadBox(load) { roots -> LazyColumn { items(roots, key = { it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = Space.gutter, vertical = 15.dp)) } } }
+    LoadBox(load) { roots ->
+        LazyColumn {
+            items(roots, key = { it.id }) { f ->
+                NavRow(
+                    f.name, { nav.folder(f.id) }, chevron = true,
+                    leading = { Icon(Icons.Filled.Folder, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -240,22 +252,21 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
     }
     if (creating) AlertDialog(
         onDismissRequest = { creating = false }, title = { Text("New playlist") },
-        text = { OutlinedTextField(name, { name = it }, singleLine = true) },
+        text = { FormField(name, { name = it }, label = { Text("Name") }, singleLine = true) },
         confirmButton = { TextButton({ vm.create(name.trim()); name = ""; creating = false }, enabled = name.isNotBlank()) { Text("Create") } },
     )
     LoadBox(load) { playlists ->
         LazyColumn {
-            item { Row(Modifier.fillMaxWidth().clickable { creating = true }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New playlist", Modifier.padding(start = 12.dp)) } }
-            item { Text("Import M3U…", Modifier.fillMaxWidth().clickable { pickM3u.launch(arrayOf("*/*")) }.padding(horizontal = Space.gutter, vertical = 13.dp), color = MaterialTheme.colorScheme.primary) }
+            item { ActionRow("New playlist", Icons.Filled.Add, { creating = true }) }
+            item { ActionRow("Import M3U…", Icons.Filled.FileDownload, { pickM3u.launch(arrayOf("*/*")) }) }
+            if (playlists.isEmpty()) item { EmptyNote("No playlists yet") }
             items(playlists, key = { it.id }) { p ->
-                Row(Modifier.fillMaxWidth().clickable { nav.playlist(p.id) }.padding(start = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp)
-                    Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                        Text(p.name)
-                        Text("${p.songCount} songs · ${duration(p.duration.toLong())}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    IconButton({ vm.delete(p.id) }) { Icon(Icons.Filled.Delete, "Delete") }
-                }
+                NavRow(
+                    p.name, { nav.playlist(p.id) },
+                    subtitle = "${p.songCount} songs · ${duration(p.duration.toLong())}",
+                    leading = { Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp) },
+                    action = { IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Delete, "Delete", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
+                )
             }
         }
     }
@@ -273,7 +284,12 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
                     items(s.albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id) }) }
                 }
             }
-            items(s.artists, key = { "ar" + it.id }) { a -> Text(a.name, Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(16.dp)) }
+            items(s.artists, key = { "ar" + it.id }) { a ->
+                NavRow(
+                    a.name, { nav.artist(a.id) }, chevron = true,
+                    leading = { Cover(vm.cover(a.coverArt, CoverSize.ROW), 44.dp, radius = 22.dp) },
+                )
+            }
             songRows(s.songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }
@@ -286,10 +302,7 @@ private fun Genres(vm: GenresViewModel = viewModel()) {
     LoadBox(load) { genres ->
         LazyColumn {
             items(genres, key = { it.name }) { g ->
-                Row(Modifier.fillMaxWidth().clickable { nav.genre(g.name) }.padding(16.dp)) {
-                    Text(g.name, Modifier.weight(1f))
-                    Text("${g.songCount}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                NavRow(g.name, { nav.genre(g.name) }, trailing = "${g.songCount}", chevron = true)
             }
         }
     }
@@ -303,17 +316,19 @@ private fun Radio(vm: RadioViewModel = viewModel()) {
     var url by remember { mutableStateOf("") }
     if (adding) AlertDialog(
         onDismissRequest = { adding = false }, title = { Text("New station") },
-        text = { Column { OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true); OutlinedTextField(url, { url = it }, label = { Text("Stream URL") }, singleLine = true) } },
+        text = { Column { FormField(name, { name = it }, label = { Text("Name") }, singleLine = true); Spacer(Modifier.height(10.dp)); FormField(url, { url = it }, label = { Text("Stream URL") }, singleLine = true) } },
         confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = name.isNotBlank() && url.startsWith("http")) { Text("Add") } },
     )
     LoadBox(load) { stations ->
         LazyColumn {
-            item { Row(Modifier.fillMaxWidth().clickable { adding = true }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New station", Modifier.padding(start = 12.dp)) } }
+            item { ActionRow("New station", Icons.Filled.Add, { adding = true }) }
+            if (stations.isEmpty()) item { EmptyNote("No stations yet") }
             items(stations, key = { it.id }) { s ->
-                Row(Modifier.fillMaxWidth().clickable { vm.play(s) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(s.name, Modifier.weight(1f))
-                    IconButton({ vm.delete(s.id) }) { Icon(Icons.Filled.Delete, "Delete") }
-                }
+                NavRow(
+                    s.name, { vm.play(s) },
+                    leading = { Icon(Icons.Filled.Radio, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
+                    action = { IconButton({ vm.delete(s.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Delete, "Delete", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
+                )
             }
         }
     }
@@ -325,8 +340,8 @@ private fun Downloads(actions: ActionsViewModel) {
     val menu = LocalSongMenu.current
     val vm: StarredViewModel = viewModel()
     LazyColumn {
-        if (d.pending.isNotEmpty()) item(key = "pending") { Text("${d.pending.size} downloading…", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        if (d.done.isEmpty() && d.pending.isEmpty()) item { Text("Nothing downloaded yet", Modifier.padding(16.dp)) }
+        if (d.pending.isNotEmpty()) item(key = "pending") { Caption("${d.pending.size} downloading…", Modifier.padding(horizontal = Space.gutter, vertical = 10.dp)) }
+        if (d.done.isEmpty() && d.pending.isEmpty()) item { EmptyNote("Nothing downloaded yet") }
         songRows(d.done, actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }

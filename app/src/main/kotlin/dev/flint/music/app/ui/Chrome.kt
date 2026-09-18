@@ -21,6 +21,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -56,31 +57,34 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
         Column(Modifier.background(bar)) {
             Hairline(startIndent = 0.dp)
             Row(
-                Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 7.dp, bottom = 5.dp),
+                Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 8.dp, bottom = 7.dp),
                 Arrangement.SpaceEvenly, Alignment.CenterVertically,
             ) { tabs.forEach { t -> TabButton(t, selected = route == t.route) { onTab(t.route) } } }
         }
     }
 }
 
-data class Tab(val route: String, val label: String, val icon: ImageVector, val outline: ImageVector)
+data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 @Composable
 private fun TabButton(tab: Tab, selected: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = 0.75f)
+    // Apple Music keeps the same solid glyph in both states and lets colour alone say which tab you are
+    // on - swapping outline for solid belongs to Files and Photos, not to a music app. There is also no
+    // ripple: a tab bar on iOS answers instantly and silently, and a spreading circle reads as Android.
+    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = 0.8f)
+    val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Column(
-        Modifier.clip(PillShape).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 2.dp)
+        Modifier.clickable(interactionSource = press, indication = null, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 2.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // Outline when it is somewhere to go, solid when it is where you are: the difference does the
-        // work an indicator pill would otherwise have to do.
-        Icon(if (selected) tab.icon else tab.outline, null, Modifier.size(22.dp), tint = color)
+        Icon(tab.icon, null, Modifier.size(25.dp), tint = color)
         Text(
-            tab.label, Modifier.padding(top = 2.dp),
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
-            color = color, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+            tab.label, Modifier.padding(top = 1.dp),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, letterSpacing = 0.sp),
+            color = color, fontWeight = FontWeight.Medium,
         )
     }
 }

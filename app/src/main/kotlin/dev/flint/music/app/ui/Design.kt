@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -16,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
@@ -423,4 +426,66 @@ fun FormField(
             unfocusedBorderColor = Color.Transparent,
         ),
     )
+}
+
+/**
+ * The list row every browsing screen shares: something on the left, a title (and maybe a second line),
+ * a value or a chevron on the right, and a hairline that starts where the text does. Genres, decades,
+ * folders, playlists and stations all used to draw their own row, each with its own padding, which is
+ * what made the library feel like several apps stitched together.
+ */
+@Composable
+fun NavRow(
+    title: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    trailing: String? = null,
+    leading: (@Composable () -> Unit)? = null,
+    chevron: Boolean = false,
+    divider: Boolean = true,
+    action: (@Composable RowScope.() -> Unit)? = null,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onClick)
+                .padding(start = Space.gutter, end = if (action != null) 4.dp else Space.gutter, top = 11.dp, bottom = 11.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (leading != null) { leading(); Spacer(Modifier.size(12.dp)) }
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!subtitle.isNullOrEmpty()) Text(
+                    subtitle, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!trailing.isNullOrEmpty()) Text(trailing, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant)
+            action?.invoke(this)
+            if (chevron) Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight, null,
+                Modifier.padding(start = 6.dp).size(19.dp), tint = scheme.onSurfaceVariant.copy(alpha = 0.7f),
+            )
+        }
+        if (divider) Hairline(startIndent = Space.gutter + (if (leading != null) 60.dp else 0.dp))
+    }
+}
+
+/** A row that does something rather than going somewhere: "New playlist", "Import M3U…". */
+@Composable
+fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Boolean = true) {
+    Column {
+        Row(
+            Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Space.gutter, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(
+                title, Modifier.padding(start = 12.dp),
+                style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        if (divider) Hairline(startIndent = Space.gutter + 32.dp)
+    }
 }
