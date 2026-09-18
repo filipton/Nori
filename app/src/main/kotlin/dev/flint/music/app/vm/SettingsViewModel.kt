@@ -162,6 +162,25 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
         _autoEq.update { if (it.query == query) it.copy(hits = hits) else it }
     }
 
+    /**
+     * What an output device might be in the AutoEQ database: "Bluetooth: LE_WH-1000XM5" -> "WH-1000XM5".
+     * Empty when the index is not downloaded or the name says nothing (the speaker, a generic "USB Audio").
+     */
+    suspend fun autoEqFor(output: String): List<AutoEqEntry> {
+        val name = output.substringAfter(": ", "").replace(Regex("^(LE[_-]|BT[_-])", RegexOption.IGNORE_CASE), "").replace('_', ' ').trim()
+        if (name.length < 3 || name.equals("DAC", true) || name.contains("USB Audio", true) || name.equals("device", true)) return emptyList()
+        return withContext(Dispatchers.IO) { runCatching { flint.core.autoeqSearch(name, 5u) }.getOrDefault(emptyList()) }
+    }
+
+    /** Applies [entry]'s curve and binds it, as a profile named after it, to [output]: next time it loads by itself. */
+    fun adoptAutoEq(entry: AutoEqEntry, output: String) = viewModelScope.launch {
+        applyAutoEq(entry).join()
+        if (_autoEq.value.applied == entry.name) {
+            runCatching { flint.core.profileSave(SoundProfile(entry.name, Sound.of(prefs.value).toJson(), listOf(output))) }
+            refreshProfiles()
+        }
+    }
+
     /** Fetches one headphone's parametric preset and makes it the current curve. */
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {
         _autoEq.update { it.copy(busy = true, error = null) }

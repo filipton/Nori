@@ -309,7 +309,9 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 The owner asked for these explicitly; they override the "UI later" note below.
 
-- USB DAC handling like Symfonium, and earphone-model auto EQ -> AutoEQ browser done; auto-suggest on connect planned; integer/exclusive USB output needs the owner's DAC.
+- USB DAC handling like Symfonium, and earphone-model auto EQ -> AutoEQ browser done; when a Bluetooth or USB device
+  connects whose name matches a measured headphone, the app offers its curve and remembers it for that device;
+  integer/exclusive USB output needs the owner's DAC.
 - Octo-fiesta-aware search, telling library and provider items apart, and the stale-cover bug (provider covers
   cached with their "not downloaded" badge) -> done: provider label, library/provider filter, provider covers never
   disk-cached, "add to library" (star makes octo-fiesta download it).

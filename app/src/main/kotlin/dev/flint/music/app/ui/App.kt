@@ -83,6 +83,15 @@ fun App() {
         val snackbar = remember { SnackbarHostState() }
         var menuSong by remember { mutableStateOf<Song?>(null) }
         LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
+        // Headphones or a DAC connected and nothing is bound to them yet: offer their AutoEQ curve, once per device.
+        val output by settings.currentOutput.collectAsStateWithLifecycle()
+        val profiles by settings.profiles.collectAsStateWithLifecycle()
+        LaunchedEffect(output) {
+            if (output == dev.flint.music.playback.Outputs.SPEAKER || profiles.any { output in it.outputs }) return@LaunchedEffect
+            val hit = settings.autoEqFor(output).firstOrNull() ?: return@LaunchedEffect
+            val result = snackbar.showSnackbar("${hit.name} connected. Use its AutoEQ curve?", actionLabel = "Apply", withDismissAction = true, duration = androidx.compose.material3.SnackbarDuration.Long)
+            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) settings.adoptAutoEq(hit, output)
+        }
         val context = LocalContext.current
         LaunchedEffect(Unit) {
             actions.shares.collect { url ->

@@ -30,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -129,6 +130,13 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             dismissButton = { TextButton({ naming = false }) { Text("Cancel") } },
         )
         Text("Playing through: $output", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val suggestions by produceState(emptyList<dev.flint.music.ffi.AutoEqEntry>(), output) { value = vm.autoEqFor(output) }
+        suggestions.take(3).forEach { e ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("${e.name} · ${e.source}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                TextButton({ vm.adoptAutoEq(e, output) }) { Text("Use for this device") }
+            }
+        }
         profiles.forEach { profile ->
             Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
