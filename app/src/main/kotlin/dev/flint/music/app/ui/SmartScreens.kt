@@ -1,6 +1,7 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Box
@@ -235,20 +236,112 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
     val s by vm.stats.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) { IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }; Text("Listening stats", style = MaterialTheme.typography.titleLarge) }
-        Row(Modifier.padding(horizontal = 16.dp), Arrangement.spacedBy(8.dp)) { listOf(7 to "Week", 30 to "Month", 365 to "Year", 0 to "All time").forEach { (d, l) -> FilterChip(days == d, { days = d }, { Text(l) }) } }
+        Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            Text("Listening", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+        }
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(listOf(7 to "Week", 30 to "Month", 365 to "Year", 0 to "All time")) { (d, l) -> Chip(l, days == d) { days = d } }
+        }
         val st = s ?: return@Column
-        Text("${st.plays} plays · ${duration(st.listenedMs / 1000)} listened", Modifier.padding(16.dp), style = MaterialTheme.typography.headlineSmall)
-        Text("${st.distinctSongs} songs · ${st.distinctArtists} artists · ${st.distinctAlbums} albums · ${st.skips} skips · ${st.activeDays} active days · longest streak ${st.longestStreakDays} days", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        // The headline: two numbers worth reading from across the room, the rest as a grid of tiles.
+        Column(Modifier.padding(horizontal = Space.gutter, vertical = 14.dp)) {
+            Text("${st.plays}", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
+            Text("plays · ${duration(st.listenedMs / 1000)} listened", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Row(Modifier.padding(horizontal = 14.dp), Arrangement.spacedBy(8.dp)) {
+            StatTile("${st.distinctSongs}", "songs", Modifier.weight(1f))
+            StatTile("${st.distinctArtists}", "artists", Modifier.weight(1f))
+            StatTile("${st.distinctAlbums}", "albums", Modifier.weight(1f))
+        }
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
+            StatTile("${st.skips}", "skips", Modifier.weight(1f))
+            StatTile("${st.activeDays}", "active days", Modifier.weight(1f))
+            StatTile("${st.longestStreakDays}", "day streak", Modifier.weight(1f))
+        }
+
         val peak = st.playsPerHour.withIndex().maxByOrNull { it.value }
-        if (peak != null && peak.value > 0u) Text("You listen most around ${peak.index}:00" + st.playsPerWeekday.withIndex().maxByOrNull { it.value }?.let { ", mostly on ${listOf("Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays")[it.index]}" }.orEmpty(), Modifier.padding(16.dp))
+        if (peak != null && peak.value > 0u) {
+            SectionTitle("When you listen")
+            HourChart(st.playsPerHour.map { it.toInt() })
+            Text(
+                "Most around ${peak.index}:00" + st.playsPerWeekday.withIndex().maxByOrNull { it.value }
+                    ?.let { ", mostly on ${listOf("Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays")[it.index]}" }.orEmpty(),
+                Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
         if (st.topSongs.isNotEmpty()) SectionTitle("Top songs")
-        st.topSongs.forEachIndexed { i, t -> Text("${i + 1}. ${t.song.title} — ${t.song.artist}  (${t.plays})", Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) }
+        st.topSongs.forEachIndexed { i, t -> RankRow(i + 1, t.song.title, t.song.artist, "${t.plays}") }
         if (st.topArtists.isNotEmpty()) SectionTitle("Top artists")
-        st.topArtists.forEachIndexed { i, t -> Text("${i + 1}. ${t.name}  (${t.plays} plays, ${duration(t.listenedMs / 1000)})", Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) }
+        st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, duration(t.listenedMs / 1000), "${t.plays}") }
         if (st.topAlbums.isNotEmpty()) SectionTitle("Top albums")
-        st.topAlbums.forEachIndexed { i, t -> Text("${i + 1}. ${t.name}  (${t.plays})", Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) }
+        st.topAlbums.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
         if (st.topGenres.isNotEmpty()) SectionTitle("Top genres")
-        st.topGenres.forEachIndexed { i, t -> Text("${i + 1}. ${t.name}  (${t.plays})", Modifier.padding(horizontal = 16.dp, vertical = 3.dp)) }
+        st.topGenres.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
+    }
+}
+
+/** One number and what it counts, on its own plate. */
+@Composable
+private fun StatTile(value: String, label: String, modifier: Modifier = Modifier) {
+    Surface(
+        shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
+            Text(value, style = MaterialTheme.typography.headlineSmall, maxLines = 1)
+            Caption(label, Modifier.padding(top = 2.dp))
+        }
+    }
+}
+
+/** Twenty-four bars, drawn: the shape of a listening day says more than "most around 20:00" alone. */
+@Composable
+private fun HourChart(perHour: List<Int>) {
+    val peak = (perHour.maxOrNull() ?: 0).coerceAtLeast(1)
+    val bar = MaterialTheme.colorScheme.primary
+    val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+    Column(Modifier.padding(horizontal = Space.gutter)) {
+        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(96.dp)) {
+            val gap = size.width / 24f * 0.28f
+            val w = size.width / 24f - gap
+            perHour.forEachIndexed { h, plays ->
+                val x = h * (w + gap)
+                val tall = size.height * (plays / peak.toFloat())
+                drawRoundRect(dim, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Size(w, size.height), androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f))
+                if (plays > 0) drawRoundRect(
+                    bar, androidx.compose.ui.geometry.Offset(x, size.height - tall),
+                    androidx.compose.ui.geometry.Size(w, tall), androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f),
+                )
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), Arrangement.SpaceBetween) {
+            listOf("00", "06", "12", "18", "23").forEach { Caption(it) }
+        }
+    }
+}
+
+/** A place in a chart: rank, what it is, and how often. */
+@Composable
+private fun RankRow(rank: Int, title: String, subtitle: String, count: String) {
+    Column {
+        Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                "$rank", Modifier.width(28.dp), style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Column(Modifier.weight(1f).padding(end = 10.dp)) {
+                Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                if (subtitle.isNotEmpty()) Text(
+                    subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            Text(count, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Hairline(startIndent = Space.gutter + 28.dp)
     }
 }

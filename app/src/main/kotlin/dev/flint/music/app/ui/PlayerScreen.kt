@@ -5,6 +5,11 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.zIndex
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -323,15 +328,58 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
 private fun Queue(vm: PlayerViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val list = rememberLazyListState(initialFirstVisibleItemIndex = state.index.coerceAtLeast(0))
+    // Reorder by dragging the handle: the dragged row follows the finger, and each time it has travelled
+    // a full row the queue itself moves, so what you see is always the real order rather than a preview.
+    var dragIndex by remember { mutableIntStateOf(-1) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var rowHeight by remember { mutableFloatStateOf(0f) }
+    val haptics = LocalHapticFeedback.current
+
     LazyColumn(Modifier.fillMaxSize(), state = list) {
+        item(key = "next") { Caption("Playing next", Modifier.padding(top = 4.dp, bottom = 8.dp)) }
         itemsIndexed(state.queue, key = { i, s -> "$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
-            Row(Modifier.fillMaxWidth().clickable { vm.skipTo(i) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            val dragged = i == dragIndex
+            Row(
+                Modifier.fillMaxWidth()
+                    .zIndex(if (dragged) 1f else 0f)
+                    .graphicsLayer { if (dragged) { translationY = dragOffset; shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f } }
+                    .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
+                    .clickable { vm.skipTo(i) }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
+                        color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    )
                     Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                IconButton({ vm.remove(i) }, Modifier.size(38.dp)) { Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                IconButton({ vm.remove(i) }, Modifier.size(38.dp)) {
+                    Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(
+                    Icons.Filled.DragHandle, "Reorder", tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(38.dp).padding(8.dp).pointerInput(state.queue.size) {
+                        detectDragGestures(
+                            onDragStart = { dragIndex = i; dragOffset = 0f; haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
+                            onDragEnd = { dragIndex = -1; dragOffset = 0f },
+                            onDragCancel = { dragIndex = -1; dragOffset = 0f },
+                        ) { change, drag ->
+                            change.consume()
+                            if (dragIndex < 0) return@detectDragGestures
+                            dragOffset += drag.y
+                            val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGestures
+                            while (dragOffset >= h && dragIndex < state.queue.lastIndex) {
+                                vm.move(dragIndex, dragIndex + 1); dragIndex++; dragOffset -= h
+                            }
+                            while (dragOffset <= -h && dragIndex > 0) {
+                                vm.move(dragIndex, dragIndex - 1); dragIndex--; dragOffset += h
+                            }
+                        }
+                    },
+                )
             }
         }
     }
