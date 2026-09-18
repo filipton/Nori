@@ -6,6 +6,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
@@ -41,6 +42,10 @@ import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.PlayerViewModel
 import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.ffi.Song
+
+/** Plain screens sit below the status bar; album, artist and playlist pages draw under it. */
+@Composable
+private fun Inset(content: @Composable () -> Unit) = androidx.compose.foundation.layout.Box(Modifier.statusBarsPadding()) { content() }
 
 /** Navigation as the screens see it; they never touch the NavController. */
 class Nav(private val c: NavHostController) {
@@ -115,23 +120,23 @@ fun App() {
                     }
                 },
             ) { pad ->
-                NavHost(controller, "home", Modifier.padding(pad)) {
-                    composable("home") { HomeScreen(actions) }
-                    composable("search") { SearchScreen(actions) }
-                    composable("library") { LibraryScreen(actions) }
-                    composable("settings") { SettingsScreen(settings) }
-                    composable("equalizer") { EqualizerScreen(settings) }
-                    composable("autoeq") { AutoEqScreen(settings) }
+                NavHost(controller, "home", Modifier.padding(bottom = pad.calculateBottomPadding())) {
+                    composable("home") { Inset { HomeScreen(actions) } }
+                    composable("search") { Inset { SearchScreen(actions) } }
+                    composable("library") { Inset { LibraryScreen(actions) } }
+                    composable("settings") { Inset { SettingsScreen(settings) } }
+                    composable("equalizer") { Inset { EqualizerScreen(settings) } }
+                    composable("autoeq") { Inset { AutoEqScreen(settings) } }
                     composable("player") { PlayerScreen(player, actions) }
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
-                    composable("genre/{id}") { GenreScreen(it.arguments!!.getString("id")!!, actions) }
-                    composable("smart/{id}") { SmartScreen(it.arguments!!.getString("id")!!, actions) }
-                    composable("smartEdit/{id}") { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) }
-                    composable("stats") { StatsScreen() }
-                    composable("folder/{id}") { FolderScreen(it.arguments!!.getString("id")!!, actions) }
-                    composable("decade/{year}") { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) }
+                    composable("genre/{id}") { Inset { GenreScreen(it.arguments!!.getString("id")!!, actions) } }
+                    composable("smart/{id}") { Inset { SmartScreen(it.arguments!!.getString("id")!!, actions) } }
+                    composable("smartEdit/{id}") { Inset { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) } }
+                    composable("stats") { Inset { StatsScreen() } }
+                    composable("folder/{id}") { Inset { FolderScreen(it.arguments!!.getString("id")!!, actions) } }
+                    composable("decade/{year}") { Inset { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) } }
                 }
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }) }

@@ -320,6 +320,10 @@ The owner asked for these explicitly; they override the "UI later" note below.
   down on 2026-09-18, so not shipped; the provider layer takes more sources.
 - Apple Music AutoMix-style transitions with BPM/beat matching -> researched (docs/research/automix.md), being built.
 - Material You, AMOLED, adjustable -> done: wallpaper colours, accent colours, theme mode, true-black mode.
+- The owner's friend: "take it from Apple, the album cover spills into the page; but no forced liquid glass" -> done:
+  album, artist and playlist pages open with the cover edge to edge under the status bar, melting into a colour taken
+  from it; buttons use the cover's accent; the player gets the same wash. Static tint (0 % CPU idle), switchable,
+  and with AMOLED on it melts into black instead.
 - Gestures -> done: swipe the mini player to skip, up to open; swipe the player header or artwork down to close;
   swipe the artwork to skip.
 

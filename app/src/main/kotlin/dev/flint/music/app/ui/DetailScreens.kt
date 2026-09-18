@@ -118,11 +118,10 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     var filter by remember { mutableStateOf("") }
     LoadBox(load) { d ->
         val discs = remember(d, filter) { d.songs.matching(filter).groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
-        LazyColumn {
-            item(key = "header") {
-                Header(d.album.name, listOfNotNull(d.album.artist, d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs", duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs), "explicit".takeIf { d.album.explicitStatus == "explicit" }).joinToString(" · "), vm.cover(d.album.coverArt, CoverSize.FULL)) {
+        HeroPage(vm.cover(d.album.coverArt, CoverSize.FULL), d.album.name, listOfNotNull(d.album.artist, d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs", duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs), "explicit".takeIf { d.album.explicitStatus == "explicit" }).joinToString(" · "), actions = {
                     IconButton({ actions.starAlbum(d.album.id, !d.album.starred) }) { Icon(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-                }
+            }) {
+            item(key = "header") {
                 if (d.album.isExternal || d.album.id.startsWith("pl-")) {
                     TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 8.dp)) {
                         Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
@@ -167,11 +166,10 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
     }
     LoadBox(load) { ui ->
         val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
-        LazyColumn {
-            item(key = "header") {
-                Header(ui.detail.artist.name, "${ui.detail.albums.size} releases", vm.cover(ui.detail.artist.coverArt, CoverSize.FULL)) {
+        HeroPage(vm.cover(ui.detail.artist.coverArt, CoverSize.FULL), ui.detail.artist.name, "${ui.detail.albums.size} releases", actions = {
                     IconButton({ actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred) }) { Icon(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-                }
+            }) {
+            item(key = "header") {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
                     Button({ actions.playArtist(ui.detail.albums) }, Modifier.weight(1f)) { Icon(Icons.Filled.PlayArrow, null); Text("Play") }
                     OutlinedButton({ actions.playArtist(ui.detail.albums, shuffle = true) }, Modifier.weight(1f)) { Icon(Icons.Filled.Shuffle, null); Text("Shuffle") }
@@ -224,14 +222,13 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
     }
     LoadBox(load) { d ->
         val shown = remember(d, filter) { d.songs.matching(filter) }
-        LazyColumn {
-            item(key = "header") {
-                Header(d.playlist.name, "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}", vm.cover(d.playlist.coverArt, CoverSize.FULL)) {
+        HeroPage(vm.cover(d.playlist.coverArt, CoverSize.FULL), d.playlist.name, "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}", actions = {
                     val pinned = id in prefs.pinnedPlaylists
                     IconButton({ settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) } }) {
                         Icon(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home", tint = if (pinned) MaterialTheme.colorScheme.primary else LocalContentColor.current)
                     }
-                }
+            }) {
+            item(key = "header") {
                 PlayButtons(d.songs, actions, filter) { filter = it }
                 TextButton({ exportM3u.launch("${d.playlist.name}.m3u8") }, Modifier.padding(horizontal = 8.dp)) { Text("Export M3U") }
             }

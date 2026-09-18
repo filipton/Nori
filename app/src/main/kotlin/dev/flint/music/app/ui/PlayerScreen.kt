@@ -1,6 +1,9 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.background
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -146,11 +149,23 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var sleepMenu by remember { mutableStateOf(false) }
 
+    // The player takes its colours from the cover, like the album pages: a vertical wash from the cover's
+    // colour into a deeper shade of it. Static, so it costs nothing while the seek bar ticks.
+    val settingsVm: dev.flint.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
+    val dark = when (prefs.theme) { dev.flint.music.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme(); dev.flint.music.settings.ThemeMode.DARK -> true; else -> false }
+    val coverColors = if (prefs.coverColors) rememberCoverColors(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
+    val base = MaterialTheme.colorScheme
+    val scheme = remember(coverColors, base) {
+        coverColors?.let { c -> base.copy(background = c.background, surface = c.background, onSurface = c.onBackground, onBackground = c.onBackground, onSurfaceVariant = c.onBackgroundVariant, primary = c.accent, onPrimary = if (c.accent.luminance() < 0.5f) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.Black) } ?: base
+    }
+    MaterialTheme(colorScheme = scheme) { androidx.compose.runtime.CompositionLocalProvider(LocalContentColor provides scheme.onSurface) {
+    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(scheme.primary.copy(alpha = if (coverColors != null) 0.35f else 0f).compositeOnto(scheme.background), scheme.background))).statusBarsPadding()) {
     Column(Modifier.fillMaxSize()) {
         // Pulling the header down closes the player, the way it was pulled up.
         Row(Modifier.flingActions(horizontal = false, threshold = 0.9f, onStart = nav::back), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.Filled.KeyboardArrowDown, "Close") }
-            PrimaryTabRow(tab, Modifier.weight(1f)) { listOf("Playing", "Queue", "Lyrics").forEachIndexed { i, t -> Tab(tab == i, { tab = i }, text = { Text(t) }) } }
+            PrimaryTabRow(tab, Modifier.weight(1f), containerColor = androidx.compose.ui.graphics.Color.Transparent, divider = {}) { listOf("Playing", "Queue", "Lyrics").forEachIndexed { i, t -> Tab(tab == i, { tab = i }, text = { Text(t) }) } }
             Box {
                 IconButton({ sleepMenu = true }) { Icon(Icons.Filled.Bedtime, "Sleep timer", tint = if (state.sleepAt > 0 || state.sleepAtEndOfTrack) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
                 DropdownMenu(sleepMenu, { sleepMenu = false }) {
@@ -194,6 +209,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         }
     }
 }
+    } } }
+
+private fun androidx.compose.ui.graphics.Color.compositeOnto(bg: androidx.compose.ui.graphics.Color) = androidx.compose.ui.graphics.Color(red * alpha + bg.red * (1 - alpha), green * alpha + bg.green * (1 - alpha), blue * alpha + bg.blue * (1 - alpha), 1f)
 
 /** The only ticking thing in the app, and only while this screen is resumed and music is playing. */
 @Composable

@@ -82,6 +82,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
         SectionTitle("Look")
         Choice("Theme", p.theme, listOf(ThemeMode.SYSTEM to "Follow system", ThemeMode.LIGHT to "Light", ThemeMode.DARK to "Dark")) { v -> vm.update { it.copy(theme = v) } }
         Toggle("AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens", p.amoled) { on -> vm.update { it.copy(amoled = on) } }
+        Toggle("Colours from the cover", "Album, artist and playlist pages and the player take their colour from the artwork, which runs edge to edge", p.coverColors) { on -> vm.update { it.copy(coverColors = on) } }
         if (android.os.Build.VERSION.SDK_INT >= 31) Toggle("Wallpaper colours", "Material You: take the colours from your wallpaper", p.dynamicColor) { on -> vm.update { it.copy(dynamicColor = on) } }
         if (!p.dynamicColor || android.os.Build.VERSION.SDK_INT < 31) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf(0xFF6750A4, 0xFF1E88E5, 0xFF00897B, 0xFF43A047, 0xFFF4511E, 0xFFE53935, 0xFFD81B60, 0xFF8E24AA).forEach { c ->
