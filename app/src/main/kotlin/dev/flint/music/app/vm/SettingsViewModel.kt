@@ -193,6 +193,14 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
         }
     }
 
+    private val _analysed = MutableStateFlow(0)
+    /** How many tracks AutoMix has measured. */
+    val analysed: StateFlow<Int> = _analysed
+
+    fun refreshAnalysed() = viewModelScope.launch { _analysed.value = runCatching { flint.core.analysisCount() }.getOrDefault(0u).toInt() }
+
+    fun clearAnalyses() = viewModelScope.launch { runCatching { flint.core.analysisClear() }; refreshAnalysed() }
+
     // ---- downloads ----
 
     /** Queues every song of the offline index for download; run [syncLibrary] first so the index is complete. */

@@ -146,6 +146,19 @@ data class Prefs(
     val limiter: Boolean = false,
     val limiterThresholdDb: Float = -1f,
     val crossfadeSec: Int = 0,
+    /**
+     * AutoMix: transitions planned from each track's analysed tempo, beats and cue points, like Apple Music's.
+     * Analysis runs on audio being played anyway, once per track; a transition costs a few percent of a core
+     * for its own few seconds. Off by default.
+     */
+    val autoMix: Boolean = false,
+    val autoMixMaxS: Int = 12,
+    val autoMixBeatMatch: Boolean = true,
+    val autoMixMaxTempoPct: Float = 6f,
+    val autoMixBassSwap: Boolean = true,
+    val autoMixFilters: Boolean = true,
+    /** Off: tempo is matched by changing speed and pitch together (cheaper, and within 2 % inaudible). */
+    val autoMixKeepPitch: Boolean = true,
     val speed: Float = 1f,
     val skipSilence: Boolean = false,
     /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
@@ -297,6 +310,9 @@ class Settings(context: Context) {
             crossfeedDb = sp.getFloat("crossfeedDb", 0f), balance = sp.getFloat("balance", 0f), mono = sp.getBoolean("mono", false),
             limiter = sp.getBoolean("limiter", false), limiterThresholdDb = sp.getFloat("limiterThresholdDb", -1f),
             crossfadeSec = sp.getInt("crossfadeSec", 0),
+            autoMix = sp.getBoolean("autoMix", false), autoMixMaxS = sp.getInt("autoMixMaxS", 12), autoMixBeatMatch = sp.getBoolean("autoMixBeatMatch", true),
+            autoMixMaxTempoPct = sp.getFloat("autoMixMaxTempoPct", 6f), autoMixBassSwap = sp.getBoolean("autoMixBassSwap", true),
+            autoMixFilters = sp.getBoolean("autoMixFilters", true), autoMixKeepPitch = sp.getBoolean("autoMixKeepPitch", true),
             speed = sp.getFloat("speed", 1f),
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
@@ -333,6 +349,9 @@ class Settings(context: Context) {
         putFloat("crossfeedDb", p.crossfeedDb); putFloat("balance", p.balance); putBoolean("mono", p.mono)
         putBoolean("limiter", p.limiter); putFloat("limiterThresholdDb", p.limiterThresholdDb)
         run { }; putInt("crossfadeSec", p.crossfadeSec)
+        putBoolean("autoMix", p.autoMix); putInt("autoMixMaxS", p.autoMixMaxS); putBoolean("autoMixBeatMatch", p.autoMixBeatMatch)
+        putFloat("autoMixMaxTempoPct", p.autoMixMaxTempoPct); putBoolean("autoMixBassSwap", p.autoMixBassSwap)
+        putBoolean("autoMixFilters", p.autoMixFilters); putBoolean("autoMixKeepPitch", p.autoMixKeepPitch)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)

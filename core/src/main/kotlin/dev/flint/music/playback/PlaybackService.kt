@@ -86,7 +86,9 @@ class PlaybackService : MediaLibraryService() {
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
-    private var crossfade: CrossfadeSink? = null
+    /** Items from the current one onwards, as the playback thread may ask about them (decoding runs ahead). */
+    @Volatile private var upcoming: List<MediaItem> = emptyList()
+    private val analysisWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "flint-analysis").apply { priority = Thread.MIN_PRIORITY } }
     private lateinit var precacher: Precacher
     private val precache = Runnable { precacheAhead() }
     /** What the volume should be once no fade is running: 1, or the ReplayGain attenuation. */
@@ -112,7 +114,7 @@ class PlaybackService : MediaLibraryService() {
 
         val renderers = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                CrossfadeSink(BurstSink(
+                TransitionSink(BurstSink(
                     DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer))
                         // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU; see BurstSink.
                         .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
@@ -120,7 +122,7 @@ class PlaybackService : MediaLibraryService() {
                             (if (tuning) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
                         }
                         .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
-                ).also { burst = it }).also { crossfade = it }
+                ).also { burst = it }, transitions)
         }
         hiRes = flint.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
@@ -193,6 +195,7 @@ class PlaybackService : MediaLibraryService() {
         flint.dac.stop()
         flint.outputs.stop()
         if (wifiLock.isHeld) wifiLock.release()
+        analysisWorker.shutdown()
         session.release()
         player.release()
         scope.cancel()
@@ -211,7 +214,7 @@ class PlaybackService : MediaLibraryService() {
             autoFill(item)
             announce()
             errorsInARow = 0
-            crossfade?.keepNextBoundary = flint.settings.value.crossfadeKeepAlbums && followsOnAlbum(item, nextItem())
+            refreshUpcoming()
             // A few seconds in, the current track has been fetched and the radio is still up: fetch ahead now.
             main.removeCallbacks(precache)
             main.postDelayed(precache, 6_000)
@@ -228,7 +231,11 @@ class PlaybackService : MediaLibraryService() {
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
         }
 
+        override fun onShuffleModeEnabledChanged(on: Boolean) = refreshUpcoming()
+        override fun onRepeatModeChanged(mode: Int) = refreshUpcoming()
+
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+            refreshUpcoming()
             if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) scheduleSave()
         }
 
@@ -273,11 +280,11 @@ class PlaybackService : MediaLibraryService() {
         val processing = p.dsp && !untouched
         equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
         equalizer.setOutput(p.balance, p.mono, p.limiterThresholdDb, 120f, if (p.limiter) 5f else 0f)
-        crossfade?.seconds = if (untouched) 0 else p.crossfadeSec
+        transitionsOff = untouched
         player.skipSilenceEnabled = p.skipSilence && !untouched
         player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)
         // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
-        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.skipSilence && p.speed == 1f && p.pitch == 1f
+        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.autoMix && !p.skipSilence && p.speed == 1f && p.pitch == 1f
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
@@ -289,10 +296,85 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+    @Volatile private var transitionsOff = false
+
+    private fun refreshUpcoming() {
+        val t = player.currentTimeline
+        if (t.isEmpty || player.currentMediaItemIndex == C.INDEX_UNSET) { upcoming = emptyList(); return }
+        val list = ArrayList<MediaItem>(8)
+        var i = player.currentMediaItemIndex
+        while (i != C.INDEX_UNSET && list.size < 8) {
+            list += player.getMediaItemAt(i)
+            i = t.getNextWindowIndex(i, player.repeatMode, player.shuffleModeEnabled)
+        }
+        upcoming = list
+    }
+
+    /**
+     * Plans each transition when the sink reaches a track: from the stored analyses (AutoMix) or, without them,
+     * a plain crossfade. The Rust planner decides; this only gathers its inputs.
+     */
+    private val transitions = object : TransitionSink.Listener {
+        override fun planFor(outgoingId: String): TransitionSink.Plan? {
+            val p = flint.settings.value
+            if (transitionsOff || (!p.autoMix && p.crossfadeSec == 0)) return null
+            val order = upcoming
+            val at = order.indexOfFirst { it.mediaId == outgoingId }.takeIf { it >= 0 } ?: return null
+            val out = order[at]
+            val next = order.getOrNull(at + 1) ?: return null
+            if (out.isRadio || next.isRadio) return null
+            val settings = dev.flint.music.ffi.AutoMixSettings(
+                maxTransitionS = (if (p.autoMix) p.autoMixMaxS else p.crossfadeSec).toFloat(),
+                beatMatch = p.autoMix && p.autoMixBeatMatch, maxTempoChangePct = p.autoMixMaxTempoPct,
+                bassSwap = p.autoMix && p.autoMixBassSwap, filterEffects = p.autoMix && p.autoMixFilters,
+                keepPitch = p.autoMixKeepPitch, sameAlbumInOrder = p.crossfadeKeepAlbums && followsOnAlbum(out, next),
+                matchLoudness = false,
+            )
+            val a = if (p.autoMix) runCatching { flint.core.analysisGet(out.mediaId) }.getOrNull() else null
+            val b = if (p.autoMix) runCatching { flint.core.analysisGet(next.mediaId) }.getOrNull() else null
+            val outMs = (out.mediaMetadata.durationMs ?: 0L)
+            val inMs = (next.mediaMetadata.durationMs ?: 0L)
+            if (outMs <= 0 || inMs <= 0) return null
+            val plan = dev.flint.music.ffi.planTransition(a, b, outMs, inMs, settings)
+            if (plan.kind == dev.flint.music.ffi.TransitionKind.GAPLESS) return null
+            android.util.Log.i("flint", "transition ${out.mediaMetadata.title} -> ${next.mediaMetadata.title}: ${plan.kind} ${plan.durationMs} ms at ${plan.outStartMs}, tempo x${"%.3f".format(plan.tempoRatio)} (${plan.reason})")
+            return TransitionSink.Plan(
+                incomingId = next.mediaId, outStartUs = plan.outStartMs * 1000, durationUs = plan.durationMs * 1000, inSkipUs = plan.inStartMs * 1000,
+                mixer = dev.flint.music.ffi.automixMixerParams(plan).toFloatArray(), tempoRatio = plan.tempoRatio.toFloat(),
+                keepPitch = plan.keepPitch, rampUs = plan.tempoRampMs * 1000,
+            )
+        }
+
+        override fun wantsAnalysis(songId: String): Boolean {
+            if (!flint.settings.value.autoMix || songId.startsWith(RADIO_PREFIX) || songId.startsWith("ext-")) return false
+            return runCatching { flint.core.analysisGet(songId) == null }.getOrDefault(false)
+        }
+
+        override fun analysed(songId: String, handle: Long, frames: Long, sampleRate: Int) {
+            analysisWorker.execute {
+                try {
+                    // Only a track heard from start to end: the duration has to agree with what the server says.
+                    val expectedMs = upcoming.firstOrNull { it.mediaId == songId }?.mediaMetadata?.durationMs ?: 0L
+                    val heardMs = frames * 1000 / sampleRate.coerceAtLeast(1)
+                    if (expectedMs <= 0 || kotlin.math.abs(heardMs - expectedMs) <= 3000) {
+                        val a = flint.core.analysisFinishStream(songId, handle)
+                        android.util.Log.i("flint", "analysed $songId: ${a?.let { "%.2f bpm (%.2f), key %s, heard %d ms of %d ms, %d frames at %d Hz".format(it.bpm, it.bpmConfidence, dev.flint.music.ffi.automixKeyName(it.key), it.durationMs, expectedMs, frames, sampleRate) } ?: "too short"}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("flint", "analysis of $songId failed: $e")
+                } finally {
+                    AutoMixAnalyzer.destroy(handle)
+                }
+            }
+        }
+    }
+
     private fun nextItem(): MediaItem? = player.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
     private fun previousItem(): MediaItem? = player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
 
+    /** Two tracks are "the album in order" only when the queue is actually playing it in order: shuffle breaks that. */
     private fun followsOnAlbum(a: MediaItem?, b: MediaItem?): Boolean {
+        if (player.shuffleModeEnabled) return false
         val (x, y) = (a?.mediaMetadata?.extras ?: return false) to (b?.mediaMetadata?.extras ?: return false)
         val album = x.getString("albumId")
         return album != null && album == y.getString("albumId") && x.getInt("disc") == y.getInt("disc") && y.getInt("track") == x.getInt("track") + 1

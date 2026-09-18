@@ -105,6 +105,18 @@ impl Core {
         Ok(missing(&self.db.lock(), &song_ids)?)
     }
 
+    /// Forgets every analysis, so tracks are measured again as they play. For when the measurements look wrong.
+    pub fn analysis_clear(&self) -> Result<u32> {
+        let c = self.db.lock();
+        let n = c.execute("DELETE FROM track_analysis", [])? as u32;
+        Ok(n)
+    }
+
+    /// How many tracks have an analysis, for the settings screen.
+    pub fn analysis_count(&self) -> Result<u32> {
+        Ok(self.db.lock().query_row("SELECT count(*) FROM track_analysis", [], |r| r.get(0))?)
+    }
+
     pub fn analysis_store(&self, analysis: TrackAnalysis) -> Result<()> {
         Ok(put(&self.db.lock(), &analysis)?)
     }

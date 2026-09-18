@@ -121,7 +121,31 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 14.dp)) {
             Text("Equalizer and crossfeed", Modifier.weight(1f)); Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
         }
-        Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s")) { v -> vm.update { it.copy(crossfadeSec = v) } }
+        Toggle(
+            "AutoMix",
+            "Transitions like a DJ set: tempo matched, beats aligned, bass swapped, the ending filtered out. Each track is analysed once while it plays; a transition costs a few percent of a core for its few seconds.",
+            p.autoMix,
+        ) { on -> vm.update { it.copy(autoMix = on) } }
+        if (p.autoMix) {
+            Choice("Longest transition", p.autoMixMaxS, listOf(6 to "6 s", 8 to "8 s", 12 to "12 s", 16 to "16 s", 24 to "24 s")) { v -> vm.update { it.copy(autoMixMaxS = v) } }
+            Toggle("Match tempo and beats", "Speeds the next song up or down a little so the beats line up", p.autoMixBeatMatch) { on -> vm.update { it.copy(autoMixBeatMatch = on) } }
+            if (p.autoMixBeatMatch) {
+                Choice("Largest tempo change", p.autoMixMaxTempoPct, listOf(2f to "2 %", 4f to "4 %", 6f to "6 %", 8f to "8 %")) { v -> vm.update { it.copy(autoMixMaxTempoPct = v) } }
+                Toggle("Keep pitch", "Off changes speed and pitch together, like a turntable: cheaper, and limited to 2 %", p.autoMixKeepPitch) { on -> vm.update { it.copy(autoMixKeepPitch = on) } }
+            }
+            Toggle("Bass swap", "The next song's bass comes in on a bar line as the old one's goes out, so they never clash", p.autoMixBassSwap) { on -> vm.update { it.copy(autoMixBassSwap = on) } }
+            Toggle("Filter sweep", "The outgoing song fades through a closing low-pass filter", p.autoMixFilters) { on -> vm.update { it.copy(autoMixFilters = on) } }
+            val analysed by vm.analysed.collectAsStateWithLifecycle()
+            LaunchedEffect(Unit) { vm.refreshAnalysed() }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Measured tracks")
+                    Text("$analysed analysed while playing. Tempo, beats and cue points, kept on this device.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(vm::clearAnalyses, enabled = analysed > 0) { Text("Measure again") }
+            }
+        }
+        if (!p.autoMix) Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s")) { v -> vm.update { it.copy(crossfadeSec = v) } }
         Choice("Playback speed", p.speed, listOf(0.75f to "0.75×", 1f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2f to "2×")) { v -> vm.update { it.copy(speed = v) } }
         Toggle("Skip silence", "Cuts silent stretches inside and between tracks", p.skipSilence) { on -> vm.update { it.copy(skipSilence = on) } }
         if (p.offload && (p.dsp || p.crossfadeSec > 0 || p.skipSilence || p.speed != 1f)) {

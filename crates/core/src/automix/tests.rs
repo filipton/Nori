@@ -462,3 +462,23 @@ fn analysis_cost() {
         println!("  front end {:.0} ms, finish {:.1} ms", front.as_secs_f64() * 1000.0, t2.elapsed().as_secs_f64() * 1000.0);
     }
 }
+
+/// Analyses a raw PCM file, to compare what the app measures with what the file really is:
+/// `FLINT_PCM=/path/file.s16 FLINT_RATE=44100 FLINT_CH=2 cargo test --release -p flintmusic -- --ignored --nocapture pcm_file`
+#[test]
+#[ignore]
+fn pcm_file() {
+    let Ok(path) = std::env::var("FLINT_PCM") else { return };
+    let rate: i32 = std::env::var("FLINT_RATE").map(|v| v.parse().unwrap()).unwrap_or(44100);
+    let ch: i32 = std::env::var("FLINT_CH").map(|v| v.parse().unwrap()).unwrap_or(2);
+    let enc: i32 = std::env::var("FLINT_ENC").map(|v| v.parse().unwrap()).unwrap_or(2);
+    for p in path.split(',') {
+        let bytes = std::fs::read(p).expect("pcm file");
+        let t = std::time::Instant::now();
+        let a = crate::automix::automix_analyse("probe".into(), bytes, rate, ch, enc);
+        println!(
+            "{p}: {:.2} bpm (conf {:.2}, stab {:.2}) offset {:.1} ms, downbeat {} ({:.2}), key {}, {:.1} LUFS, {} ms audio, took {:?}",
+            a.bpm, a.bpm_confidence, a.stability, a.beat_offset_ms, a.downbeat_phase, a.downbeat_confidence, a.key, a.lufs, a.duration_ms, t.elapsed(),
+        );
+    }
+}
