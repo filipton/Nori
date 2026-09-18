@@ -31,9 +31,9 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
         LazyColumn {
             item(key = "title") { LargeTitle("Listen now") }
             item(key = "actions") {
-                Row(Modifier.padding(horizontal = Space.gutter, vertical = 12.dp), Arrangement.spacedBy(10.dp)) {
-                    PillButton("Shuffle everything", Icons.Filled.Shuffle, actions::shuffleAll, Modifier.weight(1f), prominent = true)
-                    PillButton("Resume", Icons.Filled.History, actions::resumeFromServer)
+                Row(Modifier.padding(horizontal = Space.gutter, vertical = 10.dp), Arrangement.spacedBy(10.dp)) {
+                    PillButton("Shuffle", Icons.Filled.Shuffle, actions::shuffleAll, Modifier.weight(1f))
+                    PillButton("Resume", Icons.Filled.History, actions::resumeFromServer, Modifier.weight(1f))
                 }
             }
             if (mixes) item(key = "mixes") { SectionTitle("For you"); MixTiles() }

@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -35,6 +36,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import coil3.request.CachePolicy
 import coil3.request.ImageRequest
@@ -87,12 +90,24 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
         }.build()
     }
     val shape = remember(radius) { androidx.compose.foundation.shape.RoundedCornerShape(radius) }
-    AsyncImage(
-        model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
-        modifier = (if (px > 0) modifier.size(size) else modifier)
-            .then(if (radius > 0.dp) Modifier.clip(shape) else Modifier)
-            .background(MaterialTheme.colorScheme.surfaceVariant),
-    )
+    val scheme = MaterialTheme.colorScheme
+    // A flat grey square is what makes a library of half-loaded covers look broken. Underneath every
+    // cover sits a soft two-tone plate with a note on it, which is what shows while the picture loads
+    // and what stays when a track simply has no artwork. It is one gradient, drawn, and costs nothing.
+    val plate = remember(scheme.surfaceVariant) {
+        Brush.linearGradient(listOf(scheme.onSurface.copy(alpha = 0.13f).over(scheme.background), scheme.onSurface.copy(alpha = 0.06f).over(scheme.background)))
+    }
+    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).background(plate)) {
+        if (url == null) Icon(
+            Icons.Filled.MusicNote, null,
+            Modifier.align(Alignment.Center).size(if (size > 0.dp) size * 0.34f else 40.dp),
+            tint = scheme.onSurface.copy(alpha = 0.22f),
+        )
+        AsyncImage(
+            model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
+            modifier = Modifier.fillMaxSize(),
+        )
+    }
 }
 
 fun duration(seconds: Long): String = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60) else "%d:%02d".format(seconds / 60, seconds % 60)
@@ -191,12 +206,13 @@ fun CoverCard(title: String, subtitle: String, coverUrl: String?, size: Dp, onCl
     Column(modifier.width(size).clickable(onClick = onClick)) {
         Cover(coverUrl, size, radius = Radius.card)
         Text(
-            title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(top = 7.dp),
+            title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, fontWeight = FontWeight.Medium),
+            modifier = Modifier.padding(top = 8.dp),
         )
         if (subtitle.isNotEmpty()) Text(
             subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5f.sp), color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

@@ -157,3 +157,20 @@ Album grid fling, 300 albums: 50th 53ms 99th 93ms
 | Paused in background (30 s) | .03% of one core | 29 of 30 | 118 MB PSS |
 
 Audio offload threads active during MP3 playback: 0
+
+### sdk_gphone64_x86_64 · Android 14 · x86_64 · 2026-09-18
+
+Cold start (ms, 5 runs sorted): 930 941 956 970 1002 
+Album grid fling, 300 albums: 50th 57ms 99th 81ms 
+
+| Scenario | CPU (% of one core) | Quiet seconds | Memory |
+|---|---|---|---|
+| Idle on home, screen on (30 s) | 0% of one core | 29 of 30 | 82 MB PSS |
+| MP3 320, screen off (90 s) | 1.80% of one core | 67 of 90 | 100 MB PSS |
+| Player screen visible (45 s) | 4.86% of one core | 0 of 45 | 101 MB PSS |
+| Lyrics, word sweep on (45 s) | 4.66% of one core | 0 of 45 | 104 MB PSS |
+| FLAC, screen off (90 s) | 2.75% of one core | 66 of 90 | 120 MB PSS |
+| FLAC + equalizer, screen off (90 s) | 1.83% of one core | 71 of 90 | 98 MB PSS |
+| Paused in background (30 s) | .03% of one core | 29 of 30 | 104 MB PSS |
+
+Audio offload threads active during MP3 playback: 0

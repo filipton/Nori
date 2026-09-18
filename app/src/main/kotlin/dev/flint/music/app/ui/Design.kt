@@ -31,12 +31,17 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontVariation
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.flint.music.app.R
 
 /**
  * The look of the app in one file: radii, spacing, type and the handful of shapes every screen is
@@ -60,7 +65,7 @@ object Space {
     val gutter = 20.dp
     val tight = 8.dp
     val row = 12.dp
-    val section = 28.dp
+    val section = 26.dp
 }
 
 val CoverShape = RoundedCornerShape(Radius.cover)
@@ -69,23 +74,46 @@ val TileShape = RoundedCornerShape(Radius.tile)
 val PillShape = RoundedCornerShape(Radius.pill)
 
 /**
+ * Inter, as a variable font, standing in for the system face an iPhone would use. It is the single
+ * biggest reason a screenshot reads as "a modern music app" rather than "an Android app": Roboto's
+ * wide, loose letterforms are what makes stock Compose look like a settings screen. One 880 kB file
+ * carries every weight, and each weight is a real instance of the variable font, never a synthetic
+ * bold - synthesised weights are what make text look smeared.
+ */
+private fun inter(weight: FontWeight) = Font(
+    R.font.inter, weight,
+    variationSettings = FontVariation.Settings(FontVariation.weight(weight.weight)),
+)
+
+val Inter = FontFamily(inter(FontWeight.Normal), inter(FontWeight.Medium), inter(FontWeight.SemiBold), inter(FontWeight.Bold))
+
+/**
  * Tighter and heavier than stock Material, which is what makes a music app read as a music app:
- * album and screen titles are display-weight, list rows are plain text, and captions are small caps
- * grey. Tracking is negative on the big sizes, the way a photographed cover needs.
+ * screen and album titles are display-weight with negative tracking, list rows are plain text, and
+ * captions are small grey capitals.
  */
 val FlintTypography = Typography().run {
+    fun TextStyle.f(weight: FontWeight? = null, tracking: Float? = null) = copy(
+        fontFamily = Inter,
+        fontWeight = weight ?: fontWeight,
+        letterSpacing = tracking?.sp ?: letterSpacing,
+    )
     copy(
-        displaySmall = displaySmall.copy(fontWeight = FontWeight.Bold, letterSpacing = (-1).sp),
-        headlineLarge = headlineLarge.copy(fontWeight = FontWeight.Bold, letterSpacing = (-0.8).sp),
-        headlineMedium = headlineMedium.copy(fontWeight = FontWeight.Bold, letterSpacing = (-0.6).sp),
-        headlineSmall = headlineSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = (-0.4).sp),
-        titleLarge = titleLarge.copy(fontWeight = FontWeight.Bold, letterSpacing = (-0.3).sp),
-        titleMedium = titleMedium.copy(fontWeight = FontWeight.SemiBold),
-        titleSmall = titleSmall.copy(fontWeight = FontWeight.SemiBold),
-        bodyLarge = bodyLarge.copy(fontSize = 16.sp, lineHeight = 21.sp),
-        bodyMedium = bodyMedium.copy(fontSize = 15.sp, lineHeight = 20.sp),
-        bodySmall = bodySmall.copy(fontSize = 13.sp, lineHeight = 17.sp),
-        labelSmall = labelSmall.copy(fontWeight = FontWeight.Medium, letterSpacing = 0.6.sp),
+        displayLarge = displayLarge.f(FontWeight.Bold, -1.5f),
+        displayMedium = displayMedium.f(FontWeight.Bold, -1.2f),
+        displaySmall = displaySmall.f(FontWeight.Bold, -1f),
+        headlineLarge = headlineLarge.f(FontWeight.Bold, -0.9f),
+        headlineMedium = headlineMedium.f(FontWeight.Bold, -0.7f),
+        headlineSmall = headlineSmall.f(FontWeight.Bold, -0.5f),
+        titleLarge = titleLarge.f(FontWeight.Bold, -0.4f),
+        titleMedium = titleMedium.f(FontWeight.SemiBold, -0.2f),
+        titleSmall = titleSmall.f(FontWeight.SemiBold, -0.1f),
+        bodyLarge = bodyLarge.f(FontWeight.Normal, -0.1f).copy(fontSize = 16.sp, lineHeight = 21.sp),
+        bodyMedium = bodyMedium.f().copy(fontSize = 15.sp, lineHeight = 20.sp),
+        bodySmall = bodySmall.f().copy(fontSize = 13.sp, lineHeight = 17.sp),
+        labelLarge = labelLarge.f(FontWeight.SemiBold),
+        labelMedium = labelMedium.f(FontWeight.Medium),
+        labelSmall = labelSmall.f(FontWeight.SemiBold, 0.5f),
     )
 }
 
@@ -149,7 +177,11 @@ fun SectionHeader(title: String, modifier: Modifier = Modifier, action: @Composa
         modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.tight, top = Space.section - 12.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            title, Modifier.weight(1f),
+            style = MaterialTheme.typography.titleLarge.copy(fontSize = 20.sp, fontWeight = FontWeight.SemiBold),
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
         action?.invoke(this)
     }
 }
@@ -158,10 +190,14 @@ fun SectionHeader(title: String, modifier: Modifier = Modifier, action: @Composa
 @Composable
 fun LargeTitle(text: String, modifier: Modifier = Modifier, trailing: @Composable (RowScope.() -> Unit)? = null) {
     Row(
-        modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.tight, top = 10.dp, bottom = 4.dp),
+        modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.tight, top = 8.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(
+            text, Modifier.weight(1f),
+            style = MaterialTheme.typography.headlineMedium.copy(fontSize = 30.sp),
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
         trailing?.invoke(this)
     }
 }
@@ -190,13 +226,13 @@ fun PillButton(
     val content = if (prominent) scheme.onPrimary else scheme.primary
     Surface(
         onClick = onClick, enabled = enabled, shape = PillShape, color = container, contentColor = content,
-        modifier = modifier.heightIn(min = 46.dp),
+        modifier = modifier.heightIn(min = 42.dp),
     ) {
-        Row(Modifier.padding(horizontal = 18.dp), Arrangement.Center, Alignment.CenterVertically) {
-            if (icon != null) Icon(icon, null, Modifier.size(19.dp))
+        Row(Modifier.padding(horizontal = 16.dp), Arrangement.Center, Alignment.CenterVertically) {
+            if (icon != null) Icon(icon, null, Modifier.size(18.dp))
             Text(
                 text, Modifier.padding(start = if (icon != null) 7.dp else 0.dp),
-                style = MaterialTheme.typography.titleSmall, maxLines = 1,
+                style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp), maxLines = 1,
             )
         }
     }
@@ -295,6 +331,9 @@ fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClic
         contentColor = if (selected) scheme.onPrimary else scheme.onSurface,
         modifier = modifier,
     ) {
-        Text(label, Modifier.padding(horizontal = 15.dp, vertical = 9.dp), style = MaterialTheme.typography.labelLarge, maxLines = 1)
+        Text(
+            label, Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 13.5f.sp), maxLines = 1,
+        )
     }
 }

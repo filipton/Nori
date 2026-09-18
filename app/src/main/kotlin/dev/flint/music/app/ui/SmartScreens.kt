@@ -1,6 +1,12 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -63,8 +69,26 @@ private fun <T> Pick(value: T, options: List<T>, modifier: Modifier = Modifier, 
 /** The mixes the core draws from the index and the listening history. */
 @Composable
 fun MixTiles(vm: MixesViewModel = viewModel()) {
-    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(vm.tiles) { m -> FilledTonalButton({ vm.play(m) }) { Text(m.title) } }
+    // A mix has no artwork, so it gets a colour of its own instead: a tile the size of a cover, with the
+    // name on it. Chips made the row read as a filter bar; these read as something to play.
+    val palette = listOf(0xFF8E3BD6, 0xFFD63B6B, 0xFF1E88E5, 0xFF00897B, 0xFFE0662B, 0xFF5C6BC0)
+    LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        itemsIndexed(vm.tiles, key = { _, m -> m.title }) { i, m ->
+            val seed = androidx.compose.ui.graphics.Color(palette[i % palette.size])
+            Box(
+                Modifier.size(150.dp).clip(CardShape)
+                    .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(seed, blend(seed, androidx.compose.ui.graphics.Color.Black, 0.45f))))
+                    .clickable { vm.play(m) }
+                    .padding(14.dp),
+            ) {
+                Icon(Icons.Filled.AutoAwesome, null, Modifier.align(Alignment.TopEnd).size(18.dp), tint = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.75f))
+                Text(
+                    m.title, Modifier.align(Alignment.BottomStart),
+                    style = MaterialTheme.typography.titleMedium, color = androidx.compose.ui.graphics.Color.White,
+                    maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 
