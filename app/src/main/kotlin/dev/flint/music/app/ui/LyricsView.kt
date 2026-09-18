@@ -84,7 +84,8 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
     val load by vm.lyrics.collectAsStateWithLifecycle()
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
-    val lyrics = (load as? Load.Ready)?.data
+    val found = (load as? Load.Ready)?.data
+    val lyrics = found?.lyrics
     if (lyrics == null || lyrics.lines.isEmpty()) {
         Box(Modifier.fillMaxSize(), Alignment.Center) { Text(if (load is Load.Loading) "Loading…" else "No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         return
@@ -139,6 +140,9 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
             TextButton({ nudgeMs -= 250 }) { Text("Later") }
             TextButton({ nudgeMs += 250 }) { Text("Sooner") }
             if (!lyrics.wordTimed && sweep) Text("word timing estimated", style = MaterialTheme.typography.labelSmall, color = dim)
+        }
+        found?.source?.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }?.let { src ->
+            Text("Lyrics from ${src.label}", Modifier.align(Alignment.BottomStart).padding(12.dp), style = MaterialTheme.typography.labelSmall, color = dim)
         }
     }
 }

@@ -166,6 +166,11 @@ data class Prefs(
     val lyricsTranslation: Boolean = true,
     /** 0 small, 1 medium, 2 large. */
     val lyricsSize: Int = 1,
+    /**
+     * Ask LRCLIB when the server has no synced lyrics. Needs [thirdPartyLookups]. Off means only the
+     * server's lyrics (octo-fiesta already asks LRCLIB itself for tracks it serves from a provider).
+     */
+    val lyricsLrclib: Boolean = true,
     // ---- look ----
     val theme: ThemeMode = ThemeMode.SYSTEM,
     /** Pure black backgrounds in dark mode: OLED pixels are off, which saves power as well as looking right. */
@@ -296,7 +301,7 @@ class Settings(context: Context) {
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
             profilePerOutput = sp.getBoolean("profilePerOutput", true),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
-            lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1),
+            lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1), lyricsLrclib = sp.getBoolean("lyricsLrclib", true),
             theme = ThemeMode.entries.getOrElse(sp.getInt("theme", 0)) { ThemeMode.SYSTEM }, amoled = sp.getBoolean("amoled", false),
             dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
@@ -329,7 +334,7 @@ class Settings(context: Context) {
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
-        putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize)
+        putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
         putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })

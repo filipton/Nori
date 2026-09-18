@@ -125,6 +125,47 @@ fn estimate(text: &str, start: i64, end: i64) -> Vec<LyricWord> {
         .collect()
 }
 
+/// `[mm:ss.xx]` -> ms. Also accepts `[mm:ss]` and `[mm:ss:xx]`.
+fn stamp(tag: &str) -> Option<i64> {
+    let (m, rest) = tag.split_once(':')?;
+    let rest = rest.replacen(':', ".", 1);
+    let secs: f64 = rest.parse().ok()?;
+    Some(m.trim().parse::<i64>().ok()? * 60_000 + (secs * 1000.0).round() as i64)
+}
+
+/// Plain LRC text (what LRCLIB, sidecar files and most providers return) in the same shape as the server's
+/// structured lyrics, so the same line and word timing applies. Lines with several timestamps repeat;
+/// `[offset:+n]` is honoured; `[ar:]`-style tags are skipped.
+pub fn from_lrc(text: &str) -> Lyrics {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut offset = 0i64;
+    for raw in text.lines() {
+        let mut rest = raw.trim_start_matches('\u{feff}').trim();
+        let mut starts = Vec::new();
+        while let Some(body) = rest.strip_prefix('[') {
+            let Some(close) = body.find(']') else { break };
+            let tag = &body[..close];
+            if let Some(v) = tag.strip_prefix("offset:") {
+                offset = v.trim().parse().unwrap_or(0);
+            } else if let Some(ms) = stamp(tag) {
+                starts.push(ms);
+            }
+            rest = body[close + 1..].trim_start();
+        }
+        for s in starts {
+            lines.push(Line { start: Some(s), value: rest.to_string() });
+        }
+    }
+    if lines.is_empty() {
+        // Not LRC at all: plain text lyrics.
+        let plain: Vec<Line> = text.lines().map(|l| Line { start: None, value: l.trim().to_string() }).collect();
+        return build(vec![Structured { synced: false, line: plain, ..Default::default() }]);
+    }
+    lines.sort_by_key(|l| l.start);
+    // LRC offset is positive = lyrics come sooner, the same convention as OpenSubsonic's field.
+    build(vec![Structured { synced: true, offset, line: lines, ..Default::default() }])
+}
+
 pub fn build(mut all: Vec<Structured>) -> Lyrics {
     // The main layer: synced beats unsynced, and a translation is never the main text.
     all.sort_by_key(|l| (l.kind.as_deref() == Some("translation") || l.kind.as_deref() == Some("pronunciation"), !l.synced));
@@ -209,5 +250,17 @@ mod tests {
         let plain = parse(r#"[{"synced":false,"line":[{"value":"just text"}]}]"#);
         assert_eq!((plain.synced, plain.lines[0].start_ms, plain.lines[0].words.len()), (false, -1, 0));
         assert!(parse("[]").lines.is_empty());
+    }
+
+    #[test]
+    fn lrc_text_with_repeats_offset_and_plain_fallback() {
+        let l = from_lrc("[ar:Someone]\n[offset:+200]\n[00:01.00][00:10.50]chorus\n[00:05.25]verse\n\n");
+        assert!(l.synced);
+        let got: Vec<(i64, &str)> = l.lines.iter().map(|x| (x.start_ms, x.text.as_str())).collect();
+        assert_eq!(got, [(800, "chorus"), (5050, "verse"), (10300, "chorus")]);
+        assert!(!l.lines[0].words.is_empty(), "words are estimated for plain LRC too");
+        let plain = from_lrc("just\nwords");
+        assert!(!plain.synced);
+        assert_eq!(plain.lines.len(), 2);
     }
 }

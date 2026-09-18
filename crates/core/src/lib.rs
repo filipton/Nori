@@ -701,6 +701,12 @@ impl Core {
     }
 }
 
+/// LRC or plain lyrics text, from a third-party provider, into the app's lyrics shape.
+#[uniffi::export]
+pub fn lyrics_from_lrc(text: String) -> Lyrics {
+    lyrics::from_lrc(&text)
+}
+
 /// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
 /// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
 #[uniffi::export]

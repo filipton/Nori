@@ -313,7 +313,9 @@ The owner asked for these explicitly; they override the "UI later" note below.
 - Octo-fiesta-aware search, telling library and provider items apart, and the stale-cover bug (provider covers
   cached with their "not downloaded" badge) -> done: provider label, library/provider filter, provider covers never
   disk-cached, "add to library" (star makes octo-fiesta download it).
-- Automatic synced lyrics for songs without an LRC, from several lyric libraries -> planned next.
+- Automatic synced lyrics for songs without an LRC -> done: server first, then LRCLIB (synced preferred, duration-matched,
+  hits kept, misses retried weekly, failures never cached). LyricsPlus mirrors (Navic's karaoke source) were all
+  down on 2026-09-18, so not shipped; the provider layer takes more sources.
 - Apple Music AutoMix-style transitions with BPM/beat matching -> researched (docs/research/automix.md), being built.
 - Material You, AMOLED, adjustable -> done: wallpaper colours, accent colours, theme mode, true-black mode.
 - Gestures -> done: swipe the mini player to skip, up to open; swipe the player header or artwork down to close;

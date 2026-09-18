@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.withContext
 
 enum class AlbumSort(val api: String) {
@@ -146,7 +147,45 @@ class Library(
     fun starred(): Flow<Starred> = cached("getStarred2", emptyList(), parse = { core.parseStarred(it) })
     fun genres(): Flow<List<Genre>> = cached("getGenres", emptyList(), HOUR, { core.parseGenres(it) })
     fun radio(): Flow<List<RadioStation>> = cached("getInternetRadioStations", emptyList(), HOUR, { core.parseRadio(it) })
-    fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId), HOUR, { core.parseLyrics(it) })
+    /** `enhanced` asks OpenSubsonic servers for word cues and translation layers (songLyrics v2). */
+    fun lyrics(songId: String): Flow<Lyrics> = cached("getLyricsBySongId", params("id" to songId, "enhanced" to true), HOUR, { core.parseLyrics(it) })
+
+    private val providers = LyricsProviders(httpOf)
+
+    /**
+     * The server's lyrics, or when it has no synced ones and [useLrclib] allows, LRCLIB's. The provider
+     * answer is cached like a server response, so a song is looked up at most once a day.
+     */
+    fun lyricsFor(song: Song, useLrclib: Boolean): Flow<FoundLyrics> = flow {
+        var fromServer: Lyrics? = null
+        lyrics(song.id).catch { }.collect { fromServer = it; emit(FoundLyrics(it, LyricsSource.SERVER)) }
+        val server = fromServer
+        if (!useLrclib || song.isExternal || (server != null && server.synced && server.lines.isNotEmpty())) {
+            if (server == null) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+            return@flow
+        }
+        // A hit is kept for good; a miss is asked again after a week (someone may have added it since);
+        // a failed request (offline, server down) is not remembered at all.
+        val key = "lrclib2|${song.artist}|${song.title}|${song.duration}"
+        val cachedText = withContext(Dispatchers.IO) { core.cacheGet(key)?.decodeToString() }
+        val missFresh = cachedText == "" && withContext(Dispatchers.IO) { core.cacheFresh(key, 7 * DAY) }
+        val found: Lyrics? = when {
+            !cachedText.isNullOrEmpty() -> dev.flint.music.ffi.lyricsFromLrc(cachedText)
+            missFresh -> null
+            else -> when (val r = providers.lrclib(song)) {
+                is Lookup.Found -> r.lyrics.also { withContext(Dispatchers.IO) { core.cachePut(key, toLrc(it).encodeToByteArray()) } }
+                Lookup.Missing -> null.also { withContext(Dispatchers.IO) { core.cachePut(key, ByteArray(0)) } }
+                Lookup.Failed -> null
+            }
+        }
+        if (found != null && (server == null || server.lines.isEmpty() || found.synced)) emit(FoundLyrics(found, LyricsSource.LRCLIB))
+        else if (server == null) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+    }.flowOn(Dispatchers.IO)
+
+    /** Back to LRC text for the cache; the core parses it again when read. */
+    private fun toLrc(l: Lyrics): String = l.lines.joinToString("\n") { line ->
+        if (line.startMs < 0) line.text else "[%02d:%05.2f]%s".format(java.util.Locale.ROOT, line.startMs / 60_000, (line.startMs % 60_000) / 1000.0, line.text)
+    }
 
     // ---- local only: history, mixes, smart playlists (all computed in the Rust core from the index) ----
 

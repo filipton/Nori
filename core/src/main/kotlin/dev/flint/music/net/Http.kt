@@ -7,6 +7,7 @@ import dev.flint.music.settings.ServerProfile
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -22,6 +23,9 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+
+/** Sent with every request, as public APIs like LRCLIB ask. */
+const val USER_AGENT = "flint-music/0.1 (+https://github.com/filipton/flint-music)"
 
 /** The server is only allowed on unmetered networks and this is not one. */
 class MeteredNetworkException : IOException("This server is set to Wi-Fi only")
@@ -75,9 +79,16 @@ class Http(private val context: Context) {
             .readTimeout(30, TimeUnit.SECONDS)
             .addInterceptor { chain ->
                 val now = profile
-                if (now?.wifiOnly == true && metered) throw MeteredNetworkException()
-                val headers = now?.headers.orEmpty()
-                chain.proceed(if (headers.isEmpty()) chain.request() else chain.request().newBuilder().apply { headers.forEach { (k, v) -> header(k, v) } }.build())
+                val request = chain.request()
+                // Only the music server gets the profile's rules and headers; third parties (LRCLIB, AutoEQ) must not
+                // receive a reverse-proxy token, and are not subject to the server's Wi-Fi-only setting.
+                val toServer = now != null && (sameHost(request.url, now.url) || sameHost(request.url, now.altUrl))
+                if (toServer && now!!.wifiOnly && metered) throw MeteredNetworkException()
+                chain.proceed(request.newBuilder().apply {
+                    // Public services ask clients to identify themselves; some reject OkHttp's default outright.
+                    header("User-Agent", USER_AGENT)
+                    if (toServer) now!!.headers.forEach { (k, v) -> header(k, v) }
+                }.build())
             }
         if (p != null && (p.allowSelfSigned || p.clientCert.isNotEmpty())) tls(b, p)
         return b.build()
@@ -128,6 +139,13 @@ class Http(private val context: Context) {
             }
         })
     }
+}
+
+/** Whether [url] goes to the server written as [address] (scheme optional, as people type it). */
+private fun sameHost(url: okhttp3.HttpUrl, address: String): Boolean {
+    if (address.isBlank()) return false
+    val parsed = (if ("://" in address) address else "https://$address").toHttpUrlOrNull() ?: return false
+    return parsed.host.equals(url.host, ignoreCase = true) && parsed.port == url.port
 }
 
 /** What went wrong, in words a person can act on. */

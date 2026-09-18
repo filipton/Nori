@@ -150,6 +150,10 @@ fun SettingsScreen(vm: SettingsViewModel) {
         SectionTitle("Lyrics")
         Toggle("Word-by-word sweep", "The line being sung fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen; off means the line just lights up.", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
         Toggle("Keep the screen on", "While lyrics are showing and music is playing", p.lyricsKeepScreenOn) { on -> vm.update { it.copy(lyricsKeepScreenOn = on) } }
+        Toggle(
+            "Fetch missing lyrics from LRCLIB", if (p.thirdPartyLookups) "When the server has no synced lyrics, ask lrclib.net (sends artist, title and length)" else "Needs \"Third-party lookups\" in Features",
+            p.lyricsLrclib && p.thirdPartyLookups, enabled = p.thirdPartyLookups,
+        ) { on -> vm.update { it.copy(lyricsLrclib = on) } }
         Toggle("Show translations", "When the server has a translation layer", p.lyricsTranslation) { on -> vm.update { it.copy(lyricsTranslation = on) } }
         Choice("Text size", p.lyricsSize, listOf(0 to "Small", 1 to "Medium", 2 to "Large")) { v -> vm.update { it.copy(lyricsSize = v) } }
 

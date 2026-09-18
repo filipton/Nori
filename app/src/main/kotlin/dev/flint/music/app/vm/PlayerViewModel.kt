@@ -2,6 +2,8 @@ package dev.flint.music.app.vm
 
 import android.app.Application
 import dev.flint.music.ffi.Lyrics
+import dev.flint.music.data.FoundLyrics
+import dev.flint.music.data.LyricsSource
 import dev.flint.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.StateFlow
@@ -22,8 +24,12 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
 
     /** Lyrics of whatever is playing; fetched only while a lyrics view is collecting. */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val lyrics: StateFlow<Load<Lyrics>> = state.map { it.current?.id }.distinctUntilChanged()
-        .flatMapLatest { if (it == null) flowOf(Lyrics(synced = false, wordTimed = false, lines = emptyList())) else flint.library.lyrics(it) }.asLoad()
+    val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
+        .flatMapLatest { song ->
+            val p = flint.settings.value
+            if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+            else flint.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
+        }.asLoad()
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs
