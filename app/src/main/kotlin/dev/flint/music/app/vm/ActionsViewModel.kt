@@ -177,7 +177,38 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     val shares = _shares.receiveAsFlow()
     fun share(id: String) = attempt(null) { _shares.send(flint.library.share(id)) }
 
-    fun download(songs: List<Song>) { flint.downloads.download(songs); _messages.trySend("Downloading ${songs.size} song${if (songs.size == 1) "" else "s"}") }
+    fun download(songs: List<Song>) {
+        flint.downloads.download(songs)
+        warmCovers(songs)
+        _messages.trySend("Downloading ${songs.size} song${if (songs.size == 1) "" else "s"}")
+    }
+
+    /**
+     * Fetches the artwork of songs being downloaded into the image cache, at the two sizes the app
+     * asks for. Covers are only kept once something has drawn them, so a song downloaded from a menu -
+     * without its cover ever being on screen - arrives on the device with no picture, and shows a blank
+     * plate for the rest of its life offline.
+     */
+    private fun warmCovers(songs: List<Song>) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+        val context = getApplication<Application>()
+        val loader = coil3.SingletonImageLoader.get(context)
+        songs.asSequence().mapNotNull { it.coverArt }.filterNot { it.startsWith("ext-") || it.startsWith("pl-") }
+            .distinct().take(500)
+            .forEach { art ->
+                for (size in intArrayOf(320, 800)) {
+                    loader.enqueue(
+                        coil3.request.ImageRequest.Builder(context)
+                            .data(flint.library.coverUrl(art, size)).size(size).build(),
+                    )
+                }
+            }
+    }
+
+    /** Gives the downloads back: the same menu entry that offered them should be able to take them away. */
+    fun undownload(songs: List<Song>) {
+        flint.downloads.remove(songs.map { it.id })
+        _messages.trySend("Removed ${songs.size} download${if (songs.size == 1) "" else "s"}")
+    }
     fun downloadAlbum(a: Album) = attempt(null) { download(flint.library.albumSongs(a.id)) }
     fun removeDownloads(ids: List<String>) = flint.downloads.remove(ids)
 

@@ -125,7 +125,10 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
         // The line being sung rests a third of the way down; the list glides there instead of jumping.
-        LaunchedEffect(active) { if (active >= 0) list.animateScrollToItem(active, -third) }
+        val plain = reduceMotion()
+        LaunchedEffect(active, plain) {
+            if (active >= 0) if (plain) list.scrollToItem(active, -third) else list.animateScrollToItem(active, -third)
+        }
         LazyColumn(state = list, contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 24.dp, bottom = maxHeight / 2)) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
                 Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)) }.padding(vertical = 8.dp)) {
@@ -133,7 +136,17 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
                     when {
                         !lyrics.synced -> Text(line.text, style = style, color = bright)
                         i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { now }
-                        else -> Text(line.text, style = style.copy(fontWeight = weight), color = if (i == active) bright else if (i < active) dim.copy(alpha = 0.55f) else dim)
+                        else -> {
+                            // The line lights up over a moment instead of flicking between two colours,
+                            // which is the difference between "the song moved on" and "the screen blinked".
+                            val target = if (i == active) bright else if (i < active) dim.copy(alpha = 0.55f) else dim
+                            val colour by androidx.compose.animation.animateColorAsState(
+                                target,
+                                androidx.compose.animation.core.tween(if (plain) 0 else 260),
+                                label = "lyric",
+                            )
+                            Text(line.text, style = style.copy(fontWeight = weight), color = colour)
+                        }
                     }
                     if (prefs.lyricsTranslation) line.translation?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = if (i == active) bright.copy(alpha = 0.8f) else dim) }
                 }

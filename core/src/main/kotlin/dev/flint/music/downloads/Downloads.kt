@@ -30,8 +30,18 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     private val sources by lazySources
     private val io = Executors.newFixedThreadPool(2)
     private val _state = MutableStateFlow(DownloadState())
-    /** What this batch asked for, so the closing notification reports the batch and not the library. */
+    /**
+     * What this batch asked for and how it is going. media3 only hands the notification the downloads
+     * that are still running, so counting "done" from that list always gives nought and the total
+     * shrinks as songs finish - "0 of 8", then "0 of 7". These numbers are the app's own.
+     */
     private val batch = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+    @Volatile var batchTotal = 0
+        private set
+    @Volatile var batchDone = 0
+        private set
+    @Volatile var batchFailed = 0
+        private set
     val state: StateFlow<DownloadState> = _state
 
     val manager: DownloadManager by lazy {
@@ -39,10 +49,14 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             maxParallelDownloads = 2
             addListener(object : DownloadManager.Listener {
                 override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) {
+                    if (d.request.id in batch) {
+                        if (d.state == Download.STATE_COMPLETED) batchDone++
+                        if (d.state == Download.STATE_FAILED) batchFailed++
+                    }
                     if (d.state == Download.STATE_COMPLETED) io.execute { core.downloadDone(d.request.id); publish() }
-                    // The foreground notification disappears with the service; a batch that took a while
-                    // should still say how it went.
-                    if (m.currentDownloads.isEmpty()) summarise(m)
+                    // The service's own notification goes when the service does; the batch still owes the
+                    // user a word about how it went, in the same place the progress was.
+                    if (m.currentDownloads.isEmpty()) summarise()
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
@@ -65,7 +79,12 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         for (s in songs) {
             if (s.id in known) continue
             core.downloadAdd(s)
+            // A batch that has finished starts the count again rather than adding to the last one.
+            if (manager.currentDownloads.isEmpty() && batchDone + batchFailed >= batchTotal) {
+                batch.clear(); batchTotal = 0; batchDone = 0; batchFailed = 0
+            }
             batch += s.id
+            batchTotal++
             // The title and the expected size ride along with the request: the notification needs both,
             // and a transcoding server usually answers without a Content-Length, which leaves media3's
             // own progress bar empty and the download looking stuck.
@@ -78,36 +97,45 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         publish()
     }
 
-    /** "12 songs downloaded" (or how many did not), once the batch that was asked for finishes. */
-    private fun summarise(m: DownloadManager) {
-        val wanted = synchronized(batch) { batch.toSet() }
-        if (wanted.isEmpty()) return
-        synchronized(batch) { batch.clear() }
-        val all = m.downloadIndex.getDownloads().use { c -> generateSequence { if (c.moveToNext()) c.download else null }.toList() }
-            .filter { it.request.id in wanted }
-        val failed = all.count { it.state == Download.STATE_FAILED }
-        val done = all.count { it.state == Download.STATE_COMPLETED }
+    /**
+     * The same notification the progress was in, turned into the result: replacing id 1001 means the
+     * bar does not sit there empty next to a second notification once the service has let go of it.
+     */
+    private fun summarise() {
+        if (batchTotal == 0) return
+        val done = batchDone
+        val failed = batchFailed
+        batch.clear(); batchTotal = 0; batchDone = 0; batchFailed = 0
         if (done == 0 && failed == 0) return
         val manager = context.getSystemService(android.app.NotificationManager::class.java) ?: return
         val text = listOfNotNull(
             "$done song${if (done == 1) "" else "s"} downloaded".takeIf { done > 0 },
             "$failed failed".takeIf { failed > 0 },
         ).joinToString(" · ")
-        manager.notify(
-            1002,
-            NotificationCompat.Builder(context, "downloads")
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle(text)
-                .setAutoCancel(true)
-                .build(),
-        )
+        // The service may still hold the foreground notification for a moment; replacing it after it
+        // has gone leaves exactly one, which is what a finished download should look like.
+        io.execute {
+            Thread.sleep(1200)
+            manager.notify(
+                DOWNLOAD_NOTIFICATION,
+                NotificationCompat.Builder(context, "downloads")
+                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                    .setContentTitle(text)
+                    .setAutoCancel(true)
+                    .setOngoing(false)
+                    .build(),
+            )
+        }
     }
 
     fun remove(ids: List<String>) = ids.forEach { DownloadService.sendRemoveDownload(context, DownloadWorker::class.java, it, false) }
 }
 
+/** One id for the whole life of a download batch: progress, then the result, in the same place. */
+const val DOWNLOAD_NOTIFICATION = 1001
+
 @UnstableApi
-class DownloadWorker : DownloadService(1001, 1000L, CHANNEL, androidx.media3.exoplayer.R.string.exo_download_notification_channel_name, 0) {
+class DownloadWorker : DownloadService(DOWNLOAD_NOTIFICATION, 1000L, CHANNEL, androidx.media3.exoplayer.R.string.exo_download_notification_channel_name, 0) {
     companion object {
         private const val CHANNEL = "downloads"
         /** Last sample of total bytes and when it was taken, for a speed that means something. */
@@ -126,9 +154,10 @@ class DownloadWorker : DownloadService(1001, 1000L, CHANNEL, androidx.media3.exo
      * weighs, and says what is being fetched, how fast, and how much longer.
      */
     override fun getForegroundNotification(downloads: MutableList<Download>, notMetRequirements: Int): Notification {
-        val done = downloads.count { it.state == Download.STATE_COMPLETED }
-        val failed = downloads.count { it.state == Download.STATE_FAILED }
-        val total = downloads.size
+        val downloads2 = Flint.get(this).downloads
+        val done = downloads2.batchDone
+        val failed = downloads2.batchFailed
+        val total = downloads2.batchTotal.coerceAtLeast(downloads.size)
         val bytes = downloads.sumOf { it.bytesDownloaded }
         val expected = downloads.sumOf { d ->
             val stated = d.contentLength.takeIf { it > 0 } ?: 0L
@@ -156,7 +185,7 @@ class DownloadWorker : DownloadService(1001, 1000L, CHANNEL, androidx.media3.exo
 
         val headline = when {
             notMetRequirements != 0 -> "Waiting for the network"
-            total > 1 -> "Downloading $done of $total songs"
+            total > 1 -> "Downloading ${(done + 1).coerceAtMost(total)} of $total songs"
             else -> "Downloading"
         }
         val detail = listOfNotNull(

@@ -109,6 +109,23 @@ private fun quality(songs: List<Song>): String? {
     return listOfNotNull(s.suffix.uppercase().ifEmpty { null }, if (lossless && s.bitDepth > 0u) "${s.bitDepth}/${s.samplingRate.toInt() / 1000.0}" else s.bitRate.takeIf { it > 0u }?.let { "$it kbps" }).joinToString(" ").ifEmpty { null }
 }
 
+
+/**
+ * "Download" is the wrong word once the songs are already here, and so is offering all of them when
+ * only a few are missing. This says what is actually left to do - and offers to give the space back
+ * when there is nothing left.
+ */
+@Composable
+private fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
+    val missing = songs.filterNot { it.id in done }
+    return when {
+        songs.isEmpty() -> "Download" to { actions.download(songs) }
+        missing.isEmpty() -> "Remove downloads" to { actions.undownload(songs) }
+        missing.size == songs.size -> "Download" to { actions.download(songs) }
+        else -> "Download the other ${missing.size}" to { actions.download(missing) }
+    }
+}
+
 @Composable
 fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = viewModel()) {
     LaunchedEffect(id) { vm.open(id) }
@@ -139,12 +156,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                 }
                 // Queue and download live behind the menu: four controls on one line squeeze the Play
                 // pill until its own label no longer fits.
-                MoreCircle(
-                    listOf(
-                        "Add to queue" to { actions.enqueue(d.songs) },
-                        "Download" to { actions.download(d.songs) },
-                    ),
-                )
+                MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
             },
         ) {
             item(key = "header") {
@@ -271,7 +283,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
                 MoreCircle(
                     listOf(
                         "Add to queue" to { actions.enqueue(d.songs) },
-                        "Download" to { actions.download(d.songs) },
+                        downloadEntry(d.songs, done, actions),
                         "Export M3U" to { exportM3u.launch("${d.playlist.name}.m3u8") },
                     ),
                 )

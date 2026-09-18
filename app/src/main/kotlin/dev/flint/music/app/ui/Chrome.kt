@@ -105,28 +105,21 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
     // text colour. Tinting that patch with the accent is what made it read as a Material pill.
     val colour = if (selected) scheme.primary else content
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    // No patch behind anything. Where you are is the accent colour, a bold label and a slightly larger
+    // glyph - every shape drawn behind the current tab, circle or rectangle, ended up reading as
+    // Material's active indicator no matter how faint it was made.
     Column(
-        Modifier.clip(PillShape)
+        Modifier.clip(RoundedCornerShape(14.dp))
             .clickable(interactionSource = press, indication = null, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 5.dp)
+            .padding(horizontal = 18.dp, vertical = 7.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // A disc behind the glyph alone, never a slab behind the whole item: a wide rounded rectangle
-        // under an icon and its label is the Material navigation bar this is meant not to be.
-        Box(
-            Modifier.size(34.dp)
-                .background(if (selected) colour.copy(alpha = 0.16f) else Color.Transparent, CircleShape),
-            Alignment.Center,
-        ) {
-            Icon(tab.icon, null, Modifier.size(23.dp), tint = colour)
-        }
-        // Where you are should be readable at a glance and not only by hue: the current tab's label is
-        // bold and full strength, the others are lighter and dimmer.
+        Icon(tab.icon, null, Modifier.size(if (selected) 26.dp else 23.dp), tint = colour)
         Text(
             tab.label, Modifier.padding(top = 2.dp),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
-            color = if (selected) colour else colour.copy(alpha = 0.75f),
+            color = if (selected) colour else colour.copy(alpha = 0.7f),
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         )
     }

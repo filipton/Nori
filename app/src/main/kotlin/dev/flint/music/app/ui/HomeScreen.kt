@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.HomeViewModel
+import dev.flint.music.settings.HomeRow
 import dev.flint.music.ffi.Album
 
 @Composable
@@ -101,7 +102,11 @@ private fun androidx.compose.foundation.lazy.LazyListScope.shelf(title: String, 
 private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone: () -> Unit) {
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val order = prefs.homeRows
-    var dragIndex by remember { mutableIntStateOf(-1) }
+    // Tracked by which shelf is being held, never by its position: the position changes the instant the
+    // list reorders, and a gesture keyed on that is cancelled mid-drag - which is why a row could only
+    // be moved one place per press. The offset keeps the held row under the finger while the rest slide
+    // past it, so the gap follows the finger instead of the row snapping away from it.
+    var held by remember { mutableStateOf<HomeRow?>(null) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var rowHeight by remember { mutableFloatStateOf(0f) }
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -110,14 +115,16 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
         LargeTitle("Rearrange") {
             androidx.compose.material3.TextButton(onDone) { Text("Done", style = MaterialTheme.typography.titleSmall) }
         }
-        Caption("Drag a row to move it", Modifier.padding(start = Space.gutter, bottom = 8.dp))
+        Caption("Hold a handle and drag", Modifier.padding(start = Space.gutter, bottom = 8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            itemsIndexed(order, key = { _, r -> r.name }) { i, row ->
-                val dragged = i == dragIndex
+            itemsIndexed(order, key = { _, r -> r.name }) { _, row ->
+                val dragged = held == row
                 Row(
                     Modifier.fillMaxWidth()
-                        .androidxZ(dragged)
-                        .graphicsLayer { if (dragged) { translationY = dragOffset; shadowElevation = 12f } }
+                        .zIndex(if (dragged) 1f else 0f)
+                        .graphicsLayer {
+                            if (dragged) { translationY = dragOffset; shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f }
+                        }
                         .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
                         .padding(horizontal = Space.gutter, vertical = 14.dp),
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
@@ -125,25 +132,28 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
                     Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                     Icon(
                         androidx.compose.material.icons.Icons.Filled.DragHandle, "Reorder",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(38.dp).padding(8.dp).pointerInput(order) {
+                        tint = if (dragged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        // Keyed on the row, which never changes, so one press can carry it the whole way.
+                        modifier = Modifier.size(44.dp).padding(10.dp).pointerInput(row) {
                             detectDragGestures(
                                 onDragStart = {
-                                    dragIndex = i; dragOffset = 0f
+                                    held = row; dragOffset = 0f
                                     haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                                 },
-                                onDragEnd = { dragIndex = -1; dragOffset = 0f },
-                                onDragCancel = { dragIndex = -1; dragOffset = 0f },
+                                onDragEnd = { held = null; dragOffset = 0f },
+                                onDragCancel = { held = null; dragOffset = 0f },
                             ) { change, drag ->
                                 change.consume()
-                                if (dragIndex < 0) return@detectDragGestures
                                 dragOffset += drag.y
                                 val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGestures
-                                while (dragOffset >= h && dragIndex < order.lastIndex) {
-                                    settings.moveHomeRow(dragIndex, dragIndex + 1); dragIndex++; dragOffset -= h
+                                var at = settings.prefs.value.homeRows.indexOf(row)
+                                while (dragOffset >= h && at < settings.prefs.value.homeRows.lastIndex) {
+                                    settings.moveHomeRow(at, at + 1); at++; dragOffset -= h
+                                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                                 }
-                                while (dragOffset <= -h && dragIndex > 0) {
-                                    settings.moveHomeRow(dragIndex, dragIndex - 1); dragIndex--; dragOffset += h
+                                while (dragOffset <= -h && at > 0) {
+                                    settings.moveHomeRow(at, at - 1); at--; dragOffset += h
+                                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                                 }
                             }
                         },
@@ -155,4 +165,3 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
     }
 }
 
-private fun Modifier.androidxZ(on: Boolean) = if (on) this.zIndex(1f) else this

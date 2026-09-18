@@ -168,18 +168,20 @@ fun App() {
                 // One transition for the whole app, and a quiet one: pages slide a little and fade, the
                 // way a push does on a phone. The default jumps and the horizontal slide across the
                 // full width reads as a lurch on a large screen.
-                val slide = 40
+                val plain = reduceMotion()
+                val slide = if (plain) 0 else 40
+                val fast = if (plain) 90 else 220
                 NavHost(
                     controller, "home",
                     enterTransition = {
-                        androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(220)) { slide } +
-                            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180))
+                        androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(fast)) { slide } +
+                            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180))
                     },
-                    exitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) },
-                    popEnterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) },
+                    exitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 140)) },
+                    popEnterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180)) },
                     popExitTransition = {
-                        androidx.compose.animation.slideOutHorizontally(androidx.compose.animation.core.tween(200)) { slide } +
-                            androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+                        androidx.compose.animation.slideOutHorizontally(androidx.compose.animation.core.tween(if (plain) 90 else 200)) { slide } +
+                            androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 160))
                     },
                 ) {
                     composable("home") { Inset { HomeScreen(actions) } }

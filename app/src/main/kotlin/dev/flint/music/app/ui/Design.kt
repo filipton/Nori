@@ -30,6 +30,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -519,4 +521,20 @@ fun MoreCircle(items: List<Pair<String, () -> Unit>>, modifier: Modifier = Modif
             }
         }
     }
+}
+
+
+/**
+ * Whether movement should be kept to a minimum: the app's own switch, or the system's animations being
+ * turned off (Developer options, or the accessibility setting some people rely on). Read it rather than
+ * hard-coding durations, so "reduce motion" means the same thing everywhere.
+ */
+@Composable
+fun reduceMotion(): Boolean {
+    val prefs by (androidx.lifecycle.viewmodel.compose.viewModel<dev.flint.music.app.vm.SettingsViewModel>()).prefs.collectAsStateWithLifecycle()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val systemOff = androidx.compose.runtime.remember {
+        android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }
+    return prefs.reduceMotion || systemOff
 }

@@ -257,7 +257,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
 /** The artwork: a card that lifts and fills when the music plays, and settles back when it stops. */
 @Composable
 private fun Artwork(vm: PlayerViewModel, coverUrl: String?, playing: Boolean, onClose: () -> Unit) {
-    val scale by animateFloatAsState(if (playing) 1f else 0.86f, spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow), label = "artwork")
+    val plain = reduceMotion()
+    val scale by animateFloatAsState(
+        if (playing) 1f else 0.86f,
+        if (plain) androidx.compose.animation.core.tween(0) else spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow),
+        label = "artwork",
+    )
     Box(Modifier.fillMaxSize(), Alignment.Center) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(1f)

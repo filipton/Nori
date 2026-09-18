@@ -55,8 +55,26 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     private var connecting = false
     private val pending = ArrayList<(MediaController) -> Unit>()
 
-    val positionMs: Long get() = controller?.currentPosition ?: 0
-    val bufferedMs: Long get() = controller?.bufferedPosition ?: 0
+    // The controller is released while the app is in the background and built again when it returns,
+    // and for that moment it can answer nothing at all. Reporting zero then makes the seek bar snap to
+    // 0:00 and jump back a heartbeat later, which looks like a bug in playback rather than in the UI.
+    @Volatile private var lastPosition = 0L
+    @Volatile private var lastPositionAt = 0L
+    @Volatile private var lastBuffered = 0L
+
+    val positionMs: Long get() {
+        val c = controller
+        if (c != null) {
+            lastPosition = c.currentPosition
+            lastPositionAt = android.os.SystemClock.elapsedRealtime()
+            return lastPosition
+        }
+        // Still reconnecting: carry on from where it was, moving if it was playing.
+        val elapsed = if (_state.value.playing && lastPositionAt > 0) android.os.SystemClock.elapsedRealtime() - lastPositionAt else 0
+        return (lastPosition + elapsed).coerceAtLeast(0)
+    }
+
+    val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
 
     fun connect() {
         if (controller != null || connecting) return
