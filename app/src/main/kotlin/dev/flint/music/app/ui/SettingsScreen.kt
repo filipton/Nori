@@ -46,9 +46,9 @@ import dev.flint.music.settings.ReplayGainMode
 
 @Composable
 fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(enabled) { onChange(!value) }.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title)
+    Row(Modifier.fillMaxWidth().clickable(enabled) { onChange(!value) }.padding(horizontal = Space.gutter, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 14.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(value, onChange, enabled = enabled)
@@ -58,8 +58,8 @@ fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = tru
 @Composable
 private fun <T> Choice(title: String, value: T, options: List<Pair<T, String>>, onChange: (T) -> Unit) {
     var open by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().clickable { open = true }.padding(horizontal = 16.dp, vertical = 14.dp)) {
-        Text(title, Modifier.weight(1f))
+    Row(Modifier.fillMaxWidth().clickable { open = true }.padding(horizontal = Space.gutter, vertical = 15.dp)) {
+        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
         Text(options.firstOrNull { it.first == value }?.second ?: "$value", color = MaterialTheme.colorScheme.primary)
         DropdownMenu(open, { open = false }) { options.forEach { (v, label) -> DropdownMenuItem({ Text(label) }, { onChange(v); open = false }) } }
     }
@@ -79,12 +79,13 @@ fun SettingsScreen(vm: SettingsViewModel) {
     LaunchedEffect(p.activeServerId) { vm.loadMusicFolders() }
     editing?.let { e -> androidx.compose.ui.window.Dialog({ editing = null }, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) { LoginScreen(vm, e) { editing = null } }; }
     Column(Modifier.verticalScroll(rememberScrollState())) {
+        LargeTitle("Settings")
         SectionTitle("Look")
         Choice("Theme", p.theme, listOf(ThemeMode.SYSTEM to "Follow system", ThemeMode.LIGHT to "Light", ThemeMode.DARK to "Dark")) { v -> vm.update { it.copy(theme = v) } }
         Toggle("AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens", p.amoled) { on -> vm.update { it.copy(amoled = on) } }
         Toggle("Colours from the cover", "Album, artist and playlist pages and the player take their colour from the artwork, which runs edge to edge", p.coverColors) { on -> vm.update { it.copy(coverColors = on) } }
         if (android.os.Build.VERSION.SDK_INT >= 31) Toggle("Wallpaper colours", "Material You: take the colours from your wallpaper", p.dynamicColor) { on -> vm.update { it.copy(dynamicColor = on) } }
-        if (!p.dynamicColor || android.os.Build.VERSION.SDK_INT < 31) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (!p.dynamicColor || android.os.Build.VERSION.SDK_INT < 31) Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf(0xFF6750A4, 0xFF1E88E5, 0xFF00897B, 0xFF43A047, 0xFFF4511E, 0xFFE53935, 0xFFD81B60, 0xFF8E24AA).forEach { c ->
                 androidx.compose.foundation.layout.Box(
                     Modifier.size(if (p.accent == c) 36.dp else 30.dp).background(androidx.compose.ui.graphics.Color(c), androidx.compose.foundation.shape.CircleShape).clickable { vm.update { it.copy(accent = c) } },
@@ -111,14 +112,14 @@ fun SettingsScreen(vm: SettingsViewModel) {
             },
             p.bitPerfect,
         ) { on -> vm.update { it.copy(bitPerfect = on) } }
-        if (dac.modes.isNotEmpty()) Text("This DAC offers: " + dac.modes.joinToString(", ") + (dac.playing?.let { "  ·  now playing $it" } ?: ""), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (dac.modes.isNotEmpty()) Text("This DAC offers: " + dac.modes.joinToString(", ") + (dac.playing?.let { "  ·  now playing $it" } ?: ""), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Toggle("Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
         Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
         if (p.replayGain != ReplayGainMode.OFF) {
-            Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
-            Slider(p.preampDb, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), valueRange = -12f..6f)
+            Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
+            Slider(p.preampDb, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = Space.gutter), valueRange = -12f..6f)
         }
-        Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 14.dp)) {
+        Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = Space.gutter, vertical = 15.dp)) {
             Text("Equalizer and crossfeed", Modifier.weight(1f)); Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
         }
         Toggle(
@@ -149,14 +150,14 @@ fun SettingsScreen(vm: SettingsViewModel) {
         Choice("Playback speed", p.speed, listOf(0.75f to "0.75×", 1f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2f to "2×")) { v -> vm.update { it.copy(speed = v) } }
         Toggle("Skip silence", "Cuts silent stretches inside and between tracks", p.skipSilence) { on -> vm.update { it.copy(skipSilence = on) } }
         if (p.offload && (p.dsp || p.crossfadeSec > 0 || p.skipSilence || p.speed != 1f)) {
-            Text("Something above needs the decoded audio, so hardware offload is paused. Playback still runs in bursts from a deep buffer.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Something above needs the decoded audio, so hardware offload is paused. Playback still runs in bursts from a deep buffer.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text("System audio effects", Modifier.fillMaxWidth().clickable {
             runCatching { context.startActivity(Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName).putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)) }
-        }.padding(horizontal = 16.dp, vertical = 14.dp))
+        }.padding(horizontal = Space.gutter, vertical = 15.dp))
 
         SectionTitle("Features")
-        Text("Anything switched off here is not even started: no listener, no socket, no audio processing.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Anything switched off here is not even started: no listener, no socket, no audio processing.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Toggle("Listening history and taste model", "Kept on this device only. Feeds mixes, smart playlists and the listening stats. One small write when a track ends.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
         Toggle("Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row", p.weightedShuffle) { on -> vm.update { it.copy(weightedShuffle = on) } }
         Toggle("Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them", p.profilePerOutput) { on -> vm.update { it.copy(profilePerOutput = on) } }

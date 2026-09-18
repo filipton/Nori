@@ -47,6 +47,23 @@ Run `cargo test` and a build before committing.
 - octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never
   queue or prefetch provider tracks the user did not ask to play. Provider items are never indexed.
 
+## Look
+
+The interface follows Apple Music's feel, not Material's defaults: `app/.../ui/Design.kt` holds the
+radii, spacing, type scale and the few shapes (`PillButton`, `Chip`, `SearchField`, `Hairline`,
+`SectionHeader`, `LargeTitle`) that every screen is built from. Use them instead of dropping a raw
+`Button`, `FilterChip`, `OutlinedTextField` or `Divider` into a screen.
+
+The rule the whole thing exists for: **artwork bleeds into the page**. `CoverColors.kt` takes the
+average colour of a cover's own bottom rows and `HeroPage` starts the page wash from exactly that
+colour, so there is no line where the picture ends. Do not go further and imitate Apple's liquid
+glass - copied wholesale onto Android it looks wrong, and the owner has said so.
+
+Everything visual stays static: gradients are values, scroll effects are read in the draw phase
+(`graphicsLayer`, `drawBehind`), and nothing animates unless the user touched it. The rounded covers
+were measured against square ones on the grid and cost nothing (identical 50th/90th percentile frame
+times), but measure again before adding blur, shadows on lists or anything per-frame.
+
 ## Optional features
 
 `docs/features.md` is the checklist of what is planned, with the owner's decisions at the top. Every

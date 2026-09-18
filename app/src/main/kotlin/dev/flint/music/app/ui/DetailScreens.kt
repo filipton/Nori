@@ -14,19 +14,17 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -60,28 +58,33 @@ private fun Header(title: String, subtitle: String, coverUrl: String?, actions: 
     var fullscreen by remember { mutableStateOf(false) }
     if (fullscreen && coverUrl != null) androidx.compose.ui.window.Dialog({ fullscreen = false }) { Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }) }
     Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Caption(subtitle, Modifier.padding(top = 2.dp))
             }
             actions()
         }
-        if (coverUrl != null) Cover(coverUrl, 220.dp, Modifier.padding(16.dp).align(Alignment.CenterHorizontally).clickable { fullscreen = true })
+        if (coverUrl != null) Cover(coverUrl, 220.dp, Modifier.padding(Space.gutter).align(Alignment.CenterHorizontally).clickable { fullscreen = true }, radius = Radius.card)
     }
 }
 
+/** Play and shuffle live in the hero now; a long list still wants a way to narrow itself. */
 @Composable
-private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel, filter: String? = null, onFilter: ((String) -> Unit)? = null) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-        Button({ actions.play(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text("Play") }
-        OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text("Shuffle") }
+private fun FilterField(count: Int, filter: String, onFilter: (String) -> Unit) {
+    if (count <= 12 && filter.isEmpty()) return
+    SearchField(filter, onFilter, "Filter", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
+}
+
+/** The row of buttons the screens without a hero still use. */
+@Composable
+private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp), Arrangement.spacedBy(10.dp)) {
+        PillButton("Play", Icons.Filled.PlayArrow, { actions.play(songs) }, Modifier.weight(1f), prominent = true, enabled = songs.isNotEmpty())
+        PillButton("Shuffle", Icons.Filled.Shuffle, { actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty())
         IconButton({ actions.enqueue(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add all to queue") }
         IconButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Download, "Download all") }
-    }
-    if (onFilter != null && (songs.size > 12 || !filter.isNullOrEmpty())) {
-        OutlinedTextField(filter.orEmpty(), onFilter, Modifier.fillMaxWidth().padding(horizontal = 16.dp), singleLine = true, placeholder = { Text("Filter") })
     }
 }
 
@@ -118,17 +121,31 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     var filter by remember { mutableStateOf("") }
     LoadBox(load) { d ->
         val discs = remember(d, filter) { d.songs.matching(filter).groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
-        HeroPage(vm.cover(d.album.coverArt, CoverSize.FULL), d.album.name, listOfNotNull(d.album.artist, d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs", duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs), "explicit".takeIf { d.album.explicitStatus == "explicit" }).joinToString(" · "), actions = {
-                    IconButton({ actions.starAlbum(d.album.id, !d.album.starred) }) { Icon(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-            }) {
+        HeroPage(
+            coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
+            title = d.album.name,
+            subtitle = d.album.artist,
+            caption = listOfNotNull(
+                d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs",
+                duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
+                "explicit".takeIf { d.album.explicitStatus == "explicit" },
+            ).joinToString(" · "),
+            onSubtitle = d.album.artistId?.let { a -> { nav.artist(a) } },
+            onPlay = { actions.play(d.songs) },
+            onShuffle = { actions.shuffle(d.songs) },
+            actions = {
+                IconButton({ actions.starAlbum(d.album.id, !d.album.starred) }) { Icon(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
+                IconButton({ actions.enqueue(d.songs) }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add all to queue") }
+                IconButton({ actions.download(d.songs) }) { Icon(Icons.Filled.Download, "Download all") }
+            },
+        ) {
             item(key = "header") {
                 if (d.album.isExternal || d.album.id.startsWith("pl-")) {
-                    TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 8.dp)) {
+                    TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
                         Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
                     }
                 }
-                PlayButtons(d.songs, actions, filter) { filter = it }
-                d.album.artistId?.let { a -> Text("More by ${d.album.artist}", Modifier.padding(horizontal = 16.dp).clickable { nav.artist(a) }, color = MaterialTheme.colorScheme.primary) }
+                FilterField(d.songs.size, filter) { filter = it }
             }
             discs.forEach { (disc, tracks) ->
                 if (discs.size > 1) item(key = "disc$disc") {
@@ -166,18 +183,21 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
     }
     LoadBox(load) { ui ->
         val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
-        HeroPage(vm.cover(ui.detail.artist.coverArt, CoverSize.FULL), ui.detail.artist.name, "${ui.detail.albums.size} releases", actions = {
-                    IconButton({ actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred) }) { Icon(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-            }) {
+        HeroPage(
+            coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
+            title = ui.detail.artist.name,
+            caption = "${ui.detail.albums.size} releases",
+            onPlay = { actions.playArtist(ui.detail.albums) },
+            onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
+            actions = {
+                IconButton({ actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred) }) { Icon(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
+                IconButton({ actions.queueArtist(ui.detail.albums) }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add artist to queue") }
+                IconButton({ actions.downloadArtist(ui.detail.albums) }) { Icon(Icons.Filled.Download, "Download all albums") }
+            },
+        ) {
             item(key = "header") {
-                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-                    Button({ actions.playArtist(ui.detail.albums) }, Modifier.weight(1f)) { Icon(Icons.Filled.PlayArrow, null); Text("Play") }
-                    OutlinedButton({ actions.playArtist(ui.detail.albums, shuffle = true) }, Modifier.weight(1f)) { Icon(Icons.Filled.Shuffle, null); Text("Shuffle") }
-                    IconButton({ actions.queueArtist(ui.detail.albums) }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add artist to queue") }
-                    IconButton({ actions.downloadArtist(ui.detail.albums) }) { Icon(Icons.Filled.Download, "Download all albums") }
-                }
-                ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = 16.dp), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) }
-                Row(Modifier.padding(horizontal = 8.dp)) {
+                ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                Row(Modifier.padding(horizontal = 12.dp)) {
                     ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
                     ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
                 }
@@ -222,16 +242,23 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
     }
     LoadBox(load) { d ->
         val shown = remember(d, filter) { d.songs.matching(filter) }
-        HeroPage(vm.cover(d.playlist.coverArt, CoverSize.FULL), d.playlist.name, "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}", actions = {
-                    val pinned = id in prefs.pinnedPlaylists
-                    IconButton({ settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) } }) {
-                        Icon(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home", tint = if (pinned) MaterialTheme.colorScheme.primary else LocalContentColor.current)
-                    }
-            }) {
-            item(key = "header") {
-                PlayButtons(d.songs, actions, filter) { filter = it }
-                TextButton({ exportM3u.launch("${d.playlist.name}.m3u8") }, Modifier.padding(horizontal = 8.dp)) { Text("Export M3U") }
-            }
+        HeroPage(
+            coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
+            title = d.playlist.name,
+            subtitle = d.playlist.comment?.ifEmpty { null },
+            caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
+            onPlay = { actions.play(d.songs) },
+            onShuffle = { actions.shuffle(d.songs) },
+            actions = {
+                val pinned = id in prefs.pinnedPlaylists
+                IconButton({ settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) } }) {
+                    Icon(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home", tint = if (pinned) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                }
+                IconButton({ actions.download(d.songs) }) { Icon(Icons.Filled.Download, "Download all") }
+                IconButton({ exportM3u.launch("${d.playlist.name}.m3u8") }) { Icon(Icons.Filled.IosShare, "Export M3U") }
+            },
+        ) {
+            item(key = "header") { FilterField(d.songs.size, filter) { filter = it } }
             songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }

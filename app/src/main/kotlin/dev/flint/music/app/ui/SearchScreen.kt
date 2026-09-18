@@ -18,7 +18,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -34,7 +33,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.SearchViewModel
 import dev.flint.music.app.vm.SearchScope
-import androidx.compose.material3.FilterChip
 
 @Composable
 fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
@@ -43,18 +41,17 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
     Column {
-        OutlinedTextField(
-            ui.query, vm::setQuery, singleLine = true, placeholder = { Text("Songs, albums, artists") },
-            leadingIcon = { Icon(Icons.Filled.Search, null) },
-            trailingIcon = { if (ui.query.isNotEmpty()) IconButton({ vm.setQuery("") }) { Icon(Icons.Filled.Clear, "Clear") } },
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp).testTag("search"),
+        LargeTitle("Search")
+        SearchField(
+            ui.query, vm::setQuery, "Songs, albums, artists",
+            Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), testTag = "search",
         )
         if (ui.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text("Server search failed: $it — showing offline results", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
-        if (ui.hasProviders || ui.scope != SearchScope.EVERYTHING) LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (ui.hasProviders || ui.scope != SearchScope.EVERYTHING) LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(listOf(SearchScope.EVERYTHING to "Everything", SearchScope.LIBRARY to "In library", SearchScope.PROVIDERS to "Not in library yet")) { (sc, label) ->
-                FilterChip(ui.scope == sc, { vm.setScope(sc) }, { Text(label) })
+                Chip(label, ui.scope == sc) { vm.setScope(sc) }
             }
         }
         val r = ui.shown
@@ -62,11 +59,11 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
             LazyColumn {
                 if (ui.history.isNotEmpty()) item {
                     Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Recent searches", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+                        Text("Recent searches", Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.titleLarge)
                         TextButton(vm::clearHistory) { Text("Clear") }
                     }
                 }
-                items(ui.history, key = { it }) { q -> Text(q, Modifier.fillMaxWidth().clickable { vm.setQuery(q) }.padding(horizontal = 16.dp, vertical = 12.dp)) }
+                items(ui.history, key = { it }) { q -> Text(q, Modifier.fillMaxWidth().clickable { vm.setQuery(q) }.padding(horizontal = Space.gutter, vertical = 13.dp), style = MaterialTheme.typography.bodyLarge) }
             }
             return@Column
         }
@@ -75,10 +72,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                 SectionTitle("Artists")
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(r.artists, key = { it.id }) { a ->
-                        Column(Modifier.clickable { vm.remember(); nav.artist(a.id) }, horizontalAlignment = Alignment.CenterHorizontally) {
-                            Cover(vm.cover(a.coverArt, CoverSize.ROW), 88.dp)
-                            Text(a.name, Modifier.padding(top = 4.dp), maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
-                        }
+                        ArtistCard(a.name, "", vm.cover(a.coverArt, CoverSize.ROW), 96.dp, onClick = { vm.remember(); nav.artist(a.id) })
                     }
                 }
             }
@@ -94,7 +88,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                 // queueing the rest would make the server download every provider track in it.
                 SongRow(s, vm.cover(s.coverArt, CoverSize.ROW), onClick = { vm.remember(); actions.play(listOf(s)) }, onMenu = { menu(s) }, downloaded = s.id in downloads.doneIds)
             }
-            if (ui.fromServer && r.songs.isEmpty() && r.albums.isEmpty() && r.artists.isEmpty()) item { Text("Nothing found", Modifier.padding(16.dp)) }
+            if (ui.fromServer && r.songs.isEmpty() && r.albums.isEmpty() && r.artists.isEmpty()) item { EmptyNote("Nothing found") }
         }
     }
 }

@@ -135,14 +135,20 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
                 }
             }
         }
-        if (lyrics.synced) Row(Modifier.align(Alignment.BottomEnd).padding(8.dp), Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
-            if (nudgeMs != 0L) Text("%+.1f s".format(nudgeMs / 1000f), style = MaterialTheme.typography.labelSmall)
-            TextButton({ nudgeMs -= 250 }) { Text("Later") }
-            TextButton({ nudgeMs += 250 }) { Text("Sooner") }
-            if (!lyrics.wordTimed && sweep) Text("word timing estimated", style = MaterialTheme.typography.labelSmall, color = dim)
-        }
-        found?.source?.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }?.let { src ->
-            Text("Lyrics from ${src.label}", Modifier.align(Alignment.BottomStart).padding(12.dp), style = MaterialTheme.typography.labelSmall, color = dim)
+        // Where the words came from, and how to nudge them, on one quiet bar that does not sit on the lyrics.
+        val source = found?.source?.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
+        if (lyrics.synced || source != null) androidx.compose.material3.Surface(
+            shape = PillShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background),
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
+        ) {
+            Row(Modifier.padding(horizontal = 6.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {
+                source?.let { Text(it.label, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall, color = dim) }
+                if (lyrics.synced) {
+                    if (nudgeMs != 0L) Text("%+.1f s".format(nudgeMs / 1000f), style = MaterialTheme.typography.labelSmall)
+                    TextButton({ nudgeMs -= 250 }) { Text("Later", style = MaterialTheme.typography.labelLarge) }
+                    TextButton({ nudgeMs += 250 }) { Text("Sooner", style = MaterialTheme.typography.labelLarge) }
+                }
+            }
         }
     }
 }

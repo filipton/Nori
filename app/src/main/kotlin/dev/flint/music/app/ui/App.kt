@@ -3,8 +3,6 @@ package dev.flint.music.app.ui
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material.icons.Icons
@@ -12,16 +10,9 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +22,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
@@ -72,7 +64,12 @@ class Nav(private val c: NavHostController) {
 val LocalNav = staticCompositionLocalOf<Nav> { error("no nav") }
 val LocalSongMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 
-private val tabs = listOf(Triple("home", "Home", Icons.Filled.Home), Triple("search", "Search", Icons.Filled.Search), Triple("library", "Library", Icons.Filled.LibraryMusic), Triple("settings", "Settings", Icons.Filled.Settings))
+private val tabs = listOf(
+    Tab("home", "Home", Icons.Filled.Home),
+    Tab("search", "Search", Icons.Filled.Search),
+    Tab("library", "Library", Icons.Filled.LibraryMusic),
+    Tab("settings", "Settings", Icons.Filled.Settings),
+)
 
 @Composable
 fun App() {
@@ -108,19 +105,11 @@ fun App() {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbar) },
-                bottomBar = {
-                    if (route != "player") Column {
-                        SelectionBar(actions)
-                        MiniPlayer(player, onOpen = nav::player)
-                        NavigationBar {
-                            tabs.forEach { (r, label, icon) ->
-                                NavigationBarItem(selected = route == r, onClick = { nav.tab(r) }, icon = { Icon(icon, label) }, label = { Text(label) })
-                            }
-                        }
-                    }
-                },
+                bottomBar = { if (route != "player") BottomChrome(player, actions, route, tabs, nav::tab, nav::player) },
             ) { pad ->
-                NavHost(controller, "home", Modifier.padding(bottom = pad.calculateBottomPadding())) {
+                // The player is a full-screen sheet: it draws its own colour behind the navigation bar.
+                val bottom = if (route == "player") 0.dp else pad.calculateBottomPadding()
+                NavHost(controller, "home", Modifier.padding(bottom = bottom)) {
                     composable("home") { Inset { HomeScreen(actions) } }
                     composable("search") { Inset { SearchScreen(actions) } }
                     composable("library") { Inset { LibraryScreen(actions) } }

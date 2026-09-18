@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -27,15 +29,18 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val mixes = settings.prefs.collectAsStateWithLifecycle().value.tasteModel
     LoadBox(load) { ui ->
         LazyColumn {
+            item(key = "title") { LargeTitle("Listen now") }
             item(key = "actions") {
-                Row(Modifier.padding(16.dp), Arrangement.spacedBy(8.dp)) { FilledTonalButton(actions::shuffleAll) { Text("Shuffle everything") }
-                    FilledTonalButton(actions::resumeFromServer) { Text("Resume from server") } }
+                Row(Modifier.padding(horizontal = Space.gutter, vertical = 12.dp), Arrangement.spacedBy(10.dp)) {
+                    PillButton("Shuffle everything", Icons.Filled.Shuffle, actions::shuffleAll, Modifier.weight(1f), prominent = true)
+                    PillButton("Resume", Icons.Filled.History, actions::resumeFromServer)
+                }
             }
             if (mixes) item(key = "mixes") { SectionTitle("For you"); MixTiles() }
             if (ui.pinned.isNotEmpty()) item(key = "pinned") {
                 SectionTitle("Pinned playlists")
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 136.dp, { nav.playlist(p.id) }) }
+                LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id) }) }
                 }
             }
             ui.rows.forEach { (row, albums) -> shelf(row.title, albums, vm) }
@@ -48,8 +53,8 @@ private fun androidx.compose.foundation.lazy.LazyListScope.shelf(title: String, 
     item(key = title, contentType = "shelf") {
         val nav = LocalNav.current
         SectionTitle(title)
-        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(albums, key = { it.id }, contentType = { "album" }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 136.dp, { nav.album(a.id) }) }
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(albums, key = { it.id }, contentType = { "album" }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 150.dp, { nav.album(a.id) }) }
         }
     }
 }

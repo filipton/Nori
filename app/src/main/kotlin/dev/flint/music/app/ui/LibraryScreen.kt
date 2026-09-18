@@ -66,7 +66,12 @@ private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Smart"
 fun LibraryScreen(actions: ActionsViewModel) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     Column {
-        PrimaryScrollableTabRow(tab, edgePadding = 8.dp) { sections.forEachIndexed { i, s -> Tab(tab == i, { tab = i }, text = { Text(s) }) } }
+        LargeTitle("Library")
+        // A scrolling row of pills, not a tab strip with an underline: twelve sections in a Material tab
+        // row reads as a toolbar, and the library is a place to browse.
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            itemsIndexed(sections, key = { _, s -> s }) { i, s -> Chip(s, tab == i) { tab = i } }
+        }
         // Only the visible section is composed, so only its view model loads anything.
         when (sections[tab]) {
             "Albums" -> Albums()
@@ -91,12 +96,12 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
     val sort by vm.sort.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column {
-        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random")) { (s, label) ->
-                FilterChip(sort == s, { vm.setSort(s) }, { Text(label) })
+                Chip(label, sort == s) { vm.setSort(s) }
             }
         }
-        LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
                 AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth())
@@ -117,7 +122,7 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
         // First row of each initial, for the index on the right edge.
         val letters = remember(artists) { artists.withIndex().groupBy { it.value.name.firstOrNull()?.uppercaseChar()?.takeIf(Char::isLetter) ?: '#' }.mapValues { it.value.first().index }.toSortedMap() }
         Column {
-            OutlinedTextField(filter, { filter = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), singleLine = true, placeholder = { Text("Filter artists") })
+            SearchField(filter, { filter = it }, "Filter artists", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
             Row {
                 LazyColumn(Modifier.weight(1f), state = list) {
                     items(artists, key = { it.id }, contentType = { "artist" }) { a ->
@@ -156,7 +161,7 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
     LaunchedEffect(list, songs.size) { snapshotFlow { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= songs.size - 40 }.collect { if (it) vm.loadMore() } }
     Column {
         if (decade != null) SectionTitle("${decade}s")
-        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item { FilterChip(starred, { vm.setStarredOnly(!starred) }, { Text("★") }) }
             items(SongSort.entries) { s -> FilterChip(sort == s, { vm.setSort(s) }, { Text(s.label) }) }
         }
@@ -231,7 +236,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
     LoadBox(load) { s ->
         LazyColumn {
             if (s.albums.isNotEmpty()) item(key = "albums") {
-                LazyRow(contentPadding = PaddingValues(16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                LazyRow(contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(s.albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id) }) }
                 }
             }

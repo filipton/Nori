@@ -1,21 +1,15 @@
 package dev.flint.music.app.ui
 
-import androidx.compose.foundation.clickable
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.background
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.composed
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalHapticFeedback
-import kotlinx.coroutines.launch
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,16 +17,24 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Repeat
@@ -43,47 +45,55 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.PrimaryTabRow
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
-import dev.flint.music.app.vm.Load
 import dev.flint.music.app.vm.PlayerViewModel
+import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.playback.Repeat
+import dev.flint.music.settings.ThemeMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 
 /**
  * A drag that follows the finger and decides on release: past [threshold] of the element's size in
  * the drag direction the matching action runs, otherwise it springs back. [horizontal] picks the axis.
  * Nothing runs until a finger is down, so this costs nothing while music plays.
  */
-private fun Modifier.flingActions(
+internal fun Modifier.flingActions(
     horizontal: Boolean, threshold: Float = 0.28f,
     onStart: (() -> Unit)? = null, onEnd: (() -> Unit)? = null,
 ): Modifier = composed {
@@ -115,103 +125,142 @@ private fun Modifier.flingActions(
     }
 }
 
-@Composable
-fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
-    val state by vm.state.collectAsStateWithLifecycle()
-    val title = state.current?.title ?: state.radio ?: return
-    // A real clickable surface, so the whole bar is one labelled target for a screen reader (and for tools/perf-suite.sh).
-    Surface(
-        onClick = onOpen, tonalElevation = 3.dp,
-        modifier = Modifier.semantics { contentDescription = "Now playing bar" }
-            // Sideways: previous / next. Upwards: open the player, like pulling up a sheet.
-            .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-            .flingActions(horizontal = false, threshold = 0.5f, onEnd = onOpen),
-    ) {
-        // No progress bar here on purpose: it would tick for as long as the app is open.
-        Row(Modifier.fillMaxWidth().padding(start = 12.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 44.dp)
-            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(state.error ?: state.current?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = if (state.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (state.buffering) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            IconButton(vm::toggle) { Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause") }
-            IconButton(vm::next) { Icon(Icons.Filled.SkipNext, "Next") }
-        }
-    }
-}
+private enum class Panel { ART, QUEUE, LYRICS }
 
+/**
+ * Now playing, the way a full-screen player should feel: the page is a wash of the artwork's own
+ * colours, the artwork is a large rounded card that shrinks when the music stops, and the controls
+ * sit in one column under it. Lyrics and the queue take the artwork's place rather than opening a
+ * second screen, so the transport never moves.
+ *
+ * The only thing that ticks is the seek bar, and only while this screen is resumed and playing.
+ */
 @Composable
 fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var panel by rememberSaveable { mutableStateOf(Panel.ART) }
     var sleepMenu by remember { mutableStateOf(false) }
 
-    // The player takes its colours from the cover, like the album pages: a vertical wash from the cover's
-    // colour into a deeper shade of it. Static, so it costs nothing while the seek bar ticks.
-    val settingsVm: dev.flint.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val settingsVm: SettingsViewModel = viewModel()
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
-    val dark = when (prefs.theme) { dev.flint.music.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme(); dev.flint.music.settings.ThemeMode.DARK -> true; else -> false }
-    val coverColors = if (prefs.coverColors) rememberCoverColors(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
-    val base = MaterialTheme.colorScheme
-    val scheme = remember(coverColors, base) {
-        coverColors?.let { c -> base.copy(background = c.background, surface = c.background, onSurface = c.onBackground, onBackground = c.onBackground, onSurfaceVariant = c.onBackgroundVariant, primary = c.accent, onPrimary = if (c.accent.luminance() < 0.5f) androidx.compose.ui.graphics.Color.White else androidx.compose.ui.graphics.Color.Black) } ?: base
-    }
-    MaterialTheme(colorScheme = scheme) { androidx.compose.runtime.CompositionLocalProvider(LocalContentColor provides scheme.onSurface) {
-    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(scheme.primary.copy(alpha = if (coverColors != null) 0.35f else 0f).compositeOnto(scheme.background), scheme.background))).statusBarsPadding()) {
-    Column(Modifier.fillMaxSize()) {
-        // Pulling the header down closes the player, the way it was pulled up.
-        Row(Modifier.flingActions(horizontal = false, threshold = 0.9f, onStart = nav::back), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.Filled.KeyboardArrowDown, "Close") }
-            PrimaryTabRow(tab, Modifier.weight(1f), containerColor = androidx.compose.ui.graphics.Color.Transparent, divider = {}) { listOf("Playing", "Queue", "Lyrics").forEachIndexed { i, t -> Tab(tab == i, { tab = i }, text = { Text(t) }) } }
-            Box {
-                IconButton({ sleepMenu = true }) { Icon(Icons.Filled.Bedtime, "Sleep timer", tint = if (state.sleepAt > 0 || state.sleepAtEndOfTrack) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
-                DropdownMenu(sleepMenu, { sleepMenu = false }) {
-                    for (m in listOf(15, 30, 45, 60)) DropdownMenuItem({ Text("$m minutes") }, { vm.sleep(m); sleepMenu = false })
-                    DropdownMenuItem({ Text("End of track") }, { vm.sleep(0, endOfTrack = true); sleepMenu = false })
-                    for (n in listOf(2, 3, 5, 10)) DropdownMenuItem({ Text("After $n songs") }, { vm.sleep(0, songs = n); sleepMenu = false })
-                    DropdownMenuItem({ Text("Off") }, { vm.sleep(0); sleepMenu = false })
-                }
-            }
-            state.current?.let { s -> IconButton({ menu(s) }) { Icon(Icons.Filled.MoreVert, "More") } }
-        }
-        Box(Modifier.weight(1f)) {
-            when (tab) {
-                0 -> Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
-                    Box(
-                        Modifier.fillMaxWidth().aspectRatio(1f)
-                            .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-                            .flingActions(horizontal = false, threshold = 0.35f, onStart = nav::back),
-                    ) { Cover(vm.cover(state.current?.coverArt, CoverSize.FULL), 0.dp, Modifier.fillMaxSize()) }
-                    Text(state.current?.title ?: state.radio ?: "Nothing playing", Modifier.padding(top = 20.dp), style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(state.current?.let { "${it.artist} · ${it.album}" } ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    state.current?.let { s ->
-                        Text(listOfNotNull(s.suffix.uppercase().ifEmpty { null }, s.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }).joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
+    val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
+    val palette = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
+
+    TintedTheme(palette) {
+        val scheme = MaterialTheme.colorScheme
+        SystemBarIcons(scheme.background)
+        Box(
+            Modifier.fillMaxSize().drawBehind {
+                // A wash of the cover's colours, lit from the top where the artwork is.
+                if (palette != null) drawRect(playerBrush(palette, size.height)) else drawRect(scheme.background)
+            },
+        ) {
+            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+                // The handle: drag it down, or tap it, to put the player away.
+                Box(
+                    Modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = nav::back)
+                        .clickable(onClick = nav::back).padding(vertical = 10.dp),
+                    Alignment.Center,
+                ) { Box(Modifier.width(38.dp).height(5.dp).background(scheme.onSurface.copy(alpha = 0.35f), CircleShape)) }
+
+                Box(Modifier.weight(1f).padding(horizontal = 26.dp)) {
+                    when (panel) {
+                        Panel.ART -> Artwork(vm, coverUrl, state.playing, nav::back)
+                        Panel.QUEUE -> Queue(vm)
+                        Panel.LYRICS -> LyricsView(vm, state.playing)
                     }
-                    state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
                 }
-                1 -> Queue(vm)
-                2 -> LyricsView(vm, state.playing)
+
+                Row(Modifier.fillMaxWidth().padding(start = 26.dp, end = 14.dp, top = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            state.current?.title ?: state.radio ?: "Nothing playing",
+                            style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            state.current?.let { listOfNotNull(it.artist.ifEmpty { null }, it.album.ifEmpty { null }).joinToString(" · ") } ?: "",
+                            style = MaterialTheme.typography.titleMedium, color = scheme.primary,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    state.current?.let { s -> IconButton({ menu(s) }, Modifier.size(38.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(22.dp)) } }
+                }
+                state.error?.let { Text(it, Modifier.padding(horizontal = 26.dp), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
+                state.current?.let { s ->
+                    val line = listOfNotNull(
+                        s.suffix.uppercase().ifEmpty { null },
+                        s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
+                        s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" },
+                    ).joinToString(" · ")
+                    Caption(line, Modifier.padding(horizontal = 26.dp, vertical = 2.dp))
+                }
+
+                SeekBar(vm, state.playing, state.durationMs)
+
+                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+                    IconButton(vm::toggleShuffle) {
+                        Icon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp), tint = if (state.shuffle) scheme.primary else scheme.onSurfaceVariant)
+                    }
+                    IconButton(vm::previous, Modifier.size(58.dp)) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(38.dp)) }
+                    Surface(onClick = vm::toggle, shape = CircleShape, color = scheme.onSurface.copy(alpha = 0.14f).over(scheme.background), modifier = Modifier.size(72.dp)) {
+                        Box(Modifier.fillMaxSize(), Alignment.Center) {
+                            if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
+                            else Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(40.dp))
+                        }
+                    }
+                    IconButton(vm::next, Modifier.size(58.dp)) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(38.dp)) }
+                    IconButton(vm::cycleRepeat) {
+                        Icon(
+                            if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat",
+                            Modifier.size(22.dp), tint = if (state.repeat != Repeat.OFF) scheme.primary else scheme.onSurfaceVariant,
+                        )
+                    }
+                }
+
+                Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 14.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
+                    PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { panel = if (panel == Panel.LYRICS) Panel.ART else Panel.LYRICS }
+                    Box {
+                        PanelButton(Icons.Filled.Bedtime, "Sleep timer", state.sleepAt > 0 || state.sleepAtEndOfTrack) { sleepMenu = true }
+                        DropdownMenu(sleepMenu, { sleepMenu = false }) {
+                            for (m in listOf(15, 30, 45, 60)) DropdownMenuItem({ Text("$m minutes") }, { vm.sleep(m); sleepMenu = false })
+                            DropdownMenuItem({ Text("End of track") }, { vm.sleep(0, endOfTrack = true); sleepMenu = false })
+                            for (n in listOf(2, 3, 5, 10)) DropdownMenuItem({ Text("After $n songs") }, { vm.sleep(0, songs = n); sleepMenu = false })
+                            DropdownMenuItem({ Text("Off") }, { vm.sleep(0); sleepMenu = false })
+                        }
+                    }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { panel = if (panel == Panel.QUEUE) Panel.ART else Panel.QUEUE }
+                }
             }
-        }
-        SeekBar(vm, state.playing, state.durationMs)
-        Row(Modifier.fillMaxWidth().padding(bottom = 24.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-            IconButton(vm::toggleShuffle) { Icon(Icons.Filled.Shuffle, "Shuffle", tint = if (state.shuffle) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
-            IconButton(vm::previous) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(36.dp)) }
-            FilledIconButton(vm::toggle, Modifier.size(64.dp)) {
-                if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
-                else Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(36.dp))
+            IconButton(nav::back, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
+                Icon(Icons.Filled.KeyboardArrowDown, "Close", Modifier.size(26.dp))
             }
-            IconButton(vm::next) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(36.dp)) }
-            IconButton(vm::cycleRepeat) { Icon(if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat", tint = if (state.repeat != Repeat.OFF) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
         }
     }
 }
-    } } }
 
-private fun androidx.compose.ui.graphics.Color.compositeOnto(bg: androidx.compose.ui.graphics.Color) = androidx.compose.ui.graphics.Color(red * alpha + bg.red * (1 - alpha), green * alpha + bg.green * (1 - alpha), blue * alpha + bg.blue * (1 - alpha), 1f)
+/** The artwork: a card that lifts and fills when the music plays, and settles back when it stops. */
+@Composable
+private fun Artwork(vm: PlayerViewModel, coverUrl: String?, playing: Boolean, onClose: () -> Unit) {
+    val scale by animateFloatAsState(if (playing) 1f else 0.86f, spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow), label = "artwork")
+    Box(Modifier.fillMaxSize(), Alignment.Center) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(1f)
+                .graphicsLayer { scaleX = scale; scaleY = scale }
+                .shadow(22.dp, RoundedCornerShape(Radius.tile), clip = false)
+                .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
+                .flingActions(horizontal = false, threshold = 0.35f, onStart = onClose),
+        ) { Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = Radius.tile) }
+    }
+}
+
+@Composable
+private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    IconButton(onClick) { Icon(icon, label, Modifier.size(23.dp), tint = if (on) scheme.primary else scheme.onSurfaceVariant) }
+}
 
 /** The only ticking thing in the app, and only while this screen is resumed and music is playing. */
 @Composable
@@ -226,20 +275,42 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
     return pos
 }
 
+/**
+ * A hairline seek bar, drawn rather than assembled: two rounded rectangles and a dot, which is both
+ * what it should look like and cheaper than a Slider with its own layers and ripples.
+ */
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val pos = position(vm, playing, 1000)
+    val d = durationMs.coerceAtLeast(1)
     var dragging by remember { mutableStateOf(false) }
     var drag by remember { mutableFloatStateOf(0f) }
-    val d = durationMs.coerceAtLeast(1)
-    Column(Modifier.padding(horizontal = 24.dp)) {
-        Slider(
-            value = if (dragging) drag else (pos.toFloat() / d).coerceIn(0f, 1f), enabled = durationMs > 0,
-            onValueChange = { dragging = true; drag = it }, onValueChangeFinished = { vm.seekTo((drag * d).toLong()); dragging = false },
+    val fraction = (if (dragging) drag else pos.toFloat() / d).coerceIn(0f, 1f)
+    val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
+    val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+    Column(Modifier.padding(horizontal = 26.dp, vertical = 8.dp)) {
+        Box(
+            Modifier.fillMaxWidth().height(26.dp)
+                .pointerInput(d) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragging = true; drag = (it.x / size.width).coerceIn(0f, 1f) },
+                        onDragEnd = { vm.seekTo((drag * d).toLong()); dragging = false },
+                        onDragCancel = { dragging = false },
+                    ) { change, _ -> drag = (change.position.x / size.width).coerceIn(0f, 1f) }
+                }
+                .pointerInput(d) { detectTapGestures { vm.seekTo(((it.x / size.width).coerceIn(0f, 1f) * d).toLong()) } }
+                .drawBehind {
+                    val h = 5.dp.toPx()
+                    val y = (size.height - h) / 2f
+                    val r = CornerRadius(h / 2f, h / 2f)
+                    drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * fraction, h), r)
+                    if (dragging) drawCircle(filled, h * 1.6f, Offset(size.width * fraction, size.height / 2f))
+                },
         )
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
-            Text(duration((if (dragging) (drag * d).toLong() else pos) / 1000), style = MaterialTheme.typography.labelSmall)
-            Text(duration(durationMs / 1000), style = MaterialTheme.typography.labelSmall)
+            Text(duration((if (dragging) (drag * d).toLong() else pos) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("-" + duration(((d - (if (dragging) (drag * d).toLong() else pos)).coerceAtLeast(0)) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -248,17 +319,16 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
 private fun Queue(vm: PlayerViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val list = rememberLazyListState(initialFirstVisibleItemIndex = state.index.coerceAtLeast(0))
-    LazyColumn(state = list) {
+    LazyColumn(Modifier.fillMaxSize(), state = list) {
         itemsIndexed(state.queue, key = { i, s -> "$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
-            Row(Modifier.fillMaxWidth().clickable { vm.skipTo(i) }.padding(start = 16.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Cover(vm.cover(s.coverArt, CoverSize.ROW), 40.dp)
+            Row(Modifier.fillMaxWidth().clickable { vm.skipTo(i) }.padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                    Text(s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                     Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                IconButton({ vm.remove(i) }) { Icon(Icons.Filled.Close, "Remove") }
+                IconButton({ vm.remove(i) }, Modifier.size(38.dp)) { Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
     }
 }
-

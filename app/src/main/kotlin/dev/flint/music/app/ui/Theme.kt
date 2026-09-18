@@ -34,7 +34,7 @@ fun FlintTheme(prefs: Prefs, content: @Composable () -> Unit) {
         }
         if (dark && prefs.amoled) base.black() else base
     }
-    MaterialTheme(colorScheme = scheme, content = content)
+    MaterialTheme(colorScheme = scheme, typography = FlintTypography, content = content)
 }
 
 /** A light or dark scheme from one colour: tones of the same hue, like Material's own generator but tiny. */
