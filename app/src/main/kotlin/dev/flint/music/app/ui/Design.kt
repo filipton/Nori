@@ -8,6 +8,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -338,4 +341,86 @@ fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClic
             style = MaterialTheme.typography.labelLarge.copy(fontSize = 13.5f.sp), maxLines = 1,
         )
     }
+}
+
+/**
+ * A slider drawn rather than assembled: a rounded track, a fill and a dot. Material's Slider brings a
+ * ripple, a state layer and a value label, which on a screen of ten equalizer bands reads as ten
+ * widgets instead of one curve - and costs a layer each. [centred] fills outwards from zero, which is
+ * what a gain control should look like.
+ */
+@Composable
+fun FlintSlider(
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    centred: Boolean = false,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val track = scheme.onSurface.copy(alpha = if (enabled) 0.16f else 0.07f)
+    val fill = if (enabled) scheme.primary else scheme.onSurface.copy(alpha = 0.25f)
+    val knob = if (enabled) scheme.onSurface else scheme.onSurface.copy(alpha = 0.4f)
+    val span = (range.endInclusive - range.start).takeIf { it > 0f } ?: 1f
+    val fraction = ((value - range.start) / span).coerceIn(0f, 1f)
+    val pick: (Float, Float) -> Unit = { x, w -> onChange(range.start + (x / w).coerceIn(0f, 1f) * span) }
+    Box(
+        modifier.fillMaxWidth().height(34.dp)
+            .pointerInput(enabled, range) {
+                if (!enabled) return@pointerInput
+                detectHorizontalDragGestures(
+                    onDragStart = { pick(it.x, size.width.toFloat()) },
+                ) { change, _ -> pick(change.position.x, size.width.toFloat()) }
+            }
+            .pointerInput(enabled, range) {
+                if (!enabled) return@pointerInput
+                detectTapGestures { pick(it.x, size.width.toFloat()) }
+            }
+            .drawBehind {
+                val h = 6.dp.toPx()
+                val y = (size.height - h) / 2f
+                val radius = androidx.compose.ui.geometry.CornerRadius(h / 2f, h / 2f)
+                drawRoundRect(track, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Size(size.width, h), radius)
+                val from = if (centred) size.width * ((0f - range.start) / span).coerceIn(0f, 1f) else 0f
+                val to = size.width * fraction
+                drawRoundRect(
+                    fill, androidx.compose.ui.geometry.Offset(minOf(from, to), y),
+                    androidx.compose.ui.geometry.Size(kotlin.math.abs(to - from), h), radius,
+                )
+                drawCircle(knob, h * 1.45f, androidx.compose.ui.geometry.Offset(to, size.height / 2f))
+            },
+    )
+}
+
+/**
+ * A form field with the app's corners and no hard outline: a soft filled capsule-ish box, the way a
+ * settings form looks on iOS. It keeps Material's text field underneath, so labels, password masking
+ * and keyboard options all behave exactly as before - only the frame changes.
+ */
+@Composable
+fun FormField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    label: @Composable (() -> Unit)? = null,
+    supportingText: @Composable (() -> Unit)? = null,
+    singleLine: Boolean = false,
+    minLines: Int = 1,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+    keyboardOptions: androidx.compose.foundation.text.KeyboardOptions = androidx.compose.foundation.text.KeyboardOptions.Default,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val filled = scheme.onSurface.copy(alpha = 0.07f).over(scheme.background)
+    androidx.compose.material3.OutlinedTextField(
+        value, onValueChange, modifier, label = label, supportingText = supportingText,
+        singleLine = singleLine, minLines = minLines,
+        visualTransformation = visualTransformation, keyboardOptions = keyboardOptions,
+        shape = CardShape,
+        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+            focusedContainerColor = filled, unfocusedContainerColor = filled,
+            focusedBorderColor = scheme.primary.copy(alpha = 0.6f),
+            unfocusedBorderColor = Color.Transparent,
+        ),
+    )
 }

@@ -14,8 +14,6 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -64,32 +62,40 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
 
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.systemBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp), Arrangement.spacedBy(12.dp)) {
-            Text(if (initial == null) "flint music" else "Server", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                if (initial == null) "flint" else "Server",
+                style = MaterialTheme.typography.displaySmall, modifier = Modifier.padding(top = 16.dp, bottom = 2.dp),
+            )
             if (initial == null) Text("Navidrome, octo-fiesta or any Subsonic server", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            OutlinedTextField(p.url, { p = p.copy(url = it) }, label = { Text("Server URL") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth().testTag("url"))
+            FormField(p.url, { p = p.copy(url = it) }, label = { Text("Server URL") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth().testTag("url"))
             if (p.url.isNotEmpty() && "://" !in p.url) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip({ p = p.copy(url = "https://${p.url}") }, { Text("https://") })
-                AssistChip({ p = p.copy(url = "http://${p.url}") }, { Text("http://") })
+                Chip("https://", false) { p = p.copy(url = "https://${p.url}") }
+                Chip("http://", false) { p = p.copy(url = "http://${p.url}") }
             }
             if (p.apiKey.isEmpty()) {
-                OutlinedTextField(p.user, { p = p.copy(user = it) }, label = { Text("User") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("user"))
-                OutlinedTextField(p.password, { p = p.copy(password = it) }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().testTag("password"))
+                FormField(p.user, { p = p.copy(user = it) }, label = { Text("User") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("user"))
+                FormField(p.password, { p = p.copy(password = it) }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth().testTag("password"))
             }
             ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            Button({ vm.login(p.copy(url = p.url.trim(), altUrl = p.altUrl.trim(), headers = parsedHeaders())) }, enabled = !ui.busy && p.url.isNotBlank() && (p.user.isNotBlank() || p.apiKey.isNotBlank()), modifier = Modifier.fillMaxWidth()) { Text(if (ui.busy) "Connecting…" else "Connect") }
+            PillButton(
+                if (ui.busy) "Connecting…" else "Connect", null,
+                { vm.login(p.copy(url = p.url.trim(), altUrl = p.altUrl.trim(), headers = parsedHeaders())) },
+                Modifier.fillMaxWidth().padding(top = 4.dp), prominent = true,
+                enabled = !ui.busy && p.url.isNotBlank() && (p.user.isNotBlank() || p.apiKey.isNotBlank()),
+            )
             Row {
                 TextButton({ advanced = !advanced }) { Text(if (advanced) "Hide advanced" else "Advanced") }
                 onClose?.let { TextButton(it) { Text("Cancel") } }
             }
             if (advanced) {
-                OutlinedTextField(p.name, { p = p.copy(name = it) }, label = { Text("Name (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(p.altUrl, { p = p.copy(altUrl = it) }, label = { Text("Second address (e.g. public URL)") }, supportingText = { Text("Used when the first one does not answer, for example away from home") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(p.apiKey, { p = p.copy(apiKey = it) }, label = { Text("API key instead of password (OpenSubsonic)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(headers, { headers = it }, label = { Text("Extra HTTP headers") }, supportingText = { Text("One per line, Name: value. For reverse proxies, basic auth, Cloudflare Access.") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                FormField(p.name, { p = p.copy(name = it) }, label = { Text("Name (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                FormField(p.altUrl, { p = p.copy(altUrl = it) }, label = { Text("Second address (e.g. public URL)") }, supportingText = { Text("Used when the first one does not answer, for example away from home") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                FormField(p.apiKey, { p = p.copy(apiKey = it) }, label = { Text("API key instead of password (OpenSubsonic)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                FormField(headers, { headers = it }, label = { Text("Extra HTTP headers") }, supportingText = { Text("One per line, Name: value. For reverse proxies, basic auth, Cloudflare Access.") }, minLines = 2, modifier = Modifier.fillMaxWidth())
                 Check("Legacy authentication", "For old servers without token auth. Detected automatically when the server says so.", p.legacyAuth) { p = p.copy(legacyAuth = it) }
                 Check("Accept self-signed certificate", "Only for your own server. Certificates you installed in Android are accepted without this.", p.allowSelfSigned) { p = p.copy(allowSelfSigned = it) }
                 Check("Wi-Fi only", "Never contact this server over mobile data", p.wifiOnly) { p = p.copy(wifiOnly = it) }
-                OutlinedTextField(certPassword, { certPassword = it }, label = { Text("Client certificate password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                FormField(certPassword, { certPassword = it }, label = { Text("Client certificate password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     TextButton({ pickCert.launch(arrayOf("application/x-pkcs12", "application/octet-stream", "*/*")) }) { Text(if (p.clientCert.isEmpty()) "Import client certificate (.p12)" else "Replace client certificate") }
                     if (p.clientCert.isNotEmpty()) TextButton({ p = p.copy(clientCert = "", clientCertPassword = "") }) { Text("Remove") }

@@ -136,7 +136,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
             Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
             if (p.replayGain != ReplayGainMode.OFF) {
                 Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
-                Slider(p.preampDb, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = Space.gutter), valueRange = -12f..6f)
+                FlintSlider(p.preampDb, -12f..6f, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), centred = true)
             }
             Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = Space.gutter, vertical = 15.dp)) {
                 Text("Equalizer and crossfeed", Modifier.weight(1f)); Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)

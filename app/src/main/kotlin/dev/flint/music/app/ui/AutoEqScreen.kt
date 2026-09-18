@@ -36,7 +36,7 @@ fun AutoEqScreen(vm: SettingsViewModel) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Headphone presets", style = MaterialTheme.typography.titleLarge)
+            Text("Headphone presets", style = MaterialTheme.typography.headlineSmall)
         }
         if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }

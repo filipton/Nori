@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.rememberScrollState
@@ -23,7 +22,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,15 +56,19 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
 
     Column(Modifier.verticalScroll(rememberScrollState())) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Equalizer", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            Switch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } }, Modifier.padding(end = 16.dp))
+            Text("Equalizer", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            Switch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } })
         }
-        Text("Parametric, runs in the Rust core. Tap a band's label to change its frequency, width or type.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            "Parametric, runs in the Rust core. Tap a band's label to change its frequency, width or type.",
+            Modifier.padding(horizontal = Space.gutter, vertical = 2.dp),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         p.eqBands.forEachIndexed { i, b ->
-            Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 val mark = when {
                     b.channel == BandChannel.LEFT -> " L"
                     b.channel == BandChannel.RIGHT -> " R"
@@ -75,46 +77,50 @@ fun EqualizerScreen(vm: SettingsViewModel) {
                     !b.kind.usesGain -> " ∿"
                     else -> ""
                 }
-                Text(hz(b.freq) + mark, Modifier.width(64.dp).clickable { editing = i }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(hz(b.freq) + mark, Modifier.width(56.dp).clickable { editing = i }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (b.kind.usesGain) {
-                    Slider(b.gainDb, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, valueRange = -12f..12f)
-                    Text("%+.1f".format(b.gainDb), Modifier.width(40.dp), style = MaterialTheme.typography.labelMedium)
+                    FlintSlider(b.gainDb, -12f..12f, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
+                    Text(
+                        "%+.1f".format(b.gainDb), Modifier.width(42.dp),
+                        style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 } else {
                     Text(b.kind.label, Modifier.weight(1f).clickable { editing = i }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
-        Row(Modifier.padding(horizontal = 8.dp)) {
-            TextButton(vm::addBand) { Text("Add band") }
-            TextButton({ importing = true }) { Text("Paste a preset") }
-            TextButton(LocalNav.current::autoEq) { Text("Headphone presets") }
-            TextButton(vm::resetBands) { Text("Reset") }
+        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            item { Chip("Add band", false, onClick = vm::addBand) }
+            item { Chip("Paste a preset", false) { importing = true } }
+            item { Chip("Headphone presets", false, onClick = nav::autoEq) }
+            item { Chip("Reset", false, onClick = vm::resetBands) }
         }
         SectionTitle("Presets")
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(vm.presets) { preset -> FilledTonalButton({ vm.applyPreset(preset) }) { Text(preset.name) } }
+            items(vm.presets) { preset -> Chip(preset.name, false) { vm.applyPreset(preset) } }
         }
 
-        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Pre-amp ${"%+.1f".format(p.effectivePreampDb)} dB${if (p.eqPreampDb == null) " (automatic)" else ""}")
                 Text("Automatic pulls the level down by the largest boost so the curve cannot clip", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Switch(p.eqPreampDb == null, { auto -> vm.update { it.copy(eqPreampDb = if (auto) null else it.effectivePreampDb) } })
         }
-        p.eqPreampDb?.let { v -> Slider(v, { x -> vm.update { it.copy(eqPreampDb = x) } }, Modifier.padding(horizontal = 16.dp), enabled = p.eqEnabled, valueRange = -20f..6f) }
+        p.eqPreampDb?.let { v -> FlintSlider(v, -20f..6f, { x -> vm.update { it.copy(eqPreampDb = x) } }, Modifier.padding(horizontal = Space.gutter), enabled = p.eqEnabled) }
 
         SectionTitle("Output")
-        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Text("Balance", Modifier.width(80.dp))
-            Slider(p.balance, { v -> vm.update { it.copy(balance = if (kotlin.math.abs(v) < 0.04f) 0f else v) } }, Modifier.weight(1f), valueRange = -1f..1f)
+            FlintSlider(p.balance, -1f..1f, { v -> vm.update { it.copy(balance = if (kotlin.math.abs(v) < 0.04f) 0f else v) } }, Modifier.weight(1f), centred = true)
             Text(if (p.balance == 0f) "centre" else "%s %.0f%%".format(if (p.balance < 0) "L" else "R", kotlin.math.abs(p.balance) * 100), Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
         }
         Toggle("Mono", "Both channels summed, for one-earbud listening", p.mono) { on -> vm.update { it.copy(mono = on) } }
         Toggle("Limiter", "Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.", p.limiter) { on -> vm.update { it.copy(limiter = on) } }
         if (p.limiter) {
-            Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
-            Slider(p.limiterThresholdDb, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = 16.dp), valueRange = -12f..0f)
+            Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
+            FlintSlider(p.limiterThresholdDb, -12f..0f, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = Space.gutter))
         }
 
         SectionTitle("Profiles")
@@ -129,10 +135,10 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             confirmButton = { TextButton({ vm.saveProfile(newName); newName = ""; naming = false }, enabled = newName.isNotBlank()) { Text("Save") } },
             dismissButton = { TextButton({ naming = false }) { Text("Cancel") } },
         )
-        Text("Playing through: $output", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Playing through: $output", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val suggestions by produceState(emptyList<dev.flint.music.ffi.AutoEqEntry>(), output) { value = vm.autoEqFor(output) }
         suggestions.take(3).forEach { e ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
                 Text("${e.name} · ${e.source}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 TextButton({ vm.adoptAutoEq(e, output) }) { Text("Use for this device") }
             }
@@ -152,11 +158,11 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             }
         }
         TextButton({ naming = true }, Modifier.padding(horizontal = 8.dp)) { Text("Save current settings as a profile") }
-        Text("A profile bound to an output is applied when that output becomes active; switch that off in Settings → Features.", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("A profile bound to an output is applied when that output becomes active; switch that off in Settings → Features.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
         SectionTitle("Crossfeed")
-        Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Slider(p.crossfeedDb, { v -> vm.update { it.copy(crossfeedDb = if (v < 1f) 0f else v) } }, Modifier.padding(horizontal = 16.dp), valueRange = 0f..9f)
+        Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        FlintSlider(p.crossfeedDb, 0f..9f, { v -> vm.update { it.copy(crossfeedDb = if (v < 1f) 0f else v) } }, Modifier.padding(horizontal = Space.gutter))
     }
 }
 
@@ -196,9 +202,9 @@ private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Uni
                 }
                 Text("Frequency", style = MaterialTheme.typography.labelMedium)
                 // Logarithmic: the slider position is the exponent, 20 Hz to 20 kHz.
-                Slider(kotlin.math.log10(band.freq / 20f) / 3f, { x -> onChange(band.copy(freq = (20f * Math.pow(10.0, x * 3.0).toFloat()))) })
+                FlintSlider(kotlin.math.log10(band.freq / 20f) / 3f, 0f..1f, { x -> onChange(band.copy(freq = (20f * Math.pow(10.0, x * 3.0).toFloat()))) })
                 Text(if (band.kind == BandKind.LOW_SHELF_SLOPE || band.kind == BandKind.HIGH_SHELF_SLOPE) "Slope %.2f".format(band.q) else "Q %.2f".format(band.q), style = MaterialTheme.typography.labelMedium)
-                Slider(band.q, { q -> onChange(band.copy(q = q)) }, valueRange = 0.2f..8f)
+                FlintSlider(band.q, 0.2f..8f, { q -> onChange(band.copy(q = q)) })
             }
         },
         confirmButton = { TextButton(onDone) { Text("Done") } },

@@ -97,18 +97,23 @@ fun SmartList(vm: SmartViewModel = viewModel()) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LazyColumn {
-        item { Row(Modifier.fillMaxWidth().clickable { nav.smartEdit("") }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New smart playlist", Modifier.padding(start = 12.dp)) } }
+        item {
+            Row(Modifier.fillMaxWidth().clickable { nav.smartEdit("") }.padding(horizontal = Space.gutter, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Add, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                Text("New smart playlist", Modifier.padding(start = 12.dp), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary)
+            }
+        }
         items(saved, key = { it.id }) { p ->
-            Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.name, Modifier.weight(1f))
+            Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
+                Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                 TextButton({ nav.smartEdit(p.id) }) { Text("Edit") }
                 IconButton({ vm.delete(p.id) }) { Icon(Icons.Filled.Close, "Delete") }
             }
         }
         item { SectionTitle("Ready made") }
         items(vm.defaults, key = { it.id }) { p ->
-            Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.name, Modifier.weight(1f)); TextButton({ nav.smartEdit(p.id) }) { Text("Copy") }
+            Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
+                Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text("Copy") }
             }
         }
         item { Text("Evaluated in the Rust core over the offline index: sync it (Settings) so every song can match.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
