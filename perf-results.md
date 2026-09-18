@@ -61,6 +61,31 @@ Audio offload threads active during MP3 playback: 0
 The sweep is the one feature that costs real CPU while it is on screen, which is why it has a switch
 and why it stops the moment the tab is left or the screen goes off.
 
+### AutoMix, API 34 emulator, screen off, 90 s
+
+| State | CPU (% of one core) | Quiet seconds |
+|---|---|---|
+| AutoMix on, track already analysed | 1.76 % | 71 of 90 |
+| AutoMix on, first play (track being analysed) | 1.8 % | 72 of 90 |
+| Same build with the UI left in the foreground | 3.9-4.1 % | 72 of 90 |
+
+Analysis rides on the audio that is decoded anyway, so a first play costs no more than a repeat; the
+transition itself is a few seconds of mixing (and, when the tempo is stretched, Signalsmith) per track
+change. The foreground row is a reminder to background the app before measuring: a visible Compose
+screen, not the player, is what doubles the figure.
+
+Accuracy on device, with three generated tracks of exactly 120, 124 and 128 BPM: measured 120.00,
+124.00 and 128.00 BPM at confidence 1.00, each heard 62041 ms of a 62000 ms track. Playing them in
+shuffled order produced `BEAT_MATCHED 8000 ms at 48014, tempo x0.968 (beat-matched 4 bars, 124.0 ->
+120.0 BPM (-3.2 %), on the outro phrase)` and the same for 124 -> 128, while 128 -> 120 correctly fell
+back to a MixRamp fade because a 6.7 % tempo change is over the 6 % limit.
+
+An earlier build measured 122.0/126.1/130.3 BPM, a consistent +1.7 %. The engine was exact on the same
+audio offline; the sink was feeding the analyser before the downstream sink had accepted the buffer,
+and BurstSink returns false by design, so the renderer re-offered the same audio and it was heard
+twice. The sink now feeds only the bytes that were consumed, and the analysis is discarded unless the
+frames heard agree with the server's duration.
+
 ### Android 11 versus Android 14
 
 Same APK, same file, same host, same emulator settings:
