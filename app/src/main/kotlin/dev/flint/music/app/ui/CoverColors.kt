@@ -32,6 +32,9 @@ fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePale
     val context = LocalContext.current
     val key = url?.let { "$it|$dark|$amoled" }
     val palette by produceState(key?.let(CoverPalette.cache::get), key) {
+        // Drop the previous cover's colours the moment the track changes: holding them while the new
+        // artwork loads leaves the mini player wearing the last song's tint for a second.
+        value = key?.let(CoverPalette.cache::get)
         if (key == null || value != null) return@produceState
         value = withContext(Dispatchers.Default) {
             val result = SingletonImageLoader.get(context).execute(
