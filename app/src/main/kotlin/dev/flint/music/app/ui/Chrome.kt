@@ -24,7 +24,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,41 +48,47 @@ import dev.flint.music.app.vm.PlayerViewModel
 @Composable
 fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onOpenPlayer: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    // Apple's tab bar is a thin neutral shelf with a hairline on top, not a raised container: it reads
-    // as the edge of the page rather than as a widget, and it stays out of the artwork's colour scheme
-    // so it does not turn muddy on a brown album. Translucent, not blurred - a live blur is a
-    // full-screen GPU pass every frame, which is exactly the kind of cost this app does not pay.
-    val bar = scheme.surface.copy(alpha = 0.94f)
+    // Apple Music floats its chrome: the mini player and the tab bar are two separate rounded slabs with
+    // air around them, not a wall across the bottom of the screen. They also take a hint of the colour of
+    // whatever page you are on, which is what ties the artwork to the frame around it.
+    val tint = currentPalette()
+    val slab = tint?.let { blend(it.background, it.edge, 0.16f) } ?: scheme.onSurface.copy(alpha = 0.08f).over(scheme.background)
+    val content = tint?.onBackground ?: scheme.onSurface
     Column {
         SelectionBar(actions)
-        Box(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) { MiniPlayer(player, onOpenPlayer) }
-        Column(Modifier.background(bar)) {
-            Hairline(startIndent = 0.dp)
+        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
+        Surface(
+            shape = PillShape, color = slab, shadowElevation = 8.dp,
+            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp),
+        ) {
             Row(
-                Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 8.dp, bottom = 7.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
                 Arrangement.SpaceEvenly, Alignment.CenterVertically,
-            ) { tabs.forEach { t -> TabButton(t, selected = route == t.route) { onTab(t.route) } } }
+            ) { tabs.forEach { t -> TabButton(t, selected = route == t.route, tinted = tint != null) { onTab(t.route) } } }
         }
+        Spacer(Modifier.navigationBarsPadding())
     }
 }
 
 data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 @Composable
-private fun TabButton(tab: Tab, selected: Boolean, onClick: () -> Unit) {
+private fun TabButton(tab: Tab, selected: Boolean, tinted: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    // Apple Music keeps the same solid glyph in both states and lets colour alone say which tab you are
-    // on - swapping outline for solid belongs to Files and Photos, not to a music app. There is also no
-    // ripple: a tab bar on iOS answers instantly and silently, and a spreading circle reads as Android.
-    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = 0.8f)
+    // The same solid glyph in both states, colour alone saying where you are, and the selected one in a
+    // soft pill - swapping outline for solid belongs to Files and Photos, not to a music app. No ripple
+    // either: a tab bar answers instantly and silently, and a spreading circle reads as Android.
+    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = if (tinted) 0.9f else 0.8f)
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Column(
-        Modifier.clickable(interactionSource = press, indication = null, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 2.dp)
+        Modifier.clip(PillShape)
+            .background(if (selected) scheme.primary.copy(alpha = 0.16f) else androidx.compose.ui.graphics.Color.Transparent)
+            .clickable(interactionSource = press, indication = null, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 5.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(tab.icon, null, Modifier.size(25.dp), tint = color)
+        Icon(tab.icon, null, Modifier.size(23.dp), tint = color)
         Text(
             tab.label, Modifier.padding(top = 1.dp),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, letterSpacing = 0.sp),
@@ -95,7 +103,7 @@ private fun TabButton(tab: Tab, selected: Boolean, onClick: () -> Unit) {
  * No progress bar on purpose: it would tick for as long as the app is open.
  */
 @Composable
-fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
+fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Color) {
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     val settings: dev.flint.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
@@ -113,9 +121,8 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
     } else null
     val scheme = MaterialTheme.colorScheme
     NowPlayingPalette(palette)
-    val bar = palette?.let { blend(it.background, it.edge, 0.22f) } ?: scheme.onSurface.copy(alpha = 0.10f).over(scheme.background)
     Surface(
-        shape = CardShape, color = bar, contentColor = palette?.onBackground ?: scheme.onSurface,
+        shape = CardShape, color = slab, contentColor = content,
         shadowElevation = 6.dp,
         modifier = Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
@@ -132,7 +139,7 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
                 Text(
                     state.error ?: state.current?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (state.error != null) scheme.error else (palette?.onBackgroundVariant ?: scheme.onSurfaceVariant),
+                    color = if (state.error != null) scheme.error else content.copy(alpha = 0.65f),
                 )
             }
             if (state.buffering) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
@@ -152,6 +159,20 @@ private val nowPlaying = androidx.compose.runtime.mutableStateOf<PagePalette?>(n
 
 @Composable
 fun nowPlayingPalette(): PagePalette? = nowPlaying.value
+
+private val pagePalette = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
+
+/** A tinted page (an album, an artist, the player) lends its colours to the chrome while it is open. */
+@Composable
+fun PageTint(palette: PagePalette?) {
+    androidx.compose.runtime.DisposableEffect(palette) {
+        pagePalette.value = palette
+        onDispose { if (pagePalette.value === palette) pagePalette.value = null }
+    }
+}
+
+@Composable
+private fun currentPalette(): PagePalette? = pagePalette.value ?: nowPlaying.value
 
 @Composable
 private fun NowPlayingPalette(palette: PagePalette?) {

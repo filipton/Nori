@@ -76,6 +76,7 @@ fun HeroPage(
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
         SystemBarIcons(scheme.background)
+        PageTint(palette)
         var fullscreen by remember { mutableStateOf(false) }
         if (fullscreen && coverUrl != null) androidx.compose.ui.window.Dialog({ fullscreen = false }) {
             Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }, radius = Radius.card)

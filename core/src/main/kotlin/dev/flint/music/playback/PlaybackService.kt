@@ -109,6 +109,7 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onCreate() {
         super.onCreate()
+        Equalizer.active = equalizer
         flint = Flint.get(this)
         scrobbler = Scrobbler(flint, scope)
 
@@ -192,6 +193,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     override fun onDestroy() {
+        Equalizer.active = null
         persistQueue(push = false)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
         main.removeCallbacks(precache)

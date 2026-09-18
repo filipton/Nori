@@ -65,6 +65,42 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     fun downloadArtist(albums: List<Album>) = attempt(null) { download(artistSongs(albums)) }
 
     fun play(songs: List<Song>, index: Int = 0) = flint.player.play(songs, index)
+
+    /**
+     * For the debug test bridge: one-word actions a check needs to drive, so a script never has to find
+     * a button on screen. "download <ref>", "star <ref>", "pause", "resume", "next", "previous".
+     */
+    fun testAction(what: String, player: dev.flint.music.app.vm.PlayerViewModel) = attempt(null) {
+        val verb = what.substringBefore(' ')
+        val ref = what.substringAfter(' ', "")
+        val songs = if (ref.isEmpty()) emptyList() else when {
+            ref.startsWith("album:") -> flint.library.album(ref.substringAfter(':')).first().songs
+            ref.startsWith("song:") -> listOfNotNull(flint.library.song(ref.substringAfter(':')))
+            ref.startsWith("search:") -> flint.library.search(ref.substringAfter(':')).songs.take(1)
+            else -> emptyList()
+        }
+        when (verb) {
+            "download" -> download(songs)
+            "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
+            "pause" -> player.toggle()
+            "resume" -> player.toggle()
+            "next" -> player.next()
+            "previous" -> player.previous()
+            "enqueue" -> enqueue(songs)
+        }
+    }
+
+    /** For the debug test bridge: "song:<id>", "album:<id>" or "search:<text>" (first song hit). */
+    fun playByRef(ref: String) = attempt(null) {
+        val arg = ref.substringAfter(':')
+        val songs = when {
+            ref.startsWith("album:") -> flint.library.album(arg).first().songs
+            ref.startsWith("song:") -> listOfNotNull(flint.library.song(arg))
+            ref.startsWith("search:") -> flint.library.search(arg).songs.take(1)
+            else -> emptyList()
+        }
+        if (songs.isNotEmpty()) flint.player.play(songs, 0)
+    }
     /** Spreads artists and albums apart (in the core) unless the user prefers a plain random order. */
     fun shuffle(songs: List<Song>) {
         if (flint.settings.value.weightedShuffle && songs.size > 2) flint.player.play(flint.library.shuffled(songs, System.nanoTime()))

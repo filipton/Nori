@@ -84,6 +84,33 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
     /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
     fun setTuning(on: Boolean) = flint.player.setTuning(on)
 
+    /**
+     * Flips one setting by name, for the debug test bridge. Only the switches a check needs; anything
+     * else returns false so a typo in a script fails loudly instead of silently doing nothing.
+     */
+    fun setByName(name: String, value: String): Boolean {
+        val on = value.equals("true", true) || value == "1"
+        val change: (dev.flint.music.settings.Prefs) -> dev.flint.music.settings.Prefs? = {
+            when (name) {
+                "limiter" -> it.copy(limiter = on)
+                "eq" -> it.copy(eqEnabled = on)
+                "mono" -> it.copy(mono = on)
+                "hiRes" -> it.copy(hiRes = on)
+                "bitPerfect" -> it.copy(bitPerfect = on)
+                "offload" -> it.copy(offload = on)
+                "autoMix" -> it.copy(autoMix = on)
+                "amoled" -> it.copy(amoled = on)
+                "coverColors" -> it.copy(coverColors = on)
+                "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
+                "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
+                else -> null
+            }
+        }
+        if (change(prefs.value) == null) return false
+        update { change(it) ?: it }
+        return true
+    }
+
     /** The built-in curves, straight from the core so the numbers live in one place. */
     val presets: List<NamedPreset> by lazy { eqPresets() }
 

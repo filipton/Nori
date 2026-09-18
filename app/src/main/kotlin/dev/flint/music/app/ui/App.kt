@@ -103,6 +103,37 @@ fun App() {
             }
         }
 
+        // The test bridge's handles, live for as long as the app is on screen. See TestHooks.
+        val player2 = player
+        androidx.compose.runtime.DisposableEffect(controller) {
+            dev.flint.music.app.TestHooks.open = { route -> controller.navigate(route) }
+            dev.flint.music.app.TestHooks.set = { name, value -> settings.setByName(name, value) }
+            dev.flint.music.app.TestHooks.play = { what -> actions.playByRef(what) }
+            dev.flint.music.app.TestHooks.login = { spec ->
+                val (url, user, pass) = spec.split("|").let { Triple(it[0], it.getOrElse(1) { "" }, it.getOrElse(2) { "" }) }
+                settings.login(settings.newProfile().copy(url = url, user = user, password = pass))
+            }
+            dev.flint.music.app.TestHooks.act = { what -> actions.testAction(what, player2) }
+            dev.flint.music.app.TestHooks.state = {
+                val st = player2.state.value
+                val p = settings.prefs.value
+                """{"route":"${controller.currentBackStackEntry?.destination?.route}",""" +
+                    """"playing":${st.playing},"title":"${st.current?.title.orEmpty()}","artist":"${st.current?.artist.orEmpty()}",""" +
+                    """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
+                    """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
+                    """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
+                    """"offload":${p.offload},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
+                    """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
+                    """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
+            }
+            onDispose {
+                dev.flint.music.app.TestHooks.open = null
+                dev.flint.music.app.TestHooks.state = null
+                dev.flint.music.app.TestHooks.set = null
+                dev.flint.music.app.TestHooks.play = null
+            }
+        }
+
         CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
             Scaffold(

@@ -1,6 +1,7 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +42,21 @@ import dev.flint.music.settings.Band
 import dev.flint.music.settings.BandChannel
 import dev.flint.music.settings.BandKind
 
+/** The limiter's gain reduction, sampled while this screen is resumed and dropped the moment it is not. */
+@Composable
+private fun limiterMeter(): Float {
+    var value by remember { mutableStateOf(0f) }
+    var resumed by remember { mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    androidx.compose.runtime.LaunchedEffect(resumed) {
+        while (resumed) {
+            value = dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f
+            kotlinx.coroutines.delay(120)
+        }
+    }
+    return value
+}
+
 private fun hz(f: Float) = if (f >= 1000) "%.4gk".format(f / 1000).replace(".000k", "k").replace(".00k", "k") else "%.0f".format(f)
 
 @Composable
@@ -66,6 +82,20 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             Modifier.padding(horizontal = Space.gutter, vertical = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        // Two settings switch the whole sample chain off. Without this the screen looks broken: bands
+        // move, the limiter says it is on, and nothing whatsoever happens to the sound.
+        val dac by vm.dac.collectAsStateWithLifecycle()
+        val bypass = when {
+            dac.bitPerfect -> "Bit-perfect USB output is active, so nothing here touches the audio."
+            p.hiRes -> "Hi-res float output is on, so nothing here touches the audio. Turn it off in Settings → Audio."
+            else -> null
+        }
+        if (bypass != null) Surface(
+            shape = CardShape, color = MaterialTheme.colorScheme.errorContainer,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp),
+        ) {
+            Text(bypass, Modifier.padding(12.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onErrorContainer)
+        }
 
         p.eqBands.forEachIndexed { i, b ->
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -119,7 +149,17 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         Toggle("Mono", "Both channels summed, for one-earbud listening", p.mono) { on -> vm.update { it.copy(mono = on) } }
         Toggle("Limiter", "Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.", p.limiter) { on -> vm.update { it.copy(limiter = on) } }
         if (p.limiter) {
-            Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
+                Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                // Proof that it is working: what it is pulling back, right now. Polled only while this
+                // screen is on top, so it costs nothing the rest of the time.
+                val reduction = limiterMeter()
+                Text(
+                    if (reduction > 0.05f) "−%.1f dB".format(reduction) else "not clipping",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             FlintSlider(p.limiterThresholdDb, -12f..0f, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = Space.gutter))
         }
 

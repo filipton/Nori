@@ -210,7 +210,7 @@ private val index = listOf(
     Entry("playback", "Fetch ahead on Wi-Fi", ""),
     Entry("playback", "Fetch ahead on mobile data", ""),
     Entry("playback", "Gain for files without ReplayGain tags", ""),
-    Entry("lyrics", "Word-by-word sweep", "The line being sung fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen; off means the line just lights up."),
+    Entry("lyrics", "Word-by-word sweep", "Fills the line in word by word, but only for lyrics that carry real per-word times. Line-timed lyrics simply light up, because guessed word times drift out of sync."),
     Entry("lyrics", "Keep the screen on", "While lyrics are showing and music is playing"),
     Entry("lyrics", "Fetch missing lyrics from LRCLIB", ""),
     Entry("lyrics", "Show translations", "When the server has a translation layer"),
@@ -412,7 +412,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
 
         }
         "lyrics" -> SettingsCard {
-            Toggle("Word-by-word sweep", "The line being sung fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen; off means the line just lights up.", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
+            Toggle("Word-by-word sweep", "Fills the line in word by word, but only for lyrics that carry real per-word times. Line-timed lyrics simply light up, because guessed word times drift out of sync.", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
             Toggle("Keep the screen on", "While lyrics are showing and music is playing", p.lyricsKeepScreenOn) { on -> vm.update { it.copy(lyricsKeepScreenOn = on) } }
             Toggle(
                 "Fetch missing lyrics from LRCLIB", if (p.thirdPartyLookups) "When the server has no synced lyrics, ask lrclib.net (sends artist, title and length)" else "Needs \"Third-party lookups\" in Features",

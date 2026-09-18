@@ -79,7 +79,17 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         _state.value = _state.value.copy(connected = false)
     }
 
+    /**
+     * Every controller call goes through here, and a MediaController may only be touched from the main
+     * thread - it throws otherwise. Callers are not all on it (switching servers happens on an IO
+     * thread while the network is being probed), so anything arriving from elsewhere is posted rather
+     * than left to blow up in the caller's face.
+     */
     private fun with(action: (MediaController) -> Unit) {
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post { with(action) }
+            return
+        }
         controller?.let(action) ?: run { pending += action; connect() }
     }
 

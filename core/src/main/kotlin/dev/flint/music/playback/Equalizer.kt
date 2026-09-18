@@ -57,6 +57,14 @@ class Equalizer : BaseAudioProcessor() {
         dirty = true
     }
 
+    companion object {
+        /**
+         * The chain the service is currently playing through, so a screen can read its meters without
+         * reaching into the service. Null whenever nothing is playing through a processor.
+         */
+        @Volatile var active: Equalizer? = null
+    }
+
     /** What the limiter is doing right now, for a meter. 0 when it is off or idle. */
     val gainReductionDb: Float get() = handle.takeIf { it != 0L }?.let { Dsp.gainReductionDb(it) } ?: 0f
 

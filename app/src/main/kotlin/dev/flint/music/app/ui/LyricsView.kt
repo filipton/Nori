@@ -95,7 +95,11 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
     var nudgeMs by remember(lyrics) { mutableLongStateOf(0L) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    val sweep = prefs.lyricsSweep && lyrics.synced
+    // Only sweep when the lyrics actually carry per-word times (enhanced LRC, or a server's structured
+    // cues). Spreading a line's duration across its words by length looks right for a beat and then
+    // drifts badly on a held note or a fast line, which reads as broken sync - a line at a time is
+    // honest and stays in step.
+    val sweep = prefs.lyricsSweep && lyrics.synced && lyrics.wordTimed
     // The playhead as the lyrics see it. With the sweep on it is read once per frame (a local computation in the
     // controller, no IPC) and only the draw phase of the active line looks at it; otherwise three times a second.
     var now by remember { mutableLongStateOf(vm.positionMs) }

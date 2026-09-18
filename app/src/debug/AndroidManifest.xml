@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug builds accept test commands over adb; the receiver does not exist in a release build. -->
+        <receiver android:name="dev.flint.music.app.TestBridge" android:exported="true">
+            <intent-filter><action android:name="dev.flint.music.TEST" /></intent-filter>
+        </receiver>
+    </application>
+</manifest>

@@ -32,8 +32,13 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
         if (!enabled) return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         if (!filling) {
-            val queuedUs = if (writtenUntilUs == C.TIME_UNSET) 0 else writtenUntilUs - getCurrentPositionUs(false)
-            if (queuedUs > LOW_US) return false
+            // The sink has no position to report while it is stopped, paused before it ever played, or
+            // freshly restarted. Subtracting CURRENT_POSITION_NOT_SET (Long.MIN_VALUE) from what we wrote
+            // produces an enormous "queued" figure, and this sink then refuses every buffer for ever -
+            // which is silence that only a sink rebuild (any audio setting) recovers from.
+            val position = getCurrentPositionUs(false)
+            val known = writtenUntilUs != C.TIME_UNSET && position != AudioSink.CURRENT_POSITION_NOT_SET
+            if (known && writtenUntilUs - position > LOW_US) return false
             filling = true
         }
         val taken = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
@@ -42,6 +47,11 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     }
 
     private fun restart() { filling = true; writtenUntilUs = C.TIME_UNSET }
+
+    // Resuming is a fresh start for the burst bookkeeping: the track may have been stopped and its
+    // position reset while the app sat in the background, so what was written before means nothing now.
+    override fun play() { restart(); super.play() }
+    override fun pause() { restart(); super.pause() }
 
     override fun configure(config: AudioSink.AudioSinkConfig) { restart(); super.configure(config) }
     override fun handleDiscontinuity() { restart(); super.handleDiscontinuity() }
