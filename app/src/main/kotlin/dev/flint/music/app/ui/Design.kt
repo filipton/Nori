@@ -309,7 +309,10 @@ fun SearchField(
     testTag: String? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Surface(shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background), modifier = modifier.fillMaxWidth()) {
+    Surface(
+        shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background),
+        contentColor = scheme.onSurface, modifier = modifier.fillMaxWidth(),
+    ) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Search, null, Modifier.size(19.dp), tint = scheme.onSurfaceVariant)
             // The padding belongs to the box, not to the field: with it on the field the placeholder sat

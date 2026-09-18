@@ -143,6 +143,7 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
         val source = found?.source?.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
         if (lyrics.synced || source != null) androidx.compose.material3.Surface(
             shape = PillShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background),
+            contentColor = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
         ) {
             Row(Modifier.padding(horizontal = 6.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {

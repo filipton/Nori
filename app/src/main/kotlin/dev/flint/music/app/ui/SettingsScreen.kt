@@ -67,16 +67,6 @@ import dev.flint.music.settings.ServerProfile
 import androidx.compose.runtime.LaunchedEffect
 import dev.flint.music.settings.ReplayGainMode
 
-@Composable
-private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp)) {
-        Caption(title, Modifier.padding(start = 10.dp, top = 20.dp, bottom = 7.dp))
-        Surface(shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background)) {
-            Column(content = content)
-        }
-    }
-}
-
 private val qualities = listOf(Quality() to "Original", Quality(320, "mp3") to "MP3 320", Quality(192, "opus") to "Opus 192", Quality(128, "opus") to "Opus 128", Quality(96, "opus") to "Opus 96", Quality(64, "opus") to "Opus 64")
 
 
@@ -110,6 +100,7 @@ private fun Modifier.spotlight(title: String): Modifier {
 
 @Composable
 fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
+    Column {
     Row(
         Modifier.fillMaxWidth().spotlight(title).clickable(enabled) { onChange(!value) }
             .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -121,24 +112,34 @@ fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = tru
         }
         Switch(value, onChange, enabled = enabled)
     }
+    Hairline(startIndent = 16.dp)
+    }
 }
 
 @Composable
 private fun <T> Choice(title: String, value: T, options: List<Pair<T, String>>, onChange: (T) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    Column {
     Row(Modifier.fillMaxWidth().spotlight(title).clickable { open = true }.padding(horizontal = 16.dp, vertical = 15.dp)) {
         Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
         Text(options.firstOrNull { it.first == value }?.second ?: "$value", color = MaterialTheme.colorScheme.primary)
         DropdownMenu(open, { open = false }) { options.forEach { (v, label) -> DropdownMenuItem({ Text(label) }, { onChange(v); open = false }) } }
     }
+    Hairline(startIndent = 16.dp)
+    }
 }
 
-/** The rounded plate the rows of a group sit on. */
+/**
+ * The rounded plate the rows of a group sit on. The content colour is spelled out: Material resolves
+ * it to Unspecified for any colour it does not recognise as one of its own roles, and text inside then
+ * renders almost black - which is why every setting's title was dimmer than its own description.
+ */
 @Composable
 private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         shape = CardShape,
-        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f).over(MaterialTheme.colorScheme.background),
+        contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
     ) { Column(content = content) }
 }
@@ -354,8 +355,9 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
                 FlintSlider(p.preampDb, -12f..6f, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), centred = true)
             }
-            Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = Space.gutter, vertical = 15.dp)) {
-                Text("Equalizer and crossfeed", Modifier.weight(1f)); Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
+            Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 15.dp)) {
+                Text("Equalizer and crossfeed", Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
             }
             Toggle(
                 "AutoMix",
@@ -423,13 +425,21 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Choice("Swipe right", p.swipeRight, swipes) { v -> vm.update { it.copy(swipeRight = v) } }
             Choice("Swipe left", p.swipeLeft, swipes) { v -> vm.update { it.copy(swipeLeft = v) } }
             Toggle("Skip explicit songs", "Songs the server marks explicit are skipped during playback", p.skipExplicit) { on -> vm.update { it.copy(skipExplicit = on) } }
-            Text("Home shelves", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = MaterialTheme.typography.titleSmall)
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text("Home shelves", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Choose which shelves appear. To reorder them, drag on the home page.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             HomeRow.entries.forEach { row ->
                 val on = row in p.homeRows
-                Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(row.title, Modifier.weight(1f))
-                    if (on) TextButton({ vm.update { s -> s.copy(homeRows = s.homeRows.toMutableList().also { l -> val i = l.indexOf(row); if (i > 0) { l.removeAt(i); l.add(i - 1, row) } }) } }) { Text("Up") }
-                    Switch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } }, Modifier.padding(end = 16.dp))
+                Column {
+                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                        Switch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } })
+                    }
+                    Hairline(startIndent = 16.dp)
                 }
             }
 

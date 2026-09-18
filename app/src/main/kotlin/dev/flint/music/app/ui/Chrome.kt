@@ -76,7 +76,7 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
         SelectionBar(actions)
         Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
         Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp), Arrangement.spacedBy(8.dp), Alignment.CenterVertically) {
-            Surface(shape = PillShape, color = slab, shadowElevation = 8.dp, modifier = Modifier.weight(1f)) {
+            Surface(shape = PillShape, color = slab, contentColor = content, shadowElevation = 8.dp, modifier = Modifier.weight(1f)) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 5.dp),
                     Arrangement.SpaceEvenly, Alignment.CenterVertically,

@@ -214,7 +214,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         Icon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp), tint = if (state.shuffle) scheme.primary else scheme.onSurfaceVariant)
                     }
                     IconButton(vm::previous, Modifier.size(58.dp)) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(38.dp)) }
-                    Surface(onClick = vm::toggle, shape = CircleShape, color = scheme.onSurface.copy(alpha = 0.14f).over(scheme.background), modifier = Modifier.size(72.dp)) {
+                    Surface(
+                        onClick = vm::toggle, shape = CircleShape,
+                        color = scheme.onSurface.copy(alpha = 0.14f).over(scheme.background),
+                        contentColor = scheme.onSurface, modifier = Modifier.size(72.dp),
+                    ) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
                             if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
                             else Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(40.dp))

@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -22,6 +23,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.background
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxSize
@@ -151,6 +154,11 @@ fun App() {
             // Screens keep the last row reachable by adding LocalChromeInset to their content padding.
             var chromeHeight by remember { mutableStateOf(0.dp) }
             val density = androidx.compose.ui.platform.LocalDensity.current
+            // This replaced a Scaffold when the chrome started floating, and with it went the two things
+            // Scaffold quietly provided: something that paints the app's background (every screen was
+            // showing the window's default grey, lighter than our own cards) and a content colour for
+            // text that does not name one (which left titles rendering almost black).
+            Surface(color = MaterialTheme.colorScheme.background, contentColor = MaterialTheme.colorScheme.onBackground) {
             Box(Modifier.fillMaxSize()) {
               CompositionLocalProvider(LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
                 // One transition for the whole app, and a quiet one: pages slide a little and fade, the
@@ -196,6 +204,7 @@ fun App() {
                       .onGloballyPositioned { chromeHeight = with(density) { it.size.height.toDp() } },
               ) { BottomChrome(player, actions, route, tabs, nav::tab, nav::player) }
               SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
+            }
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }) }
         }

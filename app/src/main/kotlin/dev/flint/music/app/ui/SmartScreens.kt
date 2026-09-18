@@ -177,6 +177,7 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
             fun set(n: SmartRule) { draft = draft.copy(rules = draft.rules.toMutableList().also { it[i] = n }) }
             Surface(
                 shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+                contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 5.dp),
             ) {
                 Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 10.dp)) {
@@ -289,7 +290,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
 private fun StatTile(value: String, label: String, modifier: Modifier = Modifier) {
     Surface(
         shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
-        modifier = modifier,
+        contentColor = MaterialTheme.colorScheme.onSurface, modifier = modifier,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
             Text(value, style = MaterialTheme.typography.headlineSmall, maxLines = 1)
