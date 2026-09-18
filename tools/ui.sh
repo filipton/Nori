@@ -21,9 +21,25 @@ m=list(re.finditer(r'<node[^>]*?(?:text|content-desc)=\"'+re.escape(t)+r'\"[^>]*
 if len(m)>=n:
     a,b,c,d=map(int,m[n-1].groups()); print((a+c)//2,(b+d)//2)
 " "$1" "${2:-1}"; }
+# The on-screen keyboard is the enemy of UI automation: it covers the bottom of the screen, so taps
+# meant for the app land on keys, and a fling across it is glide typing, which quietly fills whatever
+# text field has focus. `input text` injects key events and needs no IME at all, so a scripted run
+# simply turns the keyboard off.
+#   tools/ui.sh kb off   disables every enabled IME (remembering them)
+#   tools/ui.sh kb on    puts them back
+kb() {
+  local store=/sdcard/flint-imes
+  case "$2" in
+    off) adb shell "ime list -s | tr -d '\r' > $store; for i in \$(cat $store); do ime disable \$i; done" >/dev/null 2>&1 ;;
+    on)  adb shell "for i in \$(cat $store 2>/dev/null); do ime enable \$i; done; ime set \$(head -1 $store 2>/dev/null)" >/dev/null 2>&1 ;;
+    *) echo "usage: ui.sh kb off|on" >&2; return 2 ;;
+  esac
+}
+
 case "$1" in
+  kb) kb "$@" ;;
   tap|tapn) read -r x y < <(dump | centre "$2" "${3:-1}"); [ -n "${x:-}" ] && adb shell input tap "$x" "$y" || { echo "not on screen: $2" >&2; exit 1; } ;;
   has) [ -n "$(dump | centre "$2" 1)" ] ;;
   texts) dump | grep -oE '(text|content-desc)="[^"]+"' | sed -E 's/^[a-z-]+="//; s/"$//' ;;
-  *) echo "usage: ui.sh tap|tapn|has|texts" >&2; exit 2 ;;
+  *) echo "usage: ui.sh tap|tapn|has|texts|kb" >&2; exit 2 ;;
 esac
