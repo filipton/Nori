@@ -407,6 +407,7 @@ fun FormField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     label: @Composable (() -> Unit)? = null,
+    placeholder: @Composable (() -> Unit)? = null,
     supportingText: @Composable (() -> Unit)? = null,
     singleLine: Boolean = false,
     minLines: Int = 1,
@@ -416,7 +417,7 @@ fun FormField(
     val scheme = MaterialTheme.colorScheme
     val filled = scheme.onSurface.copy(alpha = 0.07f).over(scheme.background)
     androidx.compose.material3.OutlinedTextField(
-        value, onValueChange, modifier, label = label, supportingText = supportingText,
+        value, onValueChange, modifier, label = label, placeholder = placeholder, supportingText = supportingText,
         singleLine = singleLine, minLines = minLines,
         visualTransformation = visualTransformation, keyboardOptions = keyboardOptions,
         shape = CardShape,

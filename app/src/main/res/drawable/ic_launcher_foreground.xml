@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A quaver struck like a flint: the note is the app, the spark off its flag is the name. Drawn inside
+  the 72dp safe zone of the 108dp adaptive canvas, so no launcher mask can clip it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- stem -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M56,30 L62,28 L62,70 L56,70 Z" />
+    <!-- flag -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M62,28 C72,32 80,36 80,46 C80,40 72,36 62,40 Z" />
+    <!-- note head -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M56,62 m-12,8 a12,9 0 1,0 24,0 a12,9 0 1,0 -24,0" />
+    <!-- the spark -->
+    <path android:fillColor="#FFFFD79A"
+        android:pathData="M84,26 L87,34 L95,37 L87,40 L84,48 L81,40 L73,37 L81,34 Z" />
+</vector>

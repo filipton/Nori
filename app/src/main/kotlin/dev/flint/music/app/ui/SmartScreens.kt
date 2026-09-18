@@ -1,6 +1,8 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.background
@@ -158,35 +160,55 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
     var draft by remember(id, saved.size) { mutableStateOf(vm.find(id)?.let { SmartDraft.from(it)?.let { d -> if (id.startsWith("default-")) d.copy(id = "") else d } } ?: SmartDraft()) }
     var error by remember { mutableStateOf<String?>(null) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            TextButton({ error = vm.save(draft) { nav.back() } }) { Text("Save") }
+            Text("Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            TextButton({ error = vm.save(draft) { nav.back() } }) { Text("Save", style = MaterialTheme.typography.titleSmall) }
         }
-        OutlinedTextField(draft.name, { draft = draft.copy(name = it) }, Modifier.fillMaxWidth().padding(horizontal = 16.dp), label = { Text("Name") }, singleLine = true)
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-            FilterChip(draft.all, { draft = draft.copy(all = true) }, { Text("Match all") })
-            FilterChip(!draft.all, { draft = draft.copy(all = false) }, { Text("Match any") })
+        FormField(draft.name, { draft = draft.copy(name = it) }, Modifier.fillMaxWidth().padding(horizontal = Space.gutter), label = { Text("Name") }, singleLine = true)
+        Row(Modifier.padding(horizontal = Space.gutter, vertical = 12.dp), Arrangement.spacedBy(8.dp)) {
+            Chip("Match all", draft.all) { draft = draft.copy(all = true) }
+            Chip("Match any", !draft.all) { draft = draft.copy(all = false) }
         }
+        // One rule, one card: the field and the comparison on the first line, what to compare against on
+        // the second. In a row they fought over the width and the value box ended up a sliver.
         draft.rules.forEachIndexed { i, r ->
             fun set(n: SmartRule) { draft = draft.copy(rules = draft.rules.toMutableList().also { it[i] = n }) }
-            Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Pick(r.field, SmartDraft.TEXTS + SmartDraft.NUMBERS + SmartDraft.DATES + SmartDraft.FLAGS) { f -> set(r.copy(field = f, op = SmartDraft.ops(f).first())) }
-                Pick(r.op, SmartDraft.ops(r.field)) { o -> set(r.copy(op = o)) }
-                if (r.op !in SmartDraft.FLAG_OPS) OutlinedTextField(r.value, { set(r.copy(value = it)) }, Modifier.weight(1f), singleLine = true, placeholder = { Text(if (r.op == "between") "from to" else if (r.op.endsWith("Days")) "days" else "value") })
-                else Text("", Modifier.weight(1f))
-                IconButton({ draft = draft.copy(rules = draft.rules.filterIndexed { j, _ -> j != i }.ifEmpty { listOf(SmartRule()) }) }) { Icon(Icons.Filled.Close, "Remove rule") }
+            Surface(
+                shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 5.dp),
+            ) {
+                Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Pick(r.field, SmartDraft.TEXTS + SmartDraft.NUMBERS + SmartDraft.DATES + SmartDraft.FLAGS) { f -> set(r.copy(field = f, op = SmartDraft.ops(f).first())) }
+                        Pick(r.op, SmartDraft.ops(r.field)) { o -> set(r.copy(op = o)) }
+                        Spacer(Modifier.weight(1f))
+                        IconButton({ draft = draft.copy(rules = draft.rules.filterIndexed { j, _ -> j != i }.ifEmpty { listOf(SmartRule()) }) }, Modifier.size(38.dp)) {
+                            Icon(Icons.Filled.Close, "Remove rule", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (r.op !in SmartDraft.FLAG_OPS) FormField(
+                        r.value, { set(r.copy(value = it)) }, Modifier.fillMaxWidth().padding(end = 8.dp), singleLine = true,
+                        placeholder = { Text(if (r.op == "between") "from to" else if (r.op.endsWith("Days")) "days" else "value") },
+                    )
+                }
             }
         }
-        TextButton({ draft = draft.copy(rules = draft.rules + SmartRule()) }, Modifier.padding(horizontal = 8.dp)) { Text("Add rule") }
-        Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Sort by", Modifier.padding(start = 8.dp)); Pick(draft.sortField, SmartDraft.SORTS) { draft = draft.copy(sortField = it) }
-            FilterChip(draft.descending, { draft = draft.copy(descending = !draft.descending) }, { Text("Descending") })
+        ActionRow("Add rule", Icons.Filled.Add, { draft = draft.copy(rules = draft.rules + SmartRule()) }, divider = false)
+        Row(Modifier.padding(start = Space.gutter, end = Space.gutter, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Sort by", style = MaterialTheme.typography.bodyLarge)
+            Pick(draft.sortField, SmartDraft.SORTS) { draft = draft.copy(sortField = it) }
+            Spacer(Modifier.weight(1f))
+            Chip("Descending", draft.descending) { draft = draft.copy(descending = !draft.descending) }
         }
-        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Limit"); OutlinedTextField(if (draft.limit > 0) "${draft.limit}" else "", { draft = draft.copy(limit = it.toIntOrNull() ?: 0) }, Modifier.padding(start = 12.dp).width(120.dp), singleLine = true, placeholder = { Text("none") })
+        Row(Modifier.padding(horizontal = Space.gutter, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Limit", style = MaterialTheme.typography.bodyLarge)
+            FormField(
+                if (draft.limit > 0) "${draft.limit}" else "", { draft = draft.copy(limit = it.toIntOrNull() ?: 0) },
+                Modifier.padding(start = 12.dp).width(130.dp), singleLine = true, placeholder = { Text("none") },
+            )
         }
-        error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
+        error?.let { Text(it, Modifier.padding(Space.gutter), color = MaterialTheme.colorScheme.error) }
     }
 }
 

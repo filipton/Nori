@@ -177,6 +177,11 @@ class PlaybackService : MediaLibraryService() {
             // Controllers extrapolate the playhead themselves; a broadcast every few seconds is a wake-up for nothing.
             .setPeriodicPositionUpdateEnabled(false)
             .apply { open?.let(::setSessionActivity) }.build()
+        // The notification and the lock screen carry the app's own mark, not media3's stock play circle.
+        setMediaNotificationProvider(
+            androidx.media3.session.DefaultMediaNotificationProvider.Builder(this).build()
+                .apply { setSmallIcon(dev.flint.music.core.R.drawable.ic_notification) },
+        )
         restoreQueue()
     }
 
@@ -298,7 +303,11 @@ class PlaybackService : MediaLibraryService() {
 
     @Volatile private var transitionsOff = false
 
+    /** Mirrors the player's shuffle flag for the audio thread, which may not ask the player itself. */
+    @Volatile private var shuffling = false
+
     private fun refreshUpcoming() {
+        shuffling = player.shuffleModeEnabled
         val t = player.currentTimeline
         if (t.isEmpty || player.currentMediaItemIndex == C.INDEX_UNSET) { upcoming = emptyList(); return }
         val list = ArrayList<MediaItem>(8)
@@ -374,7 +383,9 @@ class PlaybackService : MediaLibraryService() {
 
     /** Two tracks are "the album in order" only when the queue is actually playing it in order: shuffle breaks that. */
     private fun followsOnAlbum(a: MediaItem?, b: MediaItem?): Boolean {
-        if (player.shuffleModeEnabled) return false
+        // The flag, not the player: this runs on the audio thread while a buffer is being handed over,
+        // and ExoPlayer throws if it is touched from anywhere but the thread that owns it.
+        if (shuffling) return false
         val (x, y) = (a?.mediaMetadata?.extras ?: return false) to (b?.mediaMetadata?.extras ?: return false)
         val album = x.getString("albumId")
         return album != null && album == y.getString("albumId") && x.getInt("disc") == y.getInt("disc") && y.getInt("track") == x.getInt("track") + 1
