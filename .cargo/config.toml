@@ -1,0 +1,7 @@
+# Signalsmith Stretch (AutoMix time-stretch) is C++. Link its runtime statically on Android so the APK does not
+# have to ship libc++_shared.so; crates/core/build.rs adds the matching libc++abi.
+[env]
+CXXSTDLIB_aarch64_linux_android = "c++_static"
+CXXSTDLIB_armv7_linux_androideabi = "c++_static"
+CXXSTDLIB_x86_64_linux_android = "c++_static"
+CXXSTDLIB_i686_linux_android = "c++_static"

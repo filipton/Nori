@@ -16,3 +16,6 @@ md-5 = "0.11"
 thiserror = "2"
 parking_lot = "0.12"
 jni = { version = "0.21", default-features = false }
+# AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
+rustfft = "6"
+signalsmith-stretch = "0.1"
