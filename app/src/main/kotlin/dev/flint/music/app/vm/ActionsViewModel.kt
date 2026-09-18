@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.update
 import dev.flint.music.settings.SwipeAction
 import dev.flint.music.settings.TapAction
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
@@ -80,6 +81,15 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             else -> emptyList()
         }
         when (verb) {
+            // Lyrics load only while the lyrics panel is watching them, which a headless check is not:
+            // this asks for them the same way the panel does and parks the answer for the state dump.
+            "lyrics" -> {
+                val song = songs.firstOrNull() ?: flint.player.state.value.current ?: return@attempt
+                // The flow emits the server's answer first and the LRCLIB fallback second; the last one
+                // is the one the screen would end up showing.
+                lastLyrics = flint.library.lyricsFor(song, flint.settings.value.thirdPartyLookups).last()
+            }
+            "seek" -> flint.player.seekTo(ref.toLongOrNull() ?: 0L)
             "download" -> download(songs)
             "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
             "pause" -> player.toggle()
@@ -90,6 +100,10 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
         }
     }
 
+    /** The last lyrics the test bridge asked for, so the state dump can report what arrived. */
+    @Volatile var lastLyrics: dev.flint.music.data.FoundLyrics? = null
+        private set
+
     /** For the debug test bridge: "song:<id>", "album:<id>" or "search:<text>" (first song hit). */
     fun playByRef(ref: String) = attempt(null) {
         val arg = ref.substringAfter(':')
@@ -97,6 +111,9 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             ref.startsWith("album:") -> flint.library.album(arg).first().songs
             ref.startsWith("song:") -> listOfNotNull(flint.library.song(arg))
             ref.startsWith("search:") -> flint.library.search(arg).songs.take(1)
+            // Straight from what is already on the device: the only way to start playback with the
+            // network off, and therefore the only honest test of offline playback.
+            ref.startsWith("downloaded:") -> flint.downloads.state.value.done.drop(arg.toIntOrNull() ?: 0).take(1)
             else -> emptyList()
         }
         if (songs.isNotEmpty()) flint.player.play(songs, 0)

@@ -329,8 +329,13 @@ class PlaybackService : MediaLibraryService() {
         override fun planFor(outgoingId: String): TransitionSink.Plan? {
             val p = flint.settings.value
             if (transitionsOff || (!p.autoMix && p.crossfadeSec == 0)) return null
+            // Why a boundary passed without a transition is otherwise invisible, and every reason below
+            // is a deliberate one - which is hard to tell apart from a broken feature without a word.
             val order = upcoming
-            val at = order.indexOfFirst { it.mediaId == outgoingId }.takeIf { it >= 0 } ?: return null
+            val at = order.indexOfFirst { it.mediaId == outgoingId }.takeIf { it >= 0 } ?: run {
+                android.util.Log.i("flint", "planFor: $outgoingId not in the upcoming window")
+                return null
+            }
             val out = order[at]
             val next = order.getOrNull(at + 1) ?: return null
             if (out.isRadio || next.isRadio) return null
@@ -345,9 +350,9 @@ class PlaybackService : MediaLibraryService() {
             val b = if (p.autoMix) runCatching { flint.core.analysisGet(next.mediaId) }.getOrNull() else null
             val outMs = (out.mediaMetadata.durationMs ?: 0L)
             val inMs = (next.mediaMetadata.durationMs ?: 0L)
-            if (outMs <= 0 || inMs <= 0) return null
+            if (outMs <= 0 || inMs <= 0) { android.util.Log.i("flint", "planFor: durations $outMs/$inMs"); return null }
             val plan = dev.flint.music.ffi.planTransition(a, b, outMs, inMs, settings)
-            if (plan.kind == dev.flint.music.ffi.TransitionKind.GAPLESS) return null
+            if (plan.kind == dev.flint.music.ffi.TransitionKind.GAPLESS) { android.util.Log.i("flint", "planFor: gapless (${plan.reason})"); return null }
             android.util.Log.i("flint", "transition ${out.mediaMetadata.title} -> ${next.mediaMetadata.title}: ${plan.kind} ${plan.durationMs} ms at ${plan.outStartMs}, tempo x${"%.3f".format(plan.tempoRatio)} (${plan.reason})")
             return TransitionSink.Plan(
                 incomingId = next.mediaId, outStartUs = plan.outStartMs * 1000, durationUs = plan.durationMs * 1000, inSkipUs = plan.inStartMs * 1000,

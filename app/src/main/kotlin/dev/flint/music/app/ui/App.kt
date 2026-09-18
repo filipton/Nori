@@ -125,6 +125,11 @@ fun App() {
                     """"offload":${p.offload},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
                     """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten},""" +
+                    (actions.lastLyrics ?: (player2.lyrics.value as? dev.flint.music.app.vm.Load.Ready)?.data)?.let { f ->
+                        """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
+                            """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""
+                    }.orEmpty() +
+                    """"starred":${st.current?.starred ?: false},""" +
                     """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
             }
             onDispose {

@@ -101,6 +101,9 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "autoMix" -> it.copy(autoMix = on)
                 "amoled" -> it.copy(amoled = on)
                 "coverColors" -> it.copy(coverColors = on)
+                "thirdPartyLookups" -> it.copy(thirdPartyLookups = on)
+                "crossfadeKeepAlbums" -> it.copy(crossfadeKeepAlbums = on)
+                "lyricsSweep" -> it.copy(lyricsSweep = on)
                 "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
                 else -> null
