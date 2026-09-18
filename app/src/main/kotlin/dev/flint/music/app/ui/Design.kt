@@ -304,13 +304,15 @@ fun SearchField(
     Surface(shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background), modifier = modifier.fillMaxWidth()) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Search, null, Modifier.size(19.dp), tint = scheme.onSurfaceVariant)
-            Box(Modifier.weight(1f).padding(horizontal = 8.dp)) {
+            // The padding belongs to the box, not to the field: with it on the field the placeholder sat
+            // at the top of the capsule while the typed text sat in the middle of it.
+            Box(Modifier.weight(1f).padding(horizontal = 8.dp, vertical = 11.dp)) {
                 if (value.isEmpty()) Text(placeholder, style = MaterialTheme.typography.bodyLarge, color = scheme.onSurfaceVariant)
                 androidx.compose.foundation.text.BasicTextField(
                     value, onValue, singleLine = true,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(scheme.primary),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+                    modifier = Modifier.fillMaxWidth()
                         .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
                 )
             }

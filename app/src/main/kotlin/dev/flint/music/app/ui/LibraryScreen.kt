@@ -1,6 +1,12 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -60,6 +66,31 @@ import dev.flint.music.app.vm.RadioViewModel
 import dev.flint.music.app.vm.StarredViewModel
 import dev.flint.music.data.AlbumSort
 
+/**
+ * One line that says how the list is ordered and opens the alternatives, instead of a second row of
+ * chips under the first: two stacked chip strips made this screen read as a toolbar.
+ */
+@Composable
+private fun <T> SortMenu(options: List<Pair<T, String>>, value: T, onChange: (T) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box(Modifier.padding(start = Space.gutter - 4.dp, top = 2.dp)) {
+        Row(
+            Modifier.clip(PillShape).clickable { open = true }.padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.SwapVert, null, Modifier.size(17.dp), tint = MaterialTheme.colorScheme.primary)
+            Text(
+                options.firstOrNull { it.first == value }?.second ?: "Sort",
+                Modifier.padding(start = 4.dp), style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        DropdownMenu(open, { open = false }) {
+            options.forEach { (v, label) -> DropdownMenuItem({ Text(label) }, { onChange(v); open = false }) }
+        }
+    }
+}
+
 private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Smart", "Favourites", "History", "Genres", "Decades", "Folders", "Radio", "Downloads")
 
 @Composable
@@ -96,15 +127,14 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
     val sort by vm.sort.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column {
-        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random")) { (s, label) ->
-                Chip(label, sort == s) { vm.setSort(s) }
-            }
-        }
+        SortMenu(
+            listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random"),
+            sort, vm::setSort,
+        )
         LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
-                AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth())
+                AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth(), fill = true)
             }
         }
     }
@@ -126,12 +156,15 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
             Row {
                 LazyColumn(Modifier.weight(1f), state = list) {
                     items(artists, key = { it.id }, contentType = { "artist" }) { a ->
-                        Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp)
-                            Column(Modifier.padding(start = 12.dp)) {
-                                Text(a.name)
-                                Text("${a.albumCount} albums", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column {
+                            Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = Space.gutter, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp, radius = 24.dp)
+                                Column(Modifier.padding(start = 12.dp)) {
+                                    Text(a.name, style = MaterialTheme.typography.bodyLarge)
+                                    Text("${a.albumCount} albums", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
+                            Hairline(startIndent = Space.gutter + 60.dp)
                         }
                     }
                 }
@@ -162,8 +195,8 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
     Column {
         if (decade != null) SectionTitle("${decade}s")
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { FilterChip(starred, { vm.setStarredOnly(!starred) }, { Text("★") }) }
-            items(SongSort.entries) { s -> FilterChip(sort == s, { vm.setSort(s) }, { Text(s.label) }) }
+            item { Chip("★ Favourites", starred) { vm.setStarredOnly(!starred) } }
+            items(SongSort.entries) { s -> Chip(s.label, sort == s) { vm.setSort(s) } }
         }
         if (songs.isEmpty()) Text("Nothing in the offline index yet. Settings → Sync all fills it.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
         LazyColumn(state = list) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
@@ -190,7 +223,7 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
 private fun Folders(vm: FoldersViewModel = viewModel()) {
     val load by vm.roots.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    LoadBox(load) { roots -> LazyColumn { items(roots, key = { it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) } } }
+    LoadBox(load) { roots -> LazyColumn { items(roots, key = { it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = Space.gutter, vertical = 15.dp)) } } }
 }
 
 @Composable
@@ -213,7 +246,7 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
     LoadBox(load) { playlists ->
         LazyColumn {
             item { Row(Modifier.fillMaxWidth().clickable { creating = true }.padding(16.dp)) { Icon(Icons.Filled.Add, null); Text("New playlist", Modifier.padding(start = 12.dp)) } }
-            item { Text("Import M3U…", Modifier.fillMaxWidth().clickable { pickM3u.launch(arrayOf("*/*")) }.padding(horizontal = 16.dp, vertical = 12.dp), color = MaterialTheme.colorScheme.primary) }
+            item { Text("Import M3U…", Modifier.fillMaxWidth().clickable { pickM3u.launch(arrayOf("*/*")) }.padding(horizontal = Space.gutter, vertical = 13.dp), color = MaterialTheme.colorScheme.primary) }
             items(playlists, key = { it.id }) { p ->
                 Row(Modifier.fillMaxWidth().clickable { nav.playlist(p.id) }.padding(start = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp)

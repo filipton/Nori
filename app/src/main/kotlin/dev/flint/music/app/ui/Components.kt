@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
@@ -201,10 +202,15 @@ fun LazyListScope.songRows(
 }
 
 /** A cover with its title under it: the tile every shelf and grid is made of. */
+/**
+ * [fill] is for a grid, where the cell decides the width and the artwork has to take all of it: given a
+ * fixed width inside a wider cell the card hugs the left edge of it and the grid looks ragged.
+ */
 @Composable
-fun CoverCard(title: String, subtitle: String, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Column(modifier.width(size).clickable(onClick = onClick)) {
-        Cover(coverUrl, size, radius = Radius.card)
+fun CoverCard(title: String, subtitle: String, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) {
+    Column((if (fill) modifier else modifier.width(size)).clickable(onClick = onClick)) {
+        if (fill) Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().aspectRatio(1f), radius = Radius.card)
+        else Cover(coverUrl, size, radius = Radius.card)
         Text(
             title, maxLines = 1, overflow = TextOverflow.Ellipsis,
             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, fontWeight = FontWeight.Medium),
@@ -234,11 +240,11 @@ fun ArtistCard(name: String, subtitle: String, coverUrl: String?, size: Dp, onCl
 }
 
 @Composable
-fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier) =
+fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) =
     CoverCard(
         album.name,
         listOfNotNull(album.artist.ifEmpty { null }, album.year.takeIf { it > 0u }?.toString(), providerOf(album.id)?.let { "☁ $it" }).joinToString(" · "),
-        coverUrl, size, onClick, modifier,
+        coverUrl, size, onClick, modifier, fill,
     )
 
 @Composable

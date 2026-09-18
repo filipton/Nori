@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
@@ -44,18 +45,21 @@ import dev.flint.music.app.vm.PlayerViewModel
 @Composable
 fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onOpenPlayer: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    // Apple's tab bar is a thin neutral shelf with a hairline on top, not a raised container: it reads
+    // as the edge of the page rather than as a widget, and it stays out of the artwork's colour scheme
+    // so it does not turn muddy on a brown album. Translucent, not blurred - a live blur is a
+    // full-screen GPU pass every frame, which is exactly the kind of cost this app does not pay.
+    val bar = scheme.surface.copy(alpha = 0.94f)
     Column {
         SelectionBar(actions)
-        // The mini player floats: rounded on every side, inset from the edges, lifted off the page.
-        // Glued to the bottom edge with a hairline it reads as a toolbar; floating, it reads as a card
-        // that belongs to the music rather than to the app frame.
         Box(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) { MiniPlayer(player, onOpenPlayer) }
-        Row(
-            Modifier.fillMaxWidth()
-                .background(scheme.onSurface.copy(alpha = 0.05f).over(scheme.background))
-                .navigationBarsPadding().padding(top = 8.dp, bottom = 6.dp),
-            Arrangement.SpaceEvenly, Alignment.CenterVertically,
-        ) { tabs.forEach { t -> TabButton(t, selected = route == t.route) { onTab(t.route) } } }
+        Column(Modifier.background(bar)) {
+            Hairline(startIndent = 0.dp)
+            Row(
+                Modifier.fillMaxWidth().navigationBarsPadding().padding(top = 7.dp, bottom = 5.dp),
+                Arrangement.SpaceEvenly, Alignment.CenterVertically,
+            ) { tabs.forEach { t -> TabButton(t, selected = route == t.route) { onTab(t.route) } } }
+        }
     }
 }
 
@@ -64,17 +68,18 @@ data class Tab(val route: String, val label: String, val icon: ImageVector, val 
 @Composable
 private fun TabButton(tab: Tab, selected: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val color = if (selected) scheme.primary else scheme.onSurfaceVariant
+    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = 0.75f)
     Column(
-        Modifier.clip(PillShape).clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 3.dp)
+        Modifier.clip(PillShape).clickable(onClick = onClick).padding(horizontal = 14.dp, vertical = 2.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Outline when it is somewhere to go, solid when it is where you are: the difference does the
         // work an indicator pill would otherwise have to do.
-        Icon(if (selected) tab.icon else tab.outline, null, Modifier.size(24.dp), tint = color)
+        Icon(if (selected) tab.icon else tab.outline, null, Modifier.size(22.dp), tint = color)
         Text(
-            tab.label, Modifier.padding(top = 3.dp), style = MaterialTheme.typography.labelSmall,
+            tab.label, Modifier.padding(top = 2.dp),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
             color = color, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
         )
     }
@@ -103,6 +108,7 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
         rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled)
     } else null
     val scheme = MaterialTheme.colorScheme
+    NowPlayingPalette(palette)
     val bar = palette?.let { blend(it.background, it.edge, 0.22f) } ?: scheme.onSurface.copy(alpha = 0.10f).over(scheme.background)
     Surface(
         shape = CardShape, color = bar, contentColor = palette?.onBackground ?: scheme.onSurface,
@@ -131,4 +137,19 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
         }
         }
     }
+}
+
+/**
+ * The colours of the track that is playing, published once by the mini player so the tab bar under it
+ * can wear the same tint. A plain holder rather than a CompositionLocal provider, because the two
+ * composables are siblings: the bar is drawn after the player has worked its palette out.
+ */
+private val nowPlaying = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
+
+@Composable
+fun nowPlayingPalette(): PagePalette? = nowPlaying.value
+
+@Composable
+private fun NowPlayingPalette(palette: PagePalette?) {
+    androidx.compose.runtime.LaunchedEffect(palette) { nowPlaying.value = palette }
 }

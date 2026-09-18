@@ -8,9 +8,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.Shuffle
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.Text
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -29,11 +37,19 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val mixes = settings.prefs.collectAsStateWithLifecycle().value.tasteModel
     LoadBox(load) { ui ->
         LazyColumn {
-            item(key = "title") { LargeTitle("Listen now") }
-            item(key = "actions") {
-                Row(Modifier.padding(horizontal = Space.gutter, vertical = 10.dp), Arrangement.spacedBy(10.dp)) {
-                    PillButton("Shuffle", Icons.Filled.Shuffle, actions::shuffleAll, Modifier.weight(1f))
-                    PillButton("Resume", Icons.Filled.History, actions::resumeFromServer, Modifier.weight(1f))
+            // Shuffling the whole library and picking the server's queue back up are things you do
+            // occasionally, so they live behind the title's menu rather than as two buttons across the
+            // top of the page: what belongs at the top of this screen is music.
+            item(key = "title") {
+                var menu by remember { mutableStateOf(false) }
+                LargeTitle("Listen now") {
+                    Box {
+                        IconButton({ menu = true }) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(22.dp)) }
+                        DropdownMenu(menu, { menu = false }) {
+                            DropdownMenuItem({ Text("Shuffle everything") }, { actions.shuffleAll(); menu = false })
+                            DropdownMenuItem({ Text("Resume from server") }, { actions.resumeFromServer(); menu = false })
+                        }
+                    }
                 }
             }
             if (mixes) item(key = "mixes") { SectionTitle("For you"); MixTiles() }
