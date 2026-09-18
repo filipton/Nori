@@ -97,6 +97,14 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             "next" -> player.next()
             "previous" -> player.previous()
             "enqueue" -> enqueue(songs)
+            "playnext" -> playNext(songs)
+            // "newplaylist <name>|<ref>": the checks create one, look for it on the server, then delete it.
+            "newplaylist" -> {
+                val name = ref.substringBefore('|')
+                val pick = ref.substringAfter('|', "")
+                val tracks = if (pick.startsWith("search:")) flint.library.search(pick.substringAfter(':')).songs.take(1) else emptyList()
+                flint.library.createPlaylist(name, tracks.map { it.id })
+            }
         }
     }
 

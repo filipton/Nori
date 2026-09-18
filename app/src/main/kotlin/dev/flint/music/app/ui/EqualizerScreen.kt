@@ -78,7 +78,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             Switch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } })
         }
         Text(
-            "Parametric, runs in the Rust core. Tap a band's label to change its frequency, width or type.",
+            "Tap a band's label to change its frequency, width or type.",
             Modifier.padding(horizontal = Space.gutter, vertical = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

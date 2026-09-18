@@ -99,7 +99,7 @@ fun MixTiles(vm: MixesViewModel = viewModel()) {
 fun SmartList(vm: SmartViewModel = viewModel()) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    LazyColumn {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         item { ActionRow("New smart playlist", Icons.Filled.Add, { nav.smartEdit("") }) }
         items(saved, key = { it.id }) { p ->
             NavRow(
@@ -116,7 +116,7 @@ fun SmartList(vm: SmartViewModel = viewModel()) {
                 Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text("Copy") }
             }
         }
-        item { Text("Evaluated in the Rust core over the offline index: sync it (Settings) so every song can match.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text("Matched against the synced library: sync it in Settings so every song can be found.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
@@ -139,7 +139,7 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
             TextButton({ nav.smartEdit(id) }) { Text("Edit") }
         }
         LoadBox(load) { songs ->
-            LazyColumn {
+            LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
                         Button({ actions.play(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text("Play") }
@@ -222,7 +222,7 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
     val list = rememberLazyListState()
     LaunchedEffect(list, entries.size) { snapshotFlow { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= entries.size - 30 }.collect { if (it) vm.loadMore() } }
     val songs = remember(entries) { entries.map { it.song } }
-    LazyColumn(state = list) {
+    LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         item { Row(Modifier.padding(horizontal = 8.dp)) { TextButton(nav::stats) { Text("Listening stats") }; TextButton(vm::clear) { Text("Clear history") } } }
         if (entries.isEmpty()) item { Text("Nothing played yet, or the listening history is switched off in Settings → Features.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         songRows(songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "h")

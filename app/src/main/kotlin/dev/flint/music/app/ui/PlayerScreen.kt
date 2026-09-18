@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import kotlin.math.roundToInt
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.zIndex
 import androidx.compose.runtime.mutableIntStateOf
@@ -337,21 +338,31 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
 private fun Queue(vm: PlayerViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val list = rememberLazyListState(initialFirstVisibleItemIndex = state.index.coerceAtLeast(0))
-    // Reorder by dragging the handle: the dragged row follows the finger, and each time it has travelled
-    // a full row the queue itself moves, so what you see is always the real order rather than a preview.
-    var dragIndex by remember { mutableIntStateOf(-1) }
+    // Nothing is reordered until the finger lifts. The held row follows it, the rows it passes step out
+    // of the way, and the gap travels with it - reordering live would change the keys under the gesture
+    // and cancel it, which is why a row could only ever be moved one place at a time.
+    var from by remember { mutableIntStateOf(-1) }
     var dragOffset by remember { mutableFloatStateOf(0f) }
     var rowHeight by remember { mutableFloatStateOf(0f) }
     val haptics = LocalHapticFeedback.current
+    val moved = if (from >= 0 && rowHeight > 0f) (dragOffset / rowHeight).roundToInt() else 0
+    val target = (from + moved).coerceIn(0, (state.queue.size - 1).coerceAtLeast(0))
 
     LazyColumn(Modifier.fillMaxSize(), state = list) {
         item(key = "next") { Caption("Playing next", Modifier.padding(top = 4.dp, bottom = 8.dp)) }
         itemsIndexed(state.queue, key = { i, s -> "$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
-            val dragged = i == dragIndex
+            val held = i == from
+            val shift = when {
+                from < 0 -> 0f
+                held -> dragOffset
+                i in (from + 1)..target -> -rowHeight
+                i in target until from -> rowHeight
+                else -> 0f
+            }
             Row(
                 Modifier.fillMaxWidth()
-                    .zIndex(if (dragged) 1f else 0f)
-                    .graphicsLayer { if (dragged) { translationY = dragOffset; shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f } }
+                    .zIndex(if (held) 1f else 0f)
+                    .graphicsLayer { translationY = shift; if (held) { shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f } }
                     .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
                     .clickable { vm.skipTo(i) }
                     .padding(vertical = 6.dp),
@@ -369,24 +380,26 @@ private fun Queue(vm: PlayerViewModel) {
                     Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Icon(
-                    Icons.Filled.DragHandle, "Reorder", tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(38.dp).padding(8.dp).pointerInput(state.queue.size) {
+                    Icons.Filled.DragHandle, "Reorder",
+                    tint = if (held) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
                         detectDragGestures(
-                            onDragStart = { dragIndex = i; dragOffset = 0f; haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
-                            onDragEnd = { dragIndex = -1; dragOffset = 0f },
-                            onDragCancel = { dragIndex = -1; dragOffset = 0f },
-                        ) { change, drag ->
-                            change.consume()
-                            if (dragIndex < 0) return@detectDragGestures
-                            dragOffset += drag.y
-                            val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGestures
-                            while (dragOffset >= h && dragIndex < state.queue.lastIndex) {
-                                vm.move(dragIndex, dragIndex + 1); dragIndex++; dragOffset -= h
-                            }
-                            while (dragOffset <= -h && dragIndex > 0) {
-                                vm.move(dragIndex, dragIndex - 1); dragIndex--; dragOffset += h
-                            }
-                        }
+                            onDragStart = {
+                                from = i; dragOffset = 0f
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            },
+                            onDragEnd = {
+                                // Worked out here, from the state as it is now: pointerInput(Unit) keeps
+                                // the block it was created with, so anything computed during composition
+                                // is frozen at its first value - which quietly meant "did not move".
+                                val h = rowHeight
+                                val size = vm.state.value.queue.size
+                                val to = if (h > 0f) (from + (dragOffset / h).roundToInt()).coerceIn(0, (size - 1).coerceAtLeast(0)) else from
+                                if (from >= 0 && to != from) vm.move(from, to)
+                                from = -1; dragOffset = 0f
+                            },
+                            onDragCancel = { from = -1; dragOffset = 0f },
+                        ) { change, drag -> change.consume(); dragOffset += drag.y }
                     },
                 )
             }

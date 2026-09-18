@@ -79,8 +79,10 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         for (s in songs) {
             if (s.id in known) continue
             core.downloadAdd(s)
-            // A batch that has finished starts the count again rather than adding to the last one.
-            if (manager.currentDownloads.isEmpty() && batchDone + batchFailed >= batchTotal) {
+            // A batch that has finished starts the count again rather than adding to the last one. The
+            // counters answer that on their own: DownloadManager may only be asked from the main thread,
+            // and this runs on the download executor.
+            if (batchTotal > 0 && batchDone + batchFailed >= batchTotal) {
                 batch.clear(); batchTotal = 0; batchDone = 0; batchFailed = 0
             }
             batch += s.id

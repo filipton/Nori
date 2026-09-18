@@ -159,7 +159,7 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
     ) {
         // The tap has to be a child of the drag detectors, not a sibling behind them: a pointerInput
         // waiting for drag slop swallows a tap offered to a clickable further up the same chain.
-        Surface(onClick = onOpen, color = androidx.compose.ui.graphics.Color.Transparent) {
+        Surface(onClick = onOpen, color = Color.Transparent, contentColor = content) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
             Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 42.dp, radius = 7.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {

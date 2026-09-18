@@ -167,7 +167,7 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
         Column {
             SearchField(filter, { filter = it }, "Filter artists", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
             Row {
-                LazyColumn(Modifier.weight(1f), state = list) {
+                LazyColumn(Modifier.weight(1f), state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                     items(artists, key = { it.id }, contentType = { "artist" }) { a ->
                         Column {
                             Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = Space.gutter, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {

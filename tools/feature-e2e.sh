@@ -59,6 +59,36 @@ state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:
 check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
 adb shell svc wifi enable; adb shell svc data enable; sleep 6
 
+echo "-- playlists, and does the server agree"
+name="flint check $RANDOM"
+"$app" do "newplaylist $name|search:creep" >/dev/null; sleep 6
+pid=$(api getPlaylists | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['subsonic-response'].get('playlists',{})
+print(next((p['id'] for p in d.get('playlist',[]) if p['name']=='$name'), ''))")
+check "a new playlist reaches the server" test -n "$pid"
+songs=$(api getPlaylist "&id=$pid" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['subsonic-response'].get('playlist',{})
+print(len(d.get('entry',[])))" 2>/dev/null)
+check "the song went into it ($songs)" test "${songs:-0}" -ge 1
+# Tidy up: a test must not leave anything behind on someone's library.
+[ -n "$pid" ] && api deletePlaylist "&id=$pid" >/dev/null
+gone=$(api getPlaylists | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['subsonic-response'].get('playlists',{})
+print(all(p['name']!='$name' for p in d.get('playlist',[])))")
+check "the check cleans up after itself" test "$gone" = "True"
+
+echo "-- editing the queue"
+"$app" play "search:creep" >/dev/null; sleep 6
+before=$(field queue)
+"$app" do "enqueue search:no surprises" >/dev/null; sleep 4
+after=$(field queue)
+check "adding to the queue grows it ($before -> $after)" test "${after:-0}" -gt "${before:-0}"
+"$app" do "playnext search:let down" >/dev/null; sleep 4
+check "play next grows it too ($after -> $(field queue))" test "$(field queue)" -gt "${after:-0}"
+
 echo "-- automix over a real album"
 "$app" set autoMix true >/dev/null
 # Consecutive tracks of one album are meant to stay gapless, so that setting has to be off for a

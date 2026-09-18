@@ -247,7 +247,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
         SearchField(query, { query = it }, "Search settings", Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
         if (query.isNotBlank()) {
             // A result is the setting itself: tapping opens its page and puts the finger on the row.
-            LazyColumn {
+            LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 items(hits, key = { it.group + it.title }) { e ->
                     Column(Modifier.clickable { nav.settingsGroup(e.group, settingKey(e.title)) }) {
                         Column(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 11.dp)) {
