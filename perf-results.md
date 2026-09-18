@@ -86,6 +86,26 @@ and BurstSink returns false by design, so the renderer re-offered the same audio
 twice. The sink now feeds only the bytes that were consumed, and the analysis is discarded unless the
 frames heard agree with the server's duration.
 
+### The Apple-style UI rewrite, API 34 emulator
+
+Rounded artwork, washes and hairlines cost nothing measurable. The album grid was scrolled with the
+same 10 flings each way with `Radius.cover/card` at their real values and at zero:
+
+| Covers | 50th | 90th | 95th |
+|---|---|---|---|
+| Rounded (8 dp rows, 12 dp cards) | 57 ms | 81 ms | 81 ms |
+| Square | 57 ms | 81 ms | 81 ms |
+
+Identical, because the emulator's software renderer is the bottleneck; a rounded clip is a render-node
+clip the GPU does for free. Screen-off playback was measured against the build from before the rewrite,
+same track, same conditions, back to back: **3.82-3.86 % with the new UI, 4.06-4.26 % with the old
+one**, so the rewrite is neutral on battery, as it should be with the screen off and the UI not
+composing.
+
+Note that those absolute numbers are far above the 1.1-1.7 % measured earlier in the session on the
+same build: a long-lived emulator with a busy host drifts badly. Only compare runs taken minutes apart
+on the same machine state, and never quote a number from one session against another.
+
 ### Android 11 versus Android 14
 
 Same APK, same file, same host, same emulator settings:
