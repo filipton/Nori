@@ -50,6 +50,8 @@ vol=$(adb shell cmd media_session volume --stream 3 --get 2>/dev/null | grep -oE
 adb shell cmd media_session volume --stream 3 --set 0 >/dev/null 2>&1
 trap '[ -n "${vol:-}" ] && adb shell cmd media_session volume --stream 3 --set "$vol" >/dev/null 2>&1; adb shell input keyevent 127; adb shell svc power stayon false' EXIT
 
+# Always from source: a stale release APK silently makes the whole suite measure yesterday's build.
+say "build release"; (cd "$here/.." && ./gradlew :app:assembleRelease -q) || say "WARNING: release build failed, installing whatever is on disk"
 say "install"; adb install -r "$apk" >/dev/null || { adb uninstall $pkg >/dev/null; adb install "$apk" >/dev/null; }
 adb shell pm grant $pkg android.permission.POST_NOTIFICATIONS 2>/dev/null
 adb shell cmd package compile -m speed-profile -f $pkg >/dev/null 2>&1
