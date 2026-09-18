@@ -141,15 +141,17 @@ fun HeroPage(
                             Caption(caption, Modifier.padding(top = 6.dp), align = TextAlign.Center)
                         }
 
-                        // The two pills carry the page; everything else is a quiet icon on the line below them.
+                        // Apple's arrangement: shuffle in a circle on the left, one wide Play pill in the
+                        // middle, and the page's other action in a circle on the right. Two equal pills
+                        // side by side give the page two things to look at instead of one.
                         if (onPlay != null || onShuffle != null) Row(
                             Modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.gutter, top = 16.dp),
-                            Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
+                            Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
                         ) {
+                            if (onShuffle != null) CircleButton(Icons.Filled.Shuffle, "Shuffle", onShuffle)
                             if (onPlay != null) PillButton("Play", Icons.Filled.PlayArrow, onPlay, Modifier.weight(1f), prominent = true)
-                            if (onShuffle != null) PillButton("Shuffle", Icons.Filled.Shuffle, onShuffle, Modifier.weight(1f))
-                        }
-                        Row(
+                            actions()
+                        } else Row(
                             Modifier.fillMaxWidth().padding(start = Space.tight, end = Space.tight, top = 2.dp),
                             Arrangement.Center, Alignment.CenterVertically,
                         ) { actions() }

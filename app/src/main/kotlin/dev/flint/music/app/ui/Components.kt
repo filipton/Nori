@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.CircularProgressIndicator
@@ -154,10 +155,15 @@ fun SongRow(
                 .padding(start = Space.gutter, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (number != null) Text(
-                if (number > 0) "$number" else "", Modifier.width(26.dp), textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
-            ) else Cover(coverUrl, 46.dp, radius = 6.dp)
+            // The track playing shows a waveform where its number would be - the same cue Apple uses, and
+            // clearer at a glance than the title merely changing colour.
+            if (number != null) Box(Modifier.width(26.dp), Alignment.Center) {
+                if (playing) Icon(Icons.Filled.GraphicEq, "Playing", Modifier.size(16.dp), tint = scheme.primary)
+                else Text(
+                    if (number > 0) "$number" else "", textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                )
+            } else Cover(coverUrl, 46.dp, radius = 6.dp)
             Column(Modifier.weight(1f).padding(start = if (number != null) 14.dp else 12.dp, end = 8.dp)) {
                 Text(
                     song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,

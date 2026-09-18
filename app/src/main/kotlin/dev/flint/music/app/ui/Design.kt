@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -489,4 +490,15 @@ fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Bo
         }
         if (divider) Hairline(startIndent = Space.gutter + 32.dp)
     }
+}
+
+/** A round, softly filled button: the small actions either side of a page's Play pill. */
+@Composable
+fun CircleButton(icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick, shape = androidx.compose.foundation.shape.CircleShape,
+        color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background), contentColor = scheme.primary,
+        modifier = modifier.size(46.dp),
+    ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
 }

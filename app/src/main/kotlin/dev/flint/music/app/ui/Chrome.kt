@@ -1,6 +1,8 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,23 +50,31 @@ import dev.flint.music.app.vm.PlayerViewModel
 @Composable
 fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onOpenPlayer: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    // Apple Music floats its chrome: the mini player and the tab bar are two separate rounded slabs with
-    // air around them, not a wall across the bottom of the screen. They also take a hint of the colour of
-    // whatever page you are on, which is what ties the artwork to the frame around it.
+    // Apple Music floats its chrome: the mini player is one rounded slab, the tabs another, search sits
+    // apart in its own circle, and all of it takes a hint of the colour of the page behind it.
     val tint = currentPalette()
     val slab = tint?.let { blend(it.background, it.edge, 0.16f) } ?: scheme.onSurface.copy(alpha = 0.08f).over(scheme.background)
     val content = tint?.onBackground ?: scheme.onSurface
+    val search = tabs.firstOrNull { it.route == "search" }
+    val rest = tabs.filter { it.route != "search" }
     Column {
         SelectionBar(actions)
         Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
-        Surface(
-            shape = PillShape, color = slab, shadowElevation = 8.dp,
-            modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
-                Arrangement.SpaceEvenly, Alignment.CenterVertically,
-            ) { tabs.forEach { t -> TabButton(t, selected = route == t.route, tinted = tint != null) { onTab(t.route) } } }
+        Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp), Arrangement.spacedBy(8.dp), Alignment.CenterVertically) {
+            Surface(shape = PillShape, color = slab, shadowElevation = 8.dp, modifier = Modifier.weight(1f)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 5.dp),
+                    Arrangement.SpaceEvenly, Alignment.CenterVertically,
+                ) { rest.forEach { t -> TabButton(t, selected = route == t.route, content = content) { onTab(t.route) } } }
+            }
+            if (search != null) Surface(
+                onClick = { onTab(search.route) }, shape = CircleShape, color = slab, shadowElevation = 8.dp,
+                modifier = Modifier.size(58.dp).semantics { contentDescription = search.label },
+            ) {
+                Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    Icon(search.icon, null, Modifier.size(25.dp), tint = if (route == search.route) scheme.primary else content)
+                }
+            }
         }
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -73,26 +83,26 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
 data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 @Composable
-private fun TabButton(tab: Tab, selected: Boolean, tinted: Boolean, onClick: () -> Unit) {
+private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    // The same solid glyph in both states, colour alone saying where you are, and the selected one in a
-    // soft pill - swapping outline for solid belongs to Files and Photos, not to a music app. No ripple
-    // either: a tab bar answers instantly and silently, and a spreading circle reads as Android.
-    val color = if (selected) scheme.primary else scheme.onSurfaceVariant.copy(alpha = if (tinted) 0.9f else 0.8f)
+    // Apple marks the current tab twice over: the accent colour on the glyph, and a plain lighter patch
+    // behind it - light grey on their white bar, so the equivalent here is a little of the bar's own
+    // text colour. Tinting that patch with the accent is what made it read as a Material pill.
+    val colour = if (selected) scheme.primary else content
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Column(
         Modifier.clip(PillShape)
-            .background(if (selected) scheme.primary.copy(alpha = 0.16f) else androidx.compose.ui.graphics.Color.Transparent)
+            .background(if (selected) content.copy(alpha = 0.10f) else Color.Transparent)
             .clickable(interactionSource = press, indication = null, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 5.dp)
+            .padding(horizontal = 18.dp, vertical = 6.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(tab.icon, null, Modifier.size(23.dp), tint = color)
+        Icon(tab.icon, null, Modifier.size(25.dp), tint = colour)
         Text(
-            tab.label, Modifier.padding(top = 1.dp),
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, letterSpacing = 0.sp),
-            color = color, fontWeight = FontWeight.Medium,
+            tab.label, Modifier.padding(top = 2.dp),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
+            color = colour, fontWeight = FontWeight.SemiBold,
         )
     }
 }

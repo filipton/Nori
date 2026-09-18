@@ -30,6 +30,8 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     private val sources by lazySources
     private val io = Executors.newFixedThreadPool(2)
     private val _state = MutableStateFlow(DownloadState())
+    /** What this batch asked for, so the closing notification reports the batch and not the library. */
+    private val batch = java.util.Collections.synchronizedSet(mutableSetOf<String>())
     val state: StateFlow<DownloadState> = _state
 
     val manager: DownloadManager by lazy {
@@ -38,6 +40,9 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             addListener(object : DownloadManager.Listener {
                 override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) {
                     if (d.state == Download.STATE_COMPLETED) io.execute { core.downloadDone(d.request.id); publish() }
+                    // The foreground notification disappears with the service; a batch that took a while
+                    // should still say how it went.
+                    if (m.currentDownloads.isEmpty()) summarise(m)
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
@@ -60,6 +65,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         for (s in songs) {
             if (s.id in known) continue
             core.downloadAdd(s)
+            batch += s.id
             // The title and the expected size ride along with the request: the notification needs both,
             // and a transcoding server usually answers without a Content-Length, which leaves media3's
             // own progress bar empty and the download looking stuck.
@@ -70,6 +76,31 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             DownloadService.sendAddDownload(context, DownloadWorker::class.java, request, false)
         }
         publish()
+    }
+
+    /** "12 songs downloaded" (or how many did not), once the batch that was asked for finishes. */
+    private fun summarise(m: DownloadManager) {
+        val wanted = synchronized(batch) { batch.toSet() }
+        if (wanted.isEmpty()) return
+        synchronized(batch) { batch.clear() }
+        val all = m.downloadIndex.getDownloads().use { c -> generateSequence { if (c.moveToNext()) c.download else null }.toList() }
+            .filter { it.request.id in wanted }
+        val failed = all.count { it.state == Download.STATE_FAILED }
+        val done = all.count { it.state == Download.STATE_COMPLETED }
+        if (done == 0 && failed == 0) return
+        val manager = context.getSystemService(android.app.NotificationManager::class.java) ?: return
+        val text = listOfNotNull(
+            "$done song${if (done == 1) "" else "s"} downloaded".takeIf { done > 0 },
+            "$failed failed".takeIf { failed > 0 },
+        ).joinToString(" · ")
+        manager.notify(
+            1002,
+            NotificationCompat.Builder(context, "downloads")
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle(text)
+                .setAutoCancel(true)
+                .build(),
+        )
     }
 
     fun remove(ids: List<String>) = ids.forEach { DownloadService.sendRemoveDownload(context, DownloadWorker::class.java, it, false) }
@@ -95,7 +126,9 @@ class DownloadWorker : DownloadService(1001, 1000L, CHANNEL, androidx.media3.exo
      * weighs, and says what is being fetched, how fast, and how much longer.
      */
     override fun getForegroundNotification(downloads: MutableList<Download>, notMetRequirements: Int): Notification {
-        val active = downloads.filter { it.state == Download.STATE_DOWNLOADING || it.state == Download.STATE_QUEUED }
+        val done = downloads.count { it.state == Download.STATE_COMPLETED }
+        val failed = downloads.count { it.state == Download.STATE_FAILED }
+        val total = downloads.size
         val bytes = downloads.sumOf { it.bytesDownloaded }
         val expected = downloads.sumOf { d ->
             val stated = d.contentLength.takeIf { it > 0 } ?: 0L
@@ -110,32 +143,38 @@ class DownloadWorker : DownloadService(1001, 1000L, CHANNEL, androidx.media3.exo
         lastBytes = bytes
         lastAt = now
 
-        val current = active.firstOrNull { it.state == Download.STATE_DOWNLOADING }
+        val current = downloads.firstOrNull { it.state == Download.STATE_DOWNLOADING }
             ?.request?.data?.decodeToString()?.substringAfter('\n')?.takeIf { it.isNotBlank() }
         val remaining = (expected - bytes).coerceAtLeast(0)
         val eta = if (speedBps > 1024 && remaining > 0) remaining / speedBps else -1.0
+        fun time(seconds: Double) = when {
+            seconds < 60 -> "${seconds.toInt()} s left"
+            seconds < 3600 -> "${(seconds / 60).toInt()} min left"
+            else -> "%.1f h left".format(seconds / 3600)
+        }
+        fun mb(v: Long) = if (v >= 1_000_000_000) "%.1f GB".format(v / 1e9) else "%.0f MB".format(v / 1e6)
+
+        val headline = when {
+            notMetRequirements != 0 -> "Waiting for the network"
+            total > 1 -> "Downloading $done of $total songs"
+            else -> "Downloading"
+        }
         val detail = listOfNotNull(
-"${downloads.count { it.state == Download.STATE_COMPLETED } + 1}/${downloads.size}".takeIf { downloads.size > 1 },
+            current,
+            "${mb(bytes)} of ${mb(expected)}".takeIf { expected > 0 },
             "%.1f MB/s".format(speedBps / 1_000_000).takeIf { speedBps > 1024 },
-            when {
-                eta < 0 -> null
-                eta < 60 -> "${eta.toInt()} s left"
-                else -> "${(eta / 60).toInt()} min left"
-            },
+            eta.takeIf { it >= 0 }?.let(::time),
+            "$failed failed".takeIf { failed > 0 },
         ).joinToString(" · ")
 
         val percent = if (expected > 0) ((bytes * 100) / expected).toInt().coerceIn(0, 100) else -1
-        // Collapsed, Android shows the title, the sub-text and the bar, and drops the content text - so
-        // the numbers worth reading at a glance go in the sub-text, not below it.
-        val line = listOfNotNull(
-            if (expected > 0) "%.0f of %.0f MB".format(bytes / 1e6, expected / 1e6) else null,
-            detail.ifEmpty { null },
-        ).joinToString(" · ")
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(current ?: if (downloads.size > 1) "Downloading ${downloads.size} songs" else "Downloading")
-            .setContentText(line.ifEmpty { if (notMetRequirements != 0) "Waiting for the network" else "Starting…" })
-            .setSubText(line.ifEmpty { null })
+            .setContentTitle(headline)
+            // Collapsed, Android shows the title, the sub-text and the bar; expanded, it shows this too.
+            .setContentText(detail.ifEmpty { "Starting…" })
+            .setSubText(detail.ifEmpty { null })
+            .setStyle(NotificationCompat.BigTextStyle().bigText(detail.ifEmpty { "Starting…" }))
             .setProgress(100, percent.coerceAtLeast(0), percent < 0)
             .setOngoing(true)
             .setOnlyAlertOnce(true)

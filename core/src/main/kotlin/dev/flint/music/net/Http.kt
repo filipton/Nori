@@ -9,6 +9,7 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.ConnectionPool
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -39,6 +40,18 @@ class MeteredNetworkException : IOException("This server is set to Wi-Fi only")
 class Http(private val context: Context) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val pool = ConnectionPool(4, 20, TimeUnit.SECONDS)
+
+    /**
+     * OkHttp allows five requests per host by default and shares one dispatcher between every client
+     * built from the same one. A grid of covers therefore queues five at a time behind whatever else is
+     * running - including a provider stream that octo-fiesta can hold open for minutes - which is what
+     * made artwork crawl on a real server while it looked instant on a small local one. HTTP/2
+     * multiplexes them over the single connection anyway, so a higher cap costs no extra sockets.
+     */
+    private val dispatcher = Dispatcher().apply { maxRequestsPerHost = 24; maxRequests = 48 }
+
+    /** Long streams get their own dispatcher so they cannot occupy the slots the UI needs. */
+    private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = 6; maxRequests = 12 }
     @Volatile private var profile: ServerProfile? = null
 
     @Volatile var api: OkHttpClient = build(null)
@@ -48,7 +61,7 @@ class Http(private val context: Context) {
      * octo-fiesta answers a stream request for a provider track only once the
      * whole file is downloaded on its side, so the first byte can take minutes.
      */
-    @Volatile var stream: OkHttpClient = api.newBuilder().readTimeout(4, TimeUnit.MINUTES).build()
+    @Volatile var stream: OkHttpClient = api.newBuilder().dispatcher(streamDispatcher).readTimeout(4, TimeUnit.MINUTES).build()
         private set
 
     val callFactory = Call.Factory { api.newCall(it) }
@@ -72,6 +85,7 @@ class Http(private val context: Context) {
 
     private fun build(p: ServerProfile?): OkHttpClient {
         val b = OkHttpClient.Builder()
+            .dispatcher(dispatcher)
             // Idle connections close after 20 s, while the radio is still up from the request that used them. The default
             // five minutes means every track fetch is followed, minutes later, by a lone FIN that wakes the modem again.
             .connectionPool(pool)

@@ -22,6 +22,15 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
         /** Depth of the AudioTrack buffer this is meant to be used with. */
         const val BUFFER_US = 10_000_000
         private const val LOW_US = 2_000_000L
+
+        /**
+         * Bytes this sink has handed to the AudioTrack since the process started. The only honest
+         * answer to "is audio actually flowing?": the media session's position is deliberately not
+         * updated periodically here, and a controller in the background can report a stale one, so a
+         * test that watches either of those can pass while the device is silent - which is exactly the
+         * bug this counter was added to catch.
+         */
+        @Volatile var bytesWritten = 0L
     }
 
     /** False while playback is offloaded or something needs low latency (the equalizer being tuned). */
@@ -30,7 +39,13 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     private var writtenUntilUs = C.TIME_UNSET
 
     override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
-        if (!enabled) return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        // Offloaded playback goes straight through, but it still has to be counted: a test that watches
+        // these bytes must not go blind the moment the audio chip takes over.
+        if (!enabled) {
+            val before = buffer.remaining()
+            return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+                .also { if (it) bytesWritten += before - buffer.remaining() }
+        }
         if (!filling) {
             // The sink has no position to report while it is stopped, paused before it ever played, or
             // freshly restarted. Subtracting CURRENT_POSITION_NOT_SET (Long.MIN_VALUE) from what we wrote
@@ -41,8 +56,9 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
             if (known && writtenUntilUs - position > LOW_US) return false
             filling = true
         }
+        val before = buffer.remaining()
         val taken = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-        if (taken) writtenUntilUs = presentationTimeUs else filling = false
+        if (taken) { writtenUntilUs = presentationTimeUs; bytesWritten += before - buffer.remaining() } else filling = false
         return taken
     }
 

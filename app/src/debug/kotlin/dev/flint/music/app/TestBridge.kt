@@ -18,6 +18,18 @@ import android.util.Log
  * Answers go to logcat under the tag `flinttest`, one line, so a script can read them back.
  */
 class TestBridge : BroadcastReceiver() {
+    /** What the player itself knows, with no Activity involved. */
+    private fun serviceState(context: Context): String {
+        val flint = dev.flint.music.Flint.get(context)
+        val st = flint.player.state.value
+        return """{"route":"background","playing":${st.playing},"title":"${st.current?.title.orEmpty()}",""" +
+            """"artist":"${st.current?.artist.orEmpty()}","positionMs":${flint.player.positionMs},""" +
+            """"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},"error":"${st.error.orEmpty()}",""" +
+            """"dspActive":${dev.flint.music.playback.Equalizer.active != null},""" +
+            """"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
+            """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten}}"""
+    }
+
     override fun onReceive(context: Context, intent: Intent) {
         val cmd = intent.getStringExtra("cmd") ?: return
         val arg = intent.getStringExtra("arg").orEmpty()
@@ -25,7 +37,10 @@ class TestBridge : BroadcastReceiver() {
         Handler(Looper.getMainLooper()).post {
             val reply = when (cmd) {
                 "open" -> TestHooks.open?.let { it(arg); "ok" } ?: "no ui"
-                "state" -> TestHooks.state?.invoke() ?: "no ui"
+                // Playback state must be answerable with the app in the background, because that is
+                // where the interesting bugs are: resuming from a notification, a lock screen, a
+                // headset button. The UI's richer answer is used when there is a UI.
+                "state" -> TestHooks.state?.invoke() ?: serviceState(context)
                 "set" -> TestHooks.set?.let { if (it(arg, value)) "ok" else "unknown setting $arg" } ?: "no ui"
                 "play" -> TestHooks.play?.let { it(arg); "ok" } ?: "no ui"
                 "login" -> TestHooks.login?.let { it(arg); "ok" } ?: "no ui"

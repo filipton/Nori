@@ -124,6 +124,7 @@ fun App() {
                     """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"offload":${p.offload},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
+                    """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten},""" +
                     """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
             }
             onDispose {
