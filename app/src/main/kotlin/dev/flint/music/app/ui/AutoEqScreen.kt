@@ -14,7 +14,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,7 +48,7 @@ fun AutoEqScreen(vm: SettingsViewModel) {
                     if (prefs.thirdPartyLookups) "" else "\n\nIt needs \"Third-party lookups\" in Settings → Features.",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Button(vm::downloadAutoEqIndex, Modifier.padding(horizontal = 16.dp), enabled = !ui.busy) { Text("Download the list") }
+            PillButton("Download the list", null, vm::downloadAutoEqIndex, Modifier.padding(horizontal = Space.gutter), prominent = true, enabled = !ui.busy)
             return@Column
         }
 
@@ -57,13 +56,10 @@ fun AutoEqScreen(vm: SettingsViewModel) {
             Text("${ui.count} headphones", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(vm::downloadAutoEqIndex, enabled = !ui.busy) { Text("Refresh list") }
         }
-        OutlinedTextField(
-            ui.query, vm::searchAutoEq, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), singleLine = true,
-            label = { Text("Search ${ui.count} headphones") }, placeholder = { Text("HD 600, Moondrop, AirPods…") },
-        )
+        SearchField(ui.query, vm::searchAutoEq, "Search ${ui.count} headphones", Modifier.padding(horizontal = Space.gutter, vertical = 8.dp))
         LazyColumn {
             items(ui.hits, key = { it.path }) { e ->
-                Column(Modifier.fillMaxWidth().clickable { vm.applyAutoEq(e) }.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Column(Modifier.fillMaxWidth().clickable { vm.applyAutoEq(e) }.padding(horizontal = Space.gutter, vertical = 11.dp)) {
                     Text(e.name)
                     Text(listOfNotNull(e.source.ifEmpty { null }, e.form.ifEmpty { null }, e.target.ifEmpty { null }).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }

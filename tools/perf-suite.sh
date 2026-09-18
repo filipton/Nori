@@ -32,8 +32,11 @@ tapright() { local y; y=$(adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2
 import sys,re; m=re.search(r'(?:text|content-desc)=\"'+re.escape(sys.argv[1])+r'\"[^>]*?bounds=\"\[\d+,(\d+)\]\[\d+,(\d+)\]\"',sys.stdin.read()); print((int(m.group(1))+int(m.group(2)))//2 if m else '')" "$1"); [ -n "$y" ] && adb shell input tap $((w * ${2:-90} / 100)) "$y"; }
 play() { # search for a song and tap it
   wake; adb shell am start -n $pkg/.app.MainActivity >/dev/null 2>&1; sleep 3
-  "$ui" tapn Search 1 || true; sleep 2; "$ui" tap "Songs, albums, artists" 2>/dev/null || "$ui" tap Clear 2>/dev/null; sleep 1
-  adb shell input tap $((w / 2)) $((h * 104 / 1000)); sleep 1; adb shell input keyevent 123; for _ in $(seq 24); do adb shell input keyevent 67; done
+  "$ui" tapn Search 1 || true; sleep 2; "$ui" tap Clear 2>/dev/null; sleep 1
+  # Tap the field by its placeholder, never by a fixed fraction of the screen: the search screen has a
+  # title above the field and the offset moved when the UI was rebuilt.
+  "$ui" tap "Songs, albums, artists" 2>/dev/null || adb shell input tap $((w / 2)) $((h * 145 / 1000))
+  sleep 1; adb shell input keyevent 123; for _ in $(seq 24); do adb shell input keyevent 67; done
   # Type only the first word: typing the whole title would make the search field itself the first node with that text.
   adb shell input text "$(echo "${1%% *}" | tr 'A-Z' 'a-z')"; sleep 3; adb shell input keyevent 4
   for _ in 1 2 3 4 5 6; do "$ui" has "$1" && break; sleep 2; done; "$ui" tap "$1"; sleep 8

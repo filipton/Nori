@@ -14,7 +14,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -37,7 +36,10 @@ import dev.flint.music.ffi.Song
 
 @Composable
 private fun Item(text: String, onClick: () -> Unit) {
-    Text(text, Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 14.dp))
+    Text(
+        text, Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Space.gutter, vertical = 15.dp),
+        style = MaterialTheme.typography.bodyLarge,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -52,18 +54,23 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
-            Text(song.title, Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.titleMedium)
-            Text("${song.artist} · ${song.album}", Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.bodySmall)
-            if (song.suffix.isNotEmpty()) Text(
-                listOfNotNull(song.suffix.uppercase(), song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }).joinToString(" · "),
-                Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(Modifier.padding(horizontal = 12.dp)) {
+            // The track leads the sheet, the way the row it came from looked.
+            Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Cover(actions.cover(song.coverArt, CoverSize.ROW), 52.dp, radius = 8.dp)
+                Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                    Text(song.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    Text("${song.artist} · ${song.album}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    if (song.suffix.isNotEmpty()) Caption(
+                        listOfNotNull(song.suffix.uppercase(), song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }).joinToString(" · "),
+                    )
+                }
+            }
+            Row(Modifier.padding(horizontal = 14.dp)) {
                 for (n in 1..5) IconButton({ actions.rate(song, if (song.userRating.toInt() == n) 0 else n); onDismiss() }) {
                     Icon(if (n <= song.userRating.toInt()) Icons.Filled.Star else Icons.Filled.StarBorder, "Rate $n")
                 }
             }
-            HorizontalDivider()
+            Hairline(startIndent = Space.gutter)
             if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})") { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
             Item("Play next") { actions.playNext(listOf(song)); onDismiss() }
             Item("Add to queue") { actions.enqueue(listOf(song)); onDismiss() }
