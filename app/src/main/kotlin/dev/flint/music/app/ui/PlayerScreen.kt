@@ -161,10 +161,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
                 // The handle: drag it down, or tap it, to put the player away.
                 Box(
-                    Modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = nav::back)
-                        .clickable(onClick = nav::back).padding(vertical = 10.dp),
+                    Modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = nav::back).padding(vertical = 10.dp),
                     Alignment.Center,
-                ) { Box(Modifier.width(38.dp).height(5.dp).background(scheme.onSurface.copy(alpha = 0.35f), CircleShape)) }
+                ) {
+                    // Clickable inside the drag detector, not outside it, or the tap never arrives.
+                    Box(
+                        Modifier.clickable(onClick = nav::back).padding(8.dp),
+                    ) { Box(Modifier.width(38.dp).height(5.dp).background(scheme.onSurface.copy(alpha = 0.35f), CircleShape)) }
+                }
 
                 Box(Modifier.weight(1f).padding(horizontal = 26.dp)) {
                     when (panel) {

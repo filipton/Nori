@@ -140,3 +140,17 @@ device before treating it as a platform fact rather than an image quirk.
   earlier runs.
 - `dumpsys media_session` prints the playback state as a word on Android 14 and as a number on
   Android 11; `bench.sh` and the suite handle both.
+
+### sdk_gphone64_x86_64 · Android 14 · x86_64 · 2026-09-18
+
+Cold start (ms, 5 runs sorted): 802 803 820 824 908 
+Album grid fling, 300 albums: 50th 53ms 99th 77ms 
+
+| Scenario | CPU (% of one core) | Quiet seconds | Memory |
+|---|---|---|---|
+| Idle on home, screen on (30 s) | -.86% of one core | 29 of 30 | 70 MB PSS |
+| MP3 320, screen off (90 s) | 2.11% of one core | 73 of 90 | 105 MB PSS |
+| Player screen visible (45 s) | 3.82% of one core | 0 of 45 | 100 MB PSS |
+| Lyrics, word sweep on (45 s) | 4.06% of one core | 0 of 45 | 99 MB PSS |
+| FLAC, screen off (90 s) | 2.35% of one core | 71 of 90 | 123 MB PSS |
+| FLAC + equalizer, screen off (90 s) | 2.61% of one core | 73 of 90 | 128 MB PSS |

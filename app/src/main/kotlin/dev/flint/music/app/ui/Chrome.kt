@@ -88,9 +88,11 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
         Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
             .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-            .flingActions(horizontal = false, threshold = 0.5f, onEnd = onOpen)
-            .clickable(onClick = onOpen),
+            .flingActions(horizontal = false, threshold = 0.5f, onEnd = onOpen),
     ) {
+        // The tap has to be a child of the drag detectors, not a sibling behind them: a pointerInput
+        // waiting for drag slop swallows a tap offered to a clickable further up the same chain.
+        Surface(onClick = onOpen, color = androidx.compose.ui.graphics.Color.Transparent) {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
@@ -104,6 +106,7 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
             if (state.buffering) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
             IconButton(vm::toggle) { Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(26.dp)) }
             IconButton(vm::next) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(24.dp)) }
+        }
         }
         Hairline(startIndent = 12.dp)
     }
