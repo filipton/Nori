@@ -54,6 +54,8 @@ class Nav(private val c: NavHostController) {
     fun smart(id: String) = c.navigate("smart/${Uri.encode(id)}")
     fun smartEdit(id: String) = c.navigate("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
     fun stats() = c.navigate("stats")
+    /** A settings group, optionally landing on one row of it (from the settings search). */
+    fun settingsGroup(id: String, key: String = "") = c.navigate("settings/$id?key=${Uri.encode(key)}")
     fun player() = c.navigate("player") { launchSingleTop = true }
     fun equalizer() = c.navigate("equalizer")
     fun autoEq() = c.navigate("autoeq")
@@ -118,6 +120,9 @@ fun App() {
                     composable("search") { Inset { SearchScreen(actions) } }
                     composable("library") { Inset { LibraryScreen(actions) } }
                     composable("settings") { Inset { SettingsScreen(settings) } }
+                    composable("settings/{id}?key={key}") { e ->
+                        Inset { SettingsGroupScreen(settings, e.arguments!!.getString("id")!!, e.arguments?.getString("key").orEmpty()) }
+                    }
                     composable("equalizer") { Inset { EqualizerScreen(settings) } }
                     composable("autoeq") { Inset { AutoEqScreen(settings) } }
                     composable("player") { PlayerScreen(player, actions) }
