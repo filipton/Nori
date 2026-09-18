@@ -64,6 +64,7 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
                 }
             }
             HorizontalDivider()
+            if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})") { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
             Item("Play next") { actions.playNext(listOf(song)); onDismiss() }
             Item("Add to queue") { actions.enqueue(listOf(song)); onDismiss() }
             Item("Start radio from this song") { actions.startRadio(song); onDismiss() }

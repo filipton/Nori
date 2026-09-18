@@ -33,6 +33,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.SearchViewModel
+import dev.flint.music.app.vm.SearchScope
+import androidx.compose.material3.FilterChip
 
 @Composable
 fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
@@ -50,7 +52,12 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
         if (ui.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text("Server search failed: $it — showing offline results", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
-        val r = ui.result
+        if (ui.hasProviders || ui.scope != SearchScope.EVERYTHING) LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(listOf(SearchScope.EVERYTHING to "Everything", SearchScope.LIBRARY to "In library", SearchScope.PROVIDERS to "Not in library yet")) { (sc, label) ->
+                FilterChip(ui.scope == sc, { vm.setScope(sc) }, { Text(label) })
+            }
+        }
+        val r = ui.shown
         if (r == null) {
             LazyColumn {
                 if (ui.history.isNotEmpty()) item {

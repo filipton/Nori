@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+enum class SearchScope { EVERYTHING, LIBRARY, PROVIDERS }
+
 data class SearchUi(
     val query: String = "",
     val result: SearchResult? = null,
@@ -20,7 +22,18 @@ data class SearchUi(
     val searching: Boolean = false,
     val error: String? = null,
     val history: List<String> = emptyList(),
-)
+    val scope: SearchScope = SearchScope.EVERYTHING,
+) {
+    /** [result] narrowed to what [scope] asks for; octo-fiesta marks provider items, Navidrome's are the rest. */
+    val shown: SearchResult? get() = result?.let { r ->
+        when (scope) {
+            SearchScope.EVERYTHING -> r
+            SearchScope.LIBRARY -> SearchResult(r.artists.filterNot { it.isExternal }, r.albums.filterNot { it.isExternal }, r.songs.filterNot { it.isExternal })
+            SearchScope.PROVIDERS -> SearchResult(r.artists.filter { it.isExternal }, r.albums.filter { it.isExternal }, r.songs.filter { it.isExternal })
+        }
+    }
+    val hasProviders: Boolean get() = result?.let { r -> r.songs.any { it.isExternal } || r.albums.any { it.isExternal } || r.artists.any { it.isExternal } } == true
+}
 
 /**
  * Live search in two layers. Every keystroke is answered at once from the
@@ -75,6 +88,8 @@ class SearchViewModel(app: Application) : FlintViewModel(app) {
         flint.library.rememberSearch(q)
         _ui.update { it.copy(history = flint.library.searchHistory()) }
     }
+
+    fun setScope(s: SearchScope) = _ui.update { it.copy(scope = s) }
 
     fun clearHistory() = viewModelScope.launch {
         flint.library.forgetSearches()

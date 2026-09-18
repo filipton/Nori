@@ -35,6 +35,9 @@ import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.playback.Equalizer
 import dev.flint.music.settings.Quality
 import dev.flint.music.settings.HomeRow
+import dev.flint.music.settings.ThemeMode
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.size
 import dev.flint.music.settings.SwipeAction
 import dev.flint.music.settings.TapAction
 import dev.flint.music.settings.ServerProfile
@@ -76,6 +79,18 @@ fun SettingsScreen(vm: SettingsViewModel) {
     LaunchedEffect(p.activeServerId) { vm.loadMusicFolders() }
     editing?.let { e -> androidx.compose.ui.window.Dialog({ editing = null }, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) { LoginScreen(vm, e) { editing = null } }; }
     Column(Modifier.verticalScroll(rememberScrollState())) {
+        SectionTitle("Look")
+        Choice("Theme", p.theme, listOf(ThemeMode.SYSTEM to "Follow system", ThemeMode.LIGHT to "Light", ThemeMode.DARK to "Dark")) { v -> vm.update { it.copy(theme = v) } }
+        Toggle("AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens", p.amoled) { on -> vm.update { it.copy(amoled = on) } }
+        if (android.os.Build.VERSION.SDK_INT >= 31) Toggle("Wallpaper colours", "Material You: take the colours from your wallpaper", p.dynamicColor) { on -> vm.update { it.copy(dynamicColor = on) } }
+        if (!p.dynamicColor || android.os.Build.VERSION.SDK_INT < 31) Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            listOf(0xFF6750A4, 0xFF1E88E5, 0xFF00897B, 0xFF43A047, 0xFFF4511E, 0xFFE53935, 0xFFD81B60, 0xFF8E24AA).forEach { c ->
+                androidx.compose.foundation.layout.Box(
+                    Modifier.size(if (p.accent == c) 36.dp else 30.dp).background(androidx.compose.ui.graphics.Color(c), androidx.compose.foundation.shape.CircleShape).clickable { vm.update { it.copy(accent = c) } },
+                )
+            }
+        }
+
         SectionTitle("Streaming quality")
         Choice("On Wi-Fi", p.wifi, qualities) { q -> vm.update { it.copy(wifi = q) } }
         Choice("On mobile data", p.mobile, qualities) { q -> vm.update { it.copy(mobile = q) } }

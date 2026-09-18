@@ -1,6 +1,18 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.composed
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,12 +75,55 @@ import dev.flint.music.playback.Repeat
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
+/**
+ * A drag that follows the finger and decides on release: past [threshold] of the element's size in
+ * the drag direction the matching action runs, otherwise it springs back. [horizontal] picks the axis.
+ * Nothing runs until a finger is down, so this costs nothing while music plays.
+ */
+private fun Modifier.flingActions(
+    horizontal: Boolean, threshold: Float = 0.28f,
+    onStart: (() -> Unit)? = null, onEnd: (() -> Unit)? = null,
+): Modifier = composed {
+    val offset = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    pointerInput(horizontal, onStart != null, onEnd != null) {
+        val extent = { (if (horizontal) size.width else size.height).toFloat() }
+        val release: () -> Unit = {
+            val v = offset.value
+            val fired = kotlin.math.abs(v) > extent() * threshold
+            if (fired) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                if (v < 0) onEnd?.invoke() else onStart?.invoke()
+            }
+            scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+        }
+        val drag: (Float) -> Unit = { d ->
+            // Only follow the finger in a direction that has an action; the other way resists.
+            val next = offset.value + d
+            val allowed = (next > 0 && onStart != null) || (next < 0 && onEnd != null)
+            scope.launch { offset.snapTo(if (allowed) next.coerceIn(-extent(), extent()) else next * 0.15f) }
+        }
+        if (horizontal) detectHorizontalDragGestures(onDragEnd = release, onDragCancel = release) { _, d -> drag(d) }
+        else detectVerticalDragGestures(onDragEnd = release, onDragCancel = release) { _, d -> drag(d) }
+    }.graphicsLayer {
+        if (horizontal) translationX = offset.value else translationY = offset.value
+        alpha = 1f - (kotlin.math.abs(offset.value) / 1200f).coerceAtMost(0.5f)
+    }
+}
+
 @Composable
 fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit) {
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     // A real clickable surface, so the whole bar is one labelled target for a screen reader (and for tools/perf-suite.sh).
-    Surface(onClick = onOpen, tonalElevation = 3.dp, modifier = Modifier.semantics { contentDescription = "Now playing bar" }) {
+    Surface(
+        onClick = onOpen, tonalElevation = 3.dp,
+        modifier = Modifier.semantics { contentDescription = "Now playing bar" }
+            // Sideways: previous / next. Upwards: open the player, like pulling up a sheet.
+            .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
+            .flingActions(horizontal = false, threshold = 0.5f, onEnd = onOpen),
+    ) {
         // No progress bar here on purpose: it would tick for as long as the app is open.
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 44.dp)
@@ -92,7 +147,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var sleepMenu by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // Pulling the header down closes the player, the way it was pulled up.
+        Row(Modifier.flingActions(horizontal = false, threshold = 0.9f, onStart = nav::back), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.Filled.KeyboardArrowDown, "Close") }
             PrimaryTabRow(tab, Modifier.weight(1f)) { listOf("Playing", "Queue", "Lyrics").forEachIndexed { i, t -> Tab(tab == i, { tab = i }, text = { Text(t) }) } }
             Box {
@@ -109,7 +165,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         Box(Modifier.weight(1f)) {
             when (tab) {
                 0 -> Column(Modifier.fillMaxSize().padding(24.dp), Arrangement.Center, Alignment.CenterHorizontally) {
-                    Box(Modifier.fillMaxWidth().aspectRatio(1f)) { Cover(vm.cover(state.current?.coverArt, CoverSize.FULL), 0.dp, Modifier.fillMaxSize()) }
+                    Box(
+                        Modifier.fillMaxWidth().aspectRatio(1f)
+                            .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
+                            .flingActions(horizontal = false, threshold = 0.35f, onStart = nav::back),
+                    ) { Cover(vm.cover(state.current?.coverArt, CoverSize.FULL), 0.dp, Modifier.fillMaxSize()) }
                     Text(state.current?.title ?: state.radio ?: "Nothing playing", Modifier.padding(top = 20.dp), style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(state.current?.let { "${it.artist} · ${it.album}" } ?: "", maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     state.current?.let { s ->

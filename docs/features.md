@@ -305,6 +305,20 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Discord presence, donation nags, easter eggs, emulator block, analytics | | x | | | skip |
 | Translations | 20 | 27 | 28 | yes | done |
 
+## Owner's list, 2026-09-18
+
+The owner asked for these explicitly; they override the "UI later" note below.
+
+- USB DAC handling like Symfonium, and earphone-model auto EQ -> AutoEQ browser done; auto-suggest on connect planned; integer/exclusive USB output needs the owner's DAC.
+- Octo-fiesta-aware search, telling library and provider items apart, and the stale-cover bug (provider covers
+  cached with their "not downloaded" badge) -> done: provider label, library/provider filter, provider covers never
+  disk-cached, "add to library" (star makes octo-fiesta download it).
+- Automatic synced lyrics for songs without an LRC, from several lyric libraries -> planned next.
+- Apple Music AutoMix-style transitions with BPM/beat matching -> researched (docs/research/automix.md), being built.
+- Material You, AMOLED, adjustable -> done: wallpaper colours, accent colours, theme mode, true-black mode.
+- Gestures -> done: swipe the mini player to skip, up to open; swipe the player header or artwork down to close;
+  swipe the artwork to skip.
+
 ## Look and feel
 
 Symfonium's style builders, Navic's five themes and Musly's artwork editor are all UI-layer work.

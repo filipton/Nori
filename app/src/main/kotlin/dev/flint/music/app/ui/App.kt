@@ -71,10 +71,10 @@ private val tabs = listOf(Triple("home", "Home", Icons.Filled.Home), Triple("sea
 
 @Composable
 fun App() {
-    MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-        val settings: SettingsViewModel = viewModel()
-        val prefs by settings.prefs.collectAsStateWithLifecycle()
-        if (!prefs.loggedIn) { LoginScreen(settings); return@MaterialTheme }
+    val settings: SettingsViewModel = viewModel()
+    val prefs by settings.prefs.collectAsStateWithLifecycle()
+    FlintTheme(prefs) {
+        if (!prefs.loggedIn) { LoginScreen(settings); return@FlintTheme }
 
         val controller = rememberNavController()
         val nav = remember(controller) { Nav(controller) }

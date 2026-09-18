@@ -106,6 +106,14 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
         if (q.songs.isEmpty()) _messages.send("No queue saved on the server") else { flint.player.play(q.songs, q.index.toInt()); flint.player.seekTo(q.positionMs.toLong()) }
     }
 
+    /**
+     * octo-fiesta downloads a provider item into the library when it is starred: a song on its own, an album
+     * or playlist in full, on the server, without streaming it to the phone.
+     */
+    fun addToLibrary(id: String, isAlbum: Boolean) = attempt("The server is downloading it into your library") {
+        flint.library.star(if (isAlbum) StarKind.ALBUM else StarKind.SONG, id, true)
+    }
+
     fun star(song: Song, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.SONG, song.id, on) }
     fun starAlbum(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ALBUM, id, on) }
     fun starArtist(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ARTIST, id, on) }

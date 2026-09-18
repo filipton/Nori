@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import coil3.request.ImageRequest
+import coil3.request.CachePolicy
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -51,6 +52,14 @@ import coil3.compose.AsyncImage
 import dev.flint.music.app.vm.Load
 import dev.flint.music.ffi.Album
 import dev.flint.music.ffi.Song
+
+/** A cover of an octo-fiesta provider item (external song, album, artist or playlist). */
+fun isProviderCover(url: String) = url.contains("&id=ext-") || url.contains("&id=pl-")
+
+/** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from. */
+fun providerOf(id: String): String? = id.takeIf { it.startsWith("ext-") || it.startsWith("pl-") }
+    ?.split('-')?.getOrNull(1)?.replaceFirstChar(Char::uppercase)
+    ?.let { mapOf("Squidwtf" to "SquidWTF").getOrDefault(it, it) }
 
 /** Cover sizes are bucketed so the server, the HTTP cache and the image cache all see few distinct URLs. */
 object CoverSize { const val ROW = 160; const val CARD = 320; const val FULL = 800 }
@@ -64,7 +73,12 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val px = with(LocalDensity.current) { size.roundToPx() }
     val request = remember(url, px) {
-        ImageRequest.Builder(context).data(url).apply { if (px > 0) size(px) }.build()
+        ImageRequest.Builder(context).data(url).apply {
+            if (px > 0) size(px)
+            // octo-fiesta draws a "not downloaded" badge on provider covers and replaces the picture once the
+            // track is in the library, under the same id. Never store those, or the badge sticks forever.
+            if (url != null && isProviderCover(url)) { diskCachePolicy(CachePolicy.DISABLED); memoryCachePolicy(CachePolicy.READ_ONLY) }
+        }.build()
     }
     AsyncImage(
         model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
@@ -115,7 +129,10 @@ fun SongRow(
             Text((if (song.explicitStatus == "explicit") "🅴 " else "") + song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         val tint = MaterialTheme.colorScheme.onSurfaceVariant
-        if (song.isExternal) Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(16.dp), tint)
+        if (song.isExternal) {
+            Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(16.dp), tint)
+            providerOf(song.id)?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
+        }
         if (downloaded) Icon(Icons.Filled.DownloadDone, "Downloaded", Modifier.size(16.dp), tint)
         if (song.starred) Icon(Icons.Filled.Favorite, "Favourite", Modifier.padding(start = 4.dp).size(16.dp), tint)
         if (song.duration > 0u) Text(duration(song.duration.toLong()), Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = tint)
@@ -151,7 +168,11 @@ fun CoverCard(title: String, subtitle: String, coverUrl: String?, size: Dp, onCl
 
 @Composable
 fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier) =
-    CoverCard(album.name, if (album.year > 0u && album.artist.isNotEmpty()) "${album.artist} · ${album.year}" else album.artist, coverUrl, size, onClick, modifier)
+    CoverCard(
+        album.name,
+        listOfNotNull(album.artist.ifEmpty { null }, album.year.takeIf { it > 0u }?.toString(), providerOf(album.id)?.let { "☁ $it" }).joinToString(" · "),
+        coverUrl, size, onClick, modifier,
+    )
 
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) {

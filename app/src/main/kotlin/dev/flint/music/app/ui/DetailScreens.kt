@@ -123,6 +123,11 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                 Header(d.album.name, listOfNotNull(d.album.artist, d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs", duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs), "explicit".takeIf { d.album.explicitStatus == "explicit" }).joinToString(" · "), vm.cover(d.album.coverArt, CoverSize.FULL)) {
                     IconButton({ actions.starAlbum(d.album.id, !d.album.starred) }) { Icon(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
                 }
+                if (d.album.isExternal || d.album.id.startsWith("pl-")) {
+                    TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 8.dp)) {
+                        Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
+                    }
+                }
                 PlayButtons(d.songs, actions, filter) { filter = it }
                 d.album.artistId?.let { a -> Text("More by ${d.album.artist}", Modifier.padding(horizontal = 16.dp).clickable { nav.artist(a) }, color = MaterialTheme.colorScheme.primary) }
             }

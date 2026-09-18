@@ -10,6 +10,8 @@ import org.json.JSONObject
 /** AUTO: album gain while the neighbours in the queue are from the same album, track gain otherwise. */
 enum class ReplayGainMode { OFF, TRACK, ALBUM, AUTO }
 
+enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
 /** What a tap on a song in a list does. */
 enum class TapAction { PLAY_LIST, PLAY_ONE, QUEUE, PLAY_NEXT }
 
@@ -164,6 +166,14 @@ data class Prefs(
     val lyricsTranslation: Boolean = true,
     /** 0 small, 1 medium, 2 large. */
     val lyricsSize: Int = 1,
+    // ---- look ----
+    val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** Pure black backgrounds in dark mode: OLED pixels are off, which saves power as well as looking right. */
+    val amoled: Boolean = false,
+    /** Android 12+ wallpaper colours; off uses [accent]. */
+    val dynamicColor: Boolean = true,
+    /** ARGB seed colour when dynamic colour is off or unavailable. */
+    val accent: Long = 0xFF6750A4,
     val tapAction: TapAction = TapAction.PLAY_LIST,
     val swipeRight: SwipeAction = SwipeAction.QUEUE,
     val swipeLeft: SwipeAction = SwipeAction.PLAY_NEXT,
@@ -287,6 +297,8 @@ class Settings(context: Context) {
             profilePerOutput = sp.getBoolean("profilePerOutput", true),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
             lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1),
+            theme = ThemeMode.entries.getOrElse(sp.getInt("theme", 0)) { ThemeMode.SYSTEM }, amoled = sp.getBoolean("amoled", false),
+            dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
             swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
             swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
@@ -318,6 +330,7 @@ class Settings(context: Context) {
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize)
+        putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
         putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())
