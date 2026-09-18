@@ -36,7 +36,7 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val settings: dev.flint.music.app.vm.SettingsViewModel = viewModel()
     val mixes = settings.prefs.collectAsStateWithLifecycle().value.tasteModel
     LoadBox(load) { ui ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             // Shuffling the whole library and picking the server's queue back up are things you do
             // occasionally, so they live behind the title's menu rather than as two buttons across the
             // top of the page: what belongs at the top of this screen is music.

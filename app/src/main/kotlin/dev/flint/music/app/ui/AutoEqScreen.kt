@@ -2,6 +2,7 @@ package dev.flint.music.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -57,7 +58,7 @@ fun AutoEqScreen(vm: SettingsViewModel) {
             TextButton(vm::downloadAutoEqIndex, enabled = !ui.busy) { Text("Refresh list") }
         }
         SearchField(ui.query, vm::searchAutoEq, "Search ${ui.count} headphones", Modifier.padding(horizontal = Space.gutter, vertical = 8.dp))
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             items(ui.hits, key = { it.path }) { e ->
                 Column(Modifier.fillMaxWidth().clickable { vm.applyAutoEq(e) }.padding(horizontal = Space.gutter, vertical = 11.dp)) {
                     Text(e.name)

@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
@@ -494,11 +495,25 @@ fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Bo
 
 /** A round, softly filled button: the small actions either side of a page's Play pill. */
 @Composable
-fun CircleButton(icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun CircleButton(icon: ImageVector, description: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Surface(
         onClick = onClick, shape = androidx.compose.foundation.shape.CircleShape,
         color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background), contentColor = scheme.primary,
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
+}
+
+/** The circle that holds whatever did not fit beside a page's Play button. */
+@Composable
+fun MoreCircle(items: List<Pair<String, () -> Unit>>, modifier: Modifier = Modifier) {
+    val open = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Box(modifier) {
+        CircleButton(Icons.Filled.MoreHoriz, "More") { open.value = true }
+        androidx.compose.material3.DropdownMenu(open.value, { open.value = false }) {
+            items.forEach { (label, action) ->
+                androidx.compose.material3.DropdownMenuItem({ Text(label) }, { action(); open.value = false })
+            }
+        }
+    }
 }

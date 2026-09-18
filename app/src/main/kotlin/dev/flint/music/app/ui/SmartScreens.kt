@@ -160,7 +160,7 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
     val nav = LocalNav.current
     var draft by remember(id, saved.size) { mutableStateOf(vm.find(id)?.let { SmartDraft.from(it)?.let { d -> if (id.startsWith("default-")) d.copy(id = "") else d } } ?: SmartDraft()) }
     var error by remember { mutableStateOf<String?>(null) }
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp + LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Text("Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
@@ -235,7 +235,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
     LaunchedEffect(days) { vm.loadStats(days) }
     val s by vm.stats.collectAsStateWithLifecycle()
     val nav = LocalNav.current
-    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp)) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp + LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Text("Listening", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)

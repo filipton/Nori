@@ -136,7 +136,7 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
             listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random"),
             sort, vm::setSort,
         )
-        LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(start = Space.gutter, end = Space.gutter, top = Space.gutter, bottom = Space.gutter + LocalChromeInset.current), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
                 AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth(), fill = true)
@@ -204,7 +204,7 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
             items(SongSort.entries) { s -> Chip(s.label, sort == s) { vm.setSort(s) } }
         }
         if (songs.isEmpty()) EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.")
-        LazyColumn(state = list) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
+        LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
     }
 }
 
@@ -213,7 +213,7 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
     val load by vm.decades.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LoadBox(load) { decades ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             if (decades.isEmpty()) item { EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.") }
             items(decades, key = { it.name }) { d ->
                 NavRow("${d.name}s", { nav.decade(d.name.toInt()) }, trailing = "${d.songCount}", chevron = true)
@@ -227,7 +227,7 @@ private fun Folders(vm: FoldersViewModel = viewModel()) {
     val load by vm.roots.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LoadBox(load) { roots ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             items(roots, key = { it.id }) { f ->
                 NavRow(
                     f.name, { nav.folder(f.id) }, chevron = true,
@@ -256,7 +256,7 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
         confirmButton = { TextButton({ vm.create(name.trim()); name = ""; creating = false }, enabled = name.isNotBlank()) { Text("Create") } },
     )
     LoadBox(load) { playlists ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item { ActionRow("New playlist", Icons.Filled.Add, { creating = true }) }
             item { ActionRow("Import M3U…", Icons.Filled.FileDownload, { pickM3u.launch(arrayOf("*/*")) }) }
             if (playlists.isEmpty()) item { EmptyNote("No playlists yet") }
@@ -278,7 +278,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
     LoadBox(load) { s ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             if (s.albums.isNotEmpty()) item(key = "albums") {
                 LazyRow(contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(s.albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id) }) }
@@ -300,7 +300,7 @@ private fun Genres(vm: GenresViewModel = viewModel()) {
     val load by vm.genres.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LoadBox(load) { genres ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             items(genres, key = { it.name }) { g ->
                 NavRow(g.name, { nav.genre(g.name) }, trailing = "${g.songCount}", chevron = true)
             }
@@ -320,7 +320,7 @@ private fun Radio(vm: RadioViewModel = viewModel()) {
         confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = name.isNotBlank() && url.startsWith("http")) { Text("Add") } },
     )
     LoadBox(load) { stations ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item { ActionRow("New station", Icons.Filled.Add, { adding = true }) }
             if (stations.isEmpty()) item { EmptyNote("No stations yet") }
             items(stations, key = { it.id }) { s ->
@@ -339,7 +339,7 @@ private fun Downloads(actions: ActionsViewModel) {
     val d by actions.downloads.collectAsState()
     val menu = LocalSongMenu.current
     val vm: StarredViewModel = viewModel()
-    LazyColumn {
+    LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         if (d.pending.isNotEmpty()) item(key = "pending") { Caption("${d.pending.size} downloading…", Modifier.padding(horizontal = Space.gutter, vertical = 10.dp)) }
         if (d.done.isEmpty() && d.pending.isEmpty()) item { EmptyNote("Nothing downloaded yet") }
         songRows(d.done, actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })

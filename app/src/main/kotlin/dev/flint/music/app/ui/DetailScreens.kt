@@ -134,9 +134,17 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             onPlay = { actions.play(d.songs) },
             onShuffle = { actions.shuffle(d.songs) },
             actions = {
-                IconButton({ actions.starAlbum(d.album.id, !d.album.starred) }) { Icon(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-                IconButton({ actions.enqueue(d.songs) }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add all to queue") }
-                IconButton({ actions.download(d.songs) }) { Icon(Icons.Filled.Download, "Download all") }
+                CircleButton(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                    actions.starAlbum(d.album.id, !d.album.starred)
+                }
+                // Queue and download live behind the menu: four controls on one line squeeze the Play
+                // pill until its own label no longer fits.
+                MoreCircle(
+                    listOf(
+                        "Add to queue" to { actions.enqueue(d.songs) },
+                        "Download" to { actions.download(d.songs) },
+                    ),
+                )
             },
         ) {
             item(key = "header") {
@@ -190,9 +198,15 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             onPlay = { actions.playArtist(ui.detail.albums) },
             onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
             actions = {
-                IconButton({ actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred) }) { Icon(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") }
-                IconButton({ actions.queueArtist(ui.detail.albums) }) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add artist to queue") }
-                IconButton({ actions.downloadArtist(ui.detail.albums) }) { Icon(Icons.Filled.Download, "Download all albums") }
+                CircleButton(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                    actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred)
+                }
+                MoreCircle(
+                    listOf(
+                        "Add to queue" to { actions.queueArtist(ui.detail.albums) },
+                        "Download everything" to { actions.downloadArtist(ui.detail.albums) },
+                    ),
+                )
             },
         ) {
             item(key = "header") {
@@ -251,11 +265,16 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             onShuffle = { actions.shuffle(d.songs) },
             actions = {
                 val pinned = id in prefs.pinnedPlaylists
-                IconButton({ settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) } }) {
-                    Icon(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home", tint = if (pinned) MaterialTheme.colorScheme.primary else LocalContentColor.current)
+                CircleButton(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home") {
+                    settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
                 }
-                IconButton({ actions.download(d.songs) }) { Icon(Icons.Filled.Download, "Download all") }
-                IconButton({ exportM3u.launch("${d.playlist.name}.m3u8") }) { Icon(Icons.Filled.IosShare, "Export M3U") }
+                MoreCircle(
+                    listOf(
+                        "Add to queue" to { actions.enqueue(d.songs) },
+                        "Download" to { actions.download(d.songs) },
+                        "Export M3U" to { exportM3u.launch("${d.playlist.name}.m3u8") },
+                    ),
+                )
             },
         ) {
             item(key = "header") { FilterField(d.songs.size, filter) { filter = it } }
@@ -273,7 +292,7 @@ fun GenreScreen(name: String, actions: ActionsViewModel, vm: GenreViewModel = vi
     val menu = LocalSongMenu.current
     val playing = playingId()
     LoadBox(load) { list ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item(key = "header") { Header(name, "${list.size} songs", null); PlayButtons(list, actions) }
             songRows(list, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
@@ -291,7 +310,7 @@ fun FolderScreen(id: String, actions: ActionsViewModel, vm: FolderViewModel = vi
     val nav = LocalNav.current
     val playing = playingId()
     LoadBox(load) { d ->
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item(key = "header") { Header(d.name.ifEmpty { "Folder" }, "${d.folders.size} folders · ${d.songs.size} songs", null); if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions) }
             items(d.folders, key = { "f" + it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
             songRows(d.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })

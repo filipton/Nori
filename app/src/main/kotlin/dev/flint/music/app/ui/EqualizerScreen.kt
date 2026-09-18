@@ -71,7 +71,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     if (importing) ImportDialog(vm) { importing = false }
     p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
 
-    Column(Modifier.verticalScroll(rememberScrollState())) {
+    Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Text("Equalizer", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)

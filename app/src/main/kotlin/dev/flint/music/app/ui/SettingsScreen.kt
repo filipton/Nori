@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.Row
@@ -263,7 +264,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
             }
             return@Column
         }
-        LazyColumn {
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             items(groups, key = { it.id }) { g ->
                 Column(Modifier.clickable { nav.settingsGroup(g.id) }) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -296,7 +297,7 @@ fun SettingsGroupScreen(vm: SettingsViewModel, id: String, highlight: String = "
                 Text(group.title, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
             }
             GroupContent(id, vm)
-            Spacer(Modifier.height(Space.section))
+            Spacer(Modifier.height(Space.section + LocalChromeInset.current))
         }
     }
 }

@@ -148,7 +148,7 @@ fun HeroPage(
                             Modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.gutter, top = 16.dp),
                             Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
                         ) {
-                            if (onShuffle != null) CircleButton(Icons.Filled.Shuffle, "Shuffle", onShuffle)
+                            if (onShuffle != null) CircleButton(Icons.Filled.Shuffle, "Shuffle", onClick = onShuffle)
                             if (onPlay != null) PillButton("Play", Icons.Filled.PlayArrow, onPlay, Modifier.weight(1f), prominent = true)
                             actions()
                         } else Row(
@@ -160,7 +160,7 @@ fun HeroPage(
                     }
                 }
                 content()
-                item(key = "tail") { Spacer(Modifier.height(Space.section)) }
+                item(key = "tail") { Spacer(Modifier.height(Space.section + LocalChromeInset.current)) }
             }
             // Back floats over the artwork on a soft disc, so it reads on any cover.
             Box(Modifier.statusBarsPadding().padding(start = 6.dp, top = 4.dp)) {

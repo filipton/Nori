@@ -1,6 +1,7 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
@@ -53,11 +54,27 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
     // Apple Music floats its chrome: the mini player is one rounded slab, the tabs another, search sits
     // apart in its own circle, and all of it takes a hint of the colour of the page behind it.
     val tint = currentPalette()
-    val slab = tint?.let { blend(it.background, it.edge, 0.16f) } ?: scheme.onSurface.copy(alpha = 0.08f).over(scheme.background)
+    val slab = (tint?.let { blend(it.background, it.edge, 0.16f) } ?: scheme.onSurface.copy(alpha = 0.08f).over(scheme.background))
+        // Opaque: Apple can be translucent because it blurs what is behind it, and a live blur is a
+        // full-screen GPU pass every frame. Unblurred text read through a bar is just mess. The slabs
+        // float because of the margins, the rounding and the page colour running behind them - the list
+        // still scrolls underneath, it simply disappears behind the slab instead of through it.
+        .copy(alpha = 1f)
     val content = tint?.onBackground ?: scheme.onSurface
     val search = tabs.firstOrNull { it.route == "search" }
     val rest = tabs.filter { it.route != "search" }
-    Column {
+    // A soft wash under the chrome so the list fades out as it passes behind it. Apple gets this from
+    // blurring what is behind the bars; one vertical gradient costs nothing and reads much the same.
+    val page = tint?.background ?: scheme.background
+    Column(
+        Modifier.drawBehind {
+            drawRect(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0f to Color.Transparent, 0.45f to page.copy(alpha = 0.75f), 1f to page,
+                ),
+            )
+        },
+    ) {
         SelectionBar(actions)
         Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
         Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp), Arrangement.spacedBy(8.dp), Alignment.CenterVertically) {
@@ -171,6 +188,13 @@ private val nowPlaying = androidx.compose.runtime.mutableStateOf<PagePalette?>(n
 fun nowPlayingPalette(): PagePalette? = nowPlaying.value
 
 private val pagePalette = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
+
+/**
+ * How much room the floating chrome takes at the bottom. Screens add it to the bottom of their own
+ * scrolling content, so a list can run underneath the mini player - the page's colour reaches the
+ * bottom edge of the screen, and the last row is still reachable.
+ */
+val LocalChromeInset = androidx.compose.runtime.compositionLocalOf { 0.dp }
 
 /** A tinted page (an album, an artist, the player) lends its colours to the chrome while it is open. */
 @Composable

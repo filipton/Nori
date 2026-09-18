@@ -22,6 +22,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.Alignment
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -142,13 +146,14 @@ fun App() {
 
         CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
-            Scaffold(
-                snackbarHost = { SnackbarHost(snackbar) },
-                bottomBar = { if (route != "player") BottomChrome(player, actions, route, tabs, nav::tab, nav::player) },
-            ) { pad ->
-                // The player is a full-screen sheet: it draws its own colour behind the navigation bar.
-                val bottom = if (route == "player") 0.dp else pad.calculateBottomPadding()
-                NavHost(controller, "home", Modifier.padding(bottom = bottom)) {
+            // The chrome floats over the page rather than ending it: the page fills the window, its colour
+            // reaches the bottom edge, and the list scrolls under the mini player the way Apple's does.
+            // Screens keep the last row reachable by adding LocalChromeInset to their content padding.
+            var chromeHeight by remember { mutableStateOf(0.dp) }
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            Box(Modifier.fillMaxSize()) {
+              CompositionLocalProvider(LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
+                NavHost(controller, "home") {
                     composable("home") { Inset { HomeScreen(actions) } }
                     composable("search") { Inset { SearchScreen(actions) } }
                     composable("library") { Inset { LibraryScreen(actions) } }
@@ -169,6 +174,12 @@ fun App() {
                     composable("folder/{id}") { Inset { FolderScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("decade/{year}") { Inset { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) } }
                 }
+              }
+              if (route != "player") Box(
+                  Modifier.align(Alignment.BottomCenter)
+                      .onGloballyPositioned { chromeHeight = with(density) { it.size.height.toDp() } },
+              ) { BottomChrome(player, actions, route, tabs, nav::tab, nav::player) }
+              SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }) }
         }
