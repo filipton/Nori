@@ -53,13 +53,11 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
     val scheme = MaterialTheme.colorScheme
     // Apple Music floats its chrome: the mini player is one rounded slab, the tabs another, search sits
     // apart in its own circle, and all of it takes a hint of the colour of the page behind it.
-    val tint = currentPalette()
-    val slab = (tint?.let { blend(it.background, it.edge, 0.16f) } ?: scheme.onSurface.copy(alpha = 0.08f).over(scheme.background))
-        // Opaque: Apple can be translucent because it blurs what is behind it, and a live blur is a
-        // full-screen GPU pass every frame. Unblurred text read through a bar is just mess. The slabs
-        // float because of the margins, the rounding and the page colour running behind them - the list
-        // still scrolls underneath, it simply disappears behind the slab instead of through it.
-        .copy(alpha = 1f)
+    // The chrome is neutral, like Apple's. Only a page that is *about* one cover - an album, an artist,
+    // the player - wears that cover's colour; a bar tinted by whatever happens to be playing turns the
+    // whole app red on screens that have nothing to do with the record.
+    val tint = currentPageTint()
+    val slab = tint?.let { blend(it.background, it.edge, 0.12f) } ?: scheme.onSurface.copy(alpha = 0.09f).over(scheme.background)
     val content = tint?.onBackground ?: scheme.onSurface
     val search = tabs.firstOrNull { it.route == "search" }
     val rest = tabs.filter { it.route != "search" }
@@ -109,13 +107,20 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
     val press = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Column(
         Modifier.clip(PillShape)
-            .background(if (selected) content.copy(alpha = 0.10f) else Color.Transparent)
             .clickable(interactionSource = press, indication = null, onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 5.dp)
             .semantics { contentDescription = tab.label },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(tab.icon, null, Modifier.size(25.dp), tint = colour)
+        // A disc behind the glyph alone, never a slab behind the whole item: a wide rounded rectangle
+        // under an icon and its label is the Material navigation bar this is meant not to be.
+        Box(
+            Modifier.size(34.dp)
+                .background(if (selected) colour.copy(alpha = 0.16f) else Color.Transparent, CircleShape),
+            Alignment.Center,
+        ) {
+            Icon(tab.icon, null, Modifier.size(23.dp), tint = colour)
+        }
         Text(
             tab.label, Modifier.padding(top = 2.dp),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
@@ -206,7 +211,7 @@ fun PageTint(palette: PagePalette?) {
 }
 
 @Composable
-private fun currentPalette(): PagePalette? = pagePalette.value ?: nowPlaying.value
+private fun currentPageTint(): PagePalette? = pagePalette.value
 
 @Composable
 private fun NowPlayingPalette(palette: PagePalette?) {

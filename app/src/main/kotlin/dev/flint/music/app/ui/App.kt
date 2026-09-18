@@ -153,7 +153,23 @@ fun App() {
             val density = androidx.compose.ui.platform.LocalDensity.current
             Box(Modifier.fillMaxSize()) {
               CompositionLocalProvider(LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
-                NavHost(controller, "home") {
+                // One transition for the whole app, and a quiet one: pages slide a little and fade, the
+                // way a push does on a phone. The default jumps and the horizontal slide across the
+                // full width reads as a lurch on a large screen.
+                val slide = 40
+                NavHost(
+                    controller, "home",
+                    enterTransition = {
+                        androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(220)) { slide } +
+                            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180))
+                    },
+                    exitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) },
+                    popEnterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) },
+                    popExitTransition = {
+                        androidx.compose.animation.slideOutHorizontally(androidx.compose.animation.core.tween(200)) { slide } +
+                            androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+                    },
+                ) {
                     composable("home") { Inset { HomeScreen(actions) } }
                     composable("search") { Inset { SearchScreen(actions) } }
                     composable("library") { Inset { LibraryScreen(actions) } }

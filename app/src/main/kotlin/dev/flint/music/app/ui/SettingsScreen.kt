@@ -184,25 +184,25 @@ private val index = listOf(
     Entry("quality", "On mobile data", ""),
     Entry("quality", "Downloads", ""),
     Entry("quality", "Stream cache", ""),
-    Entry("audio", "Hardware offload", "Decode on the audio chip so the CPU can sleep. The biggest battery saver; turned off while the equalizer is on."),
+    Entry("audio", "Hardware offload", "Saves battery by decoding on a dedicated audio chip; turned off automatically while the equalizer is on."),
     Entry("audio", "Bit-perfect USB DAC", ""),
-    Entry("audio", "Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold."),
+    Entry("audio", "Hi-res output", "Plays 24-bit files at full quality instead of 16-bit; the equalizer isn't available in this mode, and it takes effect next time you start playback."),
     Entry("audio", "ReplayGain", ""),
-    Entry("audio", "AutoMix", "Transitions like a DJ set: tempo matched, beats aligned, bass swapped, the ending filtered out. Each track is analysed once while it plays; a transition costs a few percent of a core for its few seconds."),
+    Entry("audio", "AutoMix", "Blends the next track in like a DJ set: matching tempo, aligning beats, swapping the bass and filtering out the ending."),
     Entry("audio", "Longest transition", ""),
     Entry("audio", "Match tempo and beats", "Speeds the next song up or down a little so the beats line up"),
     Entry("audio", "Largest tempo change", ""),
-    Entry("audio", "Keep pitch", "Off changes speed and pitch together, like a turntable: cheaper, and limited to 2 %"),
+    Entry("audio", "Keep pitch", "Off changes speed and pitch together, like a turntable, and limits the change to 2 %"),
     Entry("audio", "Bass swap", "The next song's bass comes in on a bar line as the old one's goes out, so they never clash"),
-    Entry("audio", "Filter sweep", "The outgoing song fades through a closing low-pass filter"),
+    Entry("audio", "Filter sweep", "The outgoing song fades out as it's gradually muffled"),
     Entry("audio", "Crossfade", ""),
     Entry("audio", "Playback speed", ""),
     Entry("audio", "Skip silence", "Cuts silent stretches inside and between tracks"),
     Entry("audio", "Equalizer and crossfeed", ""),
-    Entry("features", "Listening history and taste model", "Kept on this device only. Feeds mixes, smart playlists and the listening stats. One small write when a track ends."),
+    Entry("features", "Listening history and taste model", "Kept on this device only; powers mixes, smart playlists and your listening stats."),
     Entry("features", "Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row"),
     Entry("features", "Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them"),
-    Entry("features", "Third-party lookups", "Lyrics from lrclib.net when the server has none, the AutoEQ headphone list, update checks. Sends artist and title to those services."),
+    Entry("features", "Third-party lookups", "Looks up missing lyrics, headphone sound profiles and app updates online, sending the artist and title of what's playing"),
     Entry("playback", "Fade on play, pause, seek and skip", ""),
     Entry("playback", "No crossfade inside an album", "Tracks that follow each other on the same album stay gapless"),
     Entry("playback", "Pitch", ""),
@@ -211,9 +211,8 @@ private val index = listOf(
     Entry("playback", "Fetch ahead on Wi-Fi", ""),
     Entry("playback", "Fetch ahead on mobile data", ""),
     Entry("playback", "Gain for files without ReplayGain tags", ""),
-    Entry("lyrics", "Word-by-word sweep", "Fills the line in word by word, but only for lyrics that carry real per-word times. Line-timed lyrics simply light up, because guessed word times drift out of sync."),
+    Entry("lyrics", "Word-by-word sweep", "Fills in each word as it's sung, for lyrics with word-by-word timing; other lyrics light up a line at a time"),
     Entry("lyrics", "Keep the screen on", "While lyrics are showing and music is playing"),
-    Entry("lyrics", "Fetch missing lyrics from LRCLIB", ""),
     Entry("lyrics", "Show translations", "When the server has a translation layer"),
     Entry("lyrics", "Text size", ""),
     Entry("lists", "Tapping a song", ""),
@@ -336,7 +335,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
 
         }
         "audio" -> SettingsCard {
-            Toggle("Hardware offload", "Decode on the audio chip so the CPU can sleep. The biggest battery saver; turned off while the equalizer is on.", p.offload) { on -> vm.update { it.copy(offload = on) } }
+            Toggle("Hardware offload", "Saves battery by decoding on a dedicated audio chip; turned off automatically while the equalizer is on.", p.offload) { on -> vm.update { it.copy(offload = on) } }
             Toggle(
                 "Bit-perfect USB DAC",
                 when {
@@ -349,7 +348,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 p.bitPerfect,
             ) { on -> vm.update { it.copy(bitPerfect = on) } }
             if (dac.modes.isNotEmpty()) Text("This DAC offers: " + dac.modes.joinToString(", ") + (dac.playing?.let { "  ·  now playing $it" } ?: ""), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Toggle("Hi-res float output", "Keeps 24-bit files at full precision instead of 16-bit. The equalizer is unavailable in this mode. Applies the next time playback starts from cold.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
+            Toggle("Hi-res output", "Plays 24-bit files at full quality instead of 16-bit; the equalizer isn't available in this mode, and it takes effect next time you start playback.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
             Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
             if (p.replayGain != ReplayGainMode.OFF) {
                 Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
@@ -360,7 +359,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             }
             Toggle(
                 "AutoMix",
-                "Transitions like a DJ set: tempo matched, beats aligned, bass swapped, the ending filtered out. Each track is analysed once while it plays; a transition costs a few percent of a core for its few seconds.",
+                "Blends the next track in like a DJ set: matching tempo, aligning beats, swapping the bass and filtering out the ending.",
                 p.autoMix,
             ) { on -> vm.update { it.copy(autoMix = on) } }
             if (p.autoMix) {
@@ -368,10 +367,10 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 Toggle("Match tempo and beats", "Speeds the next song up or down a little so the beats line up", p.autoMixBeatMatch) { on -> vm.update { it.copy(autoMixBeatMatch = on) } }
                 if (p.autoMixBeatMatch) {
                     Choice("Largest tempo change", p.autoMixMaxTempoPct, listOf(2f to "2 %", 4f to "4 %", 6f to "6 %", 8f to "8 %")) { v -> vm.update { it.copy(autoMixMaxTempoPct = v) } }
-                    Toggle("Keep pitch", "Off changes speed and pitch together, like a turntable: cheaper, and limited to 2 %", p.autoMixKeepPitch) { on -> vm.update { it.copy(autoMixKeepPitch = on) } }
+                    Toggle("Keep pitch", "Off changes speed and pitch together, like a turntable, and limits the change to 2 %", p.autoMixKeepPitch) { on -> vm.update { it.copy(autoMixKeepPitch = on) } }
                 }
                 Toggle("Bass swap", "The next song's bass comes in on a bar line as the old one's goes out, so they never clash", p.autoMixBassSwap) { on -> vm.update { it.copy(autoMixBassSwap = on) } }
-                Toggle("Filter sweep", "The outgoing song fades through a closing low-pass filter", p.autoMixFilters) { on -> vm.update { it.copy(autoMixFilters = on) } }
+                Toggle("Filter sweep", "The outgoing song fades out as it's gradually muffled", p.autoMixFilters) { on -> vm.update { it.copy(autoMixFilters = on) } }
                 val analysed by vm.analysed.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) { vm.refreshAnalysed() }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -386,7 +385,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Choice("Playback speed", p.speed, listOf(0.75f to "0.75×", 1f to "1×", 1.25f to "1.25×", 1.5f to "1.5×", 2f to "2×")) { v -> vm.update { it.copy(speed = v) } }
             Toggle("Skip silence", "Cuts silent stretches inside and between tracks", p.skipSilence) { on -> vm.update { it.copy(skipSilence = on) } }
             if (p.offload && (p.dsp || p.crossfadeSec > 0 || p.skipSilence || p.speed != 1f)) {
-                Text("Something above needs the decoded audio, so hardware offload is paused. Playback still runs in bursts from a deep buffer.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Hardware offload is paused while the equalizer, crossfade or another audio effect is switched on.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text("System audio effects", Modifier.fillMaxWidth().clickable {
                 runCatching { context.startActivity(Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName).putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)) }
@@ -394,11 +393,10 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
 
         }
         "features" -> SettingsCard {
-            Text("Anything switched off here is not even started: no listener, no socket, no audio processing.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Toggle("Listening history and taste model", "Kept on this device only. Feeds mixes, smart playlists and the listening stats. One small write when a track ends.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
+            Toggle("Listening history and taste model", "Kept on this device only; powers mixes, smart playlists and your listening stats.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
             Toggle("Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row", p.weightedShuffle) { on -> vm.update { it.copy(weightedShuffle = on) } }
             Toggle("Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them", p.profilePerOutput) { on -> vm.update { it.copy(profilePerOutput = on) } }
-            Toggle("Third-party lookups", "Lyrics from lrclib.net when the server has none, the AutoEQ headphone list, update checks. Sends artist and title to those services.", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on) } }
+            Toggle("Third-party lookups", "Looks up missing lyrics, headphone sound profiles and app updates online, sending the artist and title of what's playing", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on, lyricsLrclib = on) } }
 
         }
         "playback" -> SettingsCard {
@@ -413,12 +411,8 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
 
         }
         "lyrics" -> SettingsCard {
-            Toggle("Word-by-word sweep", "Fills the line in word by word, but only for lyrics that carry real per-word times. Line-timed lyrics simply light up, because guessed word times drift out of sync.", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
+            Toggle("Word-by-word sweep", "Fills in each word as it's sung, for lyrics with word-by-word timing; other lyrics light up a line at a time", p.lyricsSweep) { on -> vm.update { it.copy(lyricsSweep = on) } }
             Toggle("Keep the screen on", "While lyrics are showing and music is playing", p.lyricsKeepScreenOn) { on -> vm.update { it.copy(lyricsKeepScreenOn = on) } }
-            Toggle(
-                "Fetch missing lyrics from LRCLIB", if (p.thirdPartyLookups) "When the server has no synced lyrics, ask lrclib.net (sends artist, title and length)" else "Needs \"Third-party lookups\" in Features",
-                p.lyricsLrclib && p.thirdPartyLookups, enabled = p.thirdPartyLookups,
-            ) { on -> vm.update { it.copy(lyricsLrclib = on) } }
             Toggle("Show translations", "When the server has a translation layer", p.lyricsTranslation) { on -> vm.update { it.copy(lyricsTranslation = on) } }
             Choice("Text size", p.lyricsSize, listOf(0 to "Small", 1 to "Medium", 2 to "Large")) { v -> vm.update { it.copy(lyricsSize = v) } }
 

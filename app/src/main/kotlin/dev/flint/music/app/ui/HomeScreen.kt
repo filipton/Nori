@@ -1,12 +1,25 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.Text
@@ -34,7 +47,10 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val load by vm.ui.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     val settings: dev.flint.music.app.vm.SettingsViewModel = viewModel()
-    val mixes = settings.prefs.collectAsStateWithLifecycle().value.tasteModel
+    val prefs by settings.prefs.collectAsStateWithLifecycle()
+    val mixes = prefs.tasteModel
+    var rearranging by remember { mutableStateOf(false) }
+    if (rearranging) { RowOrder(settings) { rearranging = false }; return }
     LoadBox(load) { ui ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             // Shuffling the whole library and picking the server's queue back up are things you do
@@ -48,6 +64,7 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                         DropdownMenu(menu, { menu = false }) {
                             DropdownMenuItem({ Text("Shuffle everything") }, { actions.shuffleAll(); menu = false })
                             DropdownMenuItem({ Text("Resume from server") }, { actions.resumeFromServer(); menu = false })
+                            DropdownMenuItem({ Text("Rearrange rows") }, { rearranging = true; menu = false })
                         }
                     }
                 }
@@ -74,3 +91,68 @@ private fun androidx.compose.foundation.lazy.LazyListScope.shelf(title: String, 
         }
     }
 }
+
+
+/**
+ * Drag the shelves into the order you want them in. Whoever likes "Random" at the top of their home
+ * page should not have to go hunting through Settings for a column of Up buttons to get it there.
+ */
+@Composable
+private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone: () -> Unit) {
+    val prefs by settings.prefs.collectAsStateWithLifecycle()
+    val order = prefs.homeRows
+    var dragIndex by remember { mutableIntStateOf(-1) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    var rowHeight by remember { mutableFloatStateOf(0f) }
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+    Column(Modifier.fillMaxSize()) {
+        LargeTitle("Rearrange") {
+            androidx.compose.material3.TextButton(onDone) { Text("Done", style = MaterialTheme.typography.titleSmall) }
+        }
+        Caption("Drag a row to move it", Modifier.padding(start = Space.gutter, bottom = 8.dp))
+        LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
+            itemsIndexed(order, key = { _, r -> r.name }) { i, row ->
+                val dragged = i == dragIndex
+                Row(
+                    Modifier.fillMaxWidth()
+                        .androidxZ(dragged)
+                        .graphicsLayer { if (dragged) { translationY = dragOffset; shadowElevation = 12f } }
+                        .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
+                        .padding(horizontal = Space.gutter, vertical = 14.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    Icon(
+                        androidx.compose.material.icons.Icons.Filled.DragHandle, "Reorder",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(38.dp).padding(8.dp).pointerInput(order) {
+                            detectDragGestures(
+                                onDragStart = {
+                                    dragIndex = i; dragOffset = 0f
+                                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                                },
+                                onDragEnd = { dragIndex = -1; dragOffset = 0f },
+                                onDragCancel = { dragIndex = -1; dragOffset = 0f },
+                            ) { change, drag ->
+                                change.consume()
+                                if (dragIndex < 0) return@detectDragGestures
+                                dragOffset += drag.y
+                                val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGestures
+                                while (dragOffset >= h && dragIndex < order.lastIndex) {
+                                    settings.moveHomeRow(dragIndex, dragIndex + 1); dragIndex++; dragOffset -= h
+                                }
+                                while (dragOffset <= -h && dragIndex > 0) {
+                                    settings.moveHomeRow(dragIndex, dragIndex - 1); dragIndex--; dragOffset += h
+                                }
+                            }
+                        },
+                    )
+                }
+                Hairline()
+            }
+        }
+    }
+}
+
+private fun Modifier.androidxZ(on: Boolean) = if (on) this.zIndex(1f) else this

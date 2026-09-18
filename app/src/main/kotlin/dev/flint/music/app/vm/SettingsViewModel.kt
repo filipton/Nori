@@ -82,6 +82,14 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
     // ---- equalizer ----
 
     /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
+    /** Moves one home shelf up or down the page. */
+    fun moveHomeRow(from: Int, to: Int) = update { p ->
+        val rows = p.homeRows.toMutableList()
+        if (from !in rows.indices || to !in rows.indices) return@update p
+        rows.add(to, rows.removeAt(from))
+        p.copy(homeRows = rows)
+    }
+
     fun setTuning(on: Boolean) = flint.player.setTuning(on)
 
     /**
