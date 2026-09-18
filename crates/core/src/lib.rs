@@ -6,6 +6,7 @@ uniffi::setup_scaffolding!();
 
 mod api;
 mod autoeq;
+pub mod automix;
 mod db;
 mod lyrics;
 pub mod dsp;

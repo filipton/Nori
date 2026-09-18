@@ -35,6 +35,7 @@ CREATE INDEX IF NOT EXISTS items_artist ON items(json_extract(json,'$.artistId')
 CREATE INDEX IF NOT EXISTS items_year ON items(json_extract(json,'$.year')) WHERE kind=2;
 CREATE INDEX IF NOT EXISTS items_starred ON items(json_extract(json,'$.starred')) WHERE kind=2 AND json_extract(json,'$.starred')=1;
 CREATE INDEX IF NOT EXISTS items_rated ON items(json_extract(json,'$.userRating')) WHERE kind=2 AND json_extract(json,'$.userRating')>=4;
+CREATE TABLE IF NOT EXISTS track_analysis(song_id TEXT PRIMARY KEY, analysis_version INTEGER NOT NULL, duration_ms INTEGER NOT NULL, bpm REAL NOT NULL, bpm_confidence REAL NOT NULL, beat_offset_ms REAL NOT NULL, stability REAL NOT NULL, downbeat_phase INTEGER NOT NULL, downbeat_confidence REAL NOT NULL, lufs REAL NOT NULL, key INTEGER NOT NULL, key_confidence REAL NOT NULL, silence_start_ms INTEGER NOT NULL, silence_end_ms INTEGER NOT NULL, mixramp_start_ms INTEGER NOT NULL, mixramp_end_ms INTEGER NOT NULL, intro_end_ms INTEGER NOT NULL, outro_start_ms INTEGER NOT NULL, analysed_ms INTEGER NOT NULL) WITHOUT ROWID;
 ";
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {

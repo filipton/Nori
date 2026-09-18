@@ -447,3 +447,141 @@ pub struct SoundProfile {
     /// Output devices this profile applies to automatically, one per line.
     pub outputs: Vec<String>,
 }
+
+/// What AutoMix knows about one track, from `automix::analysis`. One row in `track_analysis`.
+/// Times are milliseconds from the start of the file. The beat grid is not stored beat by beat: beat `n` sits at
+/// `beat_offset_ms + n * 60000 / bpm`, and beats with `n % 4 == downbeat_phase` start a bar.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct TrackAnalysis {
+    pub song_id: String,
+    /// Rows older than `automix::ANALYSIS_VERSION` are reported by `analysis_missing` so they get redone.
+    pub analysis_version: i32,
+    /// Length of the audio that was analysed; a different file under the same id shows up as a different length.
+    pub duration_ms: i64,
+    /// 0 when no tempo was found.
+    pub bpm: f64,
+    /// 0..1. Below about 0.5 the grid should not be used for beat matching.
+    pub bpm_confidence: f32,
+    /// The first beat of the grid, 0 <= offset < one beat.
+    pub beat_offset_ms: f64,
+    /// 0..1: how well one constant grid fits every beat. Live recordings and tempo changes score low.
+    pub stability: f32,
+    /// 0..3: which grid beats start a bar (assumes 4/4).
+    pub downbeat_phase: i32,
+    pub downbeat_confidence: f32,
+    /// Integrated loudness of the mono downmix, BS.1770 K-weighting and gating. -70 for silence.
+    pub lufs: f32,
+    /// Camelot code: 1..12 = 1A..12A (minor), 13..24 = 1B..12B (major), 0 = unknown.
+    pub key: i32,
+    pub key_confidence: f32,
+    /// Where the audio first rises above, and last falls below, -55 dBFS.
+    pub silence_start_ms: i64,
+    pub silence_end_ms: i64,
+    /// MixRamp points: where the start rises above, and the end falls below, 17 dB under the track's loudness.
+    pub mixramp_start_ms: i64,
+    pub mixramp_end_ms: i64,
+    /// Phrase-aligned cues (multiples of 8 bars from the first downbeat, confirmed by an energy jump when there is
+    /// one). `intro_end_ms == silence_start_ms` means the track starts at full energy.
+    pub intro_end_ms: i64,
+    pub outro_start_ms: i64,
+    /// Wall-clock time of the analysis, ms since the epoch.
+    pub analysed_ms: i64,
+}
+
+/// The user's AutoMix switches, as the planner sees them.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AutoMixSettings {
+    /// Longest transition, seconds.
+    pub max_transition_s: f32,
+    pub beat_match: bool,
+    /// Largest tempo change applied to the incoming track, percent.
+    pub max_tempo_change_pct: f32,
+    pub bass_swap: bool,
+    pub filter_effects: bool,
+    /// Time-stretch (true) or varispeed, which also moves the pitch and is therefore held to 2 %.
+    pub keep_pitch: bool,
+    /// The two tracks are consecutive on one album played in order: no transition at all.
+    pub same_album_in_order: bool,
+    /// Trim the incoming track to the outgoing one's loudness. Leave off when ReplayGain already levels both.
+    pub match_loudness: bool,
+}
+
+impl Default for AutoMixSettings {
+    fn default() -> Self {
+        AutoMixSettings {
+            max_transition_s: 16.0,
+            beat_match: true,
+            max_tempo_change_pct: 6.0,
+            bass_swap: true,
+            filter_effects: true,
+            keep_pitch: true,
+            same_album_in_order: false,
+            match_loudness: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TransitionKind {
+    /// No overlap: the next track follows sample for sample.
+    Gapless,
+    /// Fixed cos/sin crossfade; nothing is known about either track.
+    EqualPowerFade,
+    /// Overlap chosen from loudness ramps and trimmed silence, optionally with a filter sweep.
+    MixRampFade,
+    /// Tempo-locked, bar-aligned mix, optionally with a bass swap.
+    BeatMatched,
+}
+
+/// The order is the wire format of `automix_mixer_params`; only append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FadeCurve {
+    /// cos/sin: constant power, for material that does not add coherently.
+    EqualPower,
+    Linear,
+    /// sin²/cos²: constant amplitude, for beat-matched material that adds coherently.
+    SineSquared,
+}
+
+/// How to get from one track to the next. Fields marked "relative" count from the moment the transition starts;
+/// -1 means "not used".
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TransitionPlan {
+    pub kind: TransitionKind,
+    /// Position in the outgoing track where the transition starts. It stops at `out_start_ms + duration_ms`.
+    pub out_start_ms: i64,
+    /// Position in the incoming track that plays at the start of the transition.
+    pub in_start_ms: i64,
+    /// Length of the overlap, wall-clock.
+    pub duration_ms: i64,
+    /// Playback speed of the incoming track during the overlap (1 = native).
+    pub tempo_ratio: f64,
+    /// After the overlap the incoming track ramps back to native speed over this many of its beats...
+    pub tempo_ramp_beats: i32,
+    /// ...which takes this long, wall-clock. 0 when there is no tempo change.
+    pub tempo_ramp_ms: i64,
+    /// Time-stretch (true) or varispeed.
+    pub keep_pitch: bool,
+    pub fade_curve: FadeCurve,
+    /// Relative. The outgoing gain goes 1 -> 0 between these.
+    pub out_fade_start_ms: i64,
+    pub out_fade_end_ms: i64,
+    /// Relative. The incoming gain goes 0 -> 1 between these.
+    pub in_fade_start_ms: i64,
+    pub in_fade_end_ms: i64,
+    /// Constant trim on the outgoing deck during the overlap.
+    pub out_gain_db: f32,
+    /// Trim on the incoming deck; the mixer glides it back to 0 dB over the last quarter of the overlap.
+    pub in_gain_db: f32,
+    /// Relative. Until here the incoming lows are cut; over `bass_swap_len_ms` they come in and the outgoing lows go.
+    pub bass_swap_ms: i64,
+    pub bass_swap_len_ms: i64,
+    pub bass_cut_hz: f32,
+    /// Relative. Low-pass sweep on the outgoing track, `filter_from_hz` -> `filter_to_hz`.
+    pub filter_start_ms: i64,
+    pub filter_end_ms: i64,
+    pub filter_from_hz: f32,
+    pub filter_to_hz: f32,
+    /// Why this plan, for logs.
+    pub reason: String,
+}

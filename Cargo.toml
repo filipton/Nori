@@ -10,6 +10,10 @@ license = "MIT"
 [workspace.dependencies]
 uniffi = "0.32"
 
+# Signalsmith Stretch is about ten times slower unoptimised; keep it fast in debug builds and tests too.
+[profile.dev.package.signalsmith-stretch]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
