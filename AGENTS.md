@@ -60,6 +60,14 @@ there: a screenshot proves a screen renders, not that the feature works.
 - octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never
   queue or prefetch provider tracks the user did not ask to play. Provider items are never indexed.
 
+## Where the work stopped
+
+`docs/handoff.md` says what is half-finished and what to be careful of: the player still differs from
+Apple Music in five measurable ways, the Apple design research was cut short, and there is a list of
+the traps that make this app easy to test wrongly (a sleeping device answers with stale screenshots,
+the media session's position does not move while music plays, and so on). Read it before picking up
+the UI work.
+
 ## Look
 
 The interface follows Apple Music's feel, not Material's defaults: `app/.../ui/Design.kt` holds the
