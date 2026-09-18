@@ -295,8 +295,8 @@ fun SystemBarIcons(background: Color) {
 fun ScrimIconButton(icon: ImageVector, description: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     androidx.compose.material3.IconButton(
         onClick,
-        modifier.size(38.dp).background(Color.Black.copy(alpha = 0.32f), androidx.compose.foundation.shape.CircleShape),
-    ) { Icon(icon, description, Modifier.size(21.dp), tint = Color.White) }
+        modifier.size(40.dp).background(Color.Black.copy(alpha = 0.35f), androidx.compose.foundation.shape.CircleShape),
+    ) { Icon(icon, description, Modifier.size(22.dp), tint = Color.White) }
 }
 
 /**

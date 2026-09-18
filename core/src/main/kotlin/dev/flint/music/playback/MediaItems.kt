@@ -8,6 +8,14 @@ import dev.flint.music.ffi.RadioStation
 import dev.flint.music.ffi.ReplayGain
 import dev.flint.music.ffi.Song
 
+/**
+ * The artwork size asked for on the lock screen and in the notification. The same number the
+ * full-screen player uses, so the server renders and caches one large rendition per cover rather than
+ * one for each place it is shown - each new size costs a slow first fetch on a real library.
+ */
+const val NOTIFICATION_ART = 800
+
+
 /** Audio is addressed as flint://song/<id>; the real URL is decided when the bytes are needed. */
 const val SONG_SCHEME = "flint"
 

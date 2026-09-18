@@ -63,10 +63,14 @@ class Nav(private val c: NavHostController) {
     fun equalizer() = c.navigate("equalizer")
     fun autoEq() = c.navigate("autoeq")
     fun back() { c.popBackStack() }
+    /**
+     * A tab always lands on that tab's own page. It used to save the stack it popped and restore it on
+     * the way back, which meant tapping Home from an album popped the album and then put it straight
+     * back - the tab looked dead. Nothing above the tab roots survives a tab tap now.
+     */
     fun tab(route: String) = c.navigate(route) {
-        popUpTo(c.graph.startDestinationId) { saveState = true }
+        popUpTo(c.graph.startDestinationId)
         launchSingleTop = true
-        restoreState = true
     }
 }
 

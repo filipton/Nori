@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
@@ -136,7 +137,14 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
             listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random"),
             sort, vm::setSort,
         )
-        LazyVerticalGrid(GridCells.Adaptive(132.dp), contentPadding = PaddingValues(start = Space.gutter, end = Space.gutter, top = Space.gutter, bottom = Space.gutter + LocalChromeInset.current), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Ask for the covers just past the fold while the ones on screen are still arriving.
+        val list = rememberLazyGridState()
+        PrefetchCovers(
+            remember(albums, list.firstVisibleItemIndex) {
+                albums.drop(list.firstVisibleItemIndex + 6).take(12).map { vm.cover(it.coverArt, CoverSize.CARD) }
+            },
+        )
+        LazyVerticalGrid(GridCells.Adaptive(132.dp), state = list, contentPadding = PaddingValues(start = Space.gutter, end = Space.gutter, top = Space.gutter, bottom = Space.gutter + LocalChromeInset.current), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
                 AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth(), fill = true)

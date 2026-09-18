@@ -119,7 +119,7 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         )
     }
 
-    private fun items(songs: List<Song>): List<MediaItem> = songs.map { it.toMediaItem(flint.library.coverUrl(it.coverArt, 512)) }
+    private fun items(songs: List<Song>): List<MediaItem> = songs.map { it.toMediaItem(flint.library.coverUrl(it.coverArt, NOTIFICATION_ART)) }
 
     // ---- queue ----
 

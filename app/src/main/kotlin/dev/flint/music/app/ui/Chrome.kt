@@ -121,10 +121,13 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
         ) {
             Icon(tab.icon, null, Modifier.size(23.dp), tint = colour)
         }
+        // Where you are should be readable at a glance and not only by hue: the current tab's label is
+        // bold and full strength, the others are lighter and dimmer.
         Text(
             tab.label, Modifier.padding(top = 2.dp),
             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.5f.sp, letterSpacing = 0.sp),
-            color = colour, fontWeight = FontWeight.SemiBold,
+            color = if (selected) colour else colour.copy(alpha = 0.75f),
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
         )
     }
 }

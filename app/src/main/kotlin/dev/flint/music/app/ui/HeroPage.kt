@@ -163,7 +163,7 @@ fun HeroPage(
                 item(key = "tail") { Spacer(Modifier.height(Space.section + LocalChromeInset.current)) }
             }
             // Back floats over the artwork on a soft disc, so it reads on any cover.
-            Box(Modifier.statusBarsPadding().padding(start = 6.dp, top = 4.dp)) {
+            Box(Modifier.statusBarsPadding().padding(start = 12.dp, top = 10.dp)) {
                 ScrimIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", LocalNav.current::back)
             }
         }

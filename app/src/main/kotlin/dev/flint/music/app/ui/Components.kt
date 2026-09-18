@@ -70,8 +70,13 @@ fun providerOf(id: String): String? = id.takeIf { it.startsWith("ext-") || it.st
     ?.split('-')?.getOrNull(1)?.replaceFirstChar(Char::uppercase)
     ?.let { mapOf("Squidwtf" to "SquidWTF").getOrDefault(it, it) }
 
-/** Cover sizes are bucketed so the server, the HTTP cache and the image cache all see few distinct URLs. */
-object CoverSize { const val ROW = 160; const val CARD = 320; const val FULL = 800 }
+/**
+ * Two sizes, not four. A Subsonic server renders each requested size on demand and caches it per size,
+ * so every extra bucket is another slow first fetch for every album in the library - measured at over
+ * a second each on a real server. A list thumbnail and a grid card now share one rendition, and the
+ * full-screen artwork shares its rendition with the notification and the lock screen.
+ */
+object CoverSize { const val ROW = 320; const val CARD = 320; const val FULL = 800 }
 
 /**
  * Artwork with the app's corner radius. The request is remembered and sized up front, so scrolling
@@ -274,3 +279,20 @@ fun EmptyNote(text: String, modifier: Modifier = Modifier) = Text(
     text, modifier.fillMaxWidth().padding(Space.gutter), textAlign = TextAlign.Center,
     style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), color = MaterialTheme.colorScheme.onSurfaceVariant,
 )
+
+/**
+ * Warms artwork that is about to be needed. A server renders each thumbnail the first time it is
+ * asked for, which on a real library is the better part of a second per cover; asking for the next
+ * screenful while the current one is being read turns that wait into something already done. Requests
+ * go through the same loader and cache, so a prefetched cover is simply a cache hit when it appears.
+ */
+@Composable
+fun PrefetchCovers(urls: List<String?>) {
+    val context = LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(urls) {
+        val loader = coil3.SingletonImageLoader.get(context)
+        urls.filterNotNull().filterNot(::isProviderCover).forEach { url ->
+            loader.enqueue(ImageRequest.Builder(context).data(url).size(CoverSize.CARD).build())
+        }
+    }
+}

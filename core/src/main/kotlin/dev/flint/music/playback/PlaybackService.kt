@@ -513,7 +513,7 @@ class PlaybackService : MediaLibraryService() {
         player.setMediaItems(q.songs.map(::item), q.index.toInt().coerceIn(0, q.songs.lastIndex), q.positionMs.toLong())
     }
 
-    private fun item(s: Song): MediaItem = s.toMediaItem(flint.library.coverUrl(s.coverArt, 512))
+    private fun item(s: Song): MediaItem = s.toMediaItem(flint.library.coverUrl(s.coverArt, NOTIFICATION_ART))
 
     // ---- session: custom commands, Android Auto browsing, voice search ----
 
