@@ -310,8 +310,8 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
         Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
         Column(Modifier.weight(1f)) {
             Text(
-                song?.title ?: "", style = MaterialTheme.typography.titleMedium,
-                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                song?.title ?: "", Modifier.readable(), style = MaterialTheme.typography.titleMedium,
+                maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
             Text(
                 song?.artist ?: "", style = MaterialTheme.typography.bodySmall,

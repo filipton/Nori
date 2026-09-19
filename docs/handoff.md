@@ -12,6 +12,17 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Scrubbing.** The seek bar owns the pointer from touch-down and consumes every move, so the player
+  sheet's vertical drag can no longer take a scrub that runs a few degrees off level - that was the
+  bug where the bar followed the finger, the time changed, and the song never moved, because the
+  gesture ended in `onDragCancel`. The strip is 34 dp tall (26 dp was easy to miss with a thumb), the
+  bar thickens and grows a dot while held, and the seek happens once, on release. `build/seek.sh
+  <slant px per step> <end x>` scrubs it on the emulator and prints where it landed.
+- **Long titles read themselves out.** `Modifier.readable()` in PlayerScreen (`basicMarquee`) walks a
+  title that does not fit, after a 2.6 s pause, in the full player and the lyrics header. It is off
+  unless `LocalPlayerShown` is true: the player stays composed behind the rest of the app, and a
+  title scrolling down there would hold the frame clock awake (measured: 0 frames in 5 s with the
+  player closed, about 37 fps while it is open and a title is walking).
 - **Up Next.** Play next and Add to queue (the default right swipe) work as in Apple Music: the songs
   go right after the playing one, "last" ones after the songs added by hand before them, in order,
   and then the queue carries on. Items carry `queued` = "next"/"last" in their extras

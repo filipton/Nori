@@ -2,9 +2,12 @@ package dev.flint.music.app.ui
 
 import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import kotlin.math.roundToInt
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -14,6 +17,8 @@ import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -76,6 +81,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -309,7 +315,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     Column(Modifier.weight(1f)) {
                         Text(
                             state.current?.title ?: state.radio ?: "Nothing playing",
-                            style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            Modifier.readable(), style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                         )
                         Text(
                             // The artist alone, as Apple writes it. "Artist · Album" ran two ellipses into each
@@ -890,6 +897,26 @@ private fun VolumeRow(vm: PlayerViewModel) {
     }
 }
 
+/**
+ * A line too long for its width reads itself out: it sits still for a moment, so the start can be
+ * read, then walks slowly sideways and comes back round, the way the title does in Apple's player.
+ * A line that fits is left alone - the modifier only animates while the text overflows.
+ *
+ * It scrolls only while the player is really on screen. The player stays composed behind the rest of
+ * the app (see LocalPlayerShown), and a title quietly walking about down there would hold a frame
+ * clock awake for nothing.
+ */
+@Composable
+internal fun Modifier.readable(): Modifier =
+    if (!LocalPlayerShown.current) this
+    else basicMarquee(
+        iterations = Int.MAX_VALUE,
+        repeatDelayMillis = 2600,
+        initialDelayMillis = 2600,
+        spacing = MarqueeSpacing(46.dp),
+        velocity = 26.dp,
+    )
+
 @Composable
 private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
@@ -918,30 +945,59 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val state by vm.state.collectAsStateWithLifecycle()
     val pos = position(vm, playing, 1000)
-    val d = durationMs.coerceAtLeast(1)
+    // Duration is read through the gesture rather than keying it: a track that learns its real length
+    // mid-scrub would restart the detector and the finger would lift on a dead pointer.
+    val d by rememberUpdatedState(durationMs.coerceAtLeast(1))
     var dragging by remember { mutableStateOf(false) }
     var drag by remember { mutableFloatStateOf(0f) }
     val fraction = (if (dragging) drag else pos.toFloat() / d).coerceIn(0f, 1f)
     val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
     val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-    Column(Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 8.dp)) {
+    // Held, the bar thickens and the dot grows, the way Apple's does, so the scrub is felt as well as
+    // seen. Animated both ways: nothing here changes size in one frame.
+    val thickness by animateFloatAsState(if (dragging) 11f else 7.3f, spring(0.9f, 420f), label = "seek")
+    val knob by animateFloatAsState(if (dragging) 1.5f else 0f, spring(0.9f, 420f), label = "knob")
+    Column(Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 4.dp)) {
         Box(
-            Modifier.fillMaxWidth().height(26.dp)
-                .pointerInput(d) {
-                    detectHorizontalDragGestures(
-                        onDragStart = { dragging = true; drag = (it.x / size.width).coerceIn(0f, 1f) },
-                        onDragEnd = { vm.seekTo((drag * d).toLong()); dragging = false },
-                        onDragCancel = { dragging = false },
-                    ) { change, _ -> drag = (change.position.x / size.width).coerceIn(0f, 1f) }
+            // The strip is wider than the hairline it draws: a thumb is not a mouse, and the 26 dp this
+            // used to be was easy to miss by a few pixels and hit the sheet instead.
+            Modifier.fillMaxWidth().height(34.dp)
+                .pointerInput(Unit) {
+                    // Written out rather than assembled from detectHorizontalDragGestures and
+                    // detectTapGestures, because both of those let the gesture go: the pointer is
+                    // claimed on touch-down and every move is consumed, so the player sheet's own
+                    // vertical drag can no longer take a scrub that runs a few degrees off level.
+                    // It used to, and then the finger lifted on a cancelled gesture and the song
+                    // never moved - the bar had followed the finger the whole way, which is what
+                    // made it look as though seeking was broken rather than stolen.
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        drag = (down.position.x / size.width).coerceIn(0f, 1f)
+                        dragging = true
+                        var seek = true
+                        while (true) {
+                            val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
+                            // The pointer vanished from the event: the window took it (a call, a
+                            // system gesture). Leave the song where it was.
+                            if (change == null) { seek = false; break }
+                            drag = (change.position.x / size.width).coerceIn(0f, 1f)
+                            change.consume()
+                            if (!change.pressed) break
+                        }
+                        // Apple seeks on release, not while the finger moves: one seek, at the end,
+                        // and the sound carries on undisturbed until then.
+                        if (seek) vm.seekTo((drag * d).toLong())
+                        dragging = false
+                    }
                 }
-                .pointerInput(d) { detectTapGestures { vm.seekTo(((it.x / size.width).coerceIn(0f, 1f) * d).toLong()) } }
                 .drawBehind {
-                    val h = 7.3f.dp.toPx()
+                    val h = thickness.dp.toPx()
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
                     drawRoundRect(filled, Offset(0f, y), Size(size.width * fraction, h), r)
-                    if (dragging) drawCircle(filled, h * 1.6f, Offset(size.width * fraction, size.height / 2f))
+                    if (knob > 0.01f) drawCircle(filled, h * knob, Offset(size.width * fraction, size.height / 2f))
                 },
         )
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
