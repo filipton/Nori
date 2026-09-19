@@ -555,7 +555,7 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
                     val t = sheet.progress.value.coerceIn(0f, 1f)
                     val from = sheet.miniCover.translate(0f, -sheet.travel)
                     fun mix(a: Float, b: Float) = a + (b - a) * t
-                    val k = mix(from.height, h) / h
+                    val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
                     scaleX = k; scaleY = k
                     // The square is wider than the screen, so layout centres it with its sides hanging

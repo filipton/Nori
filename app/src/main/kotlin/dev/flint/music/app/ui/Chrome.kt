@@ -228,7 +228,12 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
                 Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Cover(
                         vm.cover(s?.coverArt, CoverSize.ROW), 42.dp,
-                        if (real) Modifier.onGloballyPositioned { sheet.miniCover = it.boundsInRoot() } else Modifier, radius = 7.dp,
+                        if (real) Modifier.onGloballyPositioned {
+                            // Only the whole square: slid part-way out of the bar it is clipped, and a
+                            // thumbnail with no width is not something to grow the cover from.
+                            val b = it.boundsInRoot()
+                            if (b.height > 0f && kotlin.math.abs(b.width - b.height) < 1f) sheet.miniCover = b
+                        } else Modifier, radius = 7.dp,
                     )
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                         Text(s?.title ?: title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
