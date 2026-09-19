@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -131,6 +134,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val style = when (prefs.lyricsSize) { 0 -> MaterialTheme.typography.titleMedium; 2 -> MaterialTheme.typography.headlineMedium; else -> MaterialTheme.typography.headlineSmall }
     val bright = MaterialTheme.colorScheme.onSurface
     val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
+    val page = MaterialTheme.colorScheme.background
     val list = rememberLazyListState()
     Column(Modifier.fillMaxSize()) {
         LyricsHeader(vm, actions, song)
@@ -166,6 +170,19 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         }
         // Where the words came from, and how to nudge them, on one quiet bar that does not sit on the lyrics.
         val source = found.source.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
+        // The list runs on underneath, so without this the bar lands on top of a line and both are
+        // unreadable. One gradient, the same trick the bottom chrome uses, and the words fade out under it.
+        if (lyrics.synced || source != null) Box(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(72.dp).drawBehind {
+                drawRect(
+                    Brush.verticalGradient(
+                        0f to Color.Transparent,
+                        0.55f to page.copy(alpha = 0.82f),
+                        1f to page,
+                    ),
+                )
+            },
+        )
         if (lyrics.synced || source != null) androidx.compose.material3.Surface(
             shape = PillShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background),
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -204,7 +221,7 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
             )
             Text(
                 song?.artist ?: "", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
         }

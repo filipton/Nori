@@ -201,7 +201,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // slider: measured off Apple's own player, where the band under the artwork is about half
                 // the one over the volume row.
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.3f))
-                Row(
+                // The lyrics view carries its own header - a thumbnail with the title, the favourite and
+                // the menu beside it, the way Apple's does - so this block would be the second copy of it.
+                if (panel != Panel.LYRICS) Row(
                     Modifier.fillMaxWidth().padding(start = 26.dp, end = 16.dp, top = 8.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
@@ -230,7 +232,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = 26.dp), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
-                state.current?.let { s ->
+                if (panel != Panel.LYRICS) state.current?.let { s ->
                     val line = listOfNotNull(
                         s.suffix.uppercase().ifEmpty { null },
                         s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
