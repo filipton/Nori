@@ -172,7 +172,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
     val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
-    val palette = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
+    // AMOLED black everywhere else, but the player keeps the cover's colours unless asked not to: in
+    // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
+    // carries the record's colour down the whole screen.
+    val black = prefs.amoled && !prefs.playerColours
+    val palette = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, black) else null
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
@@ -250,7 +254,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            state.current?.let { listOfNotNull(it.artist.ifEmpty { null }, it.album.ifEmpty { null }).joinToString(" · ") } ?: "",
+                            // The artist alone, as Apple writes it. "Artist · Album" ran two ellipses into each
+                            // other the moment the album had a long name; the album is one tap away on ⋯.
+                            state.current?.artist ?: "",
                             // Apple holds this line back from the title rather than colouring it: a
                             // saturated accent here is the one thing that made the screen read as Material.
                             style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),

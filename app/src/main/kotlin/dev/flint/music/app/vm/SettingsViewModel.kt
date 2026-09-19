@@ -108,6 +108,7 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "offload" -> it.copy(offload = on)
                 "autoMix" -> it.copy(autoMix = on)
                 "amoled" -> it.copy(amoled = on)
+                "playerColours" -> it.copy(playerColours = on)
                 "coverColors" -> it.copy(coverColors = on)
                 "thirdPartyLookups" -> it.copy(thirdPartyLookups = on)
                 "crossfadeKeepAlbums" -> it.copy(crossfadeKeepAlbums = on)

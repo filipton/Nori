@@ -318,6 +318,11 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
         "look" -> SettingsCard {
             Choice("Theme", p.theme, listOf(ThemeMode.SYSTEM to "Follow system", ThemeMode.LIGHT to "Light", ThemeMode.DARK to "Dark")) { v -> vm.update { it.copy(theme = v) } }
             Toggle("AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens", p.amoled) { on -> vm.update { it.copy(amoled = on) } }
+            if (p.amoled) Toggle(
+                "Player in the cover's colours",
+                "The full-screen player keeps the record's colours, as Apple Music's does. Off makes that screen black too.",
+                p.playerColours,
+            ) { on -> vm.update { it.copy(playerColours = on) } }
             Toggle(
                 "Reduce motion",
                 "Shorter, plainer movement throughout. Follows the system setting when animations are turned off there.",
