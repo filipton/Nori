@@ -192,13 +192,95 @@ fun pageBrush(palette: PagePalette, endY: Float, startY: Float = 0f): Brush = Br
  * page - the seam is opaque down to [SEAM_OPAQUE] and gone by [SEAM_END], so each is clipped to where
  * it shows.
  */
-fun DrawScope.drawPageWash(palette: PagePalette, endY: Float) {
+/**
+ * The player's page, aligned to its sleeve. The cover is drawn at the sleeve's own scale behind it, so
+ * the blurred copy and the sharp one are the same picture at the same size; above and below, the
+ * texture's first and last rows carry on. That last part is the whole point: the sleeve's bottom edge
+ * then meets a wash made of the sleeve's own bottom rows, in the same colours, and the picture runs out
+ * into the page instead of ending on one. Stretched over the screen instead, the wash showed the middle
+ * of the cover where the sleeve ended, and the hue jumped across a line.
+ */
+fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHeight: Float, endY: Float) {
+    val wash = palette.wash
+    if (wash == null) {
+        drawRect(palette.background, size = Size(size.width, endY))
+        return
+    }
+    val w = size.width.toInt().coerceAtLeast(1)
+    val bottom = sleeveBottom.coerceIn(1f, endY)
+    val top = (bottom - sleeveHeight).coerceAtLeast(0f)
+    // Rounded edges rather than rounded heights, so the three bands abut exactly with no row of page
+    // colour showing between them.
+    fun band(srcY: Int, srcH: Int, y0: Int, y1: Int) {
+        if (y1 <= y0) return
+        drawImage(
+            wash,
+            srcOffset = IntOffset(0, srcY), srcSize = IntSize(WASH_ROWS, srcH),
+            dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
+            filterQuality = FilterQuality.Low,
+        )
+    }
+    band(0, 1, 0, top.toInt())
+    band(0, WASH_ROWS, top.toInt(), bottom.toInt())
+    band(WASH_ROWS - 1, 1, bottom.toInt(), endY.toInt())
+}
+
+/**
+ * The bottom of the player's sleeve, cross-faded into its own blur. Drawn inside the sleeve's own
+ * bounds, in slices: slice by slice this is the same picture at the same scale as [drawSleeveWash]
+ * draws behind and below it, so the sharp cover simply goes soft and then carries on down the page.
+ *
+ * Nowhere in it is there a flat colour. That is the point - every version of this that faded the
+ * picture onto some computed colour left that colour meeting the page along a dead straight line,
+ * which is the one thing the eye always finds.
+ */
+fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
+    val top = size.height * (1f - fraction)
+    val wash = palette.wash
+    if (wash == null) {
+        drawRect(
+            Brush.verticalGradient(
+                0f to Color.Transparent, 1f to palette.background,
+                startY = top, endY = size.height,
+            ),
+            topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+        )
+        return
+    }
+    val steps = 28
+    val band = (size.height - top) / steps
+    val w = size.width.toInt().coerceAtLeast(1)
+    val last = size.height.toInt()
+    for (i in 0 until steps) {
+        // Rounded edges, not a rounded height: a band of 14.2 px drawn as 14 leaves a fifth of a pixel
+        // behind every time, and by the last slice that is six rows of raw, unmelted cover sitting
+        // across the bottom of the sleeve - a bright hairline, which is exactly the edge this is here
+        // to remove. The final slice is pinned to the sleeve's own bottom.
+        val y0 = (top + band * i).toInt()
+        val y1 = if (i == steps - 1) last else (top + band * (i + 1)).toInt()
+        if (y1 <= y0) continue
+        val v0 = (y0 / size.height * WASH_ROWS).toInt().coerceIn(0, WASH_ROWS - 1)
+        val v1 = ((y1 / size.height) * WASH_ROWS).toInt().coerceIn(v0 + 1, WASH_ROWS)
+        val t = (i + 1f) / steps
+        drawImage(
+            wash,
+            srcOffset = IntOffset(0, v0), srcSize = IntSize(WASH_ROWS, v1 - v0),
+            dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
+            alpha = t * t,
+            filterQuality = FilterQuality.Low,
+        )
+    }
+}
+
+fun DrawScope.drawPageWash(palette: PagePalette, endY: Float, seam: Boolean = true) {
     val wash = palette.wash
     if (wash == null) {
         drawRect(pageBrush(palette, endY))
         return
     }
-    val from = (WASH_ROWS * SEAM_OPAQUE).toInt()
+    // Without a seam over it the whole texture is drawn, top rows included: the player's sleeve starts
+    // a little below the top of the screen, and what shows above it is the same cover, softened.
+    val from = if (seam) (WASH_ROWS * SEAM_OPAQUE).toInt() else 0
     val top = (endY * from / WASH_ROWS).toInt()
     drawImage(
         wash,
@@ -207,6 +289,7 @@ fun DrawScope.drawPageWash(palette: PagePalette, endY: Float) {
         dstSize = IntSize(size.width.toInt().coerceAtLeast(1), (endY.toInt() - top).coerceAtLeast(1)),
         filterQuality = FilterQuality.Low,
     )
+    if (!seam) return
     // Same stops as pageBrush, but ending transparent: what is under it is the wash, not a flat colour.
     drawRect(
         Brush.verticalGradient(

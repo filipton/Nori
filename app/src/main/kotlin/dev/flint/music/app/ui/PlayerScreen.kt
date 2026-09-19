@@ -75,6 +75,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
@@ -155,6 +156,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
+    // Where the sleeve ends, so the page behind it can be drawn at the same scale. Written on layout,
+    // read in the draw phase; it only moves when the window does.
+    var sleeveBottom by remember { mutableFloatStateOf(0f) }
+    var sleeveHeight by remember { mutableFloatStateOf(0f) }
     var sleepMenu by remember { mutableStateOf(false) }
 
     val settingsVm: SettingsViewModel = viewModel()
@@ -168,9 +173,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         SystemBarIcons(scheme.background)
         Box(
             Modifier.fillMaxSize().drawBehind {
-                // The page is the cover itself, enlarged and smoothed, with the seam gradient over the
-                // top so the picture dissolves into it rather than stopping. See drawPageWash.
-                if (palette != null) drawPageWash(palette, size.height) else drawRect(scheme.background)
+                // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
+                // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
+                // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
+                if (palette != null) drawSleeveWash(palette, sleeveBottom, sleeveHeight, size.height) else drawRect(scheme.background)
             },
         ) {
             Column(Modifier.fillMaxSize().navigationBarsPadding()) {
@@ -183,7 +189,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // instead left a band of empty wash under it twice as deep as Apple's, because the
                 // controls below are shorter than the space that was left over; the spare height now
                 // sits above the volume slider, which is where Apple's is.
-                if (panel == Panel.ART) Box(Modifier.fillMaxWidth()) {
+                if (panel == Panel.ART) Box(
+                    Modifier.fillMaxWidth().onGloballyPositioned {
+                        sleeveBottom = it.positionInRoot().y + it.size.height
+                        sleeveHeight = it.size.height.toFloat()
+                    },
+                ) {
                     Artwork(vm, coverUrl, palette)
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), nav::back)
                 } else {
@@ -193,11 +204,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                 }
 
-                // The column's spare height, split the way Apple's screen splits it. Measured off `w4` by
-                // row profile, as percentages of the screen: their title block starts 10.5 % below the
-                // sleeve, the transport sits 10.6 % above the volume slider, and the bottom icons clear
-                // the home indicator by 7.7 %. The earlier split put the whole stack about 5 % too high
-                // and spread the bottom of it too far apart.
+                // The column's spare height. Measured off `w4` by row profile, Apple put the transport
+                // 10.6 % of the screen above the volume slider and the bottom icons 7.7 % clear of the
+                // home indicator. The three controls at the bottom are deliberately closer together than
+                // that here - the owner found Apple's own spacing too loose on a 20:9 screen, which is
+                // taller than the 19.5:9 those percentages were taken from - and the space that frees
+                // up goes underneath them rather than between them.
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.64f))
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
@@ -251,23 +263,23 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
                 // Apple leaves a clear gap between the times and these, rather than letting them follow on.
                 Row(Modifier.fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
-                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(42.dp)) }
+                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(46.dp)) }
                     IconButton(vm::toggle, Modifier.size(72.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
                             if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
                             else Icon(
                                 if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause",
-                                Modifier.size(52.dp),
+                                Modifier.size(58.dp),
                             )
                         }
                     }
-                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(42.dp)) }
+                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(46.dp)) }
                 }
 
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.28f))
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.17f))
                 VolumeRow(vm)
 
-                Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
+                Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
                     PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { panel = if (panel == Panel.LYRICS) Panel.ART else Panel.LYRICS }
                     Box {
                         PanelButton(Icons.Filled.Bedtime, "Sleep timer", state.sleepAt > 0 || state.sleepAtEndOfTrack) { sleepMenu = true }
@@ -280,7 +292,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                     PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { panel = if (panel == Panel.QUEUE) Panel.ART else Panel.QUEUE }
                 }
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.08f))
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
             if (panel == Panel.ART) ScrimIconButton(
                 Icons.Filled.KeyboardArrowDown, "Close", nav::back,
@@ -291,6 +303,16 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         }
     }
 }
+
+/**
+ * Width over height of the player's sleeve. Album art is square - Apple's too - so theirs is the
+ * square scaled up and cropped at the left and right edges to fill a taller box. Crop the region of
+ * `w4` that spans where a full-width square would have ended and the flowers below that line are as
+ * sharp as the ones above it, with a strip of red tape running across it unbroken: it is the picture,
+ * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
+ * and still reach down behind the title, which no square can do.
+ */
+private const val SLEEVE = 0.88f
 
 /** Drag it down, or tap it, to put the player away. */
 @Composable
@@ -315,7 +337,11 @@ private fun Handle(modifier: Modifier, colour: Color, onBack: () -> Unit) {
 private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette?) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
-            Modifier.fillMaxWidth().aspectRatio(1f)
+            // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
+            // to about half of it - 977 wide by roughly 1050 tall - so it is the cover scaled to fill and
+            // cropped a little at the sides. That is how it manages to have no top edge *and* reach down
+            // behind the title; a full-width square can only do one or the other. Cover crops already.
+            Modifier.fillMaxWidth().aspectRatio(SLEEVE)
                 .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
         ) {
             Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp)
@@ -325,13 +351,11 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
                 Modifier.fillMaxWidth().fillMaxHeight(0.16f)
                     .background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent)),
             )
-            if (palette != null) {
-                val melt = blend(palette.edge, palette.background, 0.9f)
-                Box(
-                    Modifier.fillMaxWidth().fillMaxHeight(0.38f).align(Alignment.BottomCenter)
-                        .background(Brush.verticalGradient(0f to Color.Transparent, 1f to melt)),
-                )
-            }
+            // The sleeve goes soft rather than stopping: its bottom third cross-fades into the same
+            // cover, blurred, which the page behind it is already drawing at the same scale.
+            if (palette != null) Box(
+                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.34f) },
+            )
         }
     }
 }

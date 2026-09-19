@@ -102,16 +102,24 @@ fun HeroPage(
                         ) {
                             Cover(coverUrl, 0.dp, Modifier.fillMaxSize())
                             val edge = palette?.edge ?: scheme.background
+                            val page = palette?.background ?: scheme.background
                             Box(
                                 Modifier.fillMaxSize().drawWithContent {
                                     drawContent()
-                                    // Long and eased, from the picture's own last colour: no seam to see.
+                                    // The whole dissolve happens inside the artwork, and finishes on the
+                                    // page colour rather than on the cover's edge colour. It used to stop
+                                    // on the edge colour and leave a second gradient below to carry on -
+                                    // but the parallax slides the picture down over that gradient as the
+                                    // page scrolls, squeezing it into a few dozen pixels, and a colour
+                                    // ramp that steep across the full width is a line. The picture has
+                                    // its own height to do this in, and ending on the page colour means
+                                    // there is nothing left to hand over to.
                                     drawRect(
                                         Brush.verticalGradient(
-                                            0.68f to Color.Transparent,
-                                            0.82f to edge.copy(alpha = 0.45f),
-                                            0.93f to edge.copy(alpha = 0.88f),
-                                            1f to edge,
+                                            0.60f to Color.Transparent,
+                                            0.76f to edge.copy(alpha = 0.40f),
+                                            0.88f to blend(edge, page, 0.55f).copy(alpha = 0.86f),
+                                            1f to page,
                                         ),
                                     )
                                     // Just enough shade under the status bar for white icons on a pale cover.
@@ -120,37 +128,9 @@ fun HeroPage(
                             )
                         } else Spacer(Modifier.statusBarsPadding().height(72.dp))
 
-                        // The wash begins on the colour the picture ended on, so there is no line between them,
-                        // and reaches the page colour by the time the buttons are past.
-                        Column(
-                            Modifier.fillMaxWidth().drawBehind {
-                                if (palette == null) return@drawBehind
-                                // This has to follow the artwork above it in both the ways the parallax
-                                // layer moves it, or the picture and the colour it melts into part company
-                                // along a hard line across the page:
-                                //
-                                //  - it is *drawn* 0.4 of the scroll lower than it is laid out, so its
-                                //    bottom edge lands part way down this gradient instead of at the top
-                                //    of it. The gradient starts where the picture actually ends.
-                                //  - it fades to half as it goes, so the gradient fades with it.
-                                //
-                                // The artwork is a full-width square, so its height is this width.
-                                if (coverUrl == null) {
-                                    drawRect(pageBrush(palette, size.height))
-                                    return@drawBehind
-                                }
-                                val cover = size.width
-                                val scrolled = if (list.firstVisibleItemIndex == 0) list.firstVisibleItemScrollOffset.toFloat() else cover
-                                val shift = (scrolled * 0.4f).coerceIn(0f, size.height)
-                                val fade = 1f - (scrolled / cover).coerceIn(0f, 1f) * 0.5f
-                                drawRect(
-                                    pageBrush(palette, endY = size.height, startY = shift),
-                                    topLeft = Offset(0f, shift),
-                                    size = Size(size.width, size.height - shift),
-                                    alpha = fade,
-                                )
-                            },
-                        ) {
+                        // Nothing is painted here: the artwork above has already dissolved onto the page
+                        // colour, and the page colour is what the root is painted with.
+                        Column(Modifier.fillMaxWidth()) {
                         Column(
                             Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 4.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,

@@ -76,17 +76,47 @@ only while the music sounds, freeze into a fixed shape when it is paused, and st
 screen goes off or the row leaves the composition. The phase is read in the draw phase, so a frame
 invalidates that 16 dp box and nothing else. The screen-off benchmark below is unchanged by it.
 
+## The sleeve is not square
+
+Album art is square, Apple's included — so how does their player's artwork touch the top edge of the
+screen *and* reach down behind the title, which a full-width square cannot do? It is the square
+scaled up and cropped at the left and right edges to fill a taller box. Crop `w4` across the row
+where a full-width square would have ended (y = 977 of a 977-wide screen) and the flowers below that
+line are exactly as sharp as the ones above it, with a strip of red tape crossing it unbroken. It is
+the picture, not the blur behind it.
+
+`PlayerScreen.SLEEVE` is that ratio, 0.88 wide over tall, and `Cover` already crops. Everything else
+follows from it: no top edge because the picture starts at y = 0, and the picture's tail reaching the
+title because it ends near half the screen.
+
+Below that, `Design.drawSleeveMelt` cross-fades the sharp sleeve into its own blur in slices, and
+`drawSleeveWash` draws that blur behind and below it at the same scale, so the two are the same
+picture and the join cannot be seen. **Nowhere in either is there a flat colour**, which is the whole
+point — every earlier version faded the picture onto some computed colour, and that colour met the
+page along a dead straight line every time.
+
+Two bugs to know about if you touch the slicing: a band of 14.2 px drawn as `band.toInt()` = 14
+leaves a fifth of a pixel behind on each slice, and by the last one that is six rows of raw, unmelted
+cover lying across the bottom of the sleeve — a bright hairline. Round the *edges*, not the heights,
+and pin the last slice to the sleeve's own bottom. `drawSleeveWash`'s three bands have the same trap.
+
 ## The album page's seam
 
-`HeroPage` draws the cover's edge colour under the artwork so the picture runs out rather than
-stopping. The artwork above it is in a parallax layer that does two things as the page scrolls — it
-is *drawn* 0.4 of the scroll lower than it is laid out, and it fades to half — and the gradient has
-to follow both, or the picture goes pale and shifts while the colour it melts into does not. That is
-a hard line straight across the page, and it was there before the wash work went anywhere near it;
-the gradient now starts where the picture actually ends and fades by the same amount.
+An album page has no wash (see above) and no separate gradient under its artwork either. It used to:
+the picture faded onto the cover's edge colour and a second gradient below carried that on to the
+page colour. But the parallax slides the picture *down* over that gradient as the page scrolls —
+`translationY = 0.4 * scroll` — squeezing it into a few dozen pixels, and a colour ramp that steep
+across the full width is a line. The dissolve now happens entirely inside the artwork, which has its
+own height to do it in, and finishes on the page colour, so there is nothing left to hand over to.
+Because the artwork's layer is alpha-faded by the same parallax, its last row is the page colour at
+any scroll and at any fade.
 
-Measure this, do not eyeball it: sample a column down the right edge and look for a step of more than
-about 15. A one- or two-pixel step is a row divider and is meant to be there.
+Measure this, do not eyeball it. `edges.py` in a scratch directory is twenty lines: sample only the
+far left and right margins, where no text or control ever sits, average 14 rows either side of each
+candidate, and report a step of 10 or more. Averaging is what makes it useful — it ignores row
+dividers and glyph edges, which are one or two pixels tall, and finds the things that are not. Run it
+on the player and on the album page at three or four scroll positions; anything it reports inside the
+artwork's own rows is the cover's own contrast, not a fault.
 
 ## What the audio path costs
 
