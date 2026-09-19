@@ -12,6 +12,20 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The wash without stairs.** The page's blur was a 32 px texture stretched over the screen, and the
+  sleeve's melt read it a row at a time in 28 slices, so both came down in visible steps. The wash is
+  still worked out at 32 px but handed to the GPU at 128 (`CoverColors.smooth`: bilinear, two light
+  box passes and a one-level dither against eight-bit banding), and the melt is cut into 72 slices.
+  One 64 kB texture per cover, still one quad per frame.
+- **Black is a colour.** The page-colour histogram has a bucket for black and near-black at full
+  weight, and the dark page may go all the way down to black, so a mostly black sleeve gives a black
+  page instead of a muddy one. Pale greys and whites are still discounted, because a page that pale
+  would take the controls with it.
+- **The sleeve always melts.** With the cover's colours off there is no wash, and the sleeve used to
+  stop dead; it now goes soft into the plain page (black on AMOLED), in place and in flight.
+- The format caption is gone from the foot of the player; the ⋯ menu's header shows it.
+- The downloads suite check now tries up to twelve albums for one with work left: the emulator keeps
+  what earlier runs downloaded, and four ran out.
 - **The now playing bar's heart updates.** The bar sat outside the `LocalStarMarks` provider, so it
   only ever saw the server's answer and a tap changed nothing on screen until the song came round
   again. It is inside it now.

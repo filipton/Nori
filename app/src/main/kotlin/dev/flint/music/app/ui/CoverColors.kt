@@ -73,7 +73,7 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
         // viewer would name - a dusty pink arrived as a neutral brown. There was room to spare: white
         // text has about 14:1 on that pink at 0.20, and better than 8:1 on the worst case the band
         // allows (a yellow at the top of it), which still holds after the wash's own +0.05 of lightness.
-        dark -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceIn(0.10f, 0.20f))))
+        dark -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceAtMost(0.20f))))
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
@@ -128,7 +128,7 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
     for (i in px.indices) {
         ColorUtils.colorToHSL(px[i], hsl)
         hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
-        hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(pageHsl[2] - spread, pageHsl[2] + spread)
+        hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(pageHsl[2] - spread, pageHsl[2] + spread).coerceIn(0f, 1f)
         // Then most of the way back to the flat page colour. Clamping the lightness alone was not
         // enough on a record that is many colours at once: one that is teal down one side and warm
         // down the other gave the page teal and warm patches, and a patch reads as a fault where a
@@ -138,7 +138,65 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
         // shouting out of it.
         px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), MUTE)
     }
-    return Bitmap.createBitmap(px, WASH, WASH, Bitmap.Config.ARGB_8888).asImageBitmap()
+    return Bitmap.createBitmap(smooth(px), WASH_OUT, WASH_OUT, Bitmap.Config.ARGB_8888).asImageBitmap()
+}
+
+/**
+ * The size the wash is handed to the GPU at. The colours and shapes are worked out at [WASH], which is
+ * plenty for what the page shows; but stretched straight from there over a whole screen, each of its
+ * pixels became a visible step - the owner's friend called the blur "stairs" - and the melt at the
+ * bottom of the sleeve, which reads the texture a row at a time, stepped as well. Four times finer,
+ * filled in smoothly here once per cover, the steps are a few screen pixels tall and gone. It costs a
+ * 64 kB texture instead of 4 kB, and still one quad per frame.
+ */
+private const val WASH_OUT = WASH * 4
+
+/**
+ * [WASH] pixels a side up to [WASH_OUT]: bilinear, then two light box passes so the corners the
+ * bilinear leaves between samples round off, then a dither of one level either way per channel.
+ * The dither is what hides the banding that eight bits give a slow dark gradient - a page that goes
+ * from one deep colour to another over a whole screen has only a handful of levels to do it in, and
+ * without noise each level is a band with an edge.
+ */
+private fun smooth(px: IntArray): IntArray {
+    val n = WASH_OUT
+    val r = FloatArray(n * n); val g = FloatArray(n * n); val b = FloatArray(n * n)
+    val scale = (WASH - 1).toFloat() / (n - 1)
+    for (y in 0 until n) {
+        val fy = y * scale; val y0 = fy.toInt().coerceAtMost(WASH - 2); val ty = fy - y0
+        for (x in 0 until n) {
+            val fx = x * scale; val x0 = fx.toInt().coerceAtMost(WASH - 2); val tx = fx - x0
+            val a = px[y0 * WASH + x0]; val bb = px[y0 * WASH + x0 + 1]
+            val c = px[(y0 + 1) * WASH + x0]; val d = px[(y0 + 1) * WASH + x0 + 1]
+            fun ch(v: Int, s: Int) = ((v shr s) and 0xFF).toFloat()
+            fun lerp(s: Int) = (ch(a, s) * (1 - tx) + ch(bb, s) * tx) * (1 - ty) + (ch(c, s) * (1 - tx) + ch(d, s) * tx) * ty
+            val i = y * n + x
+            r[i] = lerp(16); g[i] = lerp(8); b[i] = lerp(0)
+        }
+    }
+    repeat(2) { boxBlur(r, n); boxBlur(g, n); boxBlur(b, n) }
+    // Fixed seed: the same cover gives the same texture every time, so reopening a page shows exactly
+    // what it showed before.
+    val noise = java.util.Random(0x5EED)
+    return IntArray(n * n) { i ->
+        fun q(v: Float) = (v + noise.nextFloat() - 0.5f).toInt().coerceIn(0, 255)
+        (0xFF shl 24) or (q(r[i]) shl 16) or (q(g[i]) shl 8) or q(b[i])
+    }
+}
+
+/** A separable box blur of radius 2 over an n by n channel, in place. */
+private fun boxBlur(c: FloatArray, n: Int) {
+    val tmp = FloatArray(c.size)
+    for (y in 0 until n) for (x in 0 until n) {
+        var s = 0f
+        for (d in -2..2) s += c[y * n + (x + d).coerceIn(0, n - 1)]
+        tmp[y * n + x] = s / 5f
+    }
+    for (y in 0 until n) for (x in 0 until n) {
+        var s = 0f
+        for (d in -2..2) s += tmp[(y + d).coerceIn(0, n - 1) * n + x]
+        c[y * n + x] = s / 5f
+    }
 }
 
 /** One separable 3-tap box pass over the tiny wash, so bilinear enlargement has no creases to show. */
@@ -160,9 +218,15 @@ private fun blur(px: IntArray) {
     }
 }
 
-/** Hue buckets the histogram counts into, plus one past the end for pixels too grey to have a hue. */
+/**
+ * Hue buckets the histogram counts into, then one for pale greys and whites, then one for black and
+ * near-black. Black gets a bucket of its own at full weight: a sleeve that is mostly black is a black
+ * record, and its page should be black too. White and pale grey stay discounted - a page that pale
+ * would take the controls on it with it.
+ */
 private const val HUES = 18
 private const val NEUTRAL = HUES
+private const val DARK = HUES + 1
 
 /**
  * The colour there is most of, which is not the question `Palette.dominantSwatch` answers. Palette
@@ -192,10 +256,10 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
     val colStep = (w / 64).coerceAtLeast(1)
     val row = IntArray(w)
     val hsl = FloatArray(3)
-    val weight = FloatArray(HUES + 1)
-    val sumR = FloatArray(HUES + 1)
-    val sumG = FloatArray(HUES + 1)
-    val sumB = FloatArray(HUES + 1)
+    val weight = FloatArray(HUES + 2)
+    val sumR = FloatArray(HUES + 2)
+    val sumG = FloatArray(HUES + 2)
+    val sumB = FloatArray(HUES + 2)
     var y = 0
     while (y < h) {
         bitmap.getPixels(row, 0, w, 0, y, w, 1)
@@ -203,11 +267,18 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
         while (x < w) {
             val px = row[x]
             ColorUtils.colorToHSL(px, hsl)
-            val extreme = hsl[2] < 0.06f || hsl[2] > 0.97f
-            val bucket =
-                if (extreme || hsl[1] < 0.10f) NEUTRAL
-                else (hsl[0] / (360f / HUES)).toInt().coerceIn(0, HUES - 1)
-            val wt = (0.25f + 0.75f * (hsl[1] / 0.25f).coerceAtMost(1f)) * (if (extreme) 0.4f else 1f)
+            // Dark and colourless - or so dark that any hue it has is noise - is black.
+            val black = hsl[2] < 0.06f || (hsl[2] < 0.18f && hsl[1] < 0.25f)
+            val bucket = when {
+                black -> DARK
+                hsl[2] > 0.97f || hsl[1] < 0.10f -> NEUTRAL
+                else -> (hsl[0] / (360f / HUES)).toInt().coerceIn(0, HUES - 1)
+            }
+            val wt = when (bucket) {
+                DARK -> 1f
+                NEUTRAL -> 0.25f * (if (hsl[2] > 0.97f) 0.4f else 1f)
+                else -> 0.25f + 0.75f * (hsl[1] / 0.25f).coerceAtMost(1f)
+            }
             weight[bucket] += wt
             sumR[bucket] += wt * ((px shr 16) and 0xFF)
             sumG[bucket] += wt * ((px shr 8) and 0xFF)

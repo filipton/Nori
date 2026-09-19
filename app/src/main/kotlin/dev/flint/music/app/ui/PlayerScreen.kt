@@ -428,23 +428,6 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     OutputButton()
                     PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { choose(Panel.QUEUE) }
                 }
-                // Apple shows nothing of the kind anywhere. This audience wants it, so it stays - but at
-                // the very foot of the page and centred under everything else, a caption you read when
-                // you go looking for it rather than a label under the title.
-                state.current?.let { s ->
-                    val line = listOfNotNull(
-                        s.suffix.uppercase().ifEmpty { null },
-                        s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
-                        s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" },
-                    ).joinToString(" · ")
-                    Text(
-                        line, Modifier.fillMaxWidth().padding(horizontal = PLAYER_GUTTER).padding(top = 2.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = scheme.onSurface.copy(alpha = 0.38f),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
             }
@@ -576,11 +559,29 @@ private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, 
             )
             // The sleeve goes soft rather than stopping: its bottom third cross-fades into the same
             // cover, blurred, which the page behind it is already drawing at the same scale.
-            if (palette != null) Box(
-                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.19f) },
+            // With the cover's colours off there is no wash to melt into, but the sleeve still must not
+            // stop dead: it goes soft into the plain page instead - black, on an AMOLED phone.
+            val page = MaterialTheme.colorScheme.background
+            Box(
+                Modifier.fillMaxSize().drawBehind {
+                    if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
+                },
             )
         }
     }
+}
+
+/** The sleeve's bottom going soft into a flat page, for when there are no cover colours to melt into. */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSleeveFade(page: Color, fraction: Float) {
+    val top = size.height * (1f - fraction)
+    drawRect(
+        Brush.verticalGradient(
+            // Eased like the melt: most of the change early, then a long quiet tail into the page.
+            0f to page.copy(alpha = 0f), 0.35f to page.copy(alpha = 0.55f), 0.7f to page.copy(alpha = 0.88f), 1f to page,
+            startY = top, endY = size.height,
+        ),
+        topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+    )
 }
 
 /**
@@ -690,13 +691,14 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
         // inside the square, it travelled and grew with it, and near the end there were two of them in
         // two different places: this one and the page's own, which is drawn to the sleeve's geometry.
         // It fades in over the last stretch, once the square is nearly the size of the sleeve.
-        if (palette != null) Box(
+        val page = MaterialTheme.colorScheme.background
+        Box(
             Modifier.align(Alignment.TopStart).requiredSize(with(density) { w.toDp() }, side)
                 .graphicsLayer {
                     val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
                     alpha = e * e * (3f - 2f * e)
                 }
-                .drawBehind { drawSleeveMelt(palette, 0.19f) },
+                .drawBehind { if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f) },
         )
     }
 }

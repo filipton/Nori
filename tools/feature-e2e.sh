@@ -106,7 +106,7 @@ for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[])
 import sys,json
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
 ok=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
-print('$a' if ok else '')"; done | grep . | head -4 | tr '\n' ' ')
+print('$a' if ok else '')"; done | grep . | head -12 | tr '\n' ' ')
 if [ -n "$aid" ]; then
   before=$(field downloaded)
   # An album this suite has already downloaded has nothing left to fetch and would report nothing

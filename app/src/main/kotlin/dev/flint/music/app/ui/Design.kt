@@ -280,7 +280,9 @@ fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
         )
         return
     }
-    val steps = 28
+    // Fine enough that each slice is a few pixels: with fewer, each one was a band of its own alpha
+    // and its own texture rows, and the melt came down the sleeve in visible steps.
+    val steps = 72
     val band = (size.height - top) / steps
     val w = size.width.toInt().coerceAtLeast(1)
     val last = size.height.toInt()
@@ -341,8 +343,8 @@ fun DrawScope.drawPageWash(palette: PagePalette, endY: Float, seam: Boolean = tr
     )
 }
 
-/** Matches `CoverColors.WASH`: the wash texture is this many pixels a side. */
-private const val WASH_ROWS = 32
+/** Matches `CoverColors.WASH_OUT`: the wash texture is this many pixels a side. */
+private const val WASH_ROWS = 128
 /** Where the seam stops being opaque: the player's artwork covers everything above this. */
 private const val SEAM_OPAQUE = 0.42f
 private const val SEAM_END = 0.68f
