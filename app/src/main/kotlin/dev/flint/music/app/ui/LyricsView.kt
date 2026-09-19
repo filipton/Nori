@@ -155,40 +155,20 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         // worth of words is not a transition, it is a wait.
         val plain = reduceMotion()
         val motion = appMotion()
-        // How far through the change from `was` to `active` the lines are: 0 is the old line lit, 1 the
-        // new one. Read in the draw phase (graphicsLayer alpha below), so a change redraws the few lines
-        // on screen and recomposes none of them.
-        val glide = remember(lyrics) { Animatable(1f) }
-        // The drawing follows `was` and `lit`, never `active` directly. `active` changes a frame before
-        // this effect gets to run, and a line drawn from it lit up fully for that one frame, then went
-        // back to the old line when the glide reset, then lit up again - a flash before every change.
-        var was by remember(lyrics) { mutableIntStateOf(active) }
-        var lit by remember(lyrics) { mutableIntStateOf(active) }
+        // Only the scroll lives here; each line's brightness is its own (below). A scroll cut short by the
+        // next line is simply continued from wherever the list is, so it cannot jump either.
         LaunchedEffect(active, plain) {
             if (active < 0) return@LaunchedEffect
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
-            if (plain || here == null) {
-                list.scrollToItem(active, -third); glide.snapTo(1f); was = active; lit = active
-                return@LaunchedEffect
-            }
+            if (plain || here == null) { list.scrollToItem(active, -third); return@LaunchedEffect }
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
             val distance = (here.offset - third).toFloat()
-            // Reset first, then name the new line: in the other order a frame could draw the new line at
-            // the end of a glide that has not started.
-            glide.snapTo(0f)
-            was = lit
-            lit = active
+            if (kotlin.math.abs(distance) < 1f) return@LaunchedEffect
             // Under the app's own motion scale: with Android's animations off, Compose would otherwise
-            // finish both of these on the first frame, which is exactly the jump this is here to prevent.
+            // finish this on the first frame, which is exactly the jump it is here to prevent.
             withContext(motion) {
-                coroutineScope {
-                    launch { glide.animateTo(1f, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase)) }
-                    if (kotlin.math.abs(distance) >= 1f) {
-                        list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
-                    }
-                }
+                list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
             }
-            was = active
         }
         // The words fade out towards both ends of the panel by becoming transparent, not by having a
         // colour painted over them. The page behind is the cover's blur and varies across the width;
@@ -215,25 +195,35 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
                 Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)) }.padding(vertical = 8.dp)) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
+                    // Every line owns its brightness and always moves it *from wherever it is now*
+                    // towards what it should be. An earlier version drove all lines from one shared
+                    // old-line/new-line blend, and when the next line arrived before a blend had
+                    // finished it restarted from a line two changes back - one frame of the wrong
+                    // line fully lit. Nothing here can jump: a change mid-way just turns it round.
+                    val target = if (!lyrics.synced || i == active) 1f else if (i < active) PAST_LINE else NEXT_LINE
+                    val strength = remember { Animatable(target) }
+                    LaunchedEffect(target, plain) {
+                        if (plain) strength.snapTo(target)
+                        else withContext(motion) {
+                            strength.animateTo(target, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
+                        }
+                    }
                     when {
                         !lyrics.synced -> Text(line.text, style = style, color = bright)
                         i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { now }
                         else -> {
-                            // The line lights up over the same moment the list moves, instead of flicking
-                            // between two colours - "the song moved on" rather than "the screen blinked".
-                            // Every state is the same colour at a different strength, so this is one alpha,
-                            // blended in the draw phase from the old line's state to the new one's.
-                            fun strength(lit: Int) = if (i == lit) 1f else if (i < lit) 0.35f * 0.55f else 0.35f
                             Text(
                                 line.text, style = style.copy(fontWeight = weight), color = bright,
-                                modifier = Modifier.graphicsLayer {
-                                    val from = strength(was); val to = strength(lit)
-                                    alpha = from + (to - from) * glide.value
-                                },
+                                // Read in the draw phase: a fading line redraws, it does not recompose.
+                                modifier = Modifier.graphicsLayer { alpha = strength.value },
                             )
                         }
                     }
-                    if (prefs.lyricsTranslation) line.translation?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = if (i == active) bright.copy(alpha = 0.8f) else dim) }
+                    // The translation follows its line's fade rather than switching on the moment the line
+                    // is reached - otherwise it lit up a frame ahead of the words above it.
+                    if (prefs.lyricsTranslation) line.translation?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = bright.copy(alpha = 0.8f), modifier = Modifier.graphicsLayer { alpha = strength.value })
+                    }
                 }
             }
         }
@@ -328,3 +318,7 @@ private const val LYRIC_GLIDE_MS = 620
 
 /** Ease in and out, soft at both ends, the curve iOS uses for its own scrolling transitions. */
 private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
+
+/** How lit a line is once it has been sung, and before it is reached. */
+private const val PAST_LINE = 0.35f * 0.55f
+private const val NEXT_LINE = 0.35f

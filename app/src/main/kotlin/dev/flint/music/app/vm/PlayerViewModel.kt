@@ -83,8 +83,18 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
             context, receiver, android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
         )
-        awaitClose { context.unregisterReceiver(receiver) }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(1_000), 0f)
+        // That broadcast is not public API, and a hardened or future Android may stop delivering it. The
+        // system also writes every volume to its settings store half a second or so later, which any app
+        // may watch; so if the broadcast never comes, the slider is late rather than frozen.
+        val observer = object : android.database.ContentObserver(android.os.Handler(android.os.Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) { trySend(volumeFraction()) }
+        }
+        context.contentResolver.registerContentObserver(android.provider.Settings.System.CONTENT_URI, true, observer)
+        awaitClose {
+            context.unregisterReceiver(receiver)
+            context.contentResolver.unregisterContentObserver(observer)
+        }
+    }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.WhileSubscribed(1_000), volumeFraction())
 
     fun volumeFraction(): Float {
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).takeIf { it > 0 } ?: return 0f
@@ -92,6 +102,7 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     }
     fun setVolumeFraction(f: Float) {
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).takeIf { it > 0 } ?: return
-        audio.setStreamVolume(AudioManager.STREAM_MUSIC, (f.coerceIn(0f, 1f) * max).toInt().coerceIn(0, max), 0)
+        // Nearest step, not the one below: truncating made the bar jump back a notch every time it was let go.
+        audio.setStreamVolume(AudioManager.STREAM_MUSIC, kotlin.math.round(f.coerceIn(0f, 1f) * max).toInt().coerceIn(0, max), 0)
     }
 }
