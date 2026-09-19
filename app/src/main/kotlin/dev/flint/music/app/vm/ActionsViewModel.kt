@@ -198,7 +198,6 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     fun star(song: Song, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.SONG, song.id, on) }
     fun starAlbum(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ALBUM, id, on) }
     fun starArtist(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { flint.library.star(StarKind.ARTIST, id, on) }
-    fun rate(song: Song, rating: Int) = attempt("Rated") { flint.library.rate(song.id, rating) }
 
     private val _shares = Channel<String>(Channel.BUFFERED)
     /** Links ready to hand to the system share sheet. */

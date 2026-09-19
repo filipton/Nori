@@ -136,7 +136,7 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
     val nav = LocalNav.current
     Column {
         SortMenu(
-            listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.HIGHEST to "Rating", AlbumSort.RANDOM to "Random"),
+            listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.RANDOM to "Random"),
             sort, vm::setSort,
         )
         // Ask for the covers just past the fold while the ones on screen are still arriving.

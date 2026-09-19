@@ -174,7 +174,7 @@ class GenreViewModel(app: Application) : DetailViewModel<List<Song>>(app) {
 
 enum class SongSort(val key: String, val label: String, val descending: Boolean = false) {
     TITLE("title", "Title"), ARTIST("artist", "Artist"), ALBUM("album", "Album"), YEAR("year", "Year", true),
-    ADDED("created", "Added", true), PLAYS("playCount", "Most played", true), RATING("userRating", "Rating", true), LONGEST("duration", "Longest", true),
+    ADDED("created", "Added", true), PLAYS("playCount", "Most played", true), LONGEST("duration", "Longest", true),
 }
 
 /** Every song of the offline index, a page at a time. Nothing here touches the network. */

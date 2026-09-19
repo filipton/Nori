@@ -9,9 +9,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -75,11 +73,6 @@ fun SongMenu(
                     if (song.suffix.isNotEmpty()) Caption(
                         listOfNotNull(song.suffix.uppercase(), song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }).joinToString(" · "),
                     )
-                }
-            }
-            Row(Modifier.padding(horizontal = 14.dp)) {
-                for (n in 1..5) IconButton({ actions.rate(song, if (song.userRating.toInt() == n) 0 else n); onDismiss() }) {
-                    Icon(if (n <= song.userRating.toInt()) Icons.Filled.Star else Icons.Filled.StarBorder, "Rate $n")
                 }
             }
             Hairline(startIndent = Space.gutter)

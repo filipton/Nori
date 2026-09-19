@@ -75,7 +75,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Browse by year / decade | x | | | yes | done |
 | Browse by folder (getIndexes / getMusicDirectory) | x | | | yes | done |
 | Album sorts: name, artist, added, played, most played, starred | x | x | x | yes | |
-| More sorts: year, rating, random, release date; asc/desc | x | | x | yes | done |
+| More sorts: year, random, release date; asc/desc | x | | x | yes | done |
 | Sort + view remembered per list | x | | x | part | part: sort |
 | Grid / list toggle, grid size | x | x | x | | add (UI-light) |
 | Filters: starred only, downloaded only, quick text filter | x | x | x | part | part: artists, songs, album/playlist tracks |
@@ -281,8 +281,8 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 | Feature | S | M | N | flint | Plan |
 |---|---|---|---|---|---|
-| Star songs/albums/artists, 1-5 ratings | x | x | x | yes | |
-| Rate albums and artists; rating on the player screen | x | x | x | songs only | add |
+| Star songs/albums/artists | x | x | x | yes | |
+| 1-5 star ratings | x | x | x | no | dropped: nobody used them, favourites cover it |
 | Scrobble + now playing, threshold %, offline queue | x | x | x | yes | |
 | Minimum duration to scrobble | | | x | 10 s fixed | add |
 | OpenSubsonic playbackReport | x | | | | add (octo-fiesta handles it) |

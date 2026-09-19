@@ -33,7 +33,7 @@ import kotlinx.coroutines.withContext
 
 enum class AlbumSort(val api: String) {
     NEWEST("newest"), RECENT("recent"), FREQUENT("frequent"), RANDOM("random"),
-    BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"), HIGHEST("highest"), BY_YEAR("byYear"),
+    BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"), BY_YEAR("byYear"),
 }
 
 enum class Mix(val title: String) {
@@ -265,7 +265,7 @@ class Library(
     // ---- writes; each drops the cached reads it makes stale ----
 
     /**
-     * A write that cannot reach the server is kept and replayed later, in order, so stars, ratings,
+     * A write that cannot reach the server is kept and replayed later, in order, so stars,
      * playlist edits and plays made offline are not lost. The UI is told it worked either way.
      */
     private suspend fun write(endpoint: String, params: List<Param>, vararg stale: String) = withContext(Dispatchers.IO) {
@@ -312,7 +312,6 @@ class Library(
         _starsVersion.update { it + 1 }
     }
 
-    suspend fun rate(id: String, rating: Int) = write("setRating", params("id" to id, "rating" to rating), "getAlbum", "getPlaylist")
 
     suspend fun createPlaylist(name: String, songIds: List<String>) =
         write("createPlaylist", params("name" to name) + songIds.map { Param("songId", it) }, "getPlaylist")
