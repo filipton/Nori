@@ -18,9 +18,25 @@ class Outputs(context: Context) {
     private val audio = context.getSystemService(AudioManager::class.java)
     private val _current = MutableStateFlow(SPEAKER)
     val current: StateFlow<String> = _current
-    /** Every output seen so far, so settings can offer them even when unplugged. */
-    private val _known = MutableStateFlow(listOf(SPEAKER))
-    val known: StateFlow<List<String>> = _known
+    /**
+     * Every output ever seen, so a device can be given its own sound while it is unplugged. Kept across
+     * restarts (a DAC set up last week has to still be in the list); read on first use, not at startup.
+     */
+    private val store = lazy { context.getSharedPreferences("flint-outputs", Context.MODE_PRIVATE) }
+    private val _known by lazy { MutableStateFlow((store.value.getStringSet("known", null).orEmpty() + SPEAKER).sorted()) }
+    val known: StateFlow<List<String>> get() = _known
+
+    /** Drops a device from [known]; it comes back by itself the next time it is connected. */
+    fun forget(output: String) {
+        if (output == SPEAKER || output == _current.value) return
+        remember(_known.value - output)
+    }
+
+    private fun remember(list: List<String>) {
+        if (list == _known.value) return
+        _known.value = list
+        store.value.edit().putStringSet("known", list.toSet()).apply()
+    }
 
     /**
      * A USB audio device is attached. Audio offload targets the phone's own DSP: with the stream handed
@@ -39,6 +55,9 @@ class Outputs(context: Context) {
         // registerAudioDeviceCallback reports every device already attached, so this also fills the
         // initial state: a DAC plugged in before the service started would otherwise go unnoticed.
         audio.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
+        // That report arrives a moment later. Until then [current] would say "speaker" with a DAC plugged
+        // in, and whatever follows the output would switch the sound away and straight back.
+        refresh()
     }
 
     /**
@@ -61,7 +80,7 @@ class Outputs(context: Context) {
         val fake = override?.let { "USB: $it" }
         val active = fake ?: devices.minByOrNull { rank(it.type) }?.let(::key) ?: SPEAKER
         _current.value = active
-        _known.value = (_known.value + devices.map(::key) + SPEAKER + listOfNotNull(fake)).distinct().sorted()
+        remember((_known.value + devices.filter { rank(it.type) < 8 }.map(::key) + SPEAKER + listOfNotNull(fake)).distinct().sorted())
         _usb.value = fake != null ||
             devices.any { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY }
     }

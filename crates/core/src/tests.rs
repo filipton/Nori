@@ -68,6 +68,23 @@ fn synced_lyrics_preferred() {
 }
 
 #[test]
+fn a_device_is_bound_to_one_profile() {
+    let core = Core::new(String::new()).unwrap();
+    let p = |name: &str, outputs: &[&str]| SoundProfile { name: name.into(), json: "{}".into(), outputs: outputs.iter().map(|s| s.to_string()).collect() };
+    core.profile_save(p("IEM", &["USB: DAC", "Wired headphones"])).unwrap();
+    core.profile_save(p("Flat", &[])).unwrap();
+    core.profile_bind("USB: DAC".into(), Some("Flat".into())).unwrap();
+    assert_eq!(core.profile_for_output("USB: DAC".into()).unwrap().unwrap().name, "Flat");
+    assert_eq!(core.profile_for_output("Wired headphones".into()).unwrap().unwrap().name, "IEM", "other devices keep theirs");
+    core.profile_bind("USB: DAC".into(), None).unwrap();
+    assert_eq!(core.profile_for_output("USB: DAC".into()).unwrap(), None);
+    core.profile_bind("USB: DAC".into(), Some("IEM".into())).unwrap();
+    core.profile_bind("USB: DAC".into(), Some("IEM".into())).unwrap();
+    let iem = core.profiles().unwrap().into_iter().find(|p| p.name == "IEM").unwrap();
+    assert_eq!(iem.outputs, vec!["Wired headphones".to_string(), "USB: DAC".to_string()], "bound once, not twice");
+}
+
+#[test]
 fn autoeq_preset_is_read() {
     let p = parse_eq_preset("Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\nFilter 2: OFF PK Fc 500 Hz Gain 2 dB Q 1\nFilter 3: ON HSC Fc 10000 Hz Gain 4.0 dB Q 0.7\nnonsense".into());
     assert_eq!(p.preamp_db, -6.2);

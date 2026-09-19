@@ -178,6 +178,11 @@ data class Prefs(
     val thirdPartyLookups: Boolean = false,
     /** Apply the profile bound to an output device when that device becomes the active one. */
     val profilePerOutput: Boolean = true,
+    /**
+     * Headphones connected with nothing chosen for them and a matching AutoEQ curve: use that curve and
+     * remember it for the device, instead of asking first. Off asks. Fetches one small preset per new device.
+     */
+    val autoEqAuto: Boolean = false,
     /** "Shuffle" spreads artists and albums apart instead of being purely random. */
     val weightedShuffle: Boolean = true,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
@@ -347,7 +352,7 @@ class Settings(context: Context) {
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
-            profilePerOutput = sp.getBoolean("profilePerOutput", true),
+            profilePerOutput = sp.getBoolean("profilePerOutput", true), autoEqAuto = sp.getBoolean("autoEqAuto", false),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
             lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1), lyricsLrclib = sp.getBoolean("lyricsLrclib", true),
             theme = ThemeMode.entries.getOrElse(sp.getInt("theme", 0)) { ThemeMode.SYSTEM }, amoled = sp.getBoolean("amoled", false),
@@ -384,7 +389,7 @@ class Settings(context: Context) {
         putBoolean("autoMixFilters", p.autoMixFilters); putBoolean("autoMixKeepPitch", p.autoMixKeepPitch)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
-        putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
+        putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("autoEqAuto", p.autoEqAuto); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
         putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent); putBoolean("coverColors", p.coverColors); putBoolean("reduceMotion", p.reduceMotion); putBoolean("ignoreSystemMotion", p.ignoreSystemMotion); putFloat("uiScale", p.uiScale); putBoolean("playerColours", p.playerColours)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)

@@ -205,5 +205,51 @@ check "a DAC this app cannot feed says why" test -n "$(field dacBlocked)"
 check "and is not claimed to be bit-perfect" test "$(field bitPerfect)" = "False"
 "$app" do "dac off" >/dev/null; "$app" set bitPerfect false >/dev/null
 
+echo "-- a sound per output device"
+# The service switches the sound when the output changes, with no screen involved. A fake DAC stands in
+# for the device; "eq" in the state is the equalizer switch, which each device's sound sets.
+dev="USB: Flint Check DAC"; hp="USB: Sennheiser HD 600"
+clean() {
+  "$app" do "dac off" >/dev/null; sleep 2; "$app" set autoEqAuto false >/dev/null
+  for p in "flint check" "Flat" "Sennheiser HD 600"; do "$app" set deleteProfile "$p" >/dev/null; done
+  "$app" set forgetDevice "$dev" >/dev/null; "$app" set forgetDevice "$hp" >/dev/null
+}
+clean   # a run that stopped half-way must not decide this one
+"$app" set autoEqAuto false >/dev/null; "$app" do "dac off" >/dev/null; "$app" set eq false >/dev/null
+"$app" play "search:creep" >/dev/null; sleep 6
+"$app" set eq true >/dev/null; "$app" set saveProfile "flint check" >/dev/null; sleep 2; "$app" set eq false >/dev/null
+"$app" set deviceSound "$dev=profile:flint check" >/dev/null; sleep 2
+"$app" do "dac Flint Check DAC@44100/16" >/dev/null; sleep 3
+check "a device with a profile gets it on connect" test "$(field output)/$(field eq)" = "$dev/True"
+"$app" do "dac off" >/dev/null; sleep 3
+check "and the sound from before comes back without it" test "$(field eq)" = "False"
+"$app" set eq true >/dev/null; "$app" set deviceSound "$dev=flat" >/dev/null; sleep 2
+"$app" do "dac Flint Check DAC@44100/16" >/dev/null; sleep 3
+check "a device set to flat turns the equalizer off" test "$(field eq)" = "False"
+"$app" do "dac off" >/dev/null; sleep 3
+check "and it is on again on the speaker" test "$(field eq)" = "True"
+"$app" set eq false >/dev/null
+# AutoEQ: the index is one download from github.com; without it there is nothing to match against.
+"$app" set autoEqIndex 1 >/dev/null; sleep 12
+adb logcat -c; "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 4
+if adb logcat -d -s flint:I | grep -q "device sound: $hp -> nothing chosen"; then
+  check "asking first leaves the sound alone" test "$(field eq)" = "False"
+  "$app" set eqNotice apply >/dev/null; sleep 4
+  check "saying yes applies the headphones' curve" test "$(field eq)" = "True"
+  "$app" do "dac off" >/dev/null; sleep 3
+  "$app" set deviceSound "$hp=auto" >/dev/null; "$app" set deleteProfile "Sennheiser HD 600" >/dev/null; sleep 2
+  "$app" set autoEqAuto true >/dev/null; "$app" set eq false >/dev/null
+  "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 5
+  check "with automatic AutoEQ on, the curve is applied without asking" test "$(field eq)" = "True"
+  "$app" set eqNotice undo >/dev/null; sleep 3
+  check "undo puts the sound back" test "$(field eq)" = "False"
+  "$app" do "dac off" >/dev/null; sleep 2; "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 4
+  check "and that device is not switched again" test "$(field eq)" = "False"
+else
+  echo "     (AutoEQ index not available, curve checks skipped)"
+fi
+# Tidy up: nothing of the check stays in the device list or the profiles.
+clean
+
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

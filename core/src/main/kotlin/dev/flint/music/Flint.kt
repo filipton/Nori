@@ -52,6 +52,8 @@ class Flint private constructor(private val context: Context) {
     val downloads = Downloads(context, ::core, lazySources, settings)
     val dac = BitPerfect(context)
     val outputs = Outputs(context)
+    /** Each output device's own sound; built when the playback service first sees a device. */
+    val deviceSound by lazy { dev.flint.music.playback.DeviceSound(context, settings, { core }, { http }) }
     val player = PlayerConnection(context, this)
 
     /** True while requests go to the profile's second address; stream quality is capped then. */

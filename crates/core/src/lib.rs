@@ -640,6 +640,12 @@ impl Core {
         Ok(autoeq::search(&self.db.lock(), &query, limit)?)
     }
 
+    /// The curves measured for the headphones behind an output device's own name (a Bluetooth name, a USB
+    /// product name), best first; empty when the name says nothing or the index is not downloaded.
+    pub fn autoeq_for_device(&self, device: String, limit: u32) -> Result<Vec<AutoEqEntry>> {
+        Ok(autoeq::matching(&self.db.lock(), &device, limit)?)
+    }
+
     pub fn autoeq_count(&self) -> Result<u32> {
         Ok(autoeq::count(&self.db.lock())?)
     }
@@ -672,6 +678,30 @@ impl Core {
 
     pub fn profile_delete(&self, name: String) -> Result<()> {
         self.db.lock().execute("DELETE FROM profiles WHERE name=?1", [name])?;
+        Ok(())
+    }
+
+    /// Binds [output] to the profile [name] and to no other; None leaves it bound to nothing. One device has
+    /// one sound, whichever side of the settings it was chosen from.
+    pub fn profile_bind(&self, output: String, name: Option<String>) -> Result<()> {
+        let mut c = self.db.lock();
+        let tx = c.transaction()?;
+        let rows: Vec<(String, String)> = {
+            let mut st = tx.prepare("SELECT name, outputs FROM profiles")?;
+            let r = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            r
+        };
+        for (profile, outputs) in rows {
+            let mut list: Vec<&str> = outputs.lines().filter(|l| !l.is_empty() && *l != output).collect();
+            if name.as_deref() == Some(profile.as_str()) {
+                list.push(&output);
+            }
+            let joined = list.join("\n");
+            if joined != outputs {
+                tx.execute("UPDATE profiles SET outputs=?1 WHERE name=?2", params![joined, profile])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
