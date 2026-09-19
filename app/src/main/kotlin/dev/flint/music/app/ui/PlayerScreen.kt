@@ -519,15 +519,21 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
 @Composable
 private fun VolumeRow(vm: PlayerViewModel) {
     val scheme = MaterialTheme.colorScheme
-    var level by remember { mutableFloatStateOf(vm.volumeFraction()) }
+    // Pushed by the system the moment it changes - no polling, nothing ticking while the screen is open.
+    val system by vm.volume.collectAsStateWithLifecycle()
     var dragging by remember { mutableStateOf(false) }
-    var resumed by remember { mutableStateOf(false) }
-    LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    LaunchedEffect(resumed) {
-        while (resumed && isActive) {
-            if (!dragging) level = vm.volumeFraction()
-            delay(1000)
-        }
+    var level by remember { mutableFloatStateOf(vm.volumeFraction()) }
+    // What is drawn. A change from outside - the volume keys, another app - eases over, under the app's
+    // own motion so it still eases with Android's animations off; a drag is followed exactly.
+    val shown = remember { androidx.compose.animation.core.Animatable(level) }
+    val motion = appMotion()
+    val plain = reduceMotion()
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(system, dragging) {
+        if (dragging) return@LaunchedEffect
+        level = system
+        if (plain) shown.snapTo(system)
+        else kotlinx.coroutines.withContext(motion) { shown.animateTo(system, androidx.compose.animation.core.tween(180)) }
     }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 52.dp, vertical = 2.dp),
@@ -539,12 +545,8 @@ private fun VolumeRow(vm: PlayerViewModel) {
         val pick: (Float, Float) -> Unit = { x, w ->
             val f = (x / w).coerceIn(0f, 1f)
             level = f; vm.setVolumeFraction(f)
+            scope.launch { shown.snapTo(f) }
         }
-        // A change from outside - the volume keys, another app - eases over, instead of the bar jumping
-        // when the once-a-second read picks it up. A drag is followed exactly: the finger is the source.
-        val shown by androidx.compose.animation.core.animateFloatAsState(
-            level, androidx.compose.animation.core.tween(if (dragging || reduceMotion()) 0 else 260), label = "volume",
-        )
         Box(
             Modifier.weight(1f).height(34.dp)
                 .pointerInput(Unit) {
@@ -560,10 +562,10 @@ private fun VolumeRow(vm: PlayerViewModel) {
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
-                    drawRoundRect(filled, Offset(0f, y), Size(size.width * shown, h), r)
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * shown.value, h), r)
                     // No knob unless a finger is on it: Apple's volume slider is a filled bar and
                     // nothing else, and a permanent white circle is the most Material thing on the screen.
-                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * shown, size.height / 2f))
+                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * shown.value, size.height / 2f))
                 },
         )
         Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)

@@ -159,17 +159,25 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         // new one. Read in the draw phase (graphicsLayer alpha below), so a change redraws the few lines
         // on screen and recomposes none of them.
         val glide = remember(lyrics) { Animatable(1f) }
+        // The drawing follows `was` and `lit`, never `active` directly. `active` changes a frame before
+        // this effect gets to run, and a line drawn from it lit up fully for that one frame, then went
+        // back to the old line when the glide reset, then lit up again - a flash before every change.
         var was by remember(lyrics) { mutableIntStateOf(active) }
+        var lit by remember(lyrics) { mutableIntStateOf(active) }
         LaunchedEffect(active, plain) {
             if (active < 0) return@LaunchedEffect
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
             if (plain || here == null) {
-                list.scrollToItem(active, -third); was = active; glide.snapTo(1f)
+                list.scrollToItem(active, -third); glide.snapTo(1f); was = active; lit = active
                 return@LaunchedEffect
             }
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
             val distance = (here.offset - third).toFloat()
+            // Reset first, then name the new line: in the other order a frame could draw the new line at
+            // the end of a glide that has not started.
             glide.snapTo(0f)
+            was = lit
+            lit = active
             // Under the app's own motion scale: with Android's animations off, Compose would otherwise
             // finish both of these on the first frame, which is exactly the jump this is here to prevent.
             withContext(motion) {
@@ -219,7 +227,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                             Text(
                                 line.text, style = style.copy(fontWeight = weight), color = bright,
                                 modifier = Modifier.graphicsLayer {
-                                    val from = strength(was); val to = strength(active)
+                                    val from = strength(was); val to = strength(lit)
                                     alpha = from + (to - from) * glide.value
                                 },
                             )

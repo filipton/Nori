@@ -7,6 +7,7 @@ import dev.flint.music.data.FoundLyrics
 import dev.flint.music.data.LyricsSource
 import dev.flint.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
@@ -62,6 +63,29 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
      * move it under us) and written without flags, so dragging it never pops a system UI over the art.
      */
     private val audio = app.getSystemService(AudioManager::class.java)
+    /**
+     * The music stream's volume, pushed the moment it changes. It used to be read once a second by the
+     * player screen, so a press of the volume keys took up to a second to show on the slider, and the
+     * screen ticked for as long as it was open. Android announces every change with a broadcast - the
+     * one ExoPlayer's own volume tracking listens to - and this listens only while the screen collects
+     * it: nothing registered, and nothing running, once the player is closed.
+     */
+    val volume: StateFlow<Float> = kotlinx.coroutines.flow.callbackFlow {
+        val context = getApplication<Application>()
+        trySend(volumeFraction())
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(c: android.content.Context, intent: android.content.Intent) {
+                val stream = intent.getIntExtra("android.media.EXTRA_VOLUME_STREAM_TYPE", AudioManager.STREAM_MUSIC)
+                if (stream == AudioManager.STREAM_MUSIC) trySend(volumeFraction())
+            }
+        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            context, receiver, android.content.IntentFilter("android.media.VOLUME_CHANGED_ACTION"),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        awaitClose { context.unregisterReceiver(receiver) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(1_000), 0f)
+
     fun volumeFraction(): Float {
         val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).takeIf { it > 0 } ?: return 0f
         return audio.getStreamVolume(AudioManager.STREAM_MUSIC) / max.toFloat()
