@@ -12,6 +12,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The record landed off centre from a button.** `land` measured the gap between records from the
+  lift the record *had*, and a button press starts the lift in a coroutine of its own and comes
+  straight on, so the lift had not begun: the record was sent a full unlifted span, shrank on the way
+  and arrived about a fifth of the screen too far over - its edge in the middle instead of its
+  middle. It measures the lift it is going to have instead. A swipe was right all along only because
+  the lift had already started under the finger. Checked on the emulator: `incomingX=0` exactly, for
+  next, for previous and for a swipe.
 - **The record change, second pass.** Four things the owner saw on a real phone, all in
   SleeveCarousel. The record overshot the middle on a button press: the lift sprang past its mark
   (damping 0.9), and since the gap the arriving record waits in is measured from the lift, a lift

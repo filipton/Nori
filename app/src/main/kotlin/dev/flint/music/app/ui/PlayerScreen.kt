@@ -756,9 +756,16 @@ private fun SleeveCarousel(
             if (go < 0) onNextNow() else onPreviousNow()
             return
         }
-        // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
+        // Where the neighbour sits once the record is lifted, which is where it will be when it arrives.
         // A record is the whole square, as tall as the sleeve.
-        val span = heightPx * liftedScale(lift.targetValue, widthPx, heightPx) + gap
+        //
+        // The lift it is going to have, not the one it has: a button press starts the lift in a
+        // coroutine of its own and comes straight here, so the lift had not begun yet and the record
+        // was sent a full unlifted span - the gap between two records that have not shrunk. It shrank
+        // on the way, and arrived that much too far over, which is a record ending up with its edge in
+        // the middle of the screen instead of its middle. A swipe was right only because the lift had
+        // already started under the finger.
+        val span = heightPx * liftedScale(if (AppMotion.reduce) 0f else 1f, widthPx, heightPx) + gap
 
         /**
          * The record has arrived, wherever it got to: the song changes, and the picture that came in is
