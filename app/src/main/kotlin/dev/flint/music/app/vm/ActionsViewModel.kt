@@ -97,7 +97,7 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             "dac" -> {
                 val off = ref.isEmpty() || ref == "off"
                 flint.dac.testSource(if (off) null else dev.flint.music.playback.DacSource.mock(ref))
-                flint.outputs.testUsb(if (off) null else true)
+                flint.outputs.testUsb(if (off) null else ref.substringBefore('@').ifEmpty { "Mock DAC" })
             }
             "download" -> download(songs)
             "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }

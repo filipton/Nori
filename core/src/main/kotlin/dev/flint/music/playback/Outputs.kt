@@ -42,34 +42,41 @@ class Outputs(context: Context) {
     }
 
     /**
-     * Pretend a USB device is or is not attached, so the rules that hang off this flag (offload standing
-     * down, above all) can be checked without the hardware. Null hands it back to the audio system.
+     * Pretend a USB device of this name is attached, so everything that hangs off it - offload standing
+     * down, the player's output button, a sound profile bound to that output - can be checked without
+     * the hardware. Null hands it back to the audio system.
      */
-    fun testUsb(on: Boolean?) {
-        override = on
+    fun testUsb(name: String?) {
+        override = name
         refresh()
     }
 
-    private var override: Boolean? = null
+    private var override: String? = null
 
     fun stop() = audio.unregisterAudioDeviceCallback(callback)
 
     private fun refresh() {
         val devices = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         // Android routes media to the most recently attached of these, in this order of precedence.
-        val active = devices.minByOrNull { rank(it.type) }?.let(::key) ?: SPEAKER
+        val fake = override?.let { "USB: $it" }
+        val active = fake ?: devices.minByOrNull { rank(it.type) }?.let(::key) ?: SPEAKER
         _current.value = active
-        _known.value = (_known.value + devices.map(::key) + SPEAKER).distinct().sorted()
-        _usb.value = override
-            ?: devices.any { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY }
+        _known.value = (_known.value + devices.map(::key) + SPEAKER + listOfNotNull(fake)).distinct().sorted()
+        _usb.value = fake != null ||
+            devices.any { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY }
     }
 
+    // Lowest wins. Everything the framework lists that is not one of these - telephony, HDMI, a
+    // virtual sink - ranks *below* the built-in speaker rather than above it. It used to rank above,
+    // so a phone with a telephony output (which is every phone) reported that as where the music was
+    // going, and anything keyed on the current output believed it.
     private fun rank(type: Int) = when (type) {
         AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> 0
         AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> 1
         AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER -> 2
-        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> 9
-        else -> 5
+        AudioDeviceInfo.TYPE_DOCK, AudioDeviceInfo.TYPE_HDMI, AudioDeviceInfo.TYPE_AUX_LINE -> 3
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> 8
+        else -> 9
     }
 
     private fun key(d: AudioDeviceInfo): String = when (d.type) {

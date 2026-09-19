@@ -29,9 +29,16 @@ check "lyrics arrive for a well-known song" test "${lines:-0}" -gt 0
 check "sweeping only claimed for real word timing" bash -c '[ "$('"$app"' state | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get(\"lyricsWordTimed\",False) or not d.get(\"lyricsSynced\",False) or True)")" = "True" ]'
 
 echo "-- favourites, and does the server agree"
-id=$(api getRandomSongs "&size=1" | python3 -c "import sys,json;print(json.load(sys.stdin)['subsonic-response']['randomSongs']['song'][0]['id'])")
-title=$(api getSong "&id=$id" | python3 -c "import sys,json;print(json.load(sys.stdin)['subsonic-response']['song']['title'])")
-echo "     using: $title"
+# Long enough to still be playing when the offline check looks, twenty lines further down. A random
+# song can be a thirteen-second interlude, and then the track has legitimately finished by the time
+# that check samples it - which reads as "a downloaded song does not play offline" and is not that.
+pick=$(api getRandomSongs "&size=30" | python3 -c "
+import sys,json
+songs=json.load(sys.stdin)['subsonic-response']['randomSongs']['song']
+s=next((s for s in songs if s.get('duration',0) >= 90), songs[0])
+print(s['id'], s.get('duration',0), s['title'], sep='|')")
+id=${pick%%|*}; rest=${pick#*|}; secs=${rest%%|*}; title=${rest#*|}
+echo "     using: $title (${secs}s)"
 "$app" do "star song:$id" >/dev/null; sleep 5
 starred=$(api getStarred2 | python3 -c "
 import sys,json
