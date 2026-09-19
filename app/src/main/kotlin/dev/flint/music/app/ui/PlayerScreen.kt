@@ -173,34 +173,31 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 if (palette != null) drawRect(pageBrush(palette, size.height)) else drawRect(scheme.background)
             },
         ) {
-            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
-                // The handle: drag it down, or tap it, to put the player away.
-                Box(
-                    Modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = nav::back).padding(vertical = 10.dp),
-                    Alignment.Center,
-                ) {
-                    // Clickable inside the drag detector, not outside it, or the tap never arrives.
-                    Box(
-                        Modifier.clickable(onClick = nav::back).padding(8.dp),
-                    ) { Box(Modifier.width(38.dp).height(5.dp).background(scheme.onSurface.copy(alpha = 0.35f), CircleShape)) }
-                }
-
-                // The artwork bleeds to both screen edges like the sleeve it is; queue keeps the
-                // screen's side margin, lyrics lay out their own.
+            Column(Modifier.fillMaxSize().navigationBarsPadding()) {
+                // The artwork bleeds to all three edges like the sleeve it is - up under the status bar
+                // as well, which is the whole point: Apple's has no top edge, and giving it one drew a
+                // line across the screen. The handle and the close button float over it instead.
+                // Queue keeps the screen's side margin, lyrics lay out their own.
                 //
                 // The sleeve takes exactly its square and no more. Giving it the column's spare height
                 // instead left a band of empty wash under it twice as deep as Apple's, because the
                 // controls below are shorter than the space that was left over; the spare height now
                 // sits above the volume slider, which is where Apple's is.
-                if (panel == Panel.ART) Artwork(vm, coverUrl, palette)
-                else Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
-                    if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
+                if (panel == Panel.ART) Box(Modifier.fillMaxWidth()) {
+                    Artwork(vm, coverUrl, palette)
+                    Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), nav::back)
+                } else {
+                    Handle(Modifier.statusBarsPadding(), scheme.onSurface.copy(alpha = 0.35f), nav::back)
+                    Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
+                        if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
+                    }
                 }
 
-                // A quarter of the column's spare height under the sleeve and the rest above the volume
-                // slider: measured off Apple's own player, where the band under the artwork is about half
-                // the one over the volume row.
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.3f))
+                // The column's spare height, split the way Apple's screen splits it: a band under the
+                // sleeve, a deeper one over the volume slider, and a third under the bottom row - their
+                // icons sit well clear of the home indicator rather than against it. Measured off
+                // `w4`: 7 % of the screen under the artwork, 10 % above the volume, 11 % below the icons.
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.30f))
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
                 if (panel != Panel.LYRICS) Row(
@@ -251,7 +248,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 SeekBar(vm, state.playing, state.durationMs)
 
                 // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
-                Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
+                // Apple leaves a clear gap between the times and these, rather than letting them follow on.
+                Row(Modifier.fillMaxWidth().padding(top = 12.dp), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
                     IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(42.dp)) }
                     IconButton(vm::toggle, Modifier.size(72.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -265,7 +263,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(42.dp)) }
                 }
 
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.7f))
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.50f))
                 VolumeRow(vm)
 
                 Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 14.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
@@ -281,10 +279,28 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                     PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { panel = if (panel == Panel.QUEUE) Panel.ART else Panel.QUEUE }
                 }
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.20f))
             }
-            IconButton(nav::back, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
+            if (panel == Panel.ART) ScrimIconButton(
+                Icons.Filled.KeyboardArrowDown, "Close", nav::back,
+                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 6.dp),
+            ) else IconButton(nav::back, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
                 Icon(Icons.Filled.KeyboardArrowDown, "Close", Modifier.size(26.dp))
             }
+        }
+    }
+}
+
+/** Drag it down, or tap it, to put the player away. */
+@Composable
+private fun Handle(modifier: Modifier, colour: Color, onBack: () -> Unit) {
+    Box(
+        modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = onBack).padding(vertical = 10.dp),
+        Alignment.Center,
+    ) {
+        // Clickable inside the drag detector, not outside it, or the tap never arrives.
+        Box(Modifier.clickable(onClick = onBack).padding(8.dp)) {
+            Box(Modifier.width(38.dp).height(5.dp).background(colour, CircleShape))
         }
     }
 }
@@ -302,6 +318,12 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
                 .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
         ) {
             Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp)
+            // Just enough shade under the status bar for its icons to read on a pale cover; the same
+            // amount the album page uses, and invisible against anything darker.
+            Box(
+                Modifier.fillMaxWidth().fillMaxHeight(0.16f)
+                    .background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent)),
+            )
             if (palette != null) {
                 val melt = blend(palette.edge, palette.background, 0.9f)
                 Box(

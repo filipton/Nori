@@ -19,10 +19,14 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   through the queue. Bit-perfect also read the wrong format — the *decoder's* input rather than what
   the sink writes — so no mode ever matched; it is now applied from the audio track provider, which
   is the last moment the framework still reads preferred mixer attributes.
-- **The player against Apple's.** Full-bleed square artwork, three plain transport glyphs (double
-  triangles, as Apple draws them), a volume slider with no knob, a favourite and a ⋯ on the title
-  row, and the column's spare height split the way Apple's is — a quarter under the sleeve, the rest
-  above the volume row.
+- **The player against Apple's.** The sleeve runs to all three edges — **including up under the
+  status bar**, which is the point: Apple's artwork has no top edge, and stopping ours below the
+  handle drew a line across the screen. The handle and the close button float over it, with the same
+  shade under the status bar the album page uses. Three plain transport glyphs (double triangles, as
+  Apple draws them), a volume slider with no knob, a favourite and a ⋯ on the title row, and the
+  column's spare height split three ways as Apple's is: about 7 % of the screen under the sleeve,
+  10 % over the volume slider, 11 % under the bottom icons. Every row of the control stack now lands
+  within a percent or two of `w4`; measure a change against `/tmp/crops/w4_screen.png` the same way.
 - **The lyrics view.** One title block, not two: the artwork shrinks to a thumbnail in a header row
   and the words take the whole middle of the screen.
 - **The album page.** Sentence case under the title, as Apple writes it, and a track by the album's
