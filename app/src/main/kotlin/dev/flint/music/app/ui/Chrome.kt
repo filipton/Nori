@@ -1,5 +1,7 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.foundation.layout.fillMaxSize
@@ -61,23 +63,18 @@ import dev.flint.music.app.vm.PlayerViewModel
  * The chrome that never leaves: what is playing, and where to go. Apple Music stacks them into one
  * floating slab with a rounded top and a hairline between the two halves, and the page scrolls
  * underneath it. That is what this is - one surface, two rows, no boxes and no Material indicator pill.
+ *
+ * It is drawn in two layers. This one, under the player sheet, is the mini player (the sheet grows out
+ * of it, so it is simply covered as the sheet rises) with room left below it for the tab bar. The tab
+ * bar is [TabBar], over the sheet, so that it can slide down out of the way as the player opens rather
+ * than vanish under it in one frame. The two are split because only the tab bar can move: the mini
+ * player holds the drag that opens the player, and moving the element a drag started on corrupts it.
  */
 @Composable
-fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onOpenPlayer: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
-    // Apple Music floats its chrome: the mini player is one rounded slab, the tabs another, search sits
-    // apart in its own circle, and all of it takes a hint of the colour of the page behind it.
-    // The chrome is neutral, like Apple's. Only a page that is *about* one cover - an album, an artist,
-    // the player - wears that cover's colour; a bar tinted by whatever happens to be playing turns the
-    // whole app red on screens that have nothing to do with the record.
-    val tint = currentPageTint()
-    val slab = tint?.let { blend(it.background, it.edge, 0.12f) } ?: scheme.onSurface.copy(alpha = 0.09f).over(scheme.background)
-    val content = tint?.onBackground ?: scheme.onSurface
-    val search = tabs.firstOrNull { it.route == "search" }
-    val rest = tabs.filter { it.route != "search" }
+fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp) {
+    val (slab, content, page) = chromeColours()
     // A soft wash under the chrome so the list fades out as it passes behind it. Apple gets this from
     // blurring what is behind the bars; one vertical gradient costs nothing and reads much the same.
-    val page = tint?.background ?: scheme.background
     Column(
         Modifier.drawBehind {
             drawRect(
@@ -89,7 +86,35 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
     ) {
         SelectionBar(actions)
         Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
-        Row(Modifier.padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp), Arrangement.spacedBy(8.dp), Alignment.CenterVertically) {
+        Spacer(Modifier.height(tabsHeight))
+        Spacer(Modifier.navigationBarsPadding())
+    }
+}
+
+/**
+ * The tabs, over the player sheet. As the sheet rises they slide down off the screen - gone by the
+ * time it is 70 % open - and come back up as it closes, read in the draw phase from the sheet's
+ * progress so nothing recomposes while it moves. Slid away, they are out of reach as well as sight.
+ */
+@Composable
+fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val (slab, content, _) = chromeColours()
+    val search = tabs.firstOrNull { it.route == "search" }
+    val rest = tabs.filter { it.route != "search" }
+    val sheet = LocalPlayerSheet.current
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    Column(
+        Modifier.graphicsLayer {
+            val t = (sheet.progress.value / 0.7f).coerceIn(0f, 1f)
+            translationY = t * (size.height + 12.dp.toPx())
+        },
+    ) {
+        Row(
+            Modifier.onGloballyPositioned { onHeight(with(density) { it.size.height.toDp() }) }
+                .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp),
+            Arrangement.spacedBy(8.dp), Alignment.CenterVertically,
+        ) {
             Surface(shape = PillShape, color = slab, contentColor = content, shadowElevation = 8.dp, modifier = Modifier.weight(1f)) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 5.dp),
@@ -107,6 +132,20 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, route: Stri
         }
         Spacer(Modifier.navigationBarsPadding())
     }
+}
+
+/**
+ * The chrome's colours: the slab, what is written on it, and the page it fades into. Neutral, like
+ * Apple's. Only a page that is *about* one cover - an album, an artist, the player - wears that cover's
+ * colour; a bar tinted by whatever happens to be playing turns the whole app red on screens that have
+ * nothing to do with the record.
+ */
+@Composable
+private fun chromeColours(): Triple<Color, Color, Color> {
+    val scheme = MaterialTheme.colorScheme
+    val tint = currentPageTint()
+    val slab = tint?.let { blend(it.background, it.edge, 0.12f) } ?: scheme.onSurface.copy(alpha = 0.09f).over(scheme.background)
+    return Triple(slab, tint?.onBackground ?: scheme.onSurface, tint?.background ?: scheme.background)
 }
 
 data class Tab(val route: String, val label: String, val icon: ImageVector)

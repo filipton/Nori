@@ -213,6 +213,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             // reaches the bottom edge, and the list scrolls under the mini player the way Apple's does.
             // Screens keep the last row reachable by adding LocalChromeInset to their content padding.
             var chromeHeight by remember { mutableStateOf(0.dp) }
+            var tabsHeight by remember { mutableStateOf(0.dp) }
             val density = androidx.compose.ui.platform.LocalDensity.current
             // This replaced a Scaffold when the chrome started floating, and with it went the two things
             // Scaffold quietly provided: something that paints the app's background (every screen was
@@ -267,9 +268,12 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               Box(
                   Modifier.align(Alignment.BottomCenter)
                       .onGloballyPositioned { chromeHeight = with(density) { it.size.height.toDp() } },
-              ) { BottomChrome(player, actions, route, tabs, nav::tab, nav::player) }
+              ) { BottomChrome(player, actions, nav::player, tabsHeight) }
               }
               PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
+              // The tab bar is over the player, not under it: as the player rises it slides down off the
+              // screen instead of vanishing under the sheet in one frame. See BottomChrome.
+              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab) { tabsHeight = it } }
               SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
             }
             SheetBack(sheet)
