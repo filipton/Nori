@@ -31,6 +31,22 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.
 
+## What the audio path costs
+
+`tools/bench.sh dev.flint.music 90 off`, same album, fresh install, on an x86_64 emulator, before
+this work and after it:
+
+| | `2670679` (before) | `c9c6910` (after) |
+|---|---|---|
+| CPU | 3.04 % of one core | 2.82 % of one core |
+| wakeups | 411 /s | 425 /s |
+| quiet seconds | 75 of 90 | 72 of 90 |
+| PSS | 239 MB | 225 MB |
+
+Within the noise of a debug build on an emulator, and "quiet" stays around the 80 % the house rules
+ask for. The work added nothing per buffer or per frame: the audio track provider runs once when a
+track is opened, and `Outputs.usb` only emits when something is plugged in.
+
 ## Not done
 
 - **Bit-perfect at 24 bit.** media3's sink writes 16-bit or float and nothing else, so a DAC that

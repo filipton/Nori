@@ -202,7 +202,9 @@ class BitPerfect(context: Context) {
             val sameRate = modes.filter { it.sampleRate == sampleRate }
             val why = when {
                 sameRate.isEmpty() -> "this DAC has no bit-perfect mode at ${playing?.substringBefore(" /")}"
-                else -> "this DAC wants ${sameRate.joinToString(" or ") { "${bits(it.encoding)} bit" }} at ${playing?.substringBefore(" /")}, which needs the integer output path (not built yet)"
+                // The planned way in is the USB exclusive driver (docs/features.md, build step 10):
+                // Android's own path writes 16-bit or float and nothing else.
+                else -> "this DAC wants ${sameRate.joinToString(" or ") { "${bits(it.encoding)} bit" }} at ${playing?.substringBefore(" /")}, which needs USB exclusive output (not built yet)"
             }
             Log.w("BitPerfect", "no usable bit-perfect mode: $why")
             clear()
