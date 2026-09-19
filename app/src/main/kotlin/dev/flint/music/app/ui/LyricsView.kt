@@ -41,8 +41,13 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.Load
 import dev.flint.music.app.vm.PlayerViewModel
 import dev.flint.music.app.vm.SettingsViewModel
@@ -80,17 +85,22 @@ private fun sungRegion(layout: TextLayoutResult, offset: Float): Path {
 }
 
 @Composable
-fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
+fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean) {
     val load by vm.lyrics.collectAsStateWithLifecycle()
+    val playerState by vm.state.collectAsStateWithLifecycle()
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val found = (load as? Load.Ready)?.data
     val lyrics = found?.lyrics
+    if (prefs.lyricsKeepScreenOn) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
+    val song = playerState.current
     if (lyrics == null || lyrics.lines.isEmpty()) {
-        Box(Modifier.fillMaxSize(), Alignment.Center) { Text(if (load is Load.Loading) "Loading…" else "No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        Column(Modifier.fillMaxSize()) {
+            LyricsHeader(vm, actions, song)
+            Box(Modifier.fillMaxSize().weight(1f), Alignment.Center) { Text(if (load is Load.Loading) "Loading…" else "No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        }
         return
     }
-    if (prefs.lyricsKeepScreenOn) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
 
     var nudgeMs by remember(lyrics) { mutableLongStateOf(0L) }
     var resumed by remember { mutableStateOf(false) }
@@ -122,14 +132,16 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
     val bright = MaterialTheme.colorScheme.onSurface
     val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     val list = rememberLazyListState()
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize()) {
+        LyricsHeader(vm, actions, song)
+        BoxWithConstraints(Modifier.fillMaxSize().weight(1f)) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
         // The line being sung rests a third of the way down; the list glides there instead of jumping.
         val plain = reduceMotion()
         LaunchedEffect(active, plain) {
             if (active >= 0) if (plain) list.scrollToItem(active, -third) else list.animateScrollToItem(active, -third)
         }
-        LazyColumn(state = list, contentPadding = PaddingValues(start = 24.dp, end = 24.dp, top = 24.dp, bottom = maxHeight / 2)) {
+        LazyColumn(state = list, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = maxHeight / 2)) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
                 Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)) }.padding(vertical = 8.dp)) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
@@ -167,6 +179,38 @@ fun LyricsView(vm: PlayerViewModel, playing: Boolean) {
                     TextButton({ nudgeMs += 250 }) { Text("Sooner", style = MaterialTheme.typography.labelLarge) }
                 }
             }
+        }
+    }
+    }
+}
+
+/**
+ * Apple's lyrics header: a small rounded thumbnail with the title beside it, so the words get the
+ * whole middle of the screen instead of fighting the title block for it.
+ */
+@Composable
+private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: dev.flint.music.ffi.Song?) {
+    val menu = LocalSongMenu.current
+    val starred by vm.currentStarred.collectAsStateWithLifecycle()
+    Row(
+        Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
+        Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
+    ) {
+        Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                song?.title ?: "", style = MaterialTheme.typography.titleMedium,
+                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+            Text(
+                song?.artist ?: "", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        song?.let { s ->
+            TitleCircle(if (starred) Icons.Filled.Star else Icons.Filled.StarBorder, "Favourite", starred) { actions.star(s, !starred) }
+            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { menu(s) }
         }
     }
 }

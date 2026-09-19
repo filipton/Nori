@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -48,6 +49,10 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.VolumeDown
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -75,8 +80,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -144,6 +151,7 @@ private enum class Panel { ART, QUEUE, LYRICS }
 @Composable
 fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val starred by vm.currentStarred.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
@@ -160,8 +168,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         SystemBarIcons(scheme.background)
         Box(
             Modifier.fillMaxSize().drawBehind {
-                // A wash of the cover's colours, lit from the top where the artwork is.
-                if (palette != null) drawRect(playerBrush(palette, size.height)) else drawRect(scheme.background)
+                // A wash of the cover's own colours starting from the artwork's bottom rows, so the
+                // full-bleed picture dissolves into the page without a seam.
+                if (palette != null) drawRect(pageBrush(palette, size.height)) else drawRect(scheme.background)
             },
         ) {
             Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
@@ -176,15 +185,20 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     ) { Box(Modifier.width(38.dp).height(5.dp).background(scheme.onSurface.copy(alpha = 0.35f), CircleShape)) }
                 }
 
-                Box(Modifier.weight(1f).padding(horizontal = 26.dp)) {
+                // The artwork bleeds to both screen edges like the sleeve it is; queue keeps the
+                // screen's side margin, lyrics lay out their own.
+                Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
                     when (panel) {
-                        Panel.ART -> Artwork(vm, coverUrl, state.playing, nav::back)
+                        Panel.ART -> Artwork(vm, coverUrl, palette)
                         Panel.QUEUE -> Queue(vm)
-                        Panel.LYRICS -> LyricsView(vm, state.playing)
+                        Panel.LYRICS -> LyricsView(vm, actions, state.playing)
                     }
                 }
 
-                Row(Modifier.fillMaxWidth().padding(start = 26.dp, end = 14.dp, top = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 26.dp, end = 16.dp, top = 18.dp),
+                    Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
+                ) {
                     Column(Modifier.weight(1f)) {
                         Text(
                             state.current?.title ?: state.radio ?: "Nothing playing",
@@ -196,7 +210,15 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    state.current?.let { s -> IconButton({ menu(s) }, Modifier.size(38.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(22.dp)) } }
+                    state.current?.let { s ->
+                        Row(Modifier, Arrangement.spacedBy(10.dp), Alignment.CenterVertically) {
+                            TitleCircle(
+                                if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                "Favourite", starred,
+                            ) { actions.star(s, !starred) }
+                            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { menu(s) }
+                        }
+                    }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = 26.dp), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                 state.current?.let { s ->
@@ -210,29 +232,22 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
 
                 SeekBar(vm, state.playing, state.durationMs)
 
-                Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-                    IconButton(vm::toggleShuffle) {
-                        Icon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp), tint = if (state.shuffle) scheme.primary else scheme.onSurfaceVariant)
-                    }
-                    IconButton(vm::previous, Modifier.size(58.dp)) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(38.dp)) }
-                    Surface(
-                        onClick = vm::toggle, shape = CircleShape,
-                        color = scheme.onSurface.copy(alpha = 0.14f).over(scheme.background),
-                        contentColor = scheme.onSurface, modifier = Modifier.size(72.dp),
-                    ) {
+                // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
+                Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
+                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(40.dp)) }
+                    IconButton(vm::toggle, Modifier.size(72.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
                             if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
-                            else Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(40.dp))
+                            else Icon(
+                                if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause",
+                                Modifier.size(52.dp),
+                            )
                         }
                     }
-                    IconButton(vm::next, Modifier.size(58.dp)) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(38.dp)) }
-                    IconButton(vm::cycleRepeat) {
-                        Icon(
-                            if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat",
-                            Modifier.size(22.dp), tint = if (state.repeat != Repeat.OFF) scheme.primary else scheme.onSurfaceVariant,
-                        )
-                    }
+                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(40.dp)) }
                 }
+
+                VolumeRow(vm)
 
                 Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 14.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
                     PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { panel = if (panel == Panel.LYRICS) Panel.ART else Panel.LYRICS }
@@ -255,23 +270,92 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     }
 }
 
-/** The artwork: a card that lifts and fills when the music plays, and settles back when it stops. */
+/**
+ * The artwork full-bleed: edge to edge, square corners, no shadow - the sleeve it is. Its bottom
+ * third melts into the page wash (transparent to the wash colour at that height), so there is no
+ * line where the picture ends - the same dissolve the album page uses.
+ */
 @Composable
-private fun Artwork(vm: PlayerViewModel, coverUrl: String?, playing: Boolean, onClose: () -> Unit) {
-    val plain = reduceMotion()
-    val scale by animateFloatAsState(
-        if (playing) 1f else 0.86f,
-        if (plain) androidx.compose.animation.core.tween(0) else spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow),
-        label = "artwork",
-    )
-    Box(Modifier.fillMaxSize(), Alignment.Center) {
+private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette?) {
+    Box(Modifier.fillMaxSize(), Alignment.TopCenter) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(1f)
-                .graphicsLayer { scaleX = scale; scaleY = scale }
-                .shadow(22.dp, RoundedCornerShape(Radius.tile), clip = false)
-                .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-                .flingActions(horizontal = false, threshold = 0.35f, onStart = onClose),
-        ) { Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = Radius.tile) }
+                .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
+        ) {
+            Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp)
+            if (palette != null) {
+                val melt = blend(palette.edge, palette.background, 0.9f)
+                Box(
+                    Modifier.fillMaxWidth().fillMaxHeight(0.38f).align(Alignment.BottomCenter)
+                        .background(Brush.verticalGradient(0f to Color.Transparent, 1f to melt)),
+                )
+            }
+        }
+    }
+}
+
+/** A title-row circle: translucent fill, light glyph, 48 dp across with a 44 dp hit region or better. */
+@Composable
+internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick, shape = CircleShape,
+        color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background),
+        contentColor = if (selected) scheme.primary else scheme.onSurface,
+        modifier = Modifier.size(48.dp),
+    ) {
+        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(22.dp)) }
+    }
+}
+
+/**
+ * The phone's music-stream volume, read live so the hardware keys never leave it stale. Ticks only
+ * while this screen is resumed; a drag writes straight through and updates the thumb itself.
+ */
+@Composable
+private fun VolumeRow(vm: PlayerViewModel) {
+    val scheme = MaterialTheme.colorScheme
+    var level by remember { mutableFloatStateOf(vm.volumeFraction()) }
+    var dragging by remember { mutableStateOf(false) }
+    var resumed by remember { mutableStateOf(false) }
+    LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    LaunchedEffect(resumed) {
+        while (resumed && isActive) {
+            if (!dragging) level = vm.volumeFraction()
+            delay(1000)
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 52.dp, vertical = 2.dp),
+        Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.VolumeDown, null, Modifier.size(16.dp), tint = scheme.onSurfaceVariant)
+        val track = scheme.onSurface.copy(alpha = 0.22f)
+        val filled = scheme.onSurface.copy(alpha = 0.85f)
+        val pick: (Float, Float) -> Unit = { x, w ->
+            val f = (x / w).coerceIn(0f, 1f)
+            level = f; vm.setVolumeFraction(f)
+        }
+        Box(
+            Modifier.weight(1f).height(34.dp)
+                .pointerInput(Unit) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { dragging = true; pick(it.x, size.width.toFloat()) },
+                        onDragEnd = { dragging = false },
+                        onDragCancel = { dragging = false },
+                    ) { change, _ -> pick(change.position.x, size.width.toFloat()) }
+                }
+                .pointerInput(Unit) { detectTapGestures { pick(it.x, size.width.toFloat()) } }
+                .drawBehind {
+                    val h = 8.dp.toPx()
+                    val y = (size.height - h) / 2f
+                    val r = CornerRadius(h / 2f, h / 2f)
+                    drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * level, h), r)
+                    drawCircle(Color.White, 14.dp.toPx(), Offset(size.width * level, size.height / 2f))
+                },
+        )
+        Icon(Icons.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
     }
 }
 
@@ -300,6 +384,7 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
  */
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
+    val state by vm.state.collectAsStateWithLifecycle()
     val pos = position(vm, playing, 1000)
     val d = durationMs.coerceAtLeast(1)
     var dragging by remember { mutableStateOf(false) }
@@ -327,8 +412,22 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                     if (dragging) drawCircle(filled, h * 1.6f, Offset(size.width * fraction, size.height / 2f))
                 },
         )
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text(duration((if (dragging) (drag * d).toLong() else pos) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty
+            // the rest of the time, holding the space so the times never move.
+            val centre = state.error ?: when {
+                state.sleepAtEndOfTrack -> "Sleep · end of track"
+                state.sleepAt > 0 -> "Sleep · ${((state.sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min"
+                else -> ""
+            }
+            Text(
+                centre, Modifier.weight(1f).padding(horizontal = 8.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (state.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
             Text("-" + duration(((d - (if (dragging) (drag * d).toLong() else pos)).coerceAtLeast(0)) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -348,8 +447,25 @@ private fun Queue(vm: PlayerViewModel) {
     val moved = if (from >= 0 && rowHeight > 0f) (dragOffset / rowHeight).roundToInt() else 0
     val target = (from + moved).coerceIn(0, (state.queue.size - 1).coerceAtLeast(0))
 
-    LazyColumn(Modifier.fillMaxSize(), state = list) {
-        item(key = "next") { Caption("Playing next", Modifier.padding(top = 4.dp, bottom = 8.dp)) }
+    // Shuffle and repeat live here, pinned above the list - not in the transport, and never scrolled
+    // away (the list opens at the playing row, which used to hide them).
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+            Caption("Playing next", Modifier.padding(top = 4.dp, bottom = 8.dp))
+            Row(Modifier, Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
+                val scheme = MaterialTheme.colorScheme
+                IconButton(vm::toggleShuffle, Modifier.size(44.dp)) {
+                    Icon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp), tint = if (state.shuffle) scheme.primary else scheme.onSurfaceVariant)
+                }
+                IconButton(vm::cycleRepeat, Modifier.size(44.dp)) {
+                    Icon(
+                        if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat",
+                        Modifier.size(22.dp), tint = if (state.repeat != Repeat.OFF) scheme.primary else scheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    LazyColumn(Modifier.fillMaxSize().weight(1f), state = list) {
         itemsIndexed(state.queue, key = { i, s -> "$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
             val held = i == from
             val shift = when {
@@ -404,5 +520,6 @@ private fun Queue(vm: PlayerViewModel) {
                 )
             }
         }
+    }
     }
 }

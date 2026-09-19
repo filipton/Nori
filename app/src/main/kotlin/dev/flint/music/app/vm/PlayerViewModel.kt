@@ -1,12 +1,14 @@
 package dev.flint.music.app.vm
 
 import android.app.Application
+import android.media.AudioManager
 import dev.flint.music.ffi.Lyrics
 import dev.flint.music.data.FoundLyrics
 import dev.flint.music.data.LyricsSource
 import dev.flint.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -31,6 +33,15 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
             else flint.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
         }.asLoad()
 
+    /**
+     * Whether the playing song is starred. The queue holds snapshot songs, so this prefers a star
+     * change made this session over the snapshot - otherwise the now-playing star sits stale.
+     */
+    val currentStarred: StateFlow<Boolean> = combine(state, flint.library.songStars) { st, stars ->
+        val s = st.current
+        if (s == null) false else stars[s.id] ?: s.starred
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), state.value.current?.starred == true)
+
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs
 
@@ -46,4 +57,18 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     fun toggleShuffle() = player.setShuffle(!state.value.shuffle)
     fun cycleRepeat() = player.cycleRepeat()
     fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = player.sleep(minutes, endOfTrack, songs)
+
+    /**
+     * The phone's music-stream volume, for the player's volume slider. Read live (hardware keys can
+     * move it under us) and written without flags, so dragging it never pops a system UI over the art.
+     */
+    private val audio = app.getSystemService(AudioManager::class.java)
+    fun volumeFraction(): Float {
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).takeIf { it > 0 } ?: return 0f
+        return audio.getStreamVolume(AudioManager.STREAM_MUSIC) / max.toFloat()
+    }
+    fun setVolumeFraction(f: Float) {
+        val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).takeIf { it > 0 } ?: return
+        audio.setStreamVolume(AudioManager.STREAM_MUSIC, (f.coerceIn(0f, 1f) * max).toInt().coerceIn(0, max), 0)
+    }
 }

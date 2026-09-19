@@ -22,9 +22,13 @@ import dev.flint.music.net.Http
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 
 enum class AlbumSort(val api: String) {
@@ -58,6 +62,13 @@ class Library(
     // Resolved on every use, which is always on an IO thread: the core belongs to the active server profile
     // and building it costs ~100 ms the UI thread should not pay.
     private val core get() = coreOf()
+
+    /**
+     * Star changes made this session, by song id. The player's queue holds snapshot songs, so a star
+     * would otherwise succeed on the server while the now-playing star sat stale until the next play.
+     */
+    private val _songStars = MutableStateFlow(emptyMap<String, Boolean>())
+    val songStars: StateFlow<Map<String, Boolean>> = _songStars.asStateFlow()
     private val http get() = httpOf()
 
     /** The endpoints that take `musicFolderId`. */
@@ -273,8 +284,10 @@ class Library(
         }
     }
 
-    suspend fun star(kind: StarKind, id: String, on: Boolean) =
+    suspend fun star(kind: StarKind, id: String, on: Boolean) {
         write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist")
+        if (kind == StarKind.SONG) _songStars.update { it + (id to on) }
+    }
 
     suspend fun rate(id: String, rating: Int) = write("setRating", params("id" to id, "rating" to rating), "getAlbum", "getPlaylist")
 
