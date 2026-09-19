@@ -168,12 +168,17 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 }
             }
         }
-        // Where the words came from, and how to nudge them, on one quiet bar that does not sit on the lyrics.
+        // Where the words came from, and how to nudge them. Nudging is for the handful of songs whose
+        // timings are wrong, so it is not worth a permanent bar across the bottom of the lyrics: the
+        // corner carries where they came from, and tapping it opens the two buttons. It closes again
+        // on the next tap, and stays open while the offset is not zero so the number can be read.
+        var tuning by remember(lyrics) { mutableStateOf(false) }
         val source = found.source.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
+        val open = tuning || nudgeMs != 0L
         // The list runs on underneath, so without this the bar lands on top of a line and both are
         // unreadable. One gradient, the same trick the bottom chrome uses, and the words fade out under it.
         if (lyrics.synced || source != null) Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(72.dp).drawBehind {
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (open) 72.dp else 54.dp).drawBehind {
                 drawRect(
                     Brush.verticalGradient(
                         0f to Color.Transparent,
@@ -184,16 +189,24 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             },
         )
         if (lyrics.synced || source != null) androidx.compose.material3.Surface(
-            shape = PillShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background),
+            onClick = { if (lyrics.synced) tuning = !tuning },
+            enabled = lyrics.synced,
+            shape = PillShape,
+            color = if (open) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background) else Color.Transparent,
             contentColor = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp),
+            modifier = Modifier.align(if (open) Alignment.BottomCenter else Alignment.BottomStart).padding(start = 12.dp, bottom = 6.dp),
         ) {
-            Row(Modifier.padding(horizontal = 6.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {
-                source?.let { Text(it.label, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall, color = dim) }
-                if (lyrics.synced) {
+            Row(Modifier.padding(horizontal = 6.dp, vertical = 2.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {
+                // Closed, this is the one thing worth saying: whose words these are.
+                Text(
+                    source?.label ?: "Timing", Modifier.padding(horizontal = 8.dp),
+                    style = MaterialTheme.typography.labelSmall, color = dim,
+                )
+                if (open) {
                     if (nudgeMs != 0L) Text("%+.1f s".format(nudgeMs / 1000f), style = MaterialTheme.typography.labelSmall)
                     TextButton({ nudgeMs -= 250 }) { Text("Later", style = MaterialTheme.typography.labelLarge) }
                     TextButton({ nudgeMs += 250 }) { Text("Sooner", style = MaterialTheme.typography.labelLarge) }
+                    if (nudgeMs != 0L) TextButton({ nudgeMs = 0L }) { Text("Reset", style = MaterialTheme.typography.labelLarge) }
                 }
             }
         }

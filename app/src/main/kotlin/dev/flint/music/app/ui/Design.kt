@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.luminance
@@ -167,69 +168,62 @@ val LocalStarMarks = staticCompositionLocalOf<Map<String, Boolean>> { emptyMap()
 fun Map<String, Boolean>.effectiveStar(kind: dev.flint.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
     get("${kind.param}:$id") ?: snapshot
 
-/**
- * The seam: the cover's own bottom colour at the top, easing away to nothing by the time the picture
- * would have been forgotten. It ends transparent rather than on the page colour because what is under
- * it is no longer flat - see [drawPageWash].
- */
-fun pageBrush(palette: PagePalette, endY: Float): Brush = Brush.verticalGradient(
+/** The page wash: the cover's own bottom colour at the top, easing into the page colour. */
+fun pageBrush(palette: PagePalette, endY: Float, startY: Float = 0f): Brush = Brush.verticalGradient(
     0f to palette.edge,
     0.18f to blend(palette.edge, palette.background, 0.55f),
     0.42f to blend(palette.edge, palette.background, 0.88f),
-    0.66f to palette.background.copy(alpha = 0f),
-    1f to palette.background.copy(alpha = 0f),
-    startY = 0f, endY = endY,
+    1f to palette.background,
+    startY = startY, endY = endY,
 )
 
 /**
- * The page a cover is wearing: the cover itself, sixteen pixels a side, drawn stretched so the GPU's
- * bilinear filter enlarges it into a soft field of the record's own colours - which is what Apple
- * Music does and why their page matches the sleeve so exactly. The seam gradient goes over the top so
- * the picture still runs out rather than stopping, and the last fifth settles onto the flat page
- * colour so a page that ends mid-screen has no edge either.
+ * The player's page: the cover itself, sixteen-times enlarged and smoothed, so the colours vary the way
+ * the record's do instead of settling into one average - which is what Apple Music does and why their
+ * page matches the sleeve so exactly. The seam goes over the top of it, so the artwork still runs out
+ * rather than stopping.
  *
- * Static: one small texture, uploaded once per cover, drawn as one quad. Nothing here changes between
- * frames. Covers with no wash (AMOLED black, a palette that failed) fall back to the flat colour.
+ * The player only. An album page has a list scrolling over it and an artwork that fades out under the
+ * parallax, and every edge those give the wash is one more thing for it to disagree with: the cover
+ * squashed into the header, a line where the block ended, a slab of seam colour left behind when the
+ * picture above it faded. It keeps `pageBrush`, which has none of those problems.
  *
- * [fadeTail] is for a page whose wash ends part-way down the screen, with the flat page colour under
- * the rest of it - an album header. A player, whose wash reaches the bottom edge, must not fade: Apple's
- * page carries the record's colour all the way down, and fading drains it exactly where it shows most.
+ * Static: one 4 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers the whole
+ * page - the seam is opaque down to [SEAM_OPAQUE] and gone by [SEAM_END], so each is clipped to where
+ * it shows.
  */
-fun DrawScope.drawPageWash(palette: PagePalette, endY: Float, fadeTail: Boolean = false) {
+fun DrawScope.drawPageWash(palette: PagePalette, endY: Float) {
     val wash = palette.wash
-    val w = size.width.toInt().coerceAtLeast(1)
-    val h = endY.toInt().coerceAtLeast(1)
     if (wash == null) {
-        drawRect(palette.background)
-    } else {
-        // Neither fill covers the whole page: the seam gradient is opaque down to SEAM_OPAQUE and gone
-        // by SEAM_END, so above the first there is no point sampling the texture and below the second no
-        // point drawing the gradient. Two clipped fills come to about a quarter more work than the one
-        // full-page gradient this replaced, rather than twice as much.
-        val from = (WASH_ROWS * SEAM_OPAQUE).toInt()
-        drawImage(
-            wash,
-            srcOffset = IntOffset(0, from), srcSize = IntSize(WASH_ROWS, WASH_ROWS - from),
-            dstOffset = IntOffset(0, (endY * from / WASH_ROWS).toInt()),
-            dstSize = IntSize(w, h - (endY * from / WASH_ROWS).toInt()),
-            filterQuality = FilterQuality.Low,
-        )
-        // Below the wash the page is the flat colour again, so fade onto it rather than stopping.
-        if (fadeTail) drawRect(
-            Brush.verticalGradient(
-                0.80f to palette.background.copy(alpha = 0f),
-                1f to palette.background,
-                startY = 0f, endY = endY,
-            ),
-            size = Size(size.width, endY),
-        )
+        drawRect(pageBrush(palette, endY))
+        return
     }
-    drawRect(pageBrush(palette, endY), size = Size(size.width, endY * SEAM_END))
+    val from = (WASH_ROWS * SEAM_OPAQUE).toInt()
+    val top = (endY * from / WASH_ROWS).toInt()
+    drawImage(
+        wash,
+        srcOffset = IntOffset(0, from), srcSize = IntSize(WASH_ROWS, WASH_ROWS - from),
+        dstOffset = IntOffset(0, top),
+        dstSize = IntSize(size.width.toInt().coerceAtLeast(1), (endY.toInt() - top).coerceAtLeast(1)),
+        filterQuality = FilterQuality.Low,
+    )
+    // Same stops as pageBrush, but ending transparent: what is under it is the wash, not a flat colour.
+    drawRect(
+        Brush.verticalGradient(
+            0f to palette.edge,
+            0.18f to blend(palette.edge, palette.background, 0.55f),
+            0.42f to blend(palette.edge, palette.background, 0.88f),
+            0.66f to palette.background.copy(alpha = 0f),
+            1f to palette.background.copy(alpha = 0f),
+            startY = 0f, endY = endY,
+        ),
+        size = Size(size.width, endY * SEAM_END),
+    )
 }
 
 /** Matches `CoverColors.WASH`: the wash texture is this many pixels a side. */
-private const val WASH_ROWS = 16
-/** Where [pageBrush] stops being opaque, and where it has faded out entirely. */
+private const val WASH_ROWS = 32
+/** Where the seam stops being opaque: the player's artwork covers everything above this. */
 private const val SEAM_OPAQUE = 0.42f
 private const val SEAM_END = 0.68f
 

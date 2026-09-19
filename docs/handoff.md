@@ -54,10 +54,19 @@ within 0.05 of the page colour's own lightness (0.035 in light mode) and holds i
 then `Design.drawPageWash` draws that stretched over the page and lets the GPU's bilinear filter do
 the enlarging. The hues vary the way the record's do; the contrast text needs does not move.
 
-It is still static: one 1 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers
+It is still static: one 4 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers
 the whole page — the seam gradient is opaque down to 42 % and gone by 68 %, so each is clipped to
-where it shows. On the emulator's software renderer that came out *faster* than the single full-page
-gradient it replaced (below).
+where it shows. Sixteen pixels a side held the colour but no shape, and the sleeve read as stopping
+dead where the sharp artwork ended; thirty-two keeps enough of the record's forms that the picture
+seems to carry on behind the words, for the same one quad.
+
+**The player only.** It was tried on the album page and taken out again. That page has a list
+scrolling over it and an artwork that fades under the parallax, and every edge those give the wash is
+one more thing for it to disagree with: stretched over the header alone it squashed the whole cover
+into a few hundred pixels (visible as bands of the record's colours behind the title) and ended on
+the sleeve's dark bottom rows with a line across the page; drawn on the page instead it stayed put
+while the list scrolled into it, so the top rows always sat on colour. The album page keeps
+`pageBrush`, which has none of those problems.
 
 ## Animation
 
@@ -66,6 +75,18 @@ where a playing track's number would be (`Components.PlayingBars`). The owner as
 only while the music sounds, freeze into a fixed shape when it is paused, and stop entirely when the
 screen goes off or the row leaves the composition. The phase is read in the draw phase, so a frame
 invalidates that 16 dp box and nothing else. The screen-off benchmark below is unchanged by it.
+
+## The album page's seam
+
+`HeroPage` draws the cover's edge colour under the artwork so the picture runs out rather than
+stopping. The artwork above it is in a parallax layer that does two things as the page scrolls — it
+is *drawn* 0.4 of the scroll lower than it is laid out, and it fades to half — and the gradient has
+to follow both, or the picture goes pale and shifts while the colour it melts into does not. That is
+a hard line straight across the page, and it was there before the wash work went anywhere near it;
+the gradient now starts where the picture actually ends and fades by the same amount.
+
+Measure this, do not eyeball it: sample a column down the right edge and look for a step of more than
+about 15. A one- or two-pixel step is a row divider and is meant to be there.
 
 ## What the audio path costs
 
@@ -90,15 +111,25 @@ second, and no UI thread anywhere in the busiest list, because neither runs whil
 `tools/scroll.sh dev.flint.music 12` on an album page, music playing. The emulator renders in
 software, so the absolute numbers are dreadful and only the comparison means anything.
 
-| | 50th | 90th | janky |
-|---|---|---|---|
-| flat page colour (before) | 73 ms | 93 ms | 84 % |
-| wash, both fills full-page | 77 ms | 97 ms | 90 % |
-| wash clipped + playing bars | 65 ms | 85 ms | 80 % |
+| | 50th | 90th |
+|---|---|---|
+| flat page colour | 73 ms | 93 ms |
+| page wash | 77 ms | 97 ms |
 
-Drawing two full-page fills where there had been one cost 4 ms; clipping each to the part of the page
-it actually shows on took that back and more. **Wake the device first** — `tools/scroll.sh` after
-`tools/bench.sh` measures a black screen and reports `Total frames rendered: 0`.
+Measured on the same build by making `derive` hand back a null wash, which is the only honest way to
+compare: the page costs about 4 ms a frame more to scroll, roughly 5 %. That is the emulator's
+software rasterizer, where a full-screen textured fill is the expensive thing and a gradient is not;
+on a GPU a second full-screen quad is nothing. The player never scrolls, so this is an album page
+only.
+
+Two traps this measurement fell into, both worth knowing:
+
+- **Wake the device first.** `tools/scroll.sh` straight after `tools/bench.sh` swipes at a black
+  screen and reports `Total frames rendered: 0`.
+- **Do not compare runs with different frame counts.** A run with the playing bars animating rendered
+  647 frames against 366, and the extra cheap animation frames pulled the percentiles down to 65/85 —
+  which read as "the wash made scrolling faster" and was nothing of the sort. Scroll an album whose
+  track is *not* the one playing, so the frame population is the same on both sides.
 
 ## Not done
 

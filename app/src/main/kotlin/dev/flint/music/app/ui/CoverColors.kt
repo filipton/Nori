@@ -75,8 +75,13 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     return PagePalette(edge, background, on, on.copy(alpha = 0.66f), accent, wash = wash)
 }
 
-/** How many pixels a side the wash is kept at. Sixteen is enough shape; the GPU does the rest. */
-private const val WASH = 16
+/**
+ * How many pixels a side the wash is kept at. Sixteen held the colour but no shape at all, so the page
+ * read as a plain field and the sleeve looked like it stopped dead; Apple's blur still has the record's
+ * forms in it, which is what makes the picture seem to carry on behind the words. Thirty-two costs
+ * 4 kB and exactly the same one quad per frame.
+ */
+private const val WASH = 32
 
 /**
  * Apple's player is not painted one flat colour. Measure across their screenshot and the page varies

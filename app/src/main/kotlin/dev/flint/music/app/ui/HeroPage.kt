@@ -32,6 +32,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -86,6 +88,7 @@ fun HeroPage(
             LazyColumn(state = list) {
                 item(key = "hero", contentType = "hero") {
                     // One block: artwork, then the wash it melts into, carrying the title and the buttons.
+                    //
                     Column(Modifier.fillMaxWidth()) {
                         if (coverUrl != null) Box(
                             Modifier.fillMaxWidth().aspectRatio(1f)
@@ -121,7 +124,31 @@ fun HeroPage(
                         // and reaches the page colour by the time the buttons are past.
                         Column(
                             Modifier.fillMaxWidth().drawBehind {
-                                if (palette != null) drawPageWash(palette, size.height, fadeTail = true)
+                                if (palette == null) return@drawBehind
+                                // This has to follow the artwork above it in both the ways the parallax
+                                // layer moves it, or the picture and the colour it melts into part company
+                                // along a hard line across the page:
+                                //
+                                //  - it is *drawn* 0.4 of the scroll lower than it is laid out, so its
+                                //    bottom edge lands part way down this gradient instead of at the top
+                                //    of it. The gradient starts where the picture actually ends.
+                                //  - it fades to half as it goes, so the gradient fades with it.
+                                //
+                                // The artwork is a full-width square, so its height is this width.
+                                if (coverUrl == null) {
+                                    drawRect(pageBrush(palette, size.height))
+                                    return@drawBehind
+                                }
+                                val cover = size.width
+                                val scrolled = if (list.firstVisibleItemIndex == 0) list.firstVisibleItemScrollOffset.toFloat() else cover
+                                val shift = (scrolled * 0.4f).coerceIn(0f, size.height)
+                                val fade = 1f - (scrolled / cover).coerceIn(0f, 1f) * 0.5f
+                                drawRect(
+                                    pageBrush(palette, endY = size.height, startY = shift),
+                                    topLeft = Offset(0f, shift),
+                                    size = Size(size.width, size.height - shift),
+                                    alpha = fade,
+                                )
                             },
                         ) {
                         Column(
