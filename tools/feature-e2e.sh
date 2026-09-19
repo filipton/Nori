@@ -66,6 +66,11 @@ state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:
 check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
 adb shell svc wifi enable; adb shell svc data enable; sleep 6
 
+echo "-- the download queue"
+# The notification's tap is this intent; the app is already running, so it arrives as a new intent.
+"$app" open home >/dev/null; sleep 2
+adb shell am start -a dev.flint.music.OPEN_DOWNLOADS -n dev.flint.music/dev.flint.music.app.MainActivity >/dev/null 2>&1; sleep 3
+check "tapping the download notification opens the queue" test "$(field route)" = "downloads"
 echo "-- playlists, and does the server agree"
 name="flint check $RANDOM"
 "$app" do "newplaylist $name|search:creep" >/dev/null; sleep 6

@@ -63,6 +63,8 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
     fun smart(id: String) = go("smart/${Uri.encode(id)}")
     fun smartEdit(id: String) = go("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
     fun stats() = go("stats")
+    /** The download queue. Asked for again while it is showing (the notification tapped), it only puts the player away. */
+    fun downloads() { if (c.currentDestination?.route == "downloads") { if (sheet.isOpen) sheet.close() } else go("downloads") }
     /** A settings group, optionally landing on one row of it (from the settings search). */
     fun settingsGroup(id: String, key: String = "") = go("settings/$id?key=${Uri.encode(key)}")
     fun player() = sheet.open()
@@ -105,8 +107,12 @@ private val tabs = listOf(
     Tab("settings", "Settings", Icons.Filled.Settings),
 )
 
+/**
+ * [launchRoute] is a screen the activity was asked to open from outside - a tap on the download
+ * notification - set on launch or on a new intent, and cleared here once it has been opened.
+ */
 @Composable
-fun App() {
+fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     androidx.compose.runtime.SideEffect { AppMotion.force = prefs.ignoreSystemMotion }
@@ -184,9 +190,19 @@ fun App() {
             }
         }
 
+        // Read from a snapshot observer, not in composition, so a request does not recompose the app.
+        if (launchRoute != null) LaunchedEffect(launchRoute, nav) {
+            androidx.compose.runtime.snapshotFlow { launchRoute.value }.collect { route ->
+                if (route == null) return@collect
+                if (route == "downloads") nav.downloads() else nav.go(route)
+                launchRoute.value = null
+            }
+        }
+
         CompositionLocalProvider(
             LocalNav provides nav,
             LocalPlayerSheet provides sheet,
+            LocalDownloadMarks provides rememberDownloadMarks(actions),
             LocalSongMenu provides { menuSong = it; menuFromPlayer = false },
             LocalPlayerMenu provides { menuSong = it; menuFromPlayer = true },
         ) {
@@ -243,6 +259,7 @@ fun App() {
                     composable("smart/{id}") { Inset { SmartScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("smartEdit/{id}") { Inset { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) } }
                     composable("stats") { Inset { StatsScreen() } }
+                    composable("downloads") { Inset { DownloadsScreen(actions) } }
                     composable("folder/{id}") { Inset { FolderScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("decade/{year}") { Inset { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) } }
                 }

@@ -50,6 +50,15 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.
 
+- **Downloads.** Up to "Downloads at once" (Settings → Library, 1-10, default 5) run in parallel, in
+  the order asked for; that is media3's own queue, `maxParallelDownloads` kept in step from the
+  foreground-notification tick. Progress comes from wrapping media3's downloaders
+  (`TrackedDownloaders`), not from polling, and passes a `ProgressGate` (4 a second, whole percents)
+  into one flow per song. `Downloads.marks` changes only on a phase change, so song rows
+  (`DownloadSlot`) recompose on those and one ring per downloading song recomposes on progress.
+  `downloads` is a route; the notification opens it with `ACTION_OPEN_DOWNLOADS` (onNewIntent when
+  running). Not yet checked on a device: all of the drawing and motion.
+
 ## The page colour
 
 Apple's player is not painted one flat colour. Sample across their screenshot and it varies both

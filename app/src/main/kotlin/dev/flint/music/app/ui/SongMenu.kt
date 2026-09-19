@@ -93,7 +93,8 @@ fun SongMenu(
             val fav = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)
             Item(if (fav) "Remove from favourites" else "Add to favourites") { actions.star(song, !fav); onDismiss() }
             Item("Add to playlist…") { picking = true }
-            if (song.id in downloads.doneIds || song.id in downloads.pendingIds) Item("Remove download") { actions.removeDownloads(listOf(song.id)); onDismiss() }
+            if (song.id in downloads.doneIds) Item("Remove download") { actions.removeDownloads(listOf(song.id)); onDismiss() }
+            else if (song.id in downloads.pendingIds) Item("Stop download") { actions.cancelDownloads(listOf(song)); onDismiss() }
             else Item("Download") { actions.download(listOf(song)); onDismiss() }
             if (!song.isExternal) Item("Share link") { actions.share(song.id); onDismiss() }
             song.albumId?.let { id -> Item("Go to album") { nav.album(id); onDismiss() } }

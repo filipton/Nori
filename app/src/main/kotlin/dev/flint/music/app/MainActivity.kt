@@ -1,6 +1,7 @@
 package dev.flint.music.app
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.os.Looper
@@ -10,6 +11,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.ui.platform.createLifecycleAwareWindowRecomposer
 import androidx.activity.result.contract.ActivityResultContracts
 import dev.flint.music.Flint
+import dev.flint.music.downloads.ACTION_OPEN_DOWNLOADS
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import dev.flint.music.app.ui.App
@@ -17,6 +19,8 @@ import dev.flint.music.app.ui.App
 class MainActivity : ComponentActivity() {
     private var started = false
     private val askNotifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    /** A screen asked for from outside (the download notification); App opens it and clears this. */
+    private val launchRoute = androidx.compose.runtime.mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -25,8 +29,19 @@ class MainActivity : ComponentActivity() {
         // The composition runs under the app's own animation speed, not Android's: see AppMotion.
         @OptIn(androidx.compose.ui.InternalComposeUiApi::class)
         val recomposer = window.decorView.createLifecycleAwareWindowRecomposer(dev.flint.music.app.ui.AppMotion, lifecycle)
-        setContent(recomposer) { App() }
+        // Only a fresh launch: a recreated activity (rotation) already went where its intent asked.
+        if (savedInstanceState == null) launchRoute.value = routeOf(intent)
+        setContent(recomposer) { App(launchRoute) }
     }
+
+    /** The app already running: singleTop hands the notification's intent here instead of to a new activity. */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        routeOf(intent)?.let { launchRoute.value = it }
+    }
+
+    private fun routeOf(intent: Intent?): String? = if (intent?.action == ACTION_OPEN_DOWNLOADS) "downloads" else null
 
     override fun onStart() {
         super.onStart()
