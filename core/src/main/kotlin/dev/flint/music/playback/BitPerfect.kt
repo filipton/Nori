@@ -102,11 +102,14 @@ class BitPerfect(context: Context) {
     private val _state = MutableStateFlow(DacState())
     val state: StateFlow<DacState> = _state
 
+    // Touched from two threads: the audio device callback on the main looper, and the audio track
+    // provider on the playback thread. Everything that reads or writes them goes through refresh(),
+    // which is synchronized; `applied` is also read on its own by the track provider.
     private var enabled = false
     private var sampleRate = 0
     private var encoding = AudioFormat.ENCODING_PCM_16BIT
     /** The port the framework is currently holding preferred mixer attributes for. */
-    private var applied: DacPort? = null
+    @Volatile private var applied: DacPort? = null
     var onChanged: () -> Unit = {}
 
     /**
@@ -116,7 +119,7 @@ class BitPerfect(context: Context) {
     @Volatile private var source: DacSource = Framework()
 
     /** Swap in a mock DAC, or null for the real audio system. Only the test bridge calls this. */
-    fun testSource(mock: DacSource?) {
+    @Synchronized fun testSource(mock: DacSource?) {
         clear()
         source = mock ?: Framework()
         refresh()
@@ -129,12 +132,12 @@ class BitPerfect(context: Context) {
 
     fun start() = audio.registerAudioDeviceCallback(devices, Handler(Looper.getMainLooper()))
 
-    fun stop() {
+    @Synchronized fun stop() {
         audio.unregisterAudioDeviceCallback(devices)
         clear()
     }
 
-    fun setEnabled(on: Boolean) {
+    @Synchronized fun setEnabled(on: Boolean) {
         if (enabled == on) return
         enabled = on
         refresh()
@@ -147,7 +150,7 @@ class BitPerfect(context: Context) {
      * the toggle sat there doing nothing. Called on the playback thread, from the audio track provider,
      * which is the last moment the framework still reads preferred mixer attributes.
      */
-    fun onFormat(rate: Int, pcmEncoding: Int) {
+    @Synchronized fun onFormat(rate: Int, pcmEncoding: Int) {
         if (rate <= 0 || (rate == sampleRate && pcmEncoding == encoding)) return
         sampleRate = rate
         encoding = pcmEncoding
@@ -163,7 +166,7 @@ class BitPerfect(context: Context) {
     /** The device the AudioTrack should be pinned to, or null to let Android route it. */
     fun preferredDevice(): AudioDeviceInfo? = applied?.device
 
-    private fun refresh() {
+    @Synchronized private fun refresh() {
         val port = runCatching { source.find() }.getOrNull()
         val before = _state.value.bitPerfect
         _state.value = decide(port)

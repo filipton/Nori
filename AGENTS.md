@@ -37,8 +37,9 @@ emulator, `tools/apk.sh --install` to push it straight to whatever is connected.
 debug key, which installs and updates on your own device but cannot be published.
 
 `tools/app.sh` drives a **debug** build over adb without touching the screen - `open <route>`,
-`play "search:…"`, `do download album:<id>`, `set limiter true`, `state` (one JSON line of route,
-playback, DSP and download state). `tools/audio-e2e.sh` and `tools/feature-e2e.sh` are built on it and
+`play "search:…"`, `do download album:<id>`, `do "dac <name>@44100/16"` (a USB DAC that is not there,
+so the bit-perfect and offload rules can be checked on an emulator), `set limiter true`, `state`
+(one JSON line of route, playback, DSP, download and DAC state). `tools/audio-e2e.sh` and `tools/feature-e2e.sh` are built on it and
 check playback and the rest of the app against a real server. When adding a feature, add its check
 there: a screenshot proves a screen renders, not that the feature works.
 
@@ -49,6 +50,10 @@ there: a screenshot proves a screen renders, not that the feature works.
 - One OkHttp pool for API, covers and audio. URLs are stable (derived salt) so caches hit.
 - CPU-decoded playback runs in bursts (`BurstSink` + a 10 s AudioTrack buffer). Check changes to the
   audio path with `tools/bench.sh dev.flint.music 90 off`: "quiet" should stay around 80 %.
+- Audio offload only reaches the phone's own outputs: the audio chip has no path to a USB device, and
+  an offloaded track routed there plays nothing while reporting itself fine. `Outputs.usb` stands
+  offload down whenever anything USB is attached, and a sink that refuses the stream gives it up for
+  the life of the service. That silence is what a USB DAC looked like before.
 - Anything that touches samples disables audio offload, so the default path has no audio processors
   and ReplayGain is player volume. Sample-domain features must keep working under `BurstSink` (deep
   buffer); only the equalizer screen (`CMD_TUNING`) may trade it for latency. The sink chain is
