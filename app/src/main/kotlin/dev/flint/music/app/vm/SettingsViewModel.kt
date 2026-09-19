@@ -184,7 +184,8 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
 
     /** Downloads the AutoEQ index once (850 kB) so searching is local afterwards. */
     fun downloadAutoEqIndex() = viewModelScope.launch {
-        if (!prefs.value.thirdPartyLookups) return@launch _autoEq.update { it.copy(error = "Turn on \"Third-party lookups\" first: this downloads from github.com.") }
+        // Asked for by name, with a button: that is the consent. The lookups switch is for what the app
+        // fetches on its own - missing lyrics, update checks - not for a download the user started.
         _autoEq.update { it.copy(busy = true, error = null) }
         _autoEq.value = try {
             val text = withContext(Dispatchers.IO) { flint.http.get(flint.core.autoeqIndexUrl()).decodeToString() }

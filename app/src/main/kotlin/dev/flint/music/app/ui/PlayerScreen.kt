@@ -178,7 +178,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         val scheme = MaterialTheme.colorScheme
         SystemBarIcons(scheme.background)
         Box(
-            Modifier.fillMaxSize().drawBehind {
+            Modifier.fillMaxSize().pullToDismiss(panel == Panel.ART, nav::back).drawBehind {
                 // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
                 // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
                 // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
@@ -413,6 +413,39 @@ private const val SLEEVE = 0.74f
  */
 private const val SLEEVE_UNDER_TEXT = 0.095f
 
+/**
+ * Pull the player down from anywhere on it and the whole screen follows the finger; let go past a
+ * fifth of the way, or with a flick, and it closes, otherwise it springs back. That is how Apple's
+ * player goes away. Before this only the thin handle strip at the top answered, and once the sleeve
+ * filled the top half of the screen almost every pull landed on the artwork instead - which only knew
+ * sideways swipes - so the player could hardly be pulled down at all.
+ *
+ * Sideways gestures underneath (skipping on the artwork, the seek bar, the volume slider) still work:
+ * a vertical drag detector only claims a drag once it has moved further up or down than across.
+ * Off in the lyrics and queue, where a vertical drag has to scroll the list.
+ */
+private fun Modifier.pullToDismiss(enabled: Boolean, onDismiss: () -> Unit): Modifier = composed {
+    val offset = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    pointerInput(enabled) {
+        if (!enabled) return@pointerInput
+        val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+        detectVerticalDragGestures(
+            onDragStart = { tracker.resetTracking() },
+            onDragEnd = {
+                val flick = tracker.calculateVelocity().y
+                if (offset.value > size.height * 0.2f || (flick > 1600f && offset.value > 0f)) onDismiss()
+                else scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+            },
+            onDragCancel = { scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) } },
+        ) { change, delta ->
+            tracker.addPosition(change.uptimeMillis, change.position)
+            // Down follows the finger one to one; up does nothing - the player is already all the way up.
+            scope.launch { offset.snapTo((offset.value + delta).coerceAtLeast(0f)) }
+        }
+    }.graphicsLayer { translationY = offset.value }
+}
+
 /** Drag it down, or tap it, to put the player away. */
 @Composable
 private fun Handle(modifier: Modifier, colour: Color, onBack: () -> Unit) {
@@ -501,6 +534,11 @@ private fun VolumeRow(vm: PlayerViewModel) {
             val f = (x / w).coerceIn(0f, 1f)
             level = f; vm.setVolumeFraction(f)
         }
+        // A change from outside - the volume keys, another app - eases over, instead of the bar jumping
+        // when the once-a-second read picks it up. A drag is followed exactly: the finger is the source.
+        val shown by androidx.compose.animation.core.animateFloatAsState(
+            level, androidx.compose.animation.core.tween(if (dragging || reduceMotion()) 0 else 260), label = "volume",
+        )
         Box(
             Modifier.weight(1f).height(34.dp)
                 .pointerInput(Unit) {
@@ -516,10 +554,10 @@ private fun VolumeRow(vm: PlayerViewModel) {
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
-                    drawRoundRect(filled, Offset(0f, y), Size(size.width * level, h), r)
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * shown, h), r)
                     // No knob unless a finger is on it: Apple's volume slider is a filled bar and
                     // nothing else, and a permanent white circle is the most Material thing on the screen.
-                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * level, size.height / 2f))
+                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * shown, size.height / 2f))
                 },
         )
         Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)

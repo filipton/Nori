@@ -204,7 +204,7 @@ private val index = listOf(
     Entry("features", "Listening history and taste model", "Kept on this device only; powers mixes, smart playlists and your listening stats."),
     Entry("features", "Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row"),
     Entry("features", "Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them"),
-    Entry("features", "Third-party lookups", "Looks up missing lyrics, headphone sound profiles and app updates online, sending the artist and title of what's playing"),
+    Entry("features", "Third-party lookups", "Looks up missing lyrics and checks for app updates on its own, sending the artist and title of what's playing"),
     Entry("playback", "Fade on play, pause, seek and skip", ""),
     Entry("playback", "No crossfade inside an album", "Tracks that follow each other on the same album stay gapless"),
     Entry("playback", "Pitch", ""),
@@ -420,7 +420,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Toggle("Listening history and taste model", "Kept on this device only; powers mixes, smart playlists and your listening stats.", p.tasteModel) { on -> vm.update { it.copy(tasteModel = on) } }
             Toggle("Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row", p.weightedShuffle) { on -> vm.update { it.copy(weightedShuffle = on) } }
             Toggle("Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them", p.profilePerOutput) { on -> vm.update { it.copy(profilePerOutput = on) } }
-            Toggle("Third-party lookups", "Looks up missing lyrics, headphone sound profiles and app updates online, sending the artist and title of what's playing", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on, lyricsLrclib = on) } }
+            Toggle("Third-party lookups", "Looks up missing lyrics and checks for app updates on its own, sending the artist and title of what's playing", p.thirdPartyLookups) { on -> vm.update { it.copy(thirdPartyLookups = on, lyricsLrclib = on) } }
 
         }
         "playback" -> SettingsCard {

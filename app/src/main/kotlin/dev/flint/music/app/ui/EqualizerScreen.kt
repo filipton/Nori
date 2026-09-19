@@ -26,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
@@ -65,7 +66,16 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     var importing by remember { mutableStateOf(false) }
     var editing by remember { mutableStateOf(-1) }
     // Only while this screen is open does the player give up its deep buffer for instant response.
-    DisposableEffect(Unit) { vm.setTuning(true); onDispose { vm.setTuning(false) } }
+    // Low-latency mode costs a rebuild of the audio output, which is a small drop in the sound. Opening
+    // this screen to look is not a reason to pay it - the first change to a band is. That used to happen
+    // on entry, and on a DAC it was a noticeable break in the music just for opening the page.
+    val tuned = remember { mutableStateOf(false) }
+    val settled = remember { mutableStateOf(false) }
+    LaunchedEffect(p.eqBands, p.eqPreampDb, p.crossfeedDb, p.balance) {
+        if (!settled.value) { settled.value = true; return@LaunchedEffect }
+        if (!tuned.value && p.eqEnabled) { tuned.value = true; vm.setTuning(true) }
+    }
+    DisposableEffect(Unit) { onDispose { if (tuned.value) vm.setTuning(false) } }
 
     if (importing) ImportDialog(vm) { importing = false }
     p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }

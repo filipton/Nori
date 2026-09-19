@@ -45,8 +45,7 @@ fun AutoEqScreen(vm: SettingsViewModel) {
 
         if (ui.count == 0) {
             Text(
-                "AutoEQ measures headphones and publishes a correction curve for each. Downloading the list is one 850 kB request to github.com; after that, searching happens on this device." +
-                    if (prefs.thirdPartyLookups) "" else "\n\nIt needs \"Third-party lookups\" in Settings → Features.",
+                "AutoEQ measures headphones and publishes a correction curve for each. Downloading the list is one 850 kB request to github.com; after that, searching happens on this device.",
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             PillButton("Download the list", null, vm::downloadAutoEqIndex, Modifier.padding(horizontal = Space.gutter), prominent = true, enabled = !ui.busy)

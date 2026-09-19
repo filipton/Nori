@@ -105,8 +105,10 @@ class PlaybackService : MediaLibraryService() {
     private var errorsInARow = 0
     /** Sleep timer "after N songs": transitions still to go. */
     private var sleepAfterSongs = 0
-    /** The equalizer screen is open: trade the deep buffer for immediate response. */
+    /** A band is being moved: trade the deep buffer for immediate response. */
     private var tuning = false
+    /** Tuning has ended; rebuild with the deep buffer when the music is next paused, where it is silent. */
+    private var deepAtNextPause = false
     /**
      * The last thing that happens before the AudioTrack exists, and the only place that knows exactly what it
      * will be: encoding, rate and whether the stream is being offloaded. Preferred mixer attributes are read
@@ -265,6 +267,10 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (!isPlaying && !player.playWhenReady && deepAtNextPause) {
+                deepAtNextPause = false
+                reconfigureSink()
+            }
             announce()
             scrobbler.onPlaying(isPlaying)
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
@@ -582,10 +588,23 @@ class PlaybackService : MediaLibraryService() {
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
                 if (minutes > 0) alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, 15_000L, "flint.sleep", sleepAlarm, main)
             }
-            if (command.customAction == CMD_TUNING && tuning != args.getBoolean(ARG_ON)) {
-                tuning = args.getBoolean(ARG_ON)
-                updateBurst()
-                reconfigureSink()
+            if (command.customAction == CMD_TUNING) {
+                val on = args.getBoolean(ARG_ON)
+                // Rebuilding the sink to swap the deep buffer for a shallow one is a stop and a prepare -
+                // an audible drop. So it happens only when a band is actually moving and the equalizer
+                // is actually in the chain; with it off, or bypassed for a DAC, a change is inaudible
+                // either way and there is nothing to rebuild for.
+                if (on && !tuning && equalizer.enabled) {
+                    tuning = true
+                    updateBurst()
+                    reconfigureSink()
+                } else if (!on && tuning) {
+                    // And not straight back either: leaving the screen would cut the song a second time.
+                    // The shallow buffer costs some wakeups, not sound, so it lasts until the next pause.
+                    tuning = false
+                    updateBurst()
+                    deepAtNextPause = true
+                }
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }

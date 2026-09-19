@@ -147,6 +147,24 @@ track with a 27 pt white thumb (`FlintSwitch`), and `FlintSlider` is UISlider's 
 28 pt white knob on a soft shadow. Neither of those was measured off a screenshot — there is no
 settings screen in the App Store set — they are UIKit's own defaults.
 
+## Gestures and the equalizer
+
+- **Pull down anywhere on the player** closes it, and the whole screen follows the finger
+  (`PlayerScreen.pullToDismiss`); past a fifth of the height or a flick closes it, less springs
+  back. Only the handle strip used to answer, and once the sleeve filled the top half nearly every
+  pull landed on artwork that knew only sideways swipes - reported as "there is no pull down". Off
+  in the lyrics and queue, where a vertical drag scrolls. Checked: flick and slow drag on the
+  artwork close it, a short nudge springs back, a sideways swipe still skips.
+- **Test trap:** `app.sh open player` pushes another player every time, so Back or a dismiss just
+  reveals the one underneath and looks broken. Open the player by tapping the mini player after a
+  fresh launch.
+- **The equalizer no longer drops the sound on entry.** Opening it sent `CMD_TUNING`, and the
+  service rebuilt the sink (stop, prepare) to swap the 10 s buffer for a shallow one - an audible
+  break, on a DAC or anywhere, and again on leaving. Now: nothing on opening; one rebuild on the
+  first change to a band, only if the equalizer is in the chain; nothing on leaving; the deep
+  buffer comes back at the next pause, where a rebuild is silent. Counted from the `AudioTrack` log
+  line: 0 / 1 / 0 / 0 / 1 for open, first change, second change, leave, pause.
+
 ## Interface size
 
 Every size above was measured on a phone 411 dp wide. The owner's phone is about 358 dp wide
