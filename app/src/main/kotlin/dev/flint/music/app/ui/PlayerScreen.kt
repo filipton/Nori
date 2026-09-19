@@ -2,7 +2,6 @@ package dev.flint.music.app.ui
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import kotlin.math.roundToInt
@@ -34,7 +33,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Bedtime
@@ -51,8 +49,8 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.VolumeDown
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeDown
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -76,7 +74,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -151,7 +148,7 @@ private enum class Panel { ART, QUEUE, LYRICS }
 @Composable
 fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val starred by vm.currentStarred.collectAsStateWithLifecycle()
+    val marks = LocalStarMarks.current
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
@@ -211,6 +208,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         )
                     }
                     state.current?.let { s ->
+                        val starred = marks.effectiveStar(dev.flint.music.data.StarKind.SONG, s.id, s.starred)
                         Row(Modifier, Arrangement.spacedBy(10.dp), Alignment.CenterVertically) {
                             TitleCircle(
                                 if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
@@ -329,7 +327,7 @@ private fun VolumeRow(vm: PlayerViewModel) {
         Modifier.fillMaxWidth().padding(horizontal = 52.dp, vertical = 2.dp),
         Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.VolumeDown, null, Modifier.size(16.dp), tint = scheme.onSurfaceVariant)
+        Icon(Icons.AutoMirrored.Filled.VolumeDown, null, Modifier.size(16.dp), tint = scheme.onSurfaceVariant)
         val track = scheme.onSurface.copy(alpha = 0.22f)
         val filled = scheme.onSurface.copy(alpha = 0.85f)
         val pick: (Float, Float) -> Unit = { x, w ->
@@ -355,7 +353,7 @@ private fun VolumeRow(vm: PlayerViewModel) {
                     drawCircle(Color.White, 14.dp.toPx(), Offset(size.width * level, size.height / 2f))
                 },
         )
-        Icon(Icons.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
+        Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
     }
 }
 

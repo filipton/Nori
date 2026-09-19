@@ -23,6 +23,8 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     private val _messages = Channel<String>(Channel.BUFFERED)
     /** One-line confirmations and failures, for a snackbar or whatever the UI uses. */
     val messages = _messages.receiveAsFlow()
+    /** This session's star changes, so every heart on screen can prefer them over its snapshot. */
+    val starMarks: StateFlow<Map<String, Boolean>> = flint.library.starMarks
     val downloads: StateFlow<DownloadState> = flint.downloads.state
 
     private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {

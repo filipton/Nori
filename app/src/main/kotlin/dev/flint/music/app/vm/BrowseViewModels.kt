@@ -103,7 +103,10 @@ class PlaylistsViewModel(app: Application) : FlintViewModel(app) {
 }
 
 class StarredViewModel(app: Application) : FlintViewModel(app) {
-    val starred: StateFlow<Load<Starred>> = flint.library.starred().asLoad()
+    // Re-queried on every star change: the one-shot read would otherwise keep a removed favourite
+    // until the screen is reopened. The stored answer paints first, so there is no loading flash.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val starred: StateFlow<Load<Starred>> = flint.library.starsVersion.flatMapLatest { flint.library.starred() }.asLoad()
 }
 
 class GenresViewModel(app: Application) : FlintViewModel(app) {

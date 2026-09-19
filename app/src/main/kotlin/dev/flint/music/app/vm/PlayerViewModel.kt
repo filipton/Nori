@@ -8,7 +8,6 @@ import dev.flint.music.data.LyricsSource
 import dev.flint.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -32,15 +31,6 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
             if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
             else flint.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
         }.asLoad()
-
-    /**
-     * Whether the playing song is starred. The queue holds snapshot songs, so this prefers a star
-     * change made this session over the snapshot - otherwise the now-playing star sits stale.
-     */
-    val currentStarred: StateFlow<Boolean> = combine(state, flint.library.songStars) { st, stars ->
-        val s = st.current
-        if (s == null) false else stars[s.id] ?: s.starred
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), state.value.current?.starred == true)
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs

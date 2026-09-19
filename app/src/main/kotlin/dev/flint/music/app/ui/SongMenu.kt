@@ -77,7 +77,8 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
             Item("Start radio from this song") { actions.startRadio(song); onDismiss() }
             if (!song.isExternal) Item("Instant mix") { actions.instantMix(song); onDismiss() }
             if (!song.isExternal) Item("Exclude from mixes") { actions.excludeFromMixes(song); onDismiss() }
-            Item(if (song.starred) "Remove from favourites" else "Add to favourites") { actions.star(song, !song.starred); onDismiss() }
+            val fav = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)
+            Item(if (fav) "Remove from favourites" else "Add to favourites") { actions.star(song, !fav); onDismiss() }
             Item("Add to playlist…") { picking = true }
             if (song.id in downloads.doneIds || song.id in downloads.pendingIds) Item("Remove download") { actions.removeDownloads(listOf(song.id)); onDismiss() }
             else Item("Download") { actions.download(listOf(song)); onDismiss() }

@@ -64,11 +64,15 @@ class Library(
     private val core get() = coreOf()
 
     /**
-     * Star changes made this session, by song id. The player's queue holds snapshot songs, so a star
-     * would otherwise succeed on the server while the now-playing star sat stale until the next play.
+     * Star changes made this session, keyed `"${kind.param}:$id"`. Reads that paint once (a cached
+     * list, a queue snapshot) would otherwise sit stale until the screen is reopened; the UI prefers
+     * these over the snapshot. Bumped alongside [starsVersion].
      */
-    private val _songStars = MutableStateFlow(emptyMap<String, Boolean>())
-    val songStars: StateFlow<Map<String, Boolean>> = _songStars.asStateFlow()
+    private val _starMarks = MutableStateFlow(emptyMap<String, Boolean>())
+    val starMarks: StateFlow<Map<String, Boolean>> = _starMarks.asStateFlow()
+    /** Bumped on every star change, so one-shot reads (the favourites list) can re-query. */
+    private val _starsVersion = MutableStateFlow(0)
+    val starsVersion: StateFlow<Int> = _starsVersion.asStateFlow()
     private val http get() = httpOf()
 
     /** The endpoints that take `musicFolderId`. */
@@ -286,7 +290,8 @@ class Library(
 
     suspend fun star(kind: StarKind, id: String, on: Boolean) {
         write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist")
-        if (kind == StarKind.SONG) _songStars.update { it + (id to on) }
+        _starMarks.update { it + ("${kind.param}:$id" to on) }
+        _starsVersion.update { it + 1 }
     }
 
     suspend fun rate(id: String, rating: Int) = write("setRating", params("id" to id, "rating" to rating), "getAlbum", "getPlaylist")

@@ -153,6 +153,8 @@ fun App() {
 
         CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
+            // This session's star changes, so every heart prefers them over the snapshot it painted with.
+            val marks by actions.starMarks.collectAsStateWithLifecycle()
             // The chrome floats over the page rather than ending it: the page fills the window, its colour
             // reaches the bottom edge, and the list scrolls under the mini player the way Apple's does.
             // Screens keep the last row reachable by adding LocalChromeInset to their content padding.
@@ -164,7 +166,7 @@ fun App() {
             // text that does not name one (which left titles rendering almost black).
             Surface(color = MaterialTheme.colorScheme.background, contentColor = MaterialTheme.colorScheme.onBackground) {
             Box(Modifier.fillMaxSize()) {
-              CompositionLocalProvider(LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
+              CompositionLocalProvider(LocalStarMarks provides marks, LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
                 // One transition for the whole app, and a quiet one: pages slide a little and fade, the
                 // way a push does on a phone. The default jumps and the horizontal slide across the
                 // full width reads as a lurch on a large screen.
@@ -193,7 +195,20 @@ fun App() {
                     }
                     composable("equalizer") { Inset { EqualizerScreen(settings) } }
                     composable("autoeq") { Inset { AutoEqScreen(settings) } }
-                    composable("player") { PlayerScreen(player, actions) }
+                    composable(
+                        "player",
+                        // The mini player opens with an upward swipe, so the full player rises with it -
+                        // the default sideways slide reads as a jump after a vertical gesture. Other
+                        // routes keep the app-wide transition; back needs no theatre.
+                        enterTransition = {
+                            androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(if (plain) 90 else 260)) { it } +
+                                androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180))
+                        },
+                        popExitTransition = {
+                            androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(if (plain) 90 else 240)) { it } +
+                                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 160))
+                        },
+                    ) { PlayerScreen(player, actions) }
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }

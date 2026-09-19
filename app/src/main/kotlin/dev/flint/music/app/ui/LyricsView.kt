@@ -165,7 +165,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             }
         }
         // Where the words came from, and how to nudge them, on one quiet bar that does not sit on the lyrics.
-        val source = found?.source?.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
+        val source = found.source.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
         if (lyrics.synced || source != null) androidx.compose.material3.Surface(
             shape = PillShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background),
             contentColor = MaterialTheme.colorScheme.onSurface,
@@ -191,7 +191,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
 @Composable
 private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: dev.flint.music.ffi.Song?) {
     val menu = LocalSongMenu.current
-    val starred by vm.currentStarred.collectAsStateWithLifecycle()
+    val marks = LocalStarMarks.current
     Row(
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
         Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
@@ -209,6 +209,7 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
             )
         }
         song?.let { s ->
+            val starred = marks.effectiveStar(dev.flint.music.data.StarKind.SONG, s.id, s.starred)
             TitleCircle(if (starred) Icons.Filled.Star else Icons.Filled.StarBorder, "Favourite", starred) { actions.star(s, !starred) }
             TitleCircle(Icons.Filled.MoreHoriz, "More", false) { menu(s) }
         }

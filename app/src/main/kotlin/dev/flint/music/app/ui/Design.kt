@@ -30,7 +30,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -141,6 +145,17 @@ data class PagePalette(
 )
 
 val LocalPalette = staticCompositionLocalOf<PagePalette?> { null }
+
+/** Star changes made this session, keyed `"${kind.param}:$id"` (see Library.starMarks). */
+val LocalStarMarks = staticCompositionLocalOf<Map<String, Boolean>> { emptyMap() }
+
+/**
+ * Star state as the screen should show it: this session's change wins over the snapshot the list was
+ * painted with. Every toggle must also act on this, not on the snapshot, or the second tap undoes
+ * the first one's server call instead of flipping what is on screen.
+ */
+fun Map<String, Boolean>.effectiveStar(kind: dev.flint.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
+    get("${kind.param}:$id") ?: snapshot
 
 /** The page wash: the cover's own bottom colour at the top, easing into the page colour. */
 fun pageBrush(palette: PagePalette, endY: Float): Brush = Brush.verticalGradient(
@@ -308,9 +323,17 @@ fun ScrimIconButton(icon: ImageVector, description: String, onClick: () -> Unit,
 @Composable
 fun SearchField(
     value: String, onValue: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier,
-    testTag: String? = null,
+    testTag: String? = null, autofocus: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
+    // Asked for by hand: opening search focuses the field so the keyboard is already there.
+    val focus = remember(autofocus) { if (autofocus) FocusRequester() else null }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    LaunchedEffect(focus) {
+        // Focus alone does not always raise the keyboard when it lands before the window is ready;
+        // ask for it explicitly, which is the whole point of autofocus.
+        if (focus != null) { focus.requestFocus(); keyboard?.show() }
+    }
     Surface(
         shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background),
         contentColor = scheme.onSurface, modifier = modifier.fillMaxWidth(),
@@ -326,7 +349,8 @@ fun SearchField(
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = scheme.onSurface),
                     cursorBrush = androidx.compose.ui.graphics.SolidColor(scheme.primary),
                     modifier = Modifier.fillMaxWidth()
-                        .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
+                        .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+                        .then(if (focus != null) Modifier.focusRequester(focus) else Modifier),
                 )
             }
             if (value.isNotEmpty()) androidx.compose.material3.IconButton({ onValue("") }, Modifier.size(28.dp)) {

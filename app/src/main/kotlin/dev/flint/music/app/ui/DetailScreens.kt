@@ -151,8 +151,9 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             onPlay = { actions.play(d.songs) },
             onShuffle = { actions.shuffle(d.songs) },
             actions = {
-                CircleButton(if (d.album.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                    actions.starAlbum(d.album.id, !d.album.starred)
+                val albumStarred = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
+                CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                    actions.starAlbum(d.album.id, !albumStarred)
                 }
                 // Queue and download live behind the menu: four controls on one line squeeze the Play
                 // pill until its own label no longer fits.
@@ -210,8 +211,9 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             onPlay = { actions.playArtist(ui.detail.albums) },
             onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
             actions = {
-                CircleButton(if (ui.detail.artist.starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                    actions.starArtist(ui.detail.artist.id, !ui.detail.artist.starred)
+                val artistStarred = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
+                CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                    actions.starArtist(ui.detail.artist.id, !artistStarred)
                 }
                 MoreCircle(
                     listOf(
