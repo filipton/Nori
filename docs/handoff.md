@@ -114,13 +114,14 @@ software, so the absolute numbers are dreadful and only the comparison means any
 | | 50th | 90th |
 |---|---|---|
 | flat page colour | 73 ms | 93 ms |
-| page wash | 77 ms | 97 ms |
+| page wash on the album page | 77 ms | 97 ms |
+| as shipped (wash on the player only) | 69 ms | 93 ms |
 
 Measured on the same build by making `derive` hand back a null wash, which is the only honest way to
-compare: the page costs about 4 ms a frame more to scroll, roughly 5 %. That is the emulator's
-software rasterizer, where a full-screen textured fill is the expensive thing and a gradient is not;
-on a GPU a second full-screen quad is nothing. The player never scrolls, so this is an album page
-only.
+compare. While the album page carried the wash it cost about 4 ms a frame to scroll, roughly 5 % —
+the emulator's software rasterizer, where a full-screen textured fill is expensive and a gradient is
+not; on a GPU a second full-screen quad is nothing. It was taken off that page for how it looked
+rather than what it cost, and scrolling is back at the baseline. The player never scrolls.
 
 Two traps this measurement fell into, both worth knowing:
 
