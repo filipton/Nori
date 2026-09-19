@@ -12,6 +12,18 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The cover travels into the lyrics, and back out.** Entering the lyrics used to dissolve the sleeve
+  into the blurred page, which read as a block of blur appearing at the top of the screen; the sleeve
+  now shrinks into the lyrics header's thumbnail and grows back out of it, one picture the whole way
+  (`PanelFlight`, with `PlayerSheet.panelFlight` standing both ends' own copies down). The queue has no
+  cover of its own, so that change is still a dissolve - a real one now: the panel cross-fade was
+  driven by a child animation inside `AnimatedContent`, which the arriving content reads as already
+  settled, so it never ran.
+- **The hairline of letters above the seek bar.** The lyrics' fade is a mask, and the mask was drawn to
+  the panel's exact height while the layer it erases is clipped to whole pixels: the last fractional
+  row came through unmasked. The mask is drawn a pixel beyond every edge now, with the gradient still
+  anchored to the panel's own height.
+
 - **What plays when the queue runs out is a choice.** Keep playing now has two settings beside it
   (Settings → Library): songs or a whole album at a time, and what that is chosen by - what the
   server calls similar, the same artist, the same genre or the same decade. Albums queue the record

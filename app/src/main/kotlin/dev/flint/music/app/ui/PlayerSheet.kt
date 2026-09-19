@@ -43,6 +43,12 @@ class PlayerSheet(private val scope: CoroutineScope) {
      */
     var panelCover by mutableStateOf(Rect.Zero)
 
+    /**
+     * One cover is travelling between the sleeve and a panel's own thumbnail right now, so neither end
+     * draws its own copy: the flight is the only one on screen. See PanelFlight in PlayerScreen.
+     */
+    var panelFlight by mutableStateOf(false)
+
     /** The top of the mini player, in root coordinates: where the sheet's top edge starts. */
     var miniTop by mutableFloatStateOf(0f)
 

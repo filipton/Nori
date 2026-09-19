@@ -194,6 +194,36 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var sleepMenu by remember { mutableStateOf(false) }
     // The transport's way of asking the sleeve to change record; see SleeveSlide.
     val slide = remember { SleeveSlide() }
+    // How far the panel that is arriving has arrived. One number for the whole screen, driven here
+    // rather than inside AnimatedContent: a child animation started by the content that is entering
+    // reads its own state as already settled and never runs, which is why the sleeve used to be
+    // replaced by the page behind it in a single frame instead of dissolving into it.
+    val arrival = remember { Animatable(1f) }
+    var showing by remember { mutableStateOf(panel) }
+    /** The panel being left, for as long as the change lasts. */
+    var leaving by remember { mutableStateOf(panel) }
+    LaunchedEffect(panel) {
+        if (panel == showing) return@LaunchedEffect
+        leaving = showing
+        showing = panel
+        if (AppMotion.reduce) arrival.snapTo(1f)
+        else { arrival.snapTo(0f); arrival.animateTo(1f, androidx.compose.animation.core.tween(PANEL_MS)) }
+    }
+    // The lyrics keep a small copy of the cover in their header, so between the artwork and the lyrics
+    // there is one cover and it travels, the way it does between the now playing bar and the sleeve.
+    // Dissolving the sleeve into the blurred page instead is what read as a block of blur appearing at
+    // the top of the screen out of nothing. The queue has no cover of its own, so that change stays a
+    // plain dissolve.
+    var thumb by remember { mutableStateOf(Rect.Zero) }
+    LaunchedEffect(sheet) {
+        androidx.compose.runtime.snapshotFlow { sheet.panelCover }.collect { if (it != Rect.Zero) thumb = it }
+    }
+    val flying = arrival.value < 1f && thumb != Rect.Zero && sleeveHeight > 0f &&
+        (panel == Panel.LYRICS && leaving == Panel.ART || panel == Panel.ART && leaving == Panel.LYRICS)
+    androidx.compose.runtime.DisposableEffect(flying) {
+        sheet.panelFlight = flying
+        onDispose { sheet.panelFlight = false }
+    }
 
     val settingsVm: SettingsViewModel = viewModel()
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
@@ -251,6 +281,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             // in the now playing bar. Without it the lyrics simply went down behind the bar and a cover
             // appeared there out of nothing.
             else if (panel == Panel.LYRICS) FlyingThumb(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW))
+            if (flying) PanelFlight(sleeveArt, thumb, sleeveBottom, sleeveHeight, toThumb = panel == Panel.LYRICS) { arrival.value }
             // Artwork, lyrics and queue dissolve into each other rather than cutting. The fade is on the
             // panel itself and not on the whole screen: the transport is the same in all three and is
             // shared across the change, and fading the content it sits in dimmed it half-way. Fading only
@@ -259,18 +290,18 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             androidx.compose.animation.SharedTransitionLayout {
             androidx.compose.animation.AnimatedContent(
                 targetState = panel,
+                // The one that is leaving fades out where it stands, which is also what keeps it on
+                // screen while it does; the one arriving is brought up by [arrival] instead, so the
+                // controls they share are not faded twice over.
                 transitionSpec = {
                     androidx.compose.animation.EnterTransition.None togetherWith
-                        androidx.compose.animation.ExitTransition.KeepUntilTransitionsFinished
+                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(PANEL_MS))
                 },
                 label = "panel",
-            ) { panel ->
-            // One number for both directions: 1 while this panel is the one, 0 before it arrives and
-            // after it has gone, so the two panels cross-fade through each other.
-            val panelFade by transition.animateFloat(
-                transitionSpec = { androidx.compose.animation.core.tween(240) },
-                label = "panelFade",
-            ) { st -> if (st == androidx.compose.animation.EnterExitState.Visible) 1f else 0f }
+            ) { page ->
+            // 1 for the panel that is leaving - it has the transition's own fade on top of it - and the
+            // arrival for the one coming in, read in the draw phase so a dissolve recomposes nothing.
+            val panelFade: () -> Float = { if (page == panel) arrival.value else 1f }
             // The seek bar, the transport, the volume and the icons are in every panel but not at the same
             // height. Shared, only one copy of each is drawn during the dissolve, and it moves from where it
             // was to where it goes; dissolved like the rest, both copies showed and the controls doubled.
@@ -290,9 +321,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // their cover is sharp to about 53 % of the screen and still leaves a faint trace behind
                 // the title at 56.5 % and the artist at 59-61 %. A sleeve that ended above the text left
                 // the text sitting on bare page, which is what read as the cover being out of place.
-                if (panel == Panel.ART) Box(
+                if (page == Panel.ART) Box(
                     Modifier.fillMaxWidth()
-                        .graphicsLayer { alpha = panelFade }
+                        .graphicsLayer { alpha = panelFade() }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -308,7 +339,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 ) {
                     // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
                     // the moment the sheet arrives, in exactly the same place.
-                    Box(Modifier.graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f }) {
+                    Box(Modifier.graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f }) {
                         Artwork(
                             vm, sleeveArt, palette, coverUrl,
                             state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
@@ -323,10 +354,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // and the queue cannot have (they need their own vertical drag to scroll).
                     Spacer(Modifier.fillMaxWidth().statusBarsPadding().height(22.dp).dragsSheet(sheet))
                     Box(
-                        Modifier.weight(1f).graphicsLayer { alpha = panelFade }
-                            .then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier),
+                        Modifier.weight(1f).graphicsLayer { alpha = panelFade() }
+                            .then(if (page == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier),
                     ) {
-                        if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
+                        if (page == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
                     }
                 }
 
@@ -336,11 +367,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // that here - the owner found Apple's own spacing too loose on a 20:9 screen, which is
                 // taller than the 19.5:9 those percentages were taken from - and the space that frees
                 // up goes underneath them rather than between them.
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.02f))
+                if (page == Panel.ART) Spacer(Modifier.weight(0.02f))
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
-                if (panel != Panel.LYRICS) Row(
-                    Modifier.fillMaxWidth().graphicsLayer { alpha = panelFade }
+                if (page != Panel.LYRICS) Row(
+                    Modifier.fillMaxWidth().graphicsLayer { alpha = panelFade() }
                         .padding(start = PLAYER_GUTTER, end = PLAYER_GUTTER, top = 2.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
@@ -417,18 +448,18 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
                 }
 
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.17f))
+                if (page == Panel.ART) Spacer(Modifier.weight(0.17f))
                 Box(kept("volume")) { VolumeRow(vm) }
 
                 Row(kept("icons").fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                    PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { choose(Panel.LYRICS) }
+                    PanelButton(Icons.Filled.Lyrics, "Lyrics", page == Panel.LYRICS) { choose(Panel.LYRICS) }
                     // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
                     // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
                     // which is where a setting for the evening belongs.
                     OutputButton()
-                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { choose(Panel.QUEUE) }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", page == Panel.QUEUE) { choose(Panel.QUEUE) }
                 }
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
+                if (page == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
             }
             }
@@ -510,6 +541,9 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
  * at 26 and 16, so everything read as pushed against the sides.
  */
 private val PLAYER_GUTTER = 33.dp
+
+/** How long the artwork, the lyrics and the queue take to dissolve into one another. */
+private const val PANEL_MS = 360
 
 private const val SLEEVE = 0.74f
 
@@ -614,6 +648,46 @@ private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
                     clip = true
                 },
         ) { Cover(url, side, radius = 0.dp) }
+    }
+}
+
+/**
+ * The cover between the artwork and the lyrics: the sleeve shrinks into the lyrics header's thumbnail
+ * and grows back out of it, one picture the whole way. Both ends stand their own copy down while this
+ * runs (PlayerSheet.panelFlight), so there is never a second cover on screen.
+ *
+ * It is the same trick as the flight out of the now playing bar below: the square is laid out once at
+ * the sleeve's size and only moved and scaled by a layer, so nothing is measured or decoded again
+ * while it travels. [progress] is the panel change's own 0..1, read in the draw phase.
+ */
+@Composable
+private fun PanelFlight(art: SleeveArt, thumb: Rect, sleeveBottom: Float, sleeveHeight: Float, toThumb: Boolean, progress: () -> Float) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val side = with(density) { sleeveHeight.toDp() }
+    val thumbRadius = with(density) { 9.dp.toPx() }
+    val sleeveRadius = with(density) { 2.dp.toPx() }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        Box(
+            Modifier.requiredSize(side).align(Alignment.TopStart)
+                .graphicsLayer {
+                    // 0 at the sleeve, 1 at the thumbnail, whichever way the change is going.
+                    val t = progress().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
+                    val eased = t * t * (3f - 2f * t)
+                    fun mix(a: Float, b: Float) = a + (b - a) * eased
+                    val k = (mix(sleeveHeight, thumb.height) / sleeveHeight).coerceAtLeast(0.01f)
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                    scaleX = k; scaleY = k
+                    // The sleeve is the square cropped by the screen's edges, so it starts wider than the
+                    // screen and centred on it; layout has already put it there, which `overhang` takes
+                    // back out before the travel is applied.
+                    val overhang = (w - size.width) / 2f
+                    translationX = mix((w - sleeveHeight) / 2f, thumb.left) - overhang
+                    translationY = mix(sleeveBottom - sleeveHeight, thumb.top)
+                    shape = RoundedCornerShape(mix(sleeveRadius, thumbRadius) / k)
+                    clip = true
+                },
+        ) { SleeveImage(art, Modifier.fillMaxSize()) }
     }
 }
 

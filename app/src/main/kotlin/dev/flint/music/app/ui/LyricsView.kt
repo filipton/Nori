@@ -248,12 +248,21 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.flint.music.data.FoundLyr
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
                 .drawWithContent {
                     drawContent()
+                    // Drawn a pixel beyond the panel on every side, with the gradient still anchored to
+                    // the panel's own height. The layer is clipped to whole pixels and the mask was not,
+                    // so the last fractional row came through unmasked: a hairline of the tops of the
+                    // letters below, between the source label and the seek bar, which is what was
+                    // peeking out of the "1 px gap". Past the last stop the brush stays transparent, so
+                    // the extra row erases rather than paints.
                     drawRect(
                         Brush.verticalGradient(
                             // Gone by the source label at the bottom, so the two never sit on each other.
                             0f to Color.Transparent, 0.05f to Color.Black,
                             0.66f to Color.Black, 0.92f to Color.Transparent,
+                            startY = 0f, endY = size.height,
                         ),
+                        topLeft = androidx.compose.ui.geometry.Offset(-1f, -1f),
+                        size = androidx.compose.ui.geometry.Size(size.width + 2f, size.height + 2f),
                         blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
                     )
                 },
@@ -345,8 +354,9 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
         val sheet = LocalPlayerSheet.current
         Box(
             Modifier.onGloballyPositioned { if (sheet.progress.value >= 0.999f) sheet.panelCover = it.boundsInRoot() }
-                // While it is in flight it is the flying copy that is drawn, not this one.
-                .graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f },
+                // While it is in flight it is the flying copy that is drawn, not this one - whether the
+                // flight is the sheet's, out of the now playing bar, or the panel's, out of the sleeve.
+                .graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f },
         ) {
             Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
         }
