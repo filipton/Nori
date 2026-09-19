@@ -36,7 +36,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FastRewind
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lyrics
 import androidx.compose.material.icons.filled.MoreHoriz
@@ -184,16 +187,22 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
 
                 // The artwork bleeds to both screen edges like the sleeve it is; queue keeps the
                 // screen's side margin, lyrics lay out their own.
-                Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
-                    when (panel) {
-                        Panel.ART -> Artwork(vm, coverUrl, palette)
-                        Panel.QUEUE -> Queue(vm)
-                        Panel.LYRICS -> LyricsView(vm, actions, state.playing)
-                    }
+                //
+                // The sleeve takes exactly its square and no more. Giving it the column's spare height
+                // instead left a band of empty wash under it twice as deep as Apple's, because the
+                // controls below are shorter than the space that was left over; the spare height now
+                // sits above the volume slider, which is where Apple's is.
+                if (panel == Panel.ART) Artwork(vm, coverUrl, palette)
+                else Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
+                    if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
                 }
 
+                // A quarter of the column's spare height under the sleeve and the rest above the volume
+                // slider: measured off Apple's own player, where the band under the artwork is about half
+                // the one over the volume row.
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.3f))
                 Row(
-                    Modifier.fillMaxWidth().padding(start = 26.dp, end = 16.dp, top = 18.dp),
+                    Modifier.fillMaxWidth().padding(start = 26.dp, end = 16.dp, top = 8.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -203,7 +212,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         )
                         Text(
                             state.current?.let { listOfNotNull(it.artist.ifEmpty { null }, it.album.ifEmpty { null }).joinToString(" · ") } ?: "",
-                            style = MaterialTheme.typography.titleMedium, color = scheme.primary,
+                            // Apple holds this line back from the title rather than colouring it: a
+                            // saturated accent here is the one thing that made the screen read as Material.
+                            style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -225,14 +236,21 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
                         s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" },
                     ).joinToString(" · ")
-                    Caption(line, Modifier.padding(horizontal = 26.dp, vertical = 2.dp))
+                    // Apple shows nothing here. This audience wants it, so it stays - but well under
+                    // the artist line, as a caption you read when you look for it.
+                    Text(
+                        line, Modifier.padding(horizontal = 26.dp, vertical = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurface.copy(alpha = 0.38f),
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
                 }
 
                 SeekBar(vm, state.playing, state.durationMs)
 
                 // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
                 Row(Modifier.fillMaxWidth(), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
-                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.SkipPrevious, "Previous", Modifier.size(40.dp)) }
+                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(42.dp)) }
                     IconButton(vm::toggle, Modifier.size(72.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
                             if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
@@ -242,9 +260,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             )
                         }
                     }
-                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(40.dp)) }
+                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(42.dp)) }
                 }
 
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.7f))
                 VolumeRow(vm)
 
                 Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 14.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
@@ -275,7 +294,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
  */
 @Composable
 private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette?) {
-    Box(Modifier.fillMaxSize(), Alignment.TopCenter) {
+    Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(1f)
                 .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
@@ -300,9 +319,9 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
         onClick = onClick, shape = CircleShape,
         color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background),
         contentColor = if (selected) scheme.primary else scheme.onSurface,
-        modifier = Modifier.size(48.dp),
+        modifier = Modifier.size(42.dp),
     ) {
-        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(22.dp)) }
+        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(20.dp)) }
     }
 }
 
@@ -350,7 +369,9 @@ private fun VolumeRow(vm: PlayerViewModel) {
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
                     drawRoundRect(filled, Offset(0f, y), Size(size.width * level, h), r)
-                    drawCircle(Color.White, 14.dp.toPx(), Offset(size.width * level, size.height / 2f))
+                    // No knob unless a finger is on it: Apple's volume slider is a filled bar and
+                    // nothing else, and a permanent white circle is the most Material thing on the screen.
+                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * level, size.height / 2f))
                 },
         )
         Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)

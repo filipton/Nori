@@ -59,7 +59,7 @@ fun HeroPage(
     title: String,
     /** The artist line under the title, in the cover's accent colour; tapping it opens [onSubtitle]. */
     subtitle: String? = null,
-    /** Small capitals under that: year, song count, quality. */
+    /** A quiet line under that, in sentence case: year, song count, length, quality. */
     caption: String = "",
     onSubtitle: (() -> Unit)? = null,
     onPlay: (() -> Unit)? = null,
@@ -138,7 +138,9 @@ fun HeroPage(
                                 style = MaterialTheme.typography.titleMedium, color = scheme.primary,
                                 textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             )
-                            Caption(caption, Modifier.padding(top = 6.dp), align = TextAlign.Center)
+                            // Sentence case, as Apple writes it ("25 songs, 1 hour 42 minutes"). Small
+                            // capitals here made the line shout louder than the artist above it.
+                            Caption(caption, Modifier.padding(top = 6.dp), align = TextAlign.Center, caps = false)
                         }
 
                         // Apple's arrangement: shuffle in a circle on the left, one wide Play pill in the

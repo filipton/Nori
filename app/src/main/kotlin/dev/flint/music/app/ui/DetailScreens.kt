@@ -174,7 +174,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                     SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
                 }
                 // Tapping plays the whole album from that track, not just its disc.
-                songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs)
+                songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs, pageArtist = d.album.artist)
             }
         }
     }

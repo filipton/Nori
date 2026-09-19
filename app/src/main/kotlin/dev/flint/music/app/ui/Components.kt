@@ -149,7 +149,7 @@ fun SongRow(
     song: Song, coverUrl: String?, onClick: () -> Unit, onMenu: () -> Unit, modifier: Modifier = Modifier,
     number: Int? = null, playing: Boolean = false, downloaded: Boolean = false,
     selected: Boolean = false, onLongClick: (() -> Unit)? = null, onSwipe: ((Boolean) -> Unit)? = null,
-    divider: Boolean = true,
+    divider: Boolean = true, showArtist: Boolean = true,
 ) {
     val scheme = MaterialTheme.colorScheme
     Column(modifier.fillMaxWidth().background(if (selected) scheme.secondaryContainer else Color.Transparent)) {
@@ -174,9 +174,9 @@ fun SongRow(
                     song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
                     color = if (playing) scheme.primary else scheme.onSurface,
                 )
-                Text(
-                    (if (song.explicitStatus == "explicit") "🅴 " else "") + song.artist,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                val second = (if (song.explicitStatus == "explicit") "🅴 " else "") + (if (showArtist) song.artist else "")
+                if (second.isNotEmpty()) Text(
+                    second, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                 )
             }
@@ -200,6 +200,11 @@ fun LazyListScope.songRows(
     numbered: Boolean = false, cover: (Song) -> String? = { null }, keyPrefix: String = "",
     /** The list a tap plays from, when [songs] is only a slice of it (one disc of an album, a filtered view). */
     context: List<Song> = songs,
+    /**
+     * The artist the page is already about. A track by that artist then shows its title alone, the way
+     * Apple's album page does - repeating "Radiohead" down ten rows of a Radiohead album says nothing.
+     */
+    pageArtist: String? = null,
 ) {
     val swipe = actions.swipeEnabled
     itemsIndexed(songs, key = { i, s -> "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
@@ -208,6 +213,7 @@ fun LazyListScope.songRows(
             number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
             selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, onSwipe = if (swipe) ({ right -> actions.swipe(s, right) }) else null,
             divider = i < songs.lastIndex,
+            showArtist = pageArtist == null || !s.artist.equals(pageArtist, ignoreCase = true),
         )
     }
 }
