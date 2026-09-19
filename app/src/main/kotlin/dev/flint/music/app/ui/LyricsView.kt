@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -140,10 +141,21 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         LyricsHeader(vm, actions, song)
         BoxWithConstraints(Modifier.fillMaxSize().weight(1f)) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
-        // The line being sung rests a third of the way down; the list glides there instead of jumping.
+        // The line being sung rests a third of the way down, and the list glides there. It used to call
+        // animateScrollToItem, whose default spring is so stiff that over one line's distance it is
+        // done in two or three frames - on screen, a teleport. This is a measured ease instead, slow
+        // enough to follow with the eye, the way Apple's lyrics move. A line that is not on screen at
+        // all (a seek, the first line after opening) is still jumped to: gliding past a whole song's
+        // worth of words is not a transition, it is a wait.
         val plain = reduceMotion()
         LaunchedEffect(active, plain) {
-            if (active >= 0) if (plain) list.scrollToItem(active, -third) else list.animateScrollToItem(active, -third)
+            if (active < 0) return@LaunchedEffect
+            val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
+            if (plain || here == null) { list.scrollToItem(active, -third); return@LaunchedEffect }
+            // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
+            val distance = (here.offset - third).toFloat()
+            if (kotlin.math.abs(distance) < 1f) return@LaunchedEffect
+            list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
         }
         LazyColumn(state = list, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = maxHeight / 2)) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
@@ -158,7 +170,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                             val target = if (i == active) bright else if (i < active) dim.copy(alpha = 0.55f) else dim
                             val colour by androidx.compose.animation.animateColorAsState(
                                 target,
-                                androidx.compose.animation.core.tween(if (plain) 0 else 260),
+                                androidx.compose.animation.core.tween(if (plain) 0 else LYRIC_GLIDE_MS, easing = LyricEase),
                                 label = "lyric",
                             )
                             Text(line.text, style = style.copy(fontWeight = weight), color = colour)
@@ -262,3 +274,13 @@ private fun SweepLine(line: LyricLine, style: TextStyle, dim: Color, bright: Col
         },
     )
 }
+
+/**
+ * How long a line change takes, scroll and colour together so they arrive at the same moment. Long
+ * enough that the eye follows the words up rather than losing its place; short enough that a fast
+ * verse, a line every second or so, is never still catching up.
+ */
+private const val LYRIC_GLIDE_MS = 620
+
+/** Ease in and out, soft at both ends, the curve iOS uses for its own scrolling transitions. */
+private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
