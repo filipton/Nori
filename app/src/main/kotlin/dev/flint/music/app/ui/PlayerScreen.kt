@@ -1501,7 +1501,31 @@ private fun Queue(vm: PlayerViewModel) {
     // moves a song within the list, so reordering is offered only when the two are the same.
     val order = state.order.takeIf { it.size == state.queue.size } ?: state.queue.indices.toList()
     val reorderable = !state.shuffle
-    LazyColumn(Modifier.fillMaxSize().weight(1f), state = list) {
+    // The last row is cut off dead straight where the list ends, a few pixels above the song's title,
+    // and those few pixels are the ones that flickered as a panel came or went: a row half drawn, over
+    // a title arriving in the same place. It goes soft over the last stretch instead, the way the
+    // lyrics do, and a mask is used rather than a colour laid on top because the page behind is the
+    // cover's blur and any flat colour meeting it draws a line of its own.
+    val fadeOut = with(androidx.compose.ui.platform.LocalDensity.current) { 28.dp.toPx() }
+    LazyColumn(
+        Modifier.fillMaxSize().weight(1f)
+            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+            .drawWithContent {
+                drawContent()
+                drawRect(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(androidx.compose.ui.graphics.Color.Black, androidx.compose.ui.graphics.Color.Transparent),
+                        startY = size.height - fadeOut, endY = size.height,
+                    ),
+                    // A pixel past each edge: the layer is clipped to whole pixels and a mask drawn to
+                    // the exact height leaves the last fractional row of it untouched.
+                    topLeft = Offset(-1f, size.height - fadeOut),
+                    size = androidx.compose.ui.geometry.Size(size.width + 2f, fadeOut + 2f),
+                    blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                )
+            },
+        state = list,
+    ) {
         itemsIndexed(order, key = { _, i -> "$i-${state.queue[i].id}" }, contentType = { _, _ -> "song" }) { at, i ->
             val s = state.queue[i]
             val held = at == from

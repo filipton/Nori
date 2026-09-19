@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Drives a debug build of flint directly, instead of tapping screen coordinates:
-#   tools/app.sh open settings/audio      navigate to a route
+#   tools/app.sh open settings/sound      navigate to a route
 #   tools/app.sh play "search:noise 1"    play a song by id, album, or first search hit
 #   tools/app.sh set limiter true         flip one setting
 #   tools/app.sh state                    one JSON line: route, playback, key settings

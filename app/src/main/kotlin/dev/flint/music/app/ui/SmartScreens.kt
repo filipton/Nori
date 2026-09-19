@@ -314,7 +314,7 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
     val songs = remember(entries) { entries.map { it.song } }
     LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         item { Row(Modifier.padding(horizontal = 8.dp)) { TextButton(nav::stats) { Text("Listening stats") }; TextButton(vm::clear) { Text("Clear history") } } }
-        if (entries.isEmpty()) item { Text("Nothing played yet, or the listening history is switched off in Settings → Features.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (entries.isEmpty()) item { Text("Nothing played yet, or listening history is off in Settings, under Library and lists.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         songRows(songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "h")
     }
 }

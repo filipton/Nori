@@ -160,7 +160,7 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     fun importM3u(name: String, text: String) = attempt(null) {
         val matched = flint.library.m3uImport(text)
         val found = matched.filterNotNull()
-        if (found.isEmpty()) _messages.send("None of the ${matched.size} entries are in the offline index. Sync it first.")
+        if (found.isEmpty()) _messages.send("None of the ${matched.size} entries are on this phone yet. Update the offline search first.")
         else { flint.library.createPlaylist(name, found.map { it.id }); _messages.send("Imported ${found.size} of ${matched.size} tracks into $name") }
     }
     fun playNext(songs: List<Song>) { flint.player.playNext(songs); _messages.trySend("Playing next") }

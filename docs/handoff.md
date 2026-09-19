@@ -12,6 +12,15 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Settings, regrouped and in plain words.** Seven pages now, each about one thing: Playing, Sound,
+  Downloads and data, Look, Lyrics, Library and lists, Servers. Every title and description was
+  rewritten short and plain, with no dashes or semicolons, and the dead "Home shelves" note in Lists
+  (which only said the rows are arranged on the home page) is gone. The search index was rewritten
+  with the rows, since a row is found by its own title.
+- **The queue's last row fades.** It was cut off dead straight a few pixels above the song's title,
+  and those pixels flickered as a panel came or went. The list goes soft over its last stretch now,
+  masked rather than painted over, the way the lyrics are.
+
 - **The cover travels into the lyrics, and back out.** Entering the lyrics used to dissolve the sleeve
   into the blurred page, which read as a block of blur appearing at the top of the screen; the sleeve
   now shrinks into the lyrics header's thumbnail and grows back out of it, one picture the whole way
@@ -25,7 +34,7 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   anchored to the panel's own height.
 
 - **What plays when the queue runs out is a choice.** Keep playing now has two settings beside it
-  (Settings → Library): songs or a whole album at a time, and what that is chosen by - what the
+  (Settings, then Playing): songs or a whole album at a time, and what that is chosen by - what the
   server calls similar, the same artist, the same genre or the same decade. Albums queue the record
   in its own order, skipping one the queue has already played. `PlaybackService.autoFill`.
 - **Tracks are measured before they are played.** `AutoMixPrefetch` decodes the track playing and the
@@ -288,7 +297,7 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.
 
-- **Downloads.** Up to "Downloads at once" (Settings → Library, 1-10, default 5) run in parallel, in
+- **Downloads.** Up to "Downloads at once" (Settings, then Downloads and data, 1-10, default 5) run in parallel, in
   the order asked for; that is media3's own queue, `maxParallelDownloads` kept in step from the
   foreground-notification tick. Progress comes from wrapping media3's downloaders
   (`TrackedDownloaders`), not from polling, and passes a `ProgressGate` (4 a second, whole percents)
@@ -625,7 +634,7 @@ whole decision — including the part that was actually broken, offload standing
 the end of `tools/feature-e2e.sh` do this.
 
 What a mock cannot prove is that a real DAC makes a sound. When the hardware is to hand, plug it in,
-play something, and read Settings → Audio: the line under the toggle now says what the AudioTrack
+play something, and read Settings, then Sound: the line under the toggle now says what the AudioTrack
 was opened with and whether it was offloaded.
 
 ### Testing this app is full of traps

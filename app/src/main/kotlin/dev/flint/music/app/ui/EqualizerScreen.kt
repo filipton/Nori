@@ -97,7 +97,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         val dac by vm.dac.collectAsStateWithLifecycle()
         val bypass = when {
             dac.bitPerfect -> "Bit-perfect USB output is active, so nothing here touches the audio."
-            p.hiRes -> "Hi-res float output is on, so nothing here touches the audio. Turn it off in Settings → Audio."
+            p.hiRes -> "High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound."
             else -> null
         }
         if (bypass != null) Surface(

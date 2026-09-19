@@ -216,7 +216,7 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
             item { Chip("★ Favourites", starred) { vm.setStarredOnly(!starred) } }
             items(SongSort.entries) { s -> Chip(s.label, sort == s) { vm.setSort(s) } }
         }
-        if (songs.isEmpty()) EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.")
+        if (songs.isEmpty()) EmptyNote("No songs on this phone yet. Settings, then Library and lists, then Update.")
         LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
     }
 }
@@ -227,7 +227,7 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
     val nav = LocalNav.current
     LoadBox(load) { decades ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            if (decades.isEmpty()) item { EmptyNote("Nothing in the offline index yet. Settings → Library → Sync all fills it.") }
+            if (decades.isEmpty()) item { EmptyNote("No songs on this phone yet. Settings, then Library and lists, then Update.") }
             items(decades, key = { it.name }) { d ->
                 NavRow("${d.name}s", { nav.decade(d.name.toInt()) }, trailing = "${d.songCount}", chevron = true)
             }
