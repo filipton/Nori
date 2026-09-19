@@ -88,6 +88,9 @@ internal fun searchFocusKey(): Int = searchTaps.intValue
 val LocalNav = staticCompositionLocalOf<Nav> { error("no nav") }
 val LocalSongMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 
+/** The player's own ⋯: the same song menu, with the playback-wide entries the player needs. */
+val LocalPlayerMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
+
 private val tabs = listOf(
     Tab("home", "Home", Icons.Filled.Home),
     Tab("search", "Search", Icons.Filled.Search),
@@ -108,6 +111,7 @@ fun App() {
         val player: PlayerViewModel = viewModel()
         val snackbar = remember { SnackbarHostState() }
         var menuSong by remember { mutableStateOf<Song?>(null) }
+        var menuFromPlayer by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
         // Headphones or a DAC connected and nothing is bound to them yet: offer their AutoEQ curve, once per device.
         val output by settings.currentOutput.collectAsStateWithLifecycle()
@@ -144,7 +148,7 @@ fun App() {
                     """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
                     """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
-                    """"offload":${p.offload},"offloadWanted":${dev.flint.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
+                    """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.flint.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"mixing":${dev.flint.music.playback.TransitionSink.mixing},""" +
                     """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
                     """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten},""" +
@@ -169,7 +173,11 @@ fun App() {
             }
         }
 
-        CompositionLocalProvider(LocalNav provides nav, LocalSongMenu provides { menuSong = it }) {
+        CompositionLocalProvider(
+            LocalNav provides nav,
+            LocalSongMenu provides { menuSong = it; menuFromPlayer = false },
+            LocalPlayerMenu provides { menuSong = it; menuFromPlayer = true },
+        ) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
             // This session's star changes, so every heart prefers them over the snapshot it painted with.
             val marks by actions.starMarks.collectAsStateWithLifecycle()
@@ -245,7 +253,7 @@ fun App() {
               SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
             }
             }
-            menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }) }
+            menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer }) }
         }
     }
 }

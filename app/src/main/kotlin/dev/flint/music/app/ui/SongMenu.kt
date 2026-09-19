@@ -44,11 +44,23 @@ private fun Item(text: String, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
+fun SongMenu(
+    song: Song,
+    actions: ActionsViewModel,
+    onDismiss: () -> Unit,
+    /**
+     * Set when the player's own ⋯ opened this. The sleep timer is a property of the evening, not of
+     * the song, so it has no business on a row's menu in a list - but the player needs it somewhere
+     * now that the bottom of that screen belongs to the output switcher, the way Apple's does.
+     */
+    player: dev.flint.music.app.vm.PlayerViewModel? = null,
+) {
     val nav = LocalNav.current
     val downloads by actions.downloads.collectAsState()
     var picking by remember { mutableStateOf(false) }
     var details by remember { mutableStateOf(false) }
+    var sleeping by remember { mutableStateOf(false) }
+    if (sleeping && player != null) { SleepMenu(player) { sleeping = false; onDismiss() }; return }
     if (details) { TrackInfo(song) { details = false; onDismiss() }; return }
     if (picking) { PlaylistPicker(listOf(song), actions) { picking = false; onDismiss() }; return }
 
@@ -72,6 +84,7 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
             }
             Hairline(startIndent = Space.gutter)
             if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})") { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
+            player?.let { Item("Sleep timer…") { sleeping = true } }
             Item("Play next") { actions.playNext(listOf(song)); onDismiss() }
             Item("Add to queue") { actions.enqueue(listOf(song)); onDismiss() }
             Item("Start radio from this song") { actions.startRadio(song); onDismiss() }
@@ -87,6 +100,23 @@ fun SongMenu(song: Song, actions: ActionsViewModel, onDismiss: () -> Unit) {
             if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a -> Item("Go to ${a.name}") { nav.artist(a.id); onDismiss() } }
             else song.artistId?.let { id -> Item("Go to artist") { nav.artist(id); onDismiss() } }
             Item("Details") { details = true }
+        }
+    }
+}
+
+/** The sleep choices on their own sheet, so the song's menu is not buried under eleven of them. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SleepMenu(player: dev.flint.music.app.vm.PlayerViewModel, onDone: () -> Unit) {
+    val state by player.state.collectAsState()
+    ModalBottomSheet(onDismissRequest = onDone) {
+        Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
+            SectionTitle("Sleep timer")
+            val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
+            if (running) Item("Off") { player.sleep(0); onDone() }
+            for (m in listOf(15, 30, 45, 60)) Item("$m minutes") { player.sleep(m); onDone() }
+            Item("End of track") { player.sleep(0, endOfTrack = true); onDone() }
+            for (n in listOf(2, 3, 5, 10)) Item("After $n songs") { player.sleep(0, songs = n); onDone() }
         }
     }
 }

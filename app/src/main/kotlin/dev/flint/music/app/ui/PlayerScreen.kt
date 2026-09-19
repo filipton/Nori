@@ -37,6 +37,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.filled.FastRewind
@@ -75,6 +78,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
@@ -155,6 +159,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val marks = LocalStarMarks.current
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
+    val playerMenu = LocalPlayerMenu.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
     // Where the sleeve ends, so the page behind it can be drawn at the same scale. Written on layout,
     // read in the draw phase; it only moves when the window does.
@@ -237,7 +242,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                                 if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
                                 "Favourite", starred,
                             ) { actions.star(s, !starred) }
-                            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { menu(s) }
+                            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { playerMenu(s) }
                         }
                     }
                 }
@@ -281,15 +286,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
 
                 Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
                     PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { panel = if (panel == Panel.LYRICS) Panel.ART else Panel.LYRICS }
-                    Box {
-                        PanelButton(Icons.Filled.Bedtime, "Sleep timer", state.sleepAt > 0 || state.sleepAtEndOfTrack) { sleepMenu = true }
-                        DropdownMenu(sleepMenu, { sleepMenu = false }) {
-                            for (m in listOf(15, 30, 45, 60)) DropdownMenuItem({ Text("$m minutes") }, { vm.sleep(m); sleepMenu = false })
-                            DropdownMenuItem({ Text("End of track") }, { vm.sleep(0, endOfTrack = true); sleepMenu = false })
-                            for (n in listOf(2, 3, 5, 10)) DropdownMenuItem({ Text("After $n songs") }, { vm.sleep(0, songs = n); sleepMenu = false })
-                            DropdownMenuItem({ Text("Off") }, { vm.sleep(0); sleepMenu = false })
-                        }
-                    }
+                    // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
+                    // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
+                    // which is where a setting for the evening belongs.
+                    OutputButton()
                     PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { panel = if (panel == Panel.QUEUE) Panel.ART else Panel.QUEUE }
                 }
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
@@ -312,6 +312,52 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
  * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
  * and still reach down behind the title, which no square can do.
  */
+/**
+ * Where the sound is going, and one tap to change it. The glyph says which kind of output is carrying
+ * the music, the way Apple's AirPlay mark fills in when something is connected.
+ *
+ * The picker itself is Android's own: `Settings.Panel.ACTION_MEDIA_OUTPUT` is the documented way in
+ * and lists Bluetooth, wired, USB and any Cast target the system knows about - far more than this app
+ * could offer on its own, and the same sheet the media notification opens. Some builds do not carry
+ * that panel; they get SystemUI's dialog, and a device with neither is simply told what it is playing
+ * through rather than being left with a button that does nothing.
+ */
+@Composable
+private fun OutputButton() {
+    val settings: SettingsViewModel = viewModel()
+    val output by settings.currentOutput.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val scheme = MaterialTheme.colorScheme
+    val elsewhere = output != dev.flint.music.playback.Outputs.SPEAKER
+    val icon = when {
+        output.startsWith("USB") -> Icons.Filled.Headphones
+        output.startsWith("Bluetooth") -> Icons.Filled.Bluetooth
+        output.startsWith("Wired") -> Icons.Filled.Headphones
+        else -> Icons.Filled.Cast
+    }
+    IconButton({ openOutputPicker(context, output) }) {
+        Icon(icon, "Output: $output", Modifier.size(23.dp), tint = if (elsewhere) scheme.primary else scheme.onSurfaceVariant)
+    }
+}
+
+private fun openOutputPicker(context: android.content.Context, output: String) {
+    val tries = listOfNotNull(
+        // Settings.Panel.ACTION_MEDIA_OUTPUT, spelled out: the constant is API 29 and this file is
+        // compiled against a lower floor, and the string is what the panel actually matches on.
+        if (android.os.Build.VERSION.SDK_INT >= 29) {
+            android.content.Intent("android.settings.panel.action.MEDIA_OUTPUT")
+                .putExtra("com.android.settings.panel.extra.PACKAGE_NAME", context.packageName)
+        } else null,
+        android.content.Intent("com.android.systemui.action.LAUNCH_MEDIA_OUTPUT_DIALOG")
+            .setPackage("com.android.systemui")
+            .putExtra("package_name", context.packageName),
+    )
+    for (intent in tries) {
+        if (runCatching { context.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)); true }.getOrDefault(false)) return
+    }
+    android.widget.Toast.makeText(context, "Playing through $output", android.widget.Toast.LENGTH_SHORT).show()
+}
+
 private const val SLEEVE = 0.80f
 
 /** Drag it down, or tap it, to put the player away. */
@@ -489,7 +535,10 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
             val centre = state.error ?: when {
                 vm.mixing -> "Mixing"
                 state.sleepAtEndOfTrack -> "Sleep · end of track"
-                state.sleepAt > 0 -> "Sleep · ${((state.sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min"
+                // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
+                // and subtracting one from the other gives a number about fifty years wide, which the
+                // coerce below then turned into a cheerful "1 min" for every timer ever set.
+                state.sleepAt > 0 -> "Sleep · ${((state.sleepAt - android.os.SystemClock.elapsedRealtime() + 59_999) / 60_000).coerceAtLeast(1)} min"
                 else -> ""
             }
             Text(
