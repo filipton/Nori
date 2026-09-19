@@ -25,9 +25,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -84,10 +81,6 @@ fun HeroPage(
         val scheme = MaterialTheme.colorScheme
         SystemBarIcons(scheme.background)
         PageTint(palette)
-        var fullscreen by remember { mutableStateOf(false) }
-        if (fullscreen && coverUrl != null) androidx.compose.ui.window.Dialog({ fullscreen = false }) {
-            Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }, radius = Radius.card)
-        }
         Box(Modifier.fillMaxSize().drawBehind { drawRect(scheme.background) }) {
             val list = rememberLazyListState()
             LazyColumn(state = list) {
@@ -102,8 +95,7 @@ fun HeroPage(
                                     val scrolled = if (list.firstVisibleItemIndex == 0) list.firstVisibleItemScrollOffset.toFloat() else size.height
                                     translationY = scrolled * 0.4f
                                     alpha = 1f - (scrolled / size.height).coerceIn(0f, 1f) * 0.5f
-                                }
-                                .clickable { fullscreen = true },
+                                },
                         ) {
                             Cover(coverUrl, 0.dp, Modifier.fillMaxSize())
                             val edge = palette?.edge ?: scheme.background

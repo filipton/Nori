@@ -70,7 +70,11 @@ private fun Header(title: String, subtitle: String, coverUrl: String?, actions: 
     }
 }
 
-/** Play and shuffle live in the hero now; a long list still wants a way to narrow itself. */
+/**
+ * Play and shuffle live in the hero now; a long playlist still wants a way to narrow itself. An album
+ * does not, which is why its page no longer offers this: nobody reaches for a search box to find a
+ * track among ten they can already see.
+ */
 @Composable
 private fun FilterField(count: Int, filter: String, onFilter: (String) -> Unit) {
     if (count <= 12 && filter.isEmpty()) return
@@ -135,9 +139,10 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     val menu = LocalSongMenu.current
     val nav = LocalNav.current
     val playing = playingId()
-    var filter by remember { mutableStateOf("") }
     LoadBox(load) { d ->
-        val discs = remember(d, filter) { d.songs.matching(filter).groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
+        // An album is short enough to scroll and its running order is the point of it, so the songs
+        // stay exactly as the record has them, grouped by disc and never narrowed.
+        val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
         HeroPage(
             coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
             title = d.album.name,
@@ -160,13 +165,10 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                 MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
             },
         ) {
-            item(key = "header") {
-                if (d.album.isExternal || d.album.id.startsWith("pl-")) {
-                    TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                        Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
-                    }
+            if (d.album.isExternal || d.album.id.startsWith("pl-")) item(key = "header") {
+                TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
+                    Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
                 }
-                FilterField(d.songs.size, filter) { filter = it }
             }
             discs.forEach { (disc, tracks) ->
                 if (discs.size > 1) item(key = "disc$disc") {

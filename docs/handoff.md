@@ -12,6 +12,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The album page, on a friend's reading.** The library's album grid is two per row everywhere
+  (`GridCells.Fixed(2)`); it was adaptive, which gave two on an ordinary phone and three from about
+  460 dp of width - large phones, landscape, split screen - which is the cramped case. The hero's
+  cover is no longer tappable and the full-screen artwork dialog it opened is gone (HeroPage is
+  shared, so that also goes for the artist, playlist and mix pages). The album page's filter field is
+  gone with it: an album is not long enough for searching to beat scrolling. `FilterField` itself
+  stays, because the playlist page still wants one.
 - **The player's own furniture.** The close chevron and the drag bar are gone - a pull anywhere on
   the artwork already puts the player away, and the lyrics and queue keep a plain invisible strip at
   the top for the same drag. The title block now carries the artist and the album on their own

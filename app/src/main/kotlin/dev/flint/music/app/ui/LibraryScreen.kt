@@ -146,7 +146,10 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
                 albums.drop(list.firstVisibleItemIndex + 6).take(12).map { vm.cover(it.coverArt, CoverSize.CARD) }
             },
         )
-        LazyVerticalGrid(GridCells.Adaptive(132.dp), state = list, contentPadding = PaddingValues(start = Space.gutter, end = Space.gutter, top = Space.gutter, bottom = Space.gutter + LocalChromeInset.current), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Two columns, counted rather than measured: an adaptive grid gave a wide phone a third column,
+        // and a cover a third of the way across the screen is too small to recognise a sleeve by, which
+        // is the only reason to show covers instead of a list of names.
+        LazyVerticalGrid(GridCells.Fixed(2), state = list, contentPadding = PaddingValues(start = Space.gutter, end = Space.gutter, top = Space.gutter, bottom = Space.gutter + LocalChromeInset.current), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             itemsIndexed(albums, key = { _, a -> a.id }, contentType = { _, _ -> "album" }) { i, a ->
                 if (i >= albums.size - 12) vm.loadMore()
                 AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 132.dp, { nav.album(a.id) }, Modifier.fillMaxWidth(), fill = true)
