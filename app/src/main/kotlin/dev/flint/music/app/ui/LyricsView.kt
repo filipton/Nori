@@ -122,21 +122,36 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val sweep = prefs.lyricsSweep && lyrics.synced && lyrics.wordTimed
     // The playhead as the lyrics see it. With the sweep on it is read once per frame (a local computation in the
     // controller, no IPC) and only the draw phase of the active line looks at it; otherwise three times a second.
-    var now by remember { mutableLongStateOf(vm.positionMs) }
-    LaunchedEffect(playing, resumed, sweep, lyrics.synced) {
+    var now by remember(lyrics) { mutableLongStateOf(vm.positionMs) }
+    // Each line's change is as long as the line allows and is centred on the moment it is sung, so the line
+    // is fully lit as the singing starts rather than a third of a second after. A fixed 620 ms glide that
+    // began on the timestamp both lagged every line and, on a verse faster than that, never finished - the
+    // next change always arrived first. `switchAt` is when a line takes over: its timestamp less half its
+    // own change.
+    val timing = remember(lyrics) { LyricTiming.of(lyrics.lines.map { it.startMs.toLong() }) }
+    // Keyed on the lyrics themselves: on the next song this loop must time the new lines, not the old.
+    LaunchedEffect(playing, resumed, sweep, lyrics) {
         now = vm.positionMs + nudgeMs
         if (!lyrics.synced) return@LaunchedEffect
         var frame = 0
         while (playing && resumed && isActive) {
             // Every second display frame is plenty for a text fill, and half the redraws.
-            if (sweep) { withFrameMillis { }; if (++frame % 2 == 1) continue } else delay(300)
+            if (sweep) { withFrameMillis { }; if (++frame % 2 == 1) continue } else {
+                // Sleep until the next line takes over and wake once, instead of looking three times a
+                // second and changing up to 300 ms late. Capped, so a seek is picked up within half a second.
+                val t0 = vm.positionMs + nudgeMs
+                val next = timing.nextSwitchAfter(t0)
+                delay(if (next == null) 500L else (next - t0).coerceIn(8L, 500L))
+            }
             val t = vm.positionMs + nudgeMs
             // Between words, and while a held note keeps the boundary still, nothing on screen changes: do not invalidate.
             val line = lyrics.lines.getOrNull(lyrics.lines.indexOfLast { it.startMs <= t })
             if (!sweep || line == null || lyrics.lines.indexOfLast { it.startMs <= now } != lyrics.lines.indexOfLast { it.startMs <= t } || kotlin.math.abs(sungOffset(line, t) - sungOffset(line, now)) >= 0.04f) now = t
         }
     }
-    val active by remember(lyrics) { derivedStateOf { if (lyrics.synced) lyrics.lines.indexOfLast { it.startMs <= now } else -1 } }
+    val active by remember(lyrics) { derivedStateOf { if (lyrics.synced) timing.lineAt(now) else -1 } }
+    // How long the change into the current line takes; the scroll and every line's fade use the same.
+    val glideMs = if (active >= 0) timing.glideMs(active) else LYRIC_GLIDE_MS
 
     val style = when (prefs.lyricsSize) { 0 -> MaterialTheme.typography.titleMedium; 2 -> MaterialTheme.typography.headlineMedium; else -> MaterialTheme.typography.headlineSmall }
     val bright = MaterialTheme.colorScheme.onSurface
@@ -157,8 +172,10 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         val motion = appMotion()
         // Only the scroll lives here; each line's brightness is its own (below). A scroll cut short by the
         // next line is simply continued from wherever the list is, so it cannot jump either.
-        LaunchedEffect(active, plain) {
-            if (active < 0) return@LaunchedEffect
+        LaunchedEffect(active, plain, lyrics) {
+            // Before the first line (a new song, an intro), or lyrics that are not timed: back to the top.
+            // The list outlives a song, so without this the next song opened where the last one ended.
+            if (active < 0) { if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0); return@LaunchedEffect }
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
             if (plain || here == null) { list.scrollToItem(active, -third); return@LaunchedEffect }
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
@@ -167,7 +184,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             // Under the app's own motion scale: with Android's animations off, Compose would otherwise
             // finish this on the first frame, which is exactly the jump it is here to prevent.
             withContext(motion) {
-                list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
+                list.animateScrollBy(distance, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
             }
         }
         // The words fade out towards both ends of the panel by becoming transparent, not by having a
@@ -193,7 +210,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 },
         ) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
-                Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)) }.padding(vertical = 8.dp)) {
+                Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)); now = line.startMs.toLong() }.padding(vertical = 8.dp)) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
                     // Every line owns its brightness and always moves it *from wherever it is now*
                     // towards what it should be. An earlier version drove all lines from one shared
@@ -205,7 +222,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                     LaunchedEffect(target, plain) {
                         if (plain) strength.snapTo(target)
                         else withContext(motion) {
-                            strength.animateTo(target, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
+                            strength.animateTo(target, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
                         }
                     }
                     when {
@@ -322,3 +339,40 @@ private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f,
 /** How lit a line is once it has been sung, and before it is reached. */
 private const val PAST_LINE = 0.35f * 0.55f
 private const val NEXT_LINE = 0.35f
+
+/**
+ * When each lyric line takes over and how long the change into it lasts. The change is 85 % of the gap
+ * to the next line, between [MIN_GLIDE_MS] and [LYRIC_GLIDE_MS], so a fast verse gets quick changes
+ * that finish before the next one; and it starts half its length before the line's timestamp, so it is
+ * centred on the moment the line is sung.
+ */
+private class LyricTiming(private val switchAt: LongArray, private val glide: IntArray) {
+    /** The line that should be lit at playhead [t], or -1 before the first. */
+    fun lineAt(t: Long): Int {
+        var lo = 0; var hi = switchAt.size - 1; var best = -1
+        while (lo <= hi) { val mid = (lo + hi) ushr 1; if (switchAt[mid] <= t) { best = mid; lo = mid + 1 } else hi = mid - 1 }
+        return best
+    }
+    fun nextSwitchAfter(t: Long): Long? { val i = lineAt(t) + 1; return if (i < switchAt.size) switchAt[i] else null }
+    fun glideMs(line: Int): Int = glide.getOrElse(line) { LYRIC_GLIDE_MS }
+
+    companion object {
+        fun of(starts: List<Long>): LyricTiming {
+            val n = starts.size
+            val glide = IntArray(n) { i ->
+                val gap = if (i + 1 < n) starts[i + 1] - starts[i] else Long.MAX_VALUE
+                (gap.coerceAtMost(10_000L) * 0.85).toInt().coerceIn(MIN_GLIDE_MS, LYRIC_GLIDE_MS)
+            }
+            // A line may not take over before the one ahead of it has, however short its own gap.
+            val switchAt = LongArray(n)
+            for (i in 0 until n) {
+                val lead = glide[i] / 2
+                switchAt[i] = if (i == 0) starts[i] - lead else maxOf(starts[i] - lead, switchAt[i - 1] + 1)
+            }
+            return LyricTiming(switchAt, glide)
+        }
+    }
+}
+
+/** The shortest a line change gets, on the fastest verse. Below this it stops reading as movement. */
+private const val MIN_GLIDE_MS = 160

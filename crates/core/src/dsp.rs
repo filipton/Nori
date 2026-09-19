@@ -449,8 +449,13 @@ impl Equalizer {
         output[tail..].copy_from_slice(&input[tail..]);
     }
 
+    /// 16-bit samples are brought to the same scale as float ones, where 1.0 is full scale, before anything touches
+    /// them. The filters would not notice either way - they are linear - but the limiter compares against a ceiling
+    /// in full-scale units, and fed raw integers it took every sample for thirty thousand times too loud and turned
+    /// the music down by some 91 dB: silence, on the default 16-bit path, whenever the limiter was on. Dividing and
+    /// multiplying by a power of two is exact in f64, so a chain that changes nothing still changes nothing.
     pub fn process_i16(&mut self, input: &[i16], output: &mut [i16]) {
-        self.run(input, output, |x| x as f64, |y| y.round().clamp(-32768.0, 32767.0) as i16);
+        self.run(input, output, |x| x as f64 / I16_SCALE, |y| (y * I16_SCALE).round().clamp(-32768.0, 32767.0) as i16);
     }
 
     pub fn process_f32(&mut self, input: &[f32], output: &mut [f32]) {
@@ -467,6 +472,9 @@ impl Equalizer {
         }
     }
 }
+
+/// Full scale for 16-bit samples: `i16::MIN` maps to exactly -1.0.
+const I16_SCALE: f64 = 32768.0;
 
 /// The meter lives outside the lock so the UI can poll it without ever waiting on the playback thread.
 struct Handle {
@@ -874,6 +882,33 @@ mod tests {
         let mut y = vec![0f32; x.len()];
         eq.process_f32(&x, &mut y);
         assert!(peak(&y[9600..]) <= 10f64.powf(-1.0 / 20.0) * 1.04, "peak {}", peak(&y[9600..]));
+    }
+
+    /// The path the phone uses by default. Every other limiter test feeds floats, which is how 16-bit audio being
+    /// turned down by 91 dB - silence - went unnoticed: the float path was always scaled right.
+    #[test]
+    fn the_limiter_on_16_bit_audio_passes_normal_music_and_only_catches_peaks() {
+        let mut eq = Equalizer::new(48000, 2);
+        eq.configure(&[], 0.0, 0.0);
+        eq.configure_output(0.0, false, -1.0, 120.0, 5.0);
+        let d = 240 * 2; // 5 ms at 48 kHz, two channels
+
+        // -12 dBFS, far below the ceiling: must come out unchanged, only delayed.
+        let quiet: Vec<i16> = tone_at(1000.0, 0.25).iter().flat_map(|s| { let v = (*s * 32767.0) as i16; [v, v] }).collect();
+        let mut y = vec![0i16; quiet.len()];
+        eq.process_i16(&quiet, &mut y);
+        assert_eq!(&y[d..], &quiet[..quiet.len() - d], "16-bit audio below the ceiling must pass through untouched");
+        assert_eq!(eq.gain_reduction_db(), 0.0, "and the meter must not claim a reduction");
+
+        // Full scale into a -1 dB ceiling: about 1 dB of reduction, not 91.
+        eq.reset();
+        let loud: Vec<i16> = tone_at(220.0, 1.0).iter().flat_map(|s| { let v = (*s * 32767.0) as i16; [v, v] }).collect();
+        let mut y = vec![0i16; loud.len()];
+        eq.process_i16(&loud, &mut y);
+        let gr = eq.gain_reduction_db() as f64;
+        assert!(gr > 0.3 && gr < 2.0, "meter says {gr} dB on a full-scale tone into a -1 dB ceiling");
+        let peak = y[9600..].iter().map(|v| (*v as f64).abs()).fold(0.0, f64::max) / 32768.0;
+        assert!(peak > 0.8 && peak <= 10f64.powf(-1.0 / 20.0) * 1.04, "16-bit peak {peak}, should sit just under the ceiling");
     }
 
     #[test]

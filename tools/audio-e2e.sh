@@ -54,6 +54,12 @@ echo "-- processing changed while it plays"
 for setting in "eq true" "eq false" "limiter true" "mono true" "mono false" "limiter false" "autoMix true" "offload false" "offload true"; do
   "$app" set $setting >/dev/null; sleep 5
   check "still playing after $setting" playing_audio
+  # Bytes flowing is not sound: a limiter that pulled every sample down 90 dB passed the line above in
+  # silence. At its -1 dB default, mastered music needs a few dB at most.
+  if [ "$setting" = "limiter true" ]; then
+    gr=$(field gainReductionDb)
+    check "limiter only catches peaks (${gr} dB)" python3 -c "import sys; sys.exit(0 if float('$gr' or 99) < 6 else 1)"
+  fi
 done
 
 echo "-- skipping and seeking"
