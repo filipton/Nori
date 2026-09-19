@@ -45,6 +45,11 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.graphics.vector.ImageVector
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -209,23 +214,41 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
         modifier = Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
             .onGloballyPositioned { sheet.miniTop = it.positionInRoot().y }
-            .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
             // Up opens the player, following the finger the whole way; see PlayerSheet.
             .dragsSheet(sheet),
     ) {
         // The tap has to be a child of the drag detectors, not a sibling behind them: a pointerInput
         // waiting for drag slop swallows a tap offered to a clickable further up the same chain.
         Surface(onClick = onOpen, color = Color.Transparent, contentColor = content) {
-        Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-            Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 42.dp, Modifier.onGloballyPositioned { sheet.miniCover = it.boundsInRoot() }, radius = 7.dp)
-            Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    state.error ?: state.current?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (state.error != null) scheme.error else content.copy(alpha = 0.65f),
-                )
+        Row(Modifier.fillMaxWidth().padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            // What is playing slides aside for the next (or last) song, which comes in from the other
+            // edge already showing; the buttons stay where they are. Radio has no neighbours.
+            val song = state.current
+            val track: @Composable (dev.flint.music.ffi.Song?, Boolean) -> Unit = { s, real ->
+                Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Cover(
+                        vm.cover(s?.coverArt, CoverSize.ROW), 42.dp,
+                        if (real) Modifier.onGloballyPositioned { sheet.miniCover = it.boundsInRoot() } else Modifier, radius = 7.dp,
+                    )
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        Text(s?.title ?: title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            (if (real) state.error else null) ?: s?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (real && state.error != null) scheme.error else content.copy(alpha = 0.65f),
+                        )
+                    }
+                }
             }
+            SwipeCarousel(
+                current = song,
+                previous = state.queue.getOrNull(state.previousIndex)?.takeIf { song != null },
+                next = state.queue.getOrNull(state.nextIndex)?.takeIf { song != null },
+                same = { a, b -> a?.id == b?.id },
+                onPrevious = vm::previousItem, onNext = vm::next,
+                modifier = Modifier.weight(1f),
+                item = track,
+            )
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
             IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
         }
@@ -268,3 +291,82 @@ private fun currentPageTint(): PagePalette? = pagePalette.value
 private fun NowPlayingPalette(palette: PagePalette?) {
     androidx.compose.runtime.LaunchedEffect(palette) { nowPlaying.value = palette }
 }
+
+/**
+ * A row of records, one showing: a sideways drag slides the showing one aside and brings its neighbour
+ * in from the other edge, already drawn. Let go past a third of the way, or flicked, the neighbour
+ * lands and [onNext] / [onPrevious] runs; it stays drawn in place of [current] until [current] is that
+ * song too (the player answers a few frames later), so the old one never comes back for a frame.
+ * [item]'s second argument is true for the one really showing. Nothing runs until a finger is down.
+ */
+@Composable
+internal fun <T> SwipeCarousel(
+    current: T, previous: T?, next: T?, same: (T?, T?) -> Boolean,
+    onPrevious: () -> Unit, onNext: () -> Unit,
+    modifier: Modifier = Modifier,
+    item: @Composable (T?, Boolean) -> Unit,
+) {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
+    val offset = remember { androidx.compose.animation.core.Animatable(0f) }
+    val hasBefore by androidx.compose.runtime.rememberUpdatedState(previous != null)
+    val hasAfter by androidx.compose.runtime.rememberUpdatedState(next != null)
+    val nextNow by androidx.compose.runtime.rememberUpdatedState(next)
+    val previousNow by androidx.compose.runtime.rememberUpdatedState(previous)
+    // The neighbour that has been slid in, shown until the player has caught up with it.
+    var landed by remember { mutableStateOf<Any?>(NONE) }
+    val currentNow by androidx.compose.runtime.rememberUpdatedState(current)
+    androidx.compose.runtime.LaunchedEffect(landed) {
+        if (landed === NONE) return@LaunchedEffect
+        @Suppress("UNCHECKED_CAST")
+        kotlinx.coroutines.withTimeoutOrNull(2_000) {
+            androidx.compose.runtime.snapshotFlow { same(currentNow, landed as T?) }.first { it }
+        }
+        landed = NONE
+    }
+    Box(
+        modifier.clipToBounds().pointerInput(Unit) {
+            val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+            var x = 0f
+            val release: (Float) -> Unit = { v ->
+                val o = offset.value
+                val w = size.width.toFloat()
+                val go = when {
+                    o < 0f && hasAfter && (v < -900f || o < -w * 0.3f) -> -1
+                    o > 0f && hasBefore && (v > 900f || o > w * 0.3f) -> 1
+                    else -> 0
+                }
+                scope.launch {
+                    val settle = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 560f)
+                    if (go == 0) { offset.animateTo(0f, settle, initialVelocity = v); return@launch }
+                    haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                    val arriving = if (go < 0) nextNow else previousNow
+                    if (AppMotion.reduce) offset.snapTo(go * w) else offset.animateTo(go * w, settle, initialVelocity = v)
+                    landed = arriving
+                    offset.snapTo(0f)
+                    if (go < 0) onNext() else onPrevious()
+                }
+            }
+            detectHorizontalDragGestures(
+                onDragStart = { tracker.resetTracking(); x = 0f; scope.launch { offset.stop() } },
+                onDragEnd = { release(tracker.calculateVelocity().x) },
+                onDragCancel = { release(0f) },
+            ) { change, d ->
+                x += d
+                tracker.addPosition(change.uptimeMillis, androidx.compose.ui.geometry.Offset(x, 0f))
+                val w = size.width.toFloat()
+                val moved = offset.value + d
+                val allowed = (moved > 0f && hasBefore) || (moved < 0f && hasAfter)
+                scope.launch { offset.snapTo(if (allowed) moved.coerceIn(-w, w) else (offset.value + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)) }
+            }
+        },
+    ) {
+        @Suppress("UNCHECKED_CAST")
+        val showing = if (landed === NONE) current else landed as T?
+        Box(Modifier.graphicsLayer { translationX = offset.value }) { item(showing, landed === NONE) }
+        Box(Modifier.graphicsLayer { val o = offset.value; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
+        Box(Modifier.graphicsLayer { val o = offset.value; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
+    }
+}
+
+private val NONE = Any()
