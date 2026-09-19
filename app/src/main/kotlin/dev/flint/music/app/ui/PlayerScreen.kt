@@ -728,6 +728,8 @@ private fun SleeveCarousel(
     // the song, but it must not put the record back in the middle if a new drag is already moving it -
     // doing that wiped the new drag's first half, and the swipe that followed a swipe went nowhere.
     var gesture by remember { mutableIntStateOf(0) }
+    /** A finger is on the record. While it is, the record stays lifted whatever else finishes. */
+    var holding by remember { mutableStateOf(false) }
     // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
     // with a shadow - and the cover's own blur shows round it. It goes back down once the song is in.
     val lift = remember { Animatable(0f) }
@@ -800,10 +802,13 @@ private fun SleeveCarousel(
         val painter = if (go < 0) afterNow else beforeNow
         val url = if (go < 0) nextUrlNow else previousUrlNow
         // Still the song that is showing: the player never caught up, so there is nothing to slide.
-        // Change the song plainly rather than send the same record across the screen.
+        // Change the song plainly rather than send the same record across the screen - and put the
+        // record back down, since it was picked up for a move that is not going to happen. Leaving it
+        // up here is what left the cover sitting at its small size after a button press.
         if (url != null && url == currentUrlNow) {
             committed = null
             if (go < 0) onNextNow() else onPreviousNow()
+            if (!keepLift) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
             return
         }
         // Where the neighbour sits once the record is lifted, which is where it will be when it arrives.
@@ -881,7 +886,10 @@ private fun SleeveCarousel(
     //
     // They queue rather than interrupt: pressed again while a record is still going, the second press
     // waits its turn, so four quick presses are four songs and four changes, not four cancelled ones.
-    val asks = remember { kotlinx.coroutines.channels.Channel<Int>(4, kotlinx.coroutines.channels.BufferOverflow.DROP_LATEST) }
+    // Four presses in hand is plenty; a fifth is refused rather than dropped from the middle, so the
+    // count of what is still waiting cannot drift - and it is that count which decides whether the
+    // record stays up between presses.
+    val asks = remember { kotlinx.coroutines.channels.Channel<Int>(4) }
     var queued by remember { mutableIntStateOf(0) }
     LaunchedEffect(asks) {
         for (go in asks) {
@@ -899,6 +907,13 @@ private fun SleeveCarousel(
             job.join()
         }
     }
+    // Whatever happened - a move that turned out to have nothing to move to, a landing cancelled by a
+    // finger that then went nowhere - a record with nobody holding it and nothing to do belongs flat in
+    // its sleeve. This is the one place that is guaranteed to run after every move.
+    LaunchedEffect(moving, holding) {
+        moving?.join()
+        if (!holding && lift.value != 0f) lift.animateTo(0f, down)
+    }
     androidx.compose.runtime.DisposableEffect(slide) {
         val run: (Int) -> Boolean = { go ->
             if ((go < 0 && hasAfter) || (go > 0 && hasBefore)) {
@@ -914,6 +929,7 @@ private fun SleeveCarousel(
             val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
             var x = 0f
             val release: (Float) -> Unit = { v ->
+                holding = false
                 val o = offset
                 val w = size.width.toFloat()
                 val go = when {
@@ -933,6 +949,7 @@ private fun SleeveCarousel(
             detectHorizontalDragGestures(
                 onDragStart = {
                     tracker.resetTracking(); x = 0f
+                    holding = true
                     // A finger beats the buttons: whatever they had queued is dropped, and a record
                     // still on its way is cancelled - it changes the song on its way out (see land).
                     gesture++

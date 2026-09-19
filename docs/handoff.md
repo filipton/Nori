@@ -12,6 +12,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **A record left standing up.** A button press that turned out to have nothing to slide to (the
+  player had not caught up, so the record waiting off the edge was the one already showing) changed
+  the song and returned without putting the record back down, and the cover stayed at its small
+  lifted size. That path settles it now, and a guard effect makes it general: once nothing is moving
+  and no finger is on the record, a record that is still up goes back into its sleeve. The button
+  queue also refuses a fifth press rather than dropping one from the middle, so the count of what is
+  waiting - which decides whether the record stays up between presses - cannot drift.
 - **Panels cross-fade properly.** The artwork used to stay fully drawn under the incoming lyrics or
   queue and then vanish in one frame, because the outgoing panel was held at full strength (the
   transport is shared across the change and fading the content it sits in dimmed it half-way). The
