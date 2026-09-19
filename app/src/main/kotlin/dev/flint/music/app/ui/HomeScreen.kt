@@ -79,18 +79,15 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
             }
             // Favourites are always here; the mixes join them when the taste model is on (MixesViewModel).
             item(key = "mixes") { Column(Modifier.arriving(arrival, 1, rise)) { SectionTitle("For you"); MixTiles() } }
-            if (ui.pinned.isNotEmpty()) item(key = "pinned") {
-                Column(Modifier.arriving(arrival, 2, rise)) {
-                    SectionTitle("Pinned playlists")
-                    LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id) }) }
-                    }
-                }
-            }
             // The shelves carry on the count the sections above started, so each one arrives a moment
             // after the one over it; an empty shelf is not drawn and does not take a place in the order.
-            var place = if (ui.pinned.isNotEmpty()) 3 else 2
-            ui.rows.forEach { s ->
+            var place = 2
+            ui.rows.forEach { shelf ->
+                // The favourite playlists are a selection of something the page fetches once for all of
+                // it, so their shelf is filled from there - but it stands where the user put it in the
+                // order. It used to be drawn above every shelf whatever the order said, which is why it
+                // could be at the bottom of the list and at the top of the page at the same time.
+                val s = if (shelf.row == dev.flint.music.settings.HomeRow.PINNED) dev.flint.music.app.vm.Shelf.Playlists(shelf.row, ui.pinned) else shelf
                 if (s.isEmpty) return@forEach
                 when (s) {
                     is dev.flint.music.app.vm.Shelf.Albums -> shelf(s.row.title, s.albums, vm, arrival, place++, rise)

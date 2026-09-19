@@ -12,6 +12,25 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Home rows, owned by the home page.** ⋯ → Rearrange rows lists every shelf: the shown ones in
+  order, held anywhere to move (a long press, since the list scrolls), each with a switch, and the
+  hidden ones under "Not shown". Settings only points there now. Two new shelves: all Playlists, and
+  Most played songs (from the offline index, no request). The favourite playlists shelf stands where
+  the order puts it; it used to be drawn above everything whatever the order said.
+- **Playlist favourites.** What was "pin to home" is a favourite, drawn as a heart that fills when it
+  is one, and the shelf is "Favourite playlists". Still kept on the phone - Subsonic cannot star a
+  playlist.
+- **A tab that is already showing does nothing** when tapped, instead of running the page's arrival
+  again.
+- **Page colour from what there is most of.** CoverColors picks the page's colour from a coarse hue
+  histogram weighted by area, not Palette's dominant swatch (which filters out near-whites and some
+  warm hues before it counts, and on a pale pink sleeve with dark hair voted for the hair). The
+  bottom-row average no longer enters the page colour - it still starts the wash, for the seam - and
+  the dark-mode band is 0.10-0.20 lightness, which keeps a pink cover a deep rose instead of brown.
+- **The player fades up through the bar** over the first tenth of the rise instead of appearing at
+  full strength on the first frame of a drag, and **the flying cover is really centred**: a square
+  wider than the screen is centred by layout before any translation, which the flight had left out,
+  so it flew about forty pixels left of centre and jumped right when the sleeve took over.
 - **The album page, on a friend's reading.** The library's album grid is two per row everywhere
   (`GridCells.Fixed(2)`); it was adaptive, which gave two on an ordinary phone and three from about
   460 dp of width - large phones, landscape, split screen - which is the cramped case. The hero's

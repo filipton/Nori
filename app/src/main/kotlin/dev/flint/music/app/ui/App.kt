@@ -82,6 +82,9 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
         // Tapping Search is a request for the keyboard, whether or not the screen is already open -
         // and with launchSingleTop it is not recomposed, so nothing else would notice the tap.
         if (route == "search") searchTaps.intValue++
+        // Already there: nothing to go to. Navigating anyway ran the page's arrival again on every tap,
+        // so a tab pressed twice redrew the page it was already on.
+        if (c.currentBackStackEntry?.destination?.route == route) return
         c.navigate(route) {
             popUpTo(c.graph.startDestinationId)
             launchSingleTop = true

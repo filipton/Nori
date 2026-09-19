@@ -25,7 +25,7 @@ enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
 private const val SWIPE_LEFT = "swipeLeft3"
 
 enum class HomeRow(val title: String) {
-    PINNED("Pinned playlists"), PLAYLISTS("Playlists"), RECENT("Recently played"), NEWEST("Recently added"),
+    PINNED("Favourite playlists"), PLAYLISTS("Playlists"), RECENT("Recently played"), NEWEST("Recently added"),
     FREQUENT("Most played albums"), TOP_SONGS("Most played songs"), RANDOM("Random"), STARRED("Favourite albums"),
 }
 

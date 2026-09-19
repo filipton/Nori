@@ -18,7 +18,6 @@ import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -281,7 +280,12 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             onShuffle = { actions.shuffle(d.songs) },
             actions = {
                 val pinned = id in prefs.pinnedPlaylists
-                CircleButton(Icons.Filled.PushPin, if (pinned) "Unpin from home" else "Pin to home") {
+                // A favourite, drawn and named as every other favourite in the app is: a heart, filled
+                // when it is one. It was a pin with one look for both states, so there was no telling
+                // from the page whether this playlist was on the home page or not. The server has no
+                // way to star a playlist, so it is kept on this phone, and the home page's shelf of
+                // them reads it.
+                CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
                     settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
                 }
                 MoreCircle(

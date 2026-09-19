@@ -669,7 +669,14 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
                     // under the middle of the screen by the time the sheet is half way, after which it
                     // only grows.
                     val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
-                    translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f
+                    // The square is wider than the screen, and layout centres anything wider than the
+                    // room it was given: it is already sitting `overhang` to the left (a negative
+                    // number) before any of this moves it. Leaving that out put the record that far off
+                    // centre for the whole flight - its left side already cropped by the screen while
+                    // its right had a gap - and it jumped right by the same amount when the sleeve
+                    // took over at the end.
+                    val overhang = (w - size.width) / 2f
+                    translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f - overhang
                     translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
                     shape = RoundedCornerShape(thumbRadius * (1f - t) / k)
                     clip = true
