@@ -45,8 +45,17 @@ class PlayerSheet(private val scope: CoroutineScope) {
     /** Settle quickly and without a spring: the user's reduce-motion switch. */
     var plain = false
 
-    /** Open, or on the way there. What the back button, the test bridge and the chrome go by. */
-    val isOpen: Boolean get() = progress.targetValue == 1f
+    /**
+     * Open, or on the way there. What the back button, the test bridge and the chrome go by.
+     *
+     * It is the last thing the sheet was *asked* to do, not where it happens to be: a drag or a back
+     * gesture moves [progress] (and with it the Animatable's target) without meaning anything by it,
+     * and reading that turned the sheet "closed" on the first pixel of a gesture - which switched the
+     * back handler off underneath the finger, so the player never sank and then vanished in one frame
+     * instead of settling back onto the now playing bar.
+     */
+    var isOpen by mutableStateOf(false)
+        private set
 
     /** How far the sheet's top edge travels, in pixels. */
     val travel: Float get() = if (miniTop > 0f) miniTop else rootHeight.coerceAtLeast(1f)
@@ -70,7 +79,7 @@ class PlayerSheet(private val scope: CoroutineScope) {
      * Put away by the back gesture: quicker than a close from a tap. The gesture has already carried the
      * sheet part of the way, and the rest at the drag's pace read as the app lagging behind the thumb.
      */
-    fun backClose() = settle(0f, 0f, stiffness = 1100f)
+    fun backClose() = settle(0f, 0f, stiffness = 700f)
 
     /** Which end the sheet was nearer when the finger went down. */
     private var from = 0f
@@ -101,6 +110,7 @@ class PlayerSheet(private val scope: CoroutineScope) {
     }
 
     private fun settle(target: Float, velocity: Float, stiffness: Float = 420f) {
+        isOpen = target == 1f
         scope.launch {
             // Critically damped: it arrives with the finger's speed and does not bounce past either end.
             if (plain) progress.animateTo(target, tween(120))

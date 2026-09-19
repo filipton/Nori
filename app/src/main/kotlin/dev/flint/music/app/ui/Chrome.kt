@@ -44,6 +44,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import androidx.compose.ui.draw.clipToBounds
@@ -322,7 +323,11 @@ internal fun <T> SwipeCarousel(
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
-    val offset = remember { androidx.compose.animation.core.Animatable(0f) }
+    // Straight from the finger, not through a coroutine per pointer event: those queued up on a flick
+    // and landed after the settle had started, which pulled the row back mid-change. Same story as the
+    // sleeve's; see SleeveCarousel.
+    var offset by remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var moving by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     val hasBefore by androidx.compose.runtime.rememberUpdatedState(previous != null)
     val hasAfter by androidx.compose.runtime.rememberUpdatedState(next != null)
     val nextNow by androidx.compose.runtime.rememberUpdatedState(next)
@@ -343,43 +348,55 @@ internal fun <T> SwipeCarousel(
             val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
             var x = 0f
             val release: (Float) -> Unit = { v ->
-                val o = offset.value
+                val o = offset
                 val w = size.width.toFloat()
                 val go = when {
                     o < 0f && hasAfter && (v < -900f || o < -w * 0.3f) -> -1
                     o > 0f && hasBefore && (v > 900f || o > w * 0.3f) -> 1
                     else -> 0
                 }
-                scope.launch {
+                val running = moving
+                moving = scope.launch {
+                    running?.cancelAndJoin()
                     val settle = androidx.compose.animation.core.spring<Float>(dampingRatio = 1f, stiffness = 560f)
-                    if (go == 0) { offset.animateTo(0f, settle, initialVelocity = v); return@launch }
+                    if (go == 0) {
+                        androidx.compose.animation.core.animate(offset, 0f, v, settle) { value, _ -> offset = value }
+                        return@launch
+                    }
                     haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
                     val arriving = if (go < 0) nextNow else previousNow
-                    if (AppMotion.reduce) offset.snapTo(go * w) else offset.animateTo(go * w, settle, initialVelocity = v)
-                    landed = arriving
-                    offset.snapTo(0f)
-                    if (go < 0) onNext() else onPrevious()
+                    var changed = false
+                    try {
+                        if (AppMotion.reduce) offset = go * w
+                        else androidx.compose.animation.core.animate(offset, go * w, v, settle) { value, _ -> offset = value }
+                        landed = arriving
+                        offset = 0f
+                        changed = true
+                        if (go < 0) onNext() else onPrevious()
+                    } finally {
+                        if (!changed) { offset = 0f; if (go < 0) onNext() else onPrevious() }
+                    }
                 }
             }
             detectHorizontalDragGestures(
-                onDragStart = { tracker.resetTracking(); x = 0f; scope.launch { offset.stop() } },
+                onDragStart = { tracker.resetTracking(); x = 0f; moving?.cancel() },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
             ) { change, d ->
                 x += d
                 tracker.addPosition(change.uptimeMillis, androidx.compose.ui.geometry.Offset(x, 0f))
                 val w = size.width.toFloat()
-                val moved = offset.value + d
+                val moved = offset + d
                 val allowed = (moved > 0f && hasBefore) || (moved < 0f && hasAfter)
-                scope.launch { offset.snapTo(if (allowed) moved.coerceIn(-w, w) else (offset.value + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)) }
+                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)
             }
         },
     ) {
         @Suppress("UNCHECKED_CAST")
         val showing = if (landed === NONE) current else landed as T?
-        Box(Modifier.graphicsLayer { translationX = offset.value }) { item(showing, landed === NONE) }
-        Box(Modifier.graphicsLayer { val o = offset.value; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
-        Box(Modifier.graphicsLayer { val o = offset.value; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
+        Box(Modifier.graphicsLayer { translationX = offset }) { item(showing, landed === NONE) }
+        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
+        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
     }
 }
 

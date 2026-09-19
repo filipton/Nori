@@ -543,6 +543,17 @@ class PlaybackService : MediaLibraryService() {
             if (ms > 0 && wrappedPlayer.isPlaying) { wrappedPlayer.volume = 0f; action(); ramp(1f, ms) } else action()
         }
 
+        /**
+         * A skip asked for while the music is paused is a request for music, not for a different song
+         * to sit paused on: the track changes and starts. Only the buttons go through here - the
+         * service's own skips (an explicit track, a track that will not play) call the player
+         * underneath, so a queue that was paused stays paused while it steps over them.
+         */
+        private fun andPlay(action: () -> Unit) {
+            action()
+            if (!playWhenReady) play()
+        }
+
         override fun addMediaItems(mediaItems: List<MediaItem>) = addMediaItems(Int.MAX_VALUE, mediaItems)
         override fun addMediaItems(index: Int, mediaItems: List<MediaItem>) {
             if (mediaItems.isNotEmpty() && wrappedPlayer.mediaItemCount > 0 && mediaItems.all { it.queuedAs() != null }) upNext(mediaItems)
@@ -551,10 +562,14 @@ class PlaybackService : MediaLibraryService() {
 
         override fun seekTo(positionMs: Long) = softly { super.seekTo(positionMs) }
         override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly { super.seekTo(mediaItemIndex, positionMs) }
-        override fun seekToNext() = softly { super.seekToNext() }
-        override fun seekToNextMediaItem() = softly { super.seekToNextMediaItem() }
-        override fun seekToPreviousMediaItem() = softly { super.seekToPreviousMediaItem() }
-        override fun seekToPrevious() = softly { if (flint.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
+        override fun seekToNext() = andPlay { softly { super.seekToNext() } }
+        override fun seekToNextMediaItem() = andPlay { softly { super.seekToNextMediaItem() } }
+        override fun seekToPreviousMediaItem() = andPlay { softly { super.seekToPreviousMediaItem() } }
+        // Well into a song this goes back to 0:00 rather than to the song before (media3's own rule,
+        // three seconds), which paused means: start this one again, from the top, playing.
+        override fun seekToPrevious() = andPlay {
+            softly { if (flint.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
+        }
     }
 
     /**

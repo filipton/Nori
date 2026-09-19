@@ -326,7 +326,8 @@ private fun SheetBack(sheet: PlayerSheet) {
  * towards the edge the finger is moving to.
  */
 private object PredictiveBack {
-    private const val MS = 320
+    // The owner wanted the gesture to let go of the page a little sooner than it did (it was 320 ms).
+    private const val MS = 240
 
     fun enter(plain: Boolean): androidx.compose.animation.EnterTransition =
         androidx.compose.animation.fadeIn(

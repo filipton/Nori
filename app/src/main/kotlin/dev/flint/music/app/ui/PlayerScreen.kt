@@ -74,6 +74,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -118,6 +119,7 @@ import dev.flint.music.app.vm.SettingsViewModel
 import dev.flint.music.playback.Repeat
 import dev.flint.music.settings.ThemeMode
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
@@ -185,6 +187,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var sleeveBottom by remember { mutableFloatStateOf(0f) }
     var sleeveHeight by remember { mutableFloatStateOf(0f) }
     var sleepMenu by remember { mutableStateOf(false) }
+    // The transport's way of asking the sleeve to change record; see SleeveSlide.
+    val slide = remember { SleeveSlide() }
 
     val settingsVm: SettingsViewModel = viewModel()
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
@@ -292,6 +296,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             vm, sleeveArt, palette,
                             state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
                             state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            slide,
                         )
                     }
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
@@ -367,11 +372,22 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // seek bar, volume bar and bottom icons below were scaled by their own measured ratios.
                 // Apple leaves a clear gap between the times and these, rather than letting them follow on.
                 Row(kept("transport").fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(34.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
-                    IconButton(vm::previous, Modifier.size(72.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
+                    // The buttons send the record across exactly as a swipe does, so the two ways of
+                    // changing song look like the same thing happening. A previous that only rewinds
+                    // this song is not a record change and gets no slide - there is nothing to slide
+                    // to. The rule for which one it is has to match the player's (media3 rewinds
+                    // within the first three seconds), so the sleeve and the sound agree.
+                    IconButton(
+                        {
+                            val rewinds = !prefs.previousAlwaysSkips && vm.positionMs > 3_000
+                            if (rewinds || !slide.ask(1)) vm.previous()
+                        },
+                        Modifier.size(72.dp),
+                    ) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
                     IconButton(vm::toggle, Modifier.size(84.dp)) {
                         PlayPauseGlyph(state.playing, state.buffering, 70.dp, 28.dp)
                     }
-                    IconButton(vm::next, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
+                    IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
                 }
 
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.17f))
@@ -504,7 +520,7 @@ private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
  * line where the picture ends - the same dissolve the album page uses.
  */
 @Composable
-private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, previousUrl: String?, nextUrl: String?) {
+private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, previousUrl: String?, nextUrl: String?, slide: SleeveSlide) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
@@ -513,7 +529,7 @@ private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, 
             // behind the title; a full-width square can only do one or the other. Cover crops already.
             Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
-            SleeveCarousel(art, previousUrl, nextUrl, onPrevious = vm::previousItem, onNext = vm::next)
+            SleeveCarousel(art, previousUrl, nextUrl, onPrevious = vm::previousItem, onNext = vm::next, slide = slide)
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
@@ -643,11 +659,21 @@ private const val HOLD_MS = 600L
  * so they are normally there before the finger is. Nothing here runs until a finger is down.
  */
 @Composable
-private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String?, onPrevious: () -> Unit, onNext: () -> Unit) {
+private fun SleeveCarousel(
+    art: SleeveArt, previousUrl: String?, nextUrl: String?,
+    onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide,
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
-    val offset = remember { Animatable(0f) }
+    // Where the record is, in pixels, written straight from the finger. It was an Animatable, snapped
+    // to from a coroutine per pointer event; on a flick several of those were still queued when the
+    // finger left, and they landed on top of the animation that had already started and dragged the
+    // record back - the change that jerked instead of running through once.
+    var offset by remember { mutableFloatStateOf(0f) }
+    // The one animation allowed to be running: a settle, or a record landing. A new gesture or a
+    // button press takes it over.
+    var moving by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
     // with a shadow - and the cover's own blur shows round it. It goes back down once the song is in.
     val lift = remember { Animatable(0f) }
@@ -677,47 +703,82 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
     val widthPx = constraints.maxWidth.toFloat()
     val heightPx = constraints.maxHeight.toFloat()
     val sideDp = with(density) { heightPx.toDp() }
+    val down = spring<Float>(dampingRatio = 0.8f, stiffness = 240f)
+
+    /**
+     * The record goes [go] (-1 for the next one, 1 for the one before), the song changes as it arrives,
+     * and the new record settles into the sleeve. Cancelled half way - a second button press, a new
+     * gesture - it still changes the song, so nothing asked for is quietly dropped.
+     */
+    suspend fun land(go: Int, velocity: Float, stiffness: Float) {
+        var changed = false
+        try {
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            val painter = if (go < 0) after else before
+            val url = if (go < 0) nextUrl else previousUrl
+            // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
+            // A record is the whole square, as tall as the sleeve.
+            val span = heightPx * liftedScale(lift.targetValue, widthPx, heightPx) + gap
+            val settle = spring<Float>(dampingRatio = 1f, stiffness = stiffness)
+            if (AppMotion.reduce) offset = go * span
+            else androidx.compose.animation.core.animate(offset, go * span, velocity, settle) { v, _ -> offset = v }
+            // Same frame: the incoming record takes the middle, the sleeve goes back under it.
+            landed = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
+            landedUrl = url
+            art.snapNext = true
+            offset = 0f
+            changed = true
+            if (go < 0) onNext() else onPrevious()
+            // The new record settles back into the sleeve, with the slightest give.
+            lift.animateTo(0f, down)
+        } finally {
+            if (!changed) {
+                offset = 0f
+                art.snapNext = true
+                if (go < 0) onNext() else onPrevious()
+            }
+        }
+    }
+
+    // The transport's own skips slide the record too, a touch quicker than a thumb does and without the
+    // lift, which is a finger's business. A previous that only rewinds the song does not come here:
+    // there is no other record to show. See the buttons in PlayerScreen.
+    androidx.compose.runtime.DisposableEffect(slide, hasBefore, hasAfter) {
+        val run: (Int) -> Boolean = { go ->
+            if ((go < 0 && hasAfter) || (go > 0 && hasBefore)) {
+                val running = moving
+                moving = scope.launch { running?.cancelAndJoin(); land(go, 0f, BUTTON_STIFFNESS) }
+                true
+            } else false
+        }
+        slide.run = run
+        onDispose { if (slide.run === run) slide.run = null }
+    }
     Box(
         Modifier.fillMaxSize().pointerInput(Unit) {
             val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
             var x = 0f
             val release: (Float) -> Unit = { v ->
-                val o = offset.value
+                val o = offset
                 val w = size.width.toFloat()
                 val go = when {
                     o < 0f && hasAfter && (v < -FLICK_PX || o < -w * TURN) -> -1
                     o > 0f && hasBefore && (v > FLICK_PX || o > w * TURN) -> 1
                     else -> 0
                 }
-                val down = spring<Float>(dampingRatio = 0.8f, stiffness = 240f)
-                scope.launch {
-                    val settle = spring<Float>(dampingRatio = 1f, stiffness = 520f)
+                val running = moving
+                moving = scope.launch {
+                    running?.cancelAndJoin()
                     if (go == 0) {
                         launch { lift.animateTo(0f, down) }
-                        offset.animateTo(0f, settle, initialVelocity = v); return@launch
-                    }
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    val painter = if (go < 0) after else before
-                    val url = if (go < 0) nextUrl else previousUrl
-                    // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
-                    // A record is the whole square, as tall as the sleeve.
-                    val side = size.height.toFloat()
-                    val span = side * liftedScale(lift.targetValue, w, side) + gap
-                    if (AppMotion.reduce) offset.snapTo(go * span) else offset.animateTo(go * span, settle, initialVelocity = v)
-                    // Same frame: the incoming record takes the middle, the sleeve goes back under it.
-                    landed = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
-                    landedUrl = url
-                    art.snapNext = true
-                    offset.snapTo(0f)
-                    if (go < 0) onNext() else onPrevious()
-                    // The new record settles back into the sleeve, with the slightest give.
-                    lift.animateTo(0f, down)
+                        androidx.compose.animation.core.animate(offset, 0f, v, spring(dampingRatio = 1f, stiffness = 520f)) { value, _ -> offset = value }
+                    } else land(go, v, 520f)
                 }
             }
             detectHorizontalDragGestures(
                 onDragStart = {
                     tracker.resetTracking(); x = 0f
-                    scope.launch { offset.stop() }
+                    moving?.cancel()
                     if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 420f)) }
                 },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
@@ -726,10 +787,10 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                 x += d
                 tracker.addPosition(change.uptimeMillis, Offset(x, 0f))
                 val w = size.width.toFloat()
-                val next = offset.value + d
+                val next = offset + d
                 // Towards a record that is not there it gives a little and no more.
                 val allowed = (next > 0f && hasBefore) || (next < 0f && hasAfter)
-                scope.launch { offset.snapTo(if (allowed) next.coerceIn(-w, w) else (offset.value + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)) }
+                offset = if (allowed) next.coerceIn(-w, w) else (offset + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)
             }
         },
     ) {
@@ -743,7 +804,7 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
             val span = size.width * s + gap
-            val o = offset.value
+            val o = offset
             translationX = dx(o, span)
             alpha = fade((kotlin.math.abs(o) / span).coerceIn(0f, 1f))
             if (l > 0f) {
@@ -752,7 +813,7 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                 shadowElevation = elevation * l
             }
         }
-        val o0 = { offset.value }
+        val o0 = { offset }
         Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) { SleeveImage(art, Modifier.fillMaxSize()) }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
         // from a little dimmer as it arrives.
@@ -768,6 +829,22 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
     }
 }
 }
+
+/**
+ * The transport's way of asking the sleeve to change record the way a swipe does. It answers false
+ * when there is no record that way, or when there is no sleeve on screen at all (the queue or the
+ * lyrics are showing), and the caller just changes the song.
+ */
+@Stable
+internal class SleeveSlide {
+    internal var run: ((Int) -> Boolean)? = null
+
+    /** [go] is -1 for the next record, 1 for the one before. */
+    fun ask(go: Int): Boolean = run?.invoke(go) ?: false
+}
+
+/** A record sent across by a button rather than a thumb: the same move, a little quicker. */
+private const val BUTTON_STIFFNESS = 900f
 
 /** How much of the screen's width a held record takes. */
 private const val LIFTED_WIDTH = 0.86f
@@ -942,14 +1019,19 @@ private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, l
     IconButton(onClick) { Icon(icon, label, Modifier.size(27.dp), tint = if (on) scheme.primary else scheme.onSurfaceVariant) }
 }
 
-/** The only ticking thing in the app, and only while this screen is resumed and music is playing. */
+/**
+ * The only ticking thing in the app, and only while this screen is resumed and music is playing.
+ *
+ * [track] is whatever identifies the song on screen: paused, nothing ticks, so a skip would otherwise
+ * leave the last song's time under the new song's title until someone pressed play.
+ */
 @Composable
-private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long {
+private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track: Any? = null): Long {
     var pos by remember { mutableLongStateOf(vm.positionMs) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     val shown = LocalPlayerShown.current
-    LaunchedEffect(playing, resumed, shown) {
+    LaunchedEffect(playing, resumed, shown, track) {
         pos = vm.positionMs
         while (playing && resumed && shown && isActive) { delay(everyMs); pos = vm.positionMs }
     }
@@ -963,7 +1045,7 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val pos = position(vm, playing, 1000)
+    val pos = position(vm, playing, 1000, state.current?.id to state.index)
     // Duration is read through the gesture rather than keying it: a track that learns its real length
     // mid-scrub would restart the detector and the finger would lift on a dead pointer.
     val d by rememberUpdatedState(durationMs.coerceAtLeast(1))

@@ -12,6 +12,27 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The transport and the record.** A skip asked for while the music is paused starts it playing
+  (`Controls.andPlay` in PlaybackService, so the notification and a headset do it too); the service's
+  own skips - an explicit track, a track that will not play - go to the player underneath and leave a
+  paused queue paused. The player's times refresh on a track change even while paused (`position`
+  takes the song as a key), instead of leaving the last song's 2:50 under the new song's title. The
+  transport's skip buttons now send the record across exactly as a swipe does, a little quicker
+  (`SleeveSlide`, `BUTTON_STIFFNESS`); a previous press that only rewinds the current song - media3's
+  three-second rule, which the button repeats so the sleeve and the sound agree - does not, because
+  there is no other record to show.
+- **Flicked records.** Both carousels kept their offset in an `Animatable` and snapped to it from a
+  coroutine per pointer event. On a flick several of those were still queued when the finger left and
+  landed on top of the settle that had already started, dragging the record back mid-change - the
+  jerk you could see when a swipe was let go early with momentum. The offset is now plain state
+  written straight from the drag, with one cancellable job for the settle or the landing, and a
+  landing that is cancelled still changes the song so a quick second press is not dropped.
+- **Back gesture on the player.** `PlayerSheet.isOpen` is what the sheet was last asked to do, not
+  where it is: it came from the Animatable's target, so the first pixel of a drag or a back gesture
+  read as "closed" and switched the back handler off underneath the finger - the player never sank
+  and then vanished in one frame instead of settling onto the now playing bar. The back gesture's
+  close is a little quicker than the close button's (spring stiffness 700 against 420), and the page
+  back gesture lets go of the page sooner too (`PredictiveBack.MS`, 320 -> 240).
 - **Scrubbing.** The seek bar owns the pointer from touch-down and consumes every move, so the player
   sheet's vertical drag can no longer take a scrub that runs a few degrees off level - that was the
   bug where the bar followed the finger, the time changed, and the song never moved, because the
