@@ -177,6 +177,7 @@ private data class Entry(val group: String, val title: String, val hint: String)
  */
 private val index = listOf(
     Entry("look", "Theme", ""),
+    Entry("look", "Interface size", "Automatic keeps the layout's proportions on a phone set to a large display size"),
     Entry("look", "AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens"),
     Entry("look", "Reduce motion", "Shorter, plainer movement throughout"),
     Entry("look", "Colours from the cover", "Album, artist and playlist pages and the player take their colour from the artwork, which runs edge to edge"),
@@ -322,6 +323,10 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 "Shorter, plainer movement throughout. Follows the system setting when animations are turned off there.",
                 p.reduceMotion,
             ) { on -> vm.update { it.copy(reduceMotion = on) } }
+            Choice(
+                "Interface size", p.uiScale,
+                listOf(0f to "Automatic", 0.9f to "Smaller", 1f to "As the system", 1.1f to "Larger"),
+            ) { v -> vm.update { it.copy(uiScale = v) } }
             Toggle("Colours from the cover", "Album, artist and playlist pages and the player take their colour from the artwork, which runs edge to edge", p.coverColors) { on -> vm.update { it.copy(coverColors = on) } }
             if (android.os.Build.VERSION.SDK_INT >= 31) Toggle("Wallpaper colours", "Material You: take the colours from your wallpaper", p.dynamicColor) { on -> vm.update { it.copy(dynamicColor = on) } }
             if (!p.dynamicColor || android.os.Build.VERSION.SDK_INT < 31) Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -236,8 +236,11 @@ fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHe
         val floor = if (dark) blend(palette.background, Color.Black, 0.28f) else palette.background
         drawRect(
             Brush.verticalGradient(
+                // The colours stay through the controls and settle into one only towards the bottom:
+                // the owner liked them under the transport and did not want them gone, just ended.
                 0f to floor.copy(alpha = 0f),
-                0.35f to floor.copy(alpha = 0.42f),
+                0.45f to floor.copy(alpha = 0.22f),
+                0.80f to floor.copy(alpha = 0.75f),
                 1f to floor,
                 startY = bottom, endY = endY,
             ),

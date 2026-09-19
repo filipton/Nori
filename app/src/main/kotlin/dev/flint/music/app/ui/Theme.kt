@@ -34,8 +34,33 @@ fun FlintTheme(prefs: Prefs, content: @Composable () -> Unit) {
         }
         if (dark && prefs.amoled) base.black() else base
     }
-    MaterialTheme(colorScheme = scheme, typography = FlintTypography, content = content)
+    val system = androidx.compose.ui.platform.LocalDensity.current
+    val widthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
+    val scale = uiScale(prefs.uiScale, widthDp)
+    // The whole app's density, scaled once here: dp and sp both follow it, so every size keeps its
+    // proportion to the screen. The system's font scale is left as it is - that one is the reader's.
+    val density = remember(system, scale) {
+        if (scale == 1f) system else androidx.compose.ui.unit.Density(system.density * scale, system.fontScale)
+    }
+    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density) {
+        MaterialTheme(colorScheme = scheme, typography = FlintTypography, content = content)
+    }
 }
+
+/**
+ * Every size in this app was measured against Apple's own screens as a share of the screen's width,
+ * on a phone 411 dp wide. A phone whose display size makes it narrower in dp - one measured at 358 dp
+ * - draws every one of those sizes a seventh larger, and the whole thing looks zoomed in. Automatic
+ * lays the app out as if the screen were at least [REFERENCE_WIDTH_DP] wide, so the proportions hold;
+ * it only ever shrinks, never enlarges past what the system asked for.
+ */
+fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
+    setting > 0f -> setting
+    screenWidthDp <= 0 -> 1f
+    else -> (screenWidthDp / REFERENCE_WIDTH_DP).coerceIn(0.75f, 1f)
+}
+
+private const val REFERENCE_WIDTH_DP = 411f
 
 /** A light or dark scheme from one colour: tones of the same hue, like Material's own generator but tiny. */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {
