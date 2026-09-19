@@ -36,6 +36,12 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   `Phase.PASS`. Nothing new watches it - the seek bar is the only thing that ticks while the player is
   open, so it asks on the same beat. Note while testing this: the media session's position pins at the
   outgoing track's duration while the mixed tail plays, which looks like a stall and is not one.
+- **The output switcher.** The middle glyph at the bottom of the player is where the sound is going,
+  as Apple's AirPlay mark is: a cast glyph on the phone's speaker, headphones or Bluetooth in the
+  accent colour when something else carries it. It opens Android's own media output panel
+  (`android.settings.panel.action.MEDIA_OUTPUT`), falling back to SystemUI's dialog. The sleep timer
+  that used to sit there is on the player's ⋯ instead — `LocalPlayerMenu`, the same song menu with
+  the playback-wide entry added, so a row's menu in a list does not grow one.
 - **Favourites, search and the mini player.** A favourite flips under the finger instead of after a
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.
@@ -245,6 +251,13 @@ Every one of these produced a wrong conclusion in an earlier session:
   nowhere and the screenshots look plausible. Check `dumpsys power | grep mWakefulness` first.
 - **The on-screen keyboard eats automation.** A fling across it is glide typing. `tools/ui.sh kb off`
   disables every IME for a run; `input text` does not need one.
+- **The offline check needs a long song.** `feature-e2e.sh` downloads a random song and samples the
+  AudioTrack a dozen seconds after starting it. It once drew a thirteen-second interlude, found the
+  track legitimately stopped, and reported that downloads do not play offline. It now picks one of at
+  least 90 s. Before believing a failure there, look at the duration it printed.
+- **The DAC mock names the output too.** `do "dac Topping E30@..."` makes `Outputs.current` read
+  `USB: Topping E30` as well as setting the USB flag, so the player's output glyph and anything bound
+  to that output can be checked on an emulator.
 - **`do star` with no argument does nothing** — the verb needs a song, as in `do "star song:<id>"`.
 - **The emulator's own settings are not the defaults.** Crossfade and crossfeed left switched on
   there mean offload can never be asked for, so a check of the offload rules measures nothing until
@@ -274,7 +287,14 @@ Check for these before believing a screen is fine — each has bitten more than 
    audio track provider runs on the playback thread, so anything it triggers posts to `main` first.
 6. **Scrolling screens under the floating chrome** need `LocalChromeInset.current` as bottom content
    padding, or their last row cannot be reached.
-7. **Implementation detail leaking into user-visible text.** The settings copy has been cleaned once;
+7. **Two clocks in one subtraction.** The sleep label subtracted `System.currentTimeMillis()` from a
+   deadline set with `SystemClock.elapsedRealtime()`, got a number about fifty years wide, and the
+   `coerceAtLeast(1)` after it turned that into "1 min" for every timer ever set. Anything stored as
+   a deadline in this codebase is elapsedRealtime; read it back the same way.
+8. **Ranking with a catch-all that beats the default.** `Outputs.rank` gave unlisted device types 5
+   and the built-in speaker 9, so a phone's telephony output — every phone has one — was reported as
+   where the music was going. Unlisted types now rank below the speaker.
+9. **Implementation detail leaking into user-visible text.** The settings copy has been cleaned once;
    new strings keep reintroducing threads, buffers and "Rust core".
 
 ## Standing instructions from the owner
