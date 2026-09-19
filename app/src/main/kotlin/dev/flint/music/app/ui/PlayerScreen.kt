@@ -3,6 +3,7 @@ package dev.flint.music.app.ui
 import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.MarqueeSpacing
@@ -92,6 +93,7 @@ import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.geometry.CornerRadius
@@ -242,19 +244,30 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             Box(Modifier.matchParentSize().drawBehind { wash(fadingFrom ?: palette) })
             if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.drawBehind { wash(palette) })
             if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, palette, sleeveHeight > 0f)
-            // Artwork, lyrics and queue dissolve into each other rather than cutting. The incoming panel
-            // fades in over the outgoing one, which stays fully drawn underneath until it is covered: the
-            // transport is the same in all three, and fading both copies at once dimmed it half-way. (A
-            // zero-length fade-out delayed to the end was not held: the old panel vanished on frame one.)
+            // Put away from the lyrics, the cover still travels - from the header's thumbnail to the one
+            // in the now playing bar. Without it the lyrics simply went down behind the bar and a cover
+            // appeared there out of nothing.
+            else if (panel == Panel.LYRICS) FlyingThumb(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW))
+            // Artwork, lyrics and queue dissolve into each other rather than cutting. The fade is on the
+            // panel itself and not on the whole screen: the transport is the same in all three and is
+            // shared across the change, and fading the content it sits in dimmed it half-way. Fading only
+            // the incoming panel, with the outgoing one held at full strength until the end, is what left
+            // the cover sitting there under the lyrics and then vanishing in a single frame.
             androidx.compose.animation.SharedTransitionLayout {
             androidx.compose.animation.AnimatedContent(
                 targetState = panel,
                 transitionSpec = {
-                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)) togetherWith
+                    androidx.compose.animation.EnterTransition.None togetherWith
                         androidx.compose.animation.ExitTransition.KeepUntilTransitionsFinished
                 },
                 label = "panel",
             ) { panel ->
+            // One number for both directions: 1 while this panel is the one, 0 before it arrives and
+            // after it has gone, so the two panels cross-fade through each other.
+            val panelFade by transition.animateFloat(
+                transitionSpec = { androidx.compose.animation.core.tween(240) },
+                label = "panelFade",
+            ) { st -> if (st == androidx.compose.animation.EnterExitState.Visible) 1f else 0f }
             // The seek bar, the transport, the volume and the icons are in every panel but not at the same
             // height. Shared, only one copy of each is drawn during the dissolve, and it moves from where it
             // was to where it goes; dissolved like the rest, both copies showed and the controls doubled.
@@ -276,6 +289,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // the text sitting on bare page, which is what read as the cover being out of place.
                 if (panel == Panel.ART) Box(
                     Modifier.fillMaxWidth()
+                        .graphicsLayer { alpha = panelFade }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -301,8 +315,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
                 } else {
-                    Handle(Modifier.statusBarsPadding(), scheme.onSurface.copy(alpha = 0.35f), sheet)
-                    Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
+                    Handle(Modifier.statusBarsPadding().graphicsLayer { alpha = panelFade }, scheme.onSurface.copy(alpha = 0.35f), sheet)
+                    Box(
+                        Modifier.weight(1f).graphicsLayer { alpha = panelFade }
+                            .then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier),
+                    ) {
                         if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
                     }
                 }
@@ -542,6 +559,39 @@ private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, 
                 Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.19f) },
             )
         }
+    }
+}
+
+/**
+ * The same flight as [FlyingCover] between two thumbnails: the lyrics header's and the now playing
+ * bar's. One picture moving and changing size, never one swapped for another, and the corners round
+ * off from the one to the other on the way.
+ */
+@Composable
+private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
+    val flying by remember { androidx.compose.runtime.derivedStateOf { sheet.progress.value < 1f } }
+    val to = sheet.panelCover
+    if (!flying || sheet.miniCover == Rect.Zero || to == Rect.Zero) return
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val side = with(density) { to.height.toDp() }
+    val fromRadius = with(density) { 7.dp.toPx() }
+    val toRadius = with(density) { 9.dp.toPx() }
+    Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier.requiredSize(side).align(Alignment.TopStart)
+                .graphicsLayer {
+                    val t = sheet.progress.value.coerceIn(0f, 1f)
+                    val from = sheet.miniCover.translate(0f, -sheet.travel)
+                    fun mix(a: Float, b: Float) = a + (b - a) * t
+                    val k = (mix(from.height, to.height) / to.height).coerceAtLeast(0.01f)
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                    scaleX = k; scaleY = k
+                    translationX = mix(from.left, to.left)
+                    translationY = mix(from.top, to.top)
+                    shape = RoundedCornerShape(mix(fromRadius, toRadius) / k)
+                    clip = true
+                },
+        ) { Cover(url, side, radius = 0.dp) }
     }
 }
 
@@ -1108,30 +1158,43 @@ private fun VolumeRow(vm: PlayerViewModel) {
  * instead, because that bar is on screen for as long as the app is - see MiniPlayer.
  */
 @Composable
-internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier =
-    if (!LocalPlayerShown.current) this
-    // A marquee lays its text out unbounded, so there is no ellipsis to fall back on and the line
-    // would otherwise end on a half-drawn letter at the edge. It goes soft over the last 20 dp
-    // instead, both while it walks and once it has settled back at the start.
-    else graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-        .drawWithContent {
-            drawContent()
-            val fade = 20.dp.toPx()
-            drawRect(
-                Brush.horizontalGradient(
-                    listOf(Color.Black, Color.Transparent),
-                    startX = size.width - fade, endX = size.width,
-                ),
-                blendMode = BlendMode.DstIn,
-            )
-        }
+internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
+    if (!LocalPlayerShown.current) return this
+    // What the line needs and what it has. The first size is this element's own - the width the row
+    // gives the title - and the second is the text's, measured inside the marquee, which lays it out
+    // with no width limit at all. A line that fits is left alone entirely: no walk, and no soft edge
+    // either, which would otherwise dim the last letters of a title that merely came close.
+    var room by remember { mutableIntStateOf(0) }
+    var needs by remember { mutableIntStateOf(0) }
+    val over = needs > room + 1
+    return onSizeChanged { room = it.width }
+        .then(
+            // A marquee lays its text out unbounded, so there is no ellipsis to fall back on and the
+            // line would otherwise end on a half-drawn letter at the edge. It goes soft over the last
+            // 20 dp instead, both while it walks and once it has settled back at the start.
+            if (!over) Modifier else Modifier
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                .drawWithContent {
+                    drawContent()
+                    val fade = 20.dp.toPx()
+                    drawRect(
+                        Brush.horizontalGradient(
+                            listOf(Color.Black, Color.Transparent),
+                            startX = size.width - fade, endX = size.width,
+                        ),
+                        blendMode = BlendMode.DstIn,
+                    )
+                },
+        )
         .basicMarquee(
-        iterations = iterations,
-        repeatDelayMillis = 2600,
-        initialDelayMillis = 2600,
-        spacing = MarqueeSpacing(46.dp),
-        velocity = 26.dp,
-    )
+            iterations = iterations,
+            repeatDelayMillis = 2600,
+            initialDelayMillis = 2600,
+            spacing = MarqueeSpacing(46.dp),
+            velocity = 26.dp,
+        )
+        .onSizeChanged { needs = it.width }
+}
 
 @Composable
 private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
@@ -1165,13 +1228,26 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val pos = position(vm, playing, 1000, state.current?.id to state.index)
+    // Where a seek has been asked to go, until the player is really there. Without it the bar went back
+    // to where the song still was for the moment between the finger leaving and the player answering,
+    // which reads as the scrub having been thrown away.
+    var pending by remember { mutableStateOf<Long?>(null) }
+    val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, pending))
+    LaunchedEffect(pending) {
+        val target = pending ?: return@LaunchedEffect
+        // A second and a half is longer than any seek the player answers; past that, believe the player.
+        kotlinx.coroutines.withTimeoutOrNull(1_500) {
+            while (isActive && kotlin.math.abs(vm.positionMs - target) > 500) delay(32)
+        }
+        pending = null
+    }
     // Duration is read through the gesture rather than keying it: a track that learns its real length
     // mid-scrub would restart the detector and the finger would lift on a dead pointer.
     val d by rememberUpdatedState(durationMs.coerceAtLeast(1))
     var dragging by remember { mutableStateOf(false) }
     var drag by remember { mutableFloatStateOf(0f) }
-    val fraction = (if (dragging) drag else pos.toFloat() / d).coerceIn(0f, 1f)
+    val shown = if (dragging) (drag * d).toLong() else pending ?: pos
+    val fraction = (if (dragging) drag else shown.toFloat() / d).coerceIn(0f, 1f)
     val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
     val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
     // Held, the bar thickens and the dot grows, the way Apple's does, so the scrub is felt as well as
@@ -1208,7 +1284,11 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                         }
                         // Apple seeks on release, not while the finger moves: one seek, at the end,
                         // and the sound carries on undisturbed until then.
-                        if (seek) vm.seekTo((drag * d).toLong())
+                        if (seek) {
+                            val target = (drag * d).toLong()
+                            vm.seekTo(target)
+                            pending = target
+                        }
                         dragging = false
                     }
                 }
@@ -1222,7 +1302,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                 },
         )
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Text(duration((if (dragging) (drag * d).toLong() else pos) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(duration(shown / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty
             // the rest of the time, holding the space so the times never move.
             // Apple writes a word here while a transition is running; the rest of the time the slot holds
@@ -1243,7 +1323,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-            Text("-" + duration(((d - (if (dragging) (drag * d).toLong() else pos)).coerceAtLeast(0)) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("-" + duration((d - shown).coerceAtLeast(0) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

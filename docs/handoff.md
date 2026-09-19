@@ -12,6 +12,29 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Panels cross-fade properly.** The artwork used to stay fully drawn under the incoming lyrics or
+  queue and then vanish in one frame, because the outgoing panel was held at full strength (the
+  transport is shared across the change and fading the content it sits in dimmed it half-way). The
+  fade is now on the panel itself - one number from the AnimatedContent's own transition, applied to
+  the artwork, the queue and the lyrics - so the two panels pass through each other and the transport
+  stays solid.
+- **The cover flies from the lyrics too.** Put away from the lyrics, the cover travels from the
+  header's thumbnail to the one in the now playing bar (`FlyingThumb`, `PlayerSheet.panelCover`,
+  measured by the header only while the sheet is fully open so the rectangle is in sheet
+  coordinates). Before, the lyrics simply sank behind the bar and a cover appeared there out of
+  nothing.
+- **Reading the lyrics.** A finger on the words stops the list following the song, and it stays where
+  it was put for four seconds after the finger lifts; then it glides back to the line being sung
+  rather than jumping (a jump is still right for a seek, which is a different thing). Lyrics that
+  came without timings say so in the corner - "LRCLIB · not timed" - because unsung words are all one
+  brightness and a tap on one goes nowhere, which otherwise looks like the lyrics are broken.
+- **The scrub no longer snaps back.** Letting go of the seek bar showed the old position for the
+  moment between the finger leaving and the player answering. The bar holds the place it was dragged
+  to until the player is really there (or a second and a half has passed).
+- **A title that fits is left alone.** The soft right edge is only drawn when the line really is too
+  long: the title measures the room it has and the width it needs (an `onSizeChanged` either side of
+  the marquee, which lays text out unbounded), so a title that merely comes close is not dimmed at
+  its last letters. Same in the now playing bar.
 - **The record landed off centre from a button.** `land` measured the gap between records from the
   lift the record *had*, and a button press starts the lift in a coroutine of its own and comes
   straight on, so the lift had not begun: the record was sent a full unlifted span, shrank on the way

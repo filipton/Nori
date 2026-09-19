@@ -38,7 +38,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -131,6 +134,9 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
 
 private enum class LyricsPhase { LOADING, NONE }
 
+/** How long the words stay where a finger left them before they come back to the song. */
+private const val READING_MS = 4_000L
+
 /** The words of one song, in time with it. */
 @Composable
 private fun LyricsBody(vm: PlayerViewModel, found: dev.flint.music.data.FoundLyrics, playing: Boolean) {
@@ -195,13 +201,33 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.flint.music.data.FoundLyr
         // all (a seek, the first line after opening) is still jumped to: gliding past a whole song's
         // worth of words is not a transition, it is a wait.
         val plain = reduceMotion()
+        // Reading ahead, or back, is allowed: while a finger is on the words nothing scrolls them, and
+        // for a few seconds after it lifts they stay where they were put. Then the lyrics come back to
+        // the line being sung - gliding, not jumping, because this one is a return to the song rather
+        // than a seek, and a jump here would look like the list had been snatched away.
+        val dragged by list.interactionSource.collectIsDraggedAsState()
+        var follow by remember(lyrics) { mutableStateOf(true) }
+        var returning by remember(lyrics) { mutableStateOf(false) }
+        LaunchedEffect(dragged) {
+            if (dragged) { follow = false; returning = false } else if (!follow) {
+                delay(READING_MS)
+                returning = true
+                follow = true
+            }
+        }
         // Only the scroll lives here; each line's brightness is its own (below). A scroll cut short by the
         // next line is simply continued from wherever the list is, so it cannot jump either.
-        LaunchedEffect(active, plain, lyrics) {
+        LaunchedEffect(active, plain, lyrics, follow) {
+            if (!follow) return@LaunchedEffect
             // Before the first line (a new song, an intro), or lyrics that are not timed: back to the top.
             // The list outlives a song, so without this the next song opened where the last one ended.
             if (active < 0) { if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0); return@LaunchedEffect }
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
+            if (returning) {
+                returning = false
+                if (plain) list.scrollToItem(active, -third) else list.animateScrollToItem(active, -third)
+                return@LaunchedEffect
+            }
             if (plain || here == null) { list.scrollToItem(active, -third); return@LaunchedEffect }
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
             val distance = (here.offset - third).toFloat()
@@ -279,9 +305,13 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.flint.music.data.FoundLyr
             modifier = Modifier.align(if (open) Alignment.BottomCenter else Alignment.BottomStart).padding(start = 12.dp, bottom = 6.dp),
         ) {
             Row(Modifier.padding(horizontal = 6.dp, vertical = 2.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {
-                // Closed, this is the one thing worth saying: whose words these are.
+                // Closed, this is the one thing worth saying: whose words these are - and, when they
+                // came without timings, that they did. Unsung words are all one brightness and a tap on
+                // one goes nowhere, which looks broken unless the corner says why.
                 Text(
-                    source?.label ?: "Timing", Modifier.padding(horizontal = 8.dp),
+                    listOfNotNull(source?.label ?: "Timing".takeIf { lyrics.synced }, "not timed".takeIf { !lyrics.synced })
+                        .joinToString(" · "),
+                    Modifier.padding(horizontal = 8.dp),
                     style = MaterialTheme.typography.labelSmall, color = dim,
                 )
                 if (open) {
@@ -307,7 +337,18 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
         Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 4.dp, bottom = 8.dp),
         Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
     ) {
-        Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
+        // The player is put away from here as well as from the artwork, and the cover has to have
+        // somewhere to fly from: this thumbnail is it. Measured only with the sheet fully open, so the
+        // rectangle is in the sheet's own coordinates and does not move while the sheet does.
+        val sheet = LocalPlayerSheet.current
+        Box(
+            Modifier.onGloballyPositioned { if (sheet.progress.value >= 0.999f) sheet.panelCover = it.boundsInRoot() }
+                // While it is in flight it is the flying copy that is drawn, not this one.
+                .graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f },
+        ) {
+            Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
+        }
+        androidx.compose.runtime.DisposableEffect(sheet) { onDispose { sheet.panelCover = androidx.compose.ui.geometry.Rect.Zero } }
         Column(Modifier.weight(1f)) {
             Text(
                 song?.title ?: "", Modifier.readable(), style = MaterialTheme.typography.titleMedium,

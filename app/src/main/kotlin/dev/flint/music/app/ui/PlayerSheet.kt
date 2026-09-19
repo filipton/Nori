@@ -36,6 +36,13 @@ class PlayerSheet(private val scope: CoroutineScope) {
     /** The mini player's artwork, in root coordinates: where the cover flies from and back to. */
     var miniCover by mutableStateOf(Rect.Zero)
 
+    /**
+     * The cover a panel of its own shows - the lyrics header's thumbnail - in the sheet's coordinates,
+     * or [Rect.Zero] when the panel on screen has no cover. What the cover flies to and from when the
+     * player is put away from that panel, in place of the sleeve.
+     */
+    var panelCover by mutableStateOf(Rect.Zero)
+
     /** The top of the mini player, in root coordinates: where the sheet's top edge starts. */
     var miniTop by mutableFloatStateOf(0f)
 
