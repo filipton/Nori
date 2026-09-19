@@ -30,6 +30,10 @@ data class PlayerState(
     /** What a skip either way lands on, shuffle and repeat included; -1 at an end. Not [index] ± 1 under shuffle. */
     val nextIndex: Int = -1,
     val previousIndex: Int = -1,
+    /** [queue]'s indices in the order they play: the shuffle order under shuffle, otherwise 0 until size. */
+    val order: List<Int> = emptyList(),
+    /** Indices of the songs added by hand (Play next, Add to queue). */
+    val queued: Set<Int> = emptySet(),
     val radio: String? = null,
     val playing: Boolean = false,
     val buffering: Boolean = false,
@@ -127,9 +131,12 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     private fun publish(p: Player, queueChanged: Boolean) {
         val old = _state.value
         val item = p.currentMediaItem
-        val queue = if (queueChanged || !old.connected) (0 until p.mediaItemCount).map { p.getMediaItemAt(it).toSong() } else old.queue
+        val fresh = queueChanged || !old.connected
+        val queue = if (fresh) (0 until p.mediaItemCount).map { p.getMediaItemAt(it).toSong() } else old.queue
+        val order = if (fresh || p.shuffleModeEnabled != old.shuffle) playOrder(p) else old.order
+        val queued = if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
         _state.value = old.copy(
-            connected = true, queue = queue, index = if (p.mediaItemCount == 0) -1 else p.currentMediaItemIndex,
+            connected = true, queue = queue, order = order, queued = queued, index = if (p.mediaItemCount == 0) -1 else p.currentMediaItemIndex,
             nextIndex = if (p.mediaItemCount == 0) -1 else p.nextMediaItemIndex,
             previousIndex = if (p.mediaItemCount == 0) -1 else p.previousMediaItemIndex,
             // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
@@ -140,6 +147,15 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
             durationMs = p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
         )
+    }
+
+    private fun playOrder(p: Player): List<Int> {
+        val t = p.currentTimeline
+        if (!p.shuffleModeEnabled || t.isEmpty) return List(p.mediaItemCount) { it }
+        val order = ArrayList<Int>(t.windowCount)
+        var i = t.getFirstWindowIndex(true)
+        while (i != C.INDEX_UNSET) { order += i; i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, true) }
+        return order
     }
 
     private fun items(songs: List<Song>): List<MediaItem> = songs.map { it.toMediaItem(flint.library.coverUrl(it.coverArt, NOTIFICATION_ART)) }
@@ -154,13 +170,15 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         c.play()
     }
 
+    // Where these land is the service's business (PlaybackService.upNext): after the playing song, and
+    // for "last" after the songs added by hand before them, whatever the shuffle order says.
     fun playNext(songs: List<Song>) = with { c ->
-        c.addMediaItems(if (c.mediaItemCount == 0) 0 else c.currentMediaItemIndex + 1, items(songs))
+        c.addMediaItems(items(songs).map { it.queued("next") })
         if (c.playbackState == Player.STATE_IDLE) c.prepare()
     }
 
     fun enqueue(songs: List<Song>) = with { c ->
-        c.addMediaItems(items(songs))
+        c.addMediaItems(items(songs).map { it.queued("last") })
         if (c.playbackState == Player.STATE_IDLE) c.prepare()
     }
 

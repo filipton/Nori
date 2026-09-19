@@ -1,6 +1,17 @@
 package dev.flint.music.app.ui
 
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import coil3.request.crossfade
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
@@ -25,6 +36,11 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.HeartBroken
+import dev.flint.music.settings.SwipeAction
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
@@ -150,23 +166,78 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
 
 fun duration(seconds: Long): String = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60) else "%d:%02d".format(seconds / 60, seconds % 60)
 
+/** What a sideways drag on a song row does: what it uncovers under the row, and what letting go past [SWIPE_ARM] does. */
+class RowSwipe(val icon: ImageVector, val label: String, val action: () -> Unit)
+
+/** One per row: the Animatable the row slides on, and whether letting go now would act. */
+@Stable
+class SwipeState {
+    val offset = Animatable(0f)
+    var armed by mutableStateOf(false)
+}
+
+/** How far across the row a drag has to go before letting go acts. */
+private const val SWIPE_ARM = 0.3f
+
 /**
- * Sideways drag on a row: past a third of its width the action fires and the row springs back.
- * Nothing is allocated for rows that are never touched beyond one Animatable.
+ * Sideways drag on a row. Only a direction with an action moves at all. Past [SWIPE_ARM] of the width
+ * the row goes heavier (it follows at 40%), the strip underneath takes the accent colour and the phone
+ * ticks, so the finger knows before it lifts; letting go then acts and the row springs back. The row
+ * paints [fill] under itself only while it is off its place, so the strip never shows through it.
  */
-fun Modifier.swipeActions(enabled: Boolean, onSwipe: (right: Boolean) -> Unit): Modifier = if (!enabled) this else composed {
-    val offset = remember { Animatable(0f) }
+private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?, fill: Color): Modifier = composed {
     val scope = rememberCoroutineScope()
-    pointerInput(Unit) {
+    val haptics = LocalHapticFeedback.current
+    val back = remember { spring<Float>(dampingRatio = 0.8f, stiffness = 520f) }
+    pointerInput(right != null, left != null) {
+        var x = 0f
+        fun settle() { s.armed = false; scope.launch { s.offset.animateTo(0f, back) } }
         detectHorizontalDragGestures(
+            onDragStart = { x = s.offset.value; scope.launch { s.offset.stop() } },
             onDragEnd = {
-                val fired = kotlin.math.abs(offset.value) > size.width / 3f
-                if (fired) onSwipe(offset.value > 0)
-                scope.launch { offset.animateTo(0f) }
+                if (s.armed) (if (x > 0f) right else left)?.action?.invoke()
+                settle()
             },
-            onDragCancel = { scope.launch { offset.animateTo(0f) } },
-        ) { _, delta -> scope.launch { offset.snapTo((offset.value + delta).coerceIn(-size.width / 2f, size.width / 2f)) } }
-    }.offset { IntOffset(offset.value.roundToInt(), 0) }
+            onDragCancel = { settle() },
+        ) { change, delta ->
+            val w = size.width.toFloat()
+            val arm = w * SWIPE_ARM
+            val heavy = kotlin.math.abs(x) > arm && (delta > 0f) == (x > 0f)
+            x = (x + if (heavy) delta * 0.4f else delta).coerceIn(if (left != null) -w * 0.6f else 0f, if (right != null) w * 0.6f else 0f)
+            if (x != 0f) change.consume()
+            val armed = kotlin.math.abs(x) > arm
+            if (armed != s.armed) { s.armed = armed; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+            scope.launch { s.offset.snapTo(x) }
+        }
+    }
+        .graphicsLayer { translationX = s.offset.value }
+        .drawBehind { if (s.offset.value != 0f) drawRect(fill) }
+}
+
+/**
+ * The strip a swiped row uncovers: the action's icon and words at the edge the row left, fading in over
+ * the first 64 dp. Neutral until the drag is far enough to act, then the accent, with the icon giving
+ * a small pop. Composed only while the row is off its place, so a list at rest carries none of it.
+ */
+@Composable
+private fun SwipeBackdrop(s: SwipeState, right: RowSwipe?, left: RowSwipe?, modifier: Modifier) {
+    val side by remember { derivedStateOf { kotlin.math.sign(s.offset.value) } }
+    if (side == 0f) return
+    val face = (if (side > 0f) right else left) ?: return
+    val scheme = MaterialTheme.colorScheme
+    val fill by animateColorAsState(if (s.armed) scheme.primary else scheme.surfaceContainerHighest, tween(140), label = "swipe fill")
+    val ink by animateColorAsState(if (s.armed) scheme.onPrimary else scheme.onSurfaceVariant, tween(140), label = "swipe ink")
+    val pop by animateFloatAsState(if (s.armed) 1.15f else 1f, spring(dampingRatio = 0.45f, stiffness = 700f), label = "swipe pop")
+    Box(modifier.drawBehind { drawRect(fill) }) {
+        Row(
+            Modifier.align(if (side > 0f) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = Space.gutter)
+                .graphicsLayer { alpha = (kotlin.math.abs(s.offset.value) / 64.dp.toPx()).coerceIn(0f, 1f) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(face.icon, null, Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }, ink)
+            Text(face.label, Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelLarge, color = ink, maxLines = 1)
+        }
+    }
 }
 
 /**
@@ -179,14 +250,17 @@ fun Modifier.swipeActions(enabled: Boolean, onSwipe: (right: Boolean) -> Unit): 
 fun SongRow(
     song: Song, coverUrl: String?, onClick: () -> Unit, onMenu: () -> Unit, modifier: Modifier = Modifier,
     number: Int? = null, playing: Boolean = false, downloaded: Boolean = false,
-    selected: Boolean = false, onLongClick: (() -> Unit)? = null, onSwipe: ((Boolean) -> Unit)? = null,
+    selected: Boolean = false, onLongClick: (() -> Unit)? = null, swipeRight: RowSwipe? = null, swipeLeft: RowSwipe? = null,
     divider: Boolean = true, showArtist: Boolean = true,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val swipe = if (swipeRight != null || swipeLeft != null) remember { SwipeState() } else null
     Column(modifier.fillMaxWidth().background(if (selected) scheme.secondaryContainer else Color.Transparent)) {
+      Box(Modifier.fillMaxWidth()) {
+        if (swipe != null) SwipeBackdrop(swipe, swipeRight, swipeLeft, Modifier.matchParentSize())
         Row(
             Modifier.fillMaxWidth()
-                .swipeActions(onSwipe != null) { onSwipe?.invoke(it) }
+                .then(if (swipe != null) Modifier.swipeable(swipe, swipeRight, swipeLeft, if (selected) scheme.secondaryContainer else scheme.background) else Modifier)
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(start = Space.gutter, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -224,6 +298,7 @@ fun SongRow(
             Box(Modifier.width(MARK_SLOT), Alignment.Center) { DownloadSlot(song.id, downloaded, tint) }
             IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(20.dp), tint) }
         }
+      }
         if (divider) Hairline(startIndent = if (number != null) Space.gutter + 40.dp else Space.gutter + 58.dp)
     }
 }
@@ -291,16 +366,30 @@ fun LazyListScope.songRows(
      */
     animated: Boolean = false,
 ) {
-    val swipe = actions.swipeEnabled
+    val (onRight, onLeft) = actions.swipes
     itemsIndexed(songs, key = { i, s -> if (animated) "$keyPrefix${s.id}" else "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
         SongRow(
             s, if (numbered) null else cover(s), onClick = { if (context === songs) actions.tap(songs, i) else actions.tap(context, context.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) }, onMenu = { menu(s) },
             modifier = if (!animated) Modifier else if (AppMotion.reduce) Modifier.animateItem(null, null, null) else Modifier.animateItem(),
             number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
-            selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, onSwipe = if (swipe) ({ right -> actions.swipe(s, right) }) else null,
+            selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, 
+            swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
             divider = i < songs.lastIndex,
             showArtist = pageArtist == null || !s.artist.equals(pageArtist, ignoreCase = true),
         )
+    }
+}
+
+/** The icon and words a swipe setting uncovers under [song]'s row, and the action; null when that side does nothing. */
+@Composable
+private fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? = when (action) {
+    SwipeAction.NONE -> null
+    SwipeAction.QUEUE -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, "Add to queue") { actions.enqueue(listOf(song)) }
+    SwipeAction.PLAY_NEXT -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, "Play next") { actions.playNext(listOf(song)) }
+    SwipeAction.DOWNLOAD -> RowSwipe(Icons.Filled.Download, "Download") { actions.download(listOf(song)) }
+    SwipeAction.FAVOURITE -> {
+        val on = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)
+        RowSwipe(if (on) Icons.Filled.HeartBroken else Icons.Filled.Favorite, if (on) "Remove from favourites" else "Favourite") { actions.star(song, !on) }
     }
 }
 

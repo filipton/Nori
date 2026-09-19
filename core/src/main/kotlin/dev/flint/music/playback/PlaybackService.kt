@@ -19,6 +19,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
@@ -282,7 +283,7 @@ class PlaybackService : MediaLibraryService() {
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
         }
 
-        override fun onShuffleModeEnabledChanged(on: Boolean) { refreshUpcoming(); refreshButtons() }
+        override fun onShuffleModeEnabledChanged(on: Boolean) { if (on) shuffleAroundCurrent(); refreshUpcoming(); refreshButtons() }
         override fun onRepeatModeChanged(mode: Int) = refreshUpcoming()
 
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
@@ -542,12 +543,65 @@ class PlaybackService : MediaLibraryService() {
             if (ms > 0 && wrappedPlayer.isPlaying) { wrappedPlayer.volume = 0f; action(); ramp(1f, ms) } else action()
         }
 
+        override fun addMediaItems(mediaItems: List<MediaItem>) = addMediaItems(Int.MAX_VALUE, mediaItems)
+        override fun addMediaItems(index: Int, mediaItems: List<MediaItem>) {
+            if (mediaItems.isNotEmpty() && wrappedPlayer.mediaItemCount > 0 && mediaItems.all { it.queuedAs() != null }) upNext(mediaItems)
+            else super.addMediaItems(index.coerceAtMost(wrappedPlayer.mediaItemCount), mediaItems)
+        }
+
         override fun seekTo(positionMs: Long) = softly { super.seekTo(positionMs) }
         override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly { super.seekTo(mediaItemIndex, positionMs) }
         override fun seekToNext() = softly { super.seekToNext() }
         override fun seekToNextMediaItem() = softly { super.seekToNextMediaItem() }
         override fun seekToPreviousMediaItem() = softly { super.seekToPreviousMediaItem() }
         override fun seekToPrevious() = softly { if (flint.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
+    }
+
+    /**
+     * Play next and Add to queue, the way Apple does them: the songs go right after the playing one
+     * ("next"), or after the songs added by hand before them ("last"), in the order given, and then the
+     * queue carries on as it was. In the list itself they sit there too, so turning shuffle off keeps
+     * them next. Under shuffle, ExoPlayer would drop each at a random place in the play order, so the
+     * order is rebuilt with them where they belong and everything else where it was.
+     */
+    private fun upNext(items: List<MediaItem>) {
+        val t = player.currentTimeline
+        val cur = player.currentMediaItemIndex
+        val last = items.first().queuedAs() == "last"
+        fun runEnd(shuffled: Boolean): Int {
+            var end = cur
+            if (!last) return end
+            var i = t.getNextWindowIndex(cur, Player.REPEAT_MODE_OFF, shuffled)
+            while (i != C.INDEX_UNSET && player.getMediaItemAt(i).queuedAs() != null) { end = i; i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, shuffled) }
+            return end
+        }
+        val at = runEnd(false) + 1
+        if (!player.shuffleModeEnabled) return player.addMediaItems(at, items)
+        val shift = { i: Int -> if (i >= at) i + items.size else i }
+        val order = ArrayList<Int>(t.windowCount + items.size)
+        var i = t.getFirstWindowIndex(true)
+        while (i != C.INDEX_UNSET) { order += shift(i); i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, true) }
+        order.addAll(order.indexOf(shift(runEnd(true))) + 1, items.indices.map { at + it })
+        player.addMediaItems(at, items)
+        player.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), SystemClock.elapsedRealtime()))
+    }
+
+    /**
+     * Shuffle turned on: the playing song goes first, the songs added by hand after it keep their order,
+     * and only the rest is shuffled. ExoPlayer's own order would leave the playing song somewhere in the
+     * middle, so the songs before it in that order were never played, and it scatters the hand-added ones.
+     */
+    private fun shuffleAroundCurrent() {
+        val n = player.mediaItemCount
+        val cur = player.currentMediaItemIndex
+        if (n < 2 || cur == C.INDEX_UNSET) return
+        val kept = ArrayList<Int>().apply {
+            add(cur)
+            var i = cur + 1
+            while (i < n && player.getMediaItemAt(i).queuedAs() != null) add(i++)
+        }
+        val rest = (0 until n).filterNot { it in kept }.shuffled()
+        player.setShuffleOrder(DefaultShuffleOrder((kept + rest).toIntArray(), SystemClock.elapsedRealtime()))
     }
 
     private fun precacheAhead() {

@@ -12,6 +12,19 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Up Next.** Play next and Add to queue (the default right swipe) work as in Apple Music: the songs
+  go right after the playing one, "last" ones after the songs added by hand before them, in order,
+  and then the queue carries on. Items carry `queued` = "next"/"last" in their extras
+  (`MediaItem.queued`); the service's `Controls.addMediaItems` sends marked items to `upNext`, which
+  places them in the list and, under shuffle, rebuilds the `DefaultShuffleOrder` so they are not
+  scattered. Turning shuffle on puts the playing song first, keeps the hand-added run after it and
+  shuffles only the rest (`shuffleAroundCurrent`). The queue panel lists songs in play order
+  (`PlayerState.order`), marks hand-added ones, and hides reordering under shuffle. Checked with
+  `build/upnext.sh`-style runs via `do enqueue|playnext|shuffle` and the `upNext` state field.
+- **Swipes.** A song row moves only in a direction that has an action; the left swipe now does nothing
+  by default (stored under a new key, `swipeLeft2`, so old installs get it too). The drag uncovers the
+  action's icon and words; past 30% of the width the strip turns accent, the phone ticks and the row
+  goes heavier, and letting go acts. 5-star ratings are gone (nobody used them).
 - **The silent USB DAC.** Audio offload hands the compressed stream to the phone's audio chip, and
   that chip has no path to a USB device: the track opened, reported itself playing, and the DAC sat
   in silence. Offload now stands down whenever anything USB is attached (`Outputs.usb`), and a sink
@@ -455,6 +468,7 @@ Check for these before believing a screen is fine — each has bitten more than 
 ## Standing instructions from the owner
 
 - Commit messages: one line, no attribution lines, no `Co-Authored-By`.
+- One emulator only: `battery-perf`. No extra AVDs, not even for subagents; they take turns on it.
 - Do not run the long performance suite for small or UI-only changes — build, install, screenshot.
   Measure only when something can plausibly move CPU or battery.
 - Build artefacts stay in `build/`. Never copy them to `~`.

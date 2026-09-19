@@ -974,7 +974,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
 @Composable
 private fun Queue(vm: PlayerViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val list = rememberLazyListState(initialFirstVisibleItemIndex = state.index.coerceAtLeast(0))
+    val list = rememberLazyListState(initialFirstVisibleItemIndex = state.order.indexOf(state.index).coerceAtLeast(0))
     // Nothing is reordered until the finger lifts. The held row follows it, the rows it passes step out
     // of the way, and the gap travels with it - reordering live would change the keys under the gesture
     // and cancel it, which is why a row could only ever be moved one place at a time.
@@ -1003,14 +1003,19 @@ private fun Queue(vm: PlayerViewModel) {
                 }
             }
         }
+    // In the order the songs will play, which under shuffle is not the order of the list itself. A drag
+    // moves a song within the list, so reordering is offered only when the two are the same.
+    val order = state.order.takeIf { it.size == state.queue.size } ?: state.queue.indices.toList()
+    val reorderable = !state.shuffle
     LazyColumn(Modifier.fillMaxSize().weight(1f), state = list) {
-        itemsIndexed(state.queue, key = { i, s -> "$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
-            val held = i == from
+        itemsIndexed(order, key = { _, i -> "$i-${state.queue[i].id}" }, contentType = { _, _ -> "song" }) { at, i ->
+            val s = state.queue[i]
+            val held = at == from
             val shift = when {
                 from < 0 -> 0f
                 held -> dragOffset
-                i in (from + 1)..target -> -rowHeight
-                i in target until from -> rowHeight
+                at in (from + 1)..target -> -rowHeight
+                at in target until from -> rowHeight
                 else -> 0f
             }
             Row(
@@ -1028,18 +1033,26 @@ private fun Queue(vm: PlayerViewModel) {
                         s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
                         color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                     )
-                    Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Added by hand: plays before the rest of the queue carries on.
+                        if (i in state.queued) Icon(Icons.AutoMirrored.Filled.QueueMusic, "Added by you", Modifier.padding(end = 4.dp).size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                        Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
                 IconButton({ vm.remove(i) }, Modifier.size(38.dp)) {
                     Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Icon(
+                androidx.compose.animation.AnimatedVisibility(
+                    reorderable,
+                    enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
+                    exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
+                ) { Icon(
                     Icons.Filled.DragHandle, "Reorder",
                     tint = if (held) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
                         detectDragGestures(
                             onDragStart = {
-                                from = i; dragOffset = 0f
+                                from = at; dragOffset = 0f
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             },
                             onDragEnd = {
@@ -1055,7 +1068,7 @@ private fun Queue(vm: PlayerViewModel) {
                             onDragCancel = { from = -1; dragOffset = 0f },
                         ) { change, drag -> change.consume(); dragOffset += drag.y }
                     },
-                )
+                ) }
             }
         }
     }

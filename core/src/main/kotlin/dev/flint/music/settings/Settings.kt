@@ -18,6 +18,12 @@ enum class TapAction { PLAY_LIST, PLAY_ONE, QUEUE, PLAY_NEXT }
 /** What dragging a song row sideways does. */
 enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
 
+/**
+ * Where the left swipe is stored. It used to default to Play next and be saved along with everything
+ * else, so a new key is what gives existing installs the new default (the left swipe does nothing).
+ */
+private const val SWIPE_LEFT = "swipeLeft2"
+
 enum class HomeRow(val title: String) { PINNED("Pinned playlists"), RECENT("Recently played"), NEWEST("Recently added"), FREQUENT("Most played"), RANDOM("Random"), STARRED("Favourite albums") }
 
 /**
@@ -229,7 +235,7 @@ data class Prefs(
     val uiScale: Float = 0f,
     val tapAction: TapAction = TapAction.PLAY_LIST,
     val swipeRight: SwipeAction = SwipeAction.QUEUE,
-    val swipeLeft: SwipeAction = SwipeAction.PLAY_NEXT,
+    val swipeLeft: SwipeAction = SwipeAction.NONE,
     /** Songs the server marks explicit are skipped instead of played. */
     val skipExplicit: Boolean = false,
     /** Home shelves, in order; a row that is not listed is hidden. */
@@ -359,7 +365,7 @@ class Settings(context: Context) {
             dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4), coverColors = sp.getBoolean("coverColors", true), reduceMotion = sp.getBoolean("reduceMotion", false), ignoreSystemMotion = sp.getBoolean("ignoreSystemMotion", false), uiScale = sp.getFloat("uiScale", 0f), playerColours = sp.getBoolean("playerColours", true),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
             swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
-            swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
+            swipeLeft = SwipeAction.entries.getOrElse(sp.getInt(SWIPE_LEFT, d.swipeLeft.ordinal)) { d.swipeLeft },
             skipExplicit = sp.getBoolean("skipExplicit", false),
             homeRows = sp.getString("homeRows", null)?.split(',')?.mapNotNull { n -> HomeRow.entries.firstOrNull { it.name == n } } ?: d.homeRows,
             pinnedPlaylists = sp.getString("pinnedPlaylists", null)?.split('\n')?.filter { it.isNotEmpty() } ?: emptyList(),
@@ -392,7 +398,7 @@ class Settings(context: Context) {
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("autoEqAuto", p.autoEqAuto); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
         putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent); putBoolean("coverColors", p.coverColors); putBoolean("reduceMotion", p.reduceMotion); putBoolean("ignoreSystemMotion", p.ignoreSystemMotion); putFloat("uiScale", p.uiScale); putBoolean("playerColours", p.playerColours)
-        putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
+        putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt(SWIPE_LEFT, p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
         putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())
     }.apply()

@@ -59,17 +59,8 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
         }
     }
 
-    fun swipe(song: Song, right: Boolean) {
-        when (if (right) flint.settings.value.swipeRight else flint.settings.value.swipeLeft) {
-            SwipeAction.NONE -> {}
-            SwipeAction.QUEUE -> enqueue(listOf(song))
-            SwipeAction.PLAY_NEXT -> playNext(listOf(song))
-            SwipeAction.FAVOURITE -> star(song, !song.starred)
-            SwipeAction.DOWNLOAD -> download(listOf(song))
-        }
-    }
-
-    val swipeEnabled: Boolean get() = flint.settings.value.let { it.swipeLeft != SwipeAction.NONE || it.swipeRight != SwipeAction.NONE }
+    /** What swiping a song row right and left does, as set in Settings. */
+    val swipes: Pair<SwipeAction, SwipeAction> get() = flint.settings.value.let { it.swipeRight to it.swipeLeft }
 
     /** Every album of an artist, in order, as one list of songs. */
     private suspend fun artistSongs(albums: List<Album>): List<Song> = albums.filterNot { it.isExternal }.flatMap { runCatching { flint.library.albumSongs(it.id) }.getOrDefault(emptyList()) }
@@ -121,6 +112,7 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             "previous" -> player.previous()
             "enqueue" -> enqueue(songs)
             "playnext" -> playNext(songs)
+            "shuffle" -> player.toggleShuffle()
             // "newplaylist <name>|<ref>": the checks create one, look for it on the server, then delete it.
             "newplaylist" -> {
                 val name = ref.substringBefore('|')

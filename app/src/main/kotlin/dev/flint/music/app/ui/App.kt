@@ -169,6 +169,10 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                 """{"route":"${if (sheet.isOpen) "player" else controller.currentBackStackEntry?.destination?.route}",""" +
                     """"playing":${st.playing},"title":"${st.current?.title.orEmpty()}","artist":"${st.current?.artist.orEmpty()}",""" +
                     """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
+                    // The next songs in the order they will play, and which of them were added by hand.
+                    st.order.drop(st.order.indexOf(st.index) + 1).take(8).let { up ->
+                        """"upNext":"${up.joinToString(" ") { st.queue[it].id }}","upNextQueued":"${up.joinToString(" ") { if (it in st.queued) "1" else "0" }}","shuffle":${st.shuffle},"""
+                    } +
                     """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.flint.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +

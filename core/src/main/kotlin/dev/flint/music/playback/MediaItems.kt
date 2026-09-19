@@ -88,5 +88,15 @@ fun RadioStation.toMediaItem(): MediaItem = MediaItem.Builder()
 val MediaItem.isRadio get() = mediaId.startsWith(RADIO_PREFIX)
 
 /** A controller's items arrive without their URI; put it back. */
+/**
+ * Songs added by hand carry how they came: "next" (Play next) or "last" (Add to queue). The service
+ * keeps them right after the playing song, in the order they were added and ahead of the rest of the
+ * queue, shuffled or not (see PlaybackService.upNext). Once in, both count alike as hand-added.
+ */
+private const val QUEUED = "queued"
+fun MediaItem.queuedAs(): String? = mediaMetadata.extras?.getString(QUEUED)
+fun MediaItem.queued(how: String): MediaItem =
+    buildUpon().setMediaMetadata(mediaMetadata.buildUpon().setExtras(Bundle(mediaMetadata.extras ?: Bundle.EMPTY).apply { putString(QUEUED, how) }).build()).build()
+
 fun MediaItem.playable(): MediaItem =
     buildUpon().setUri(requestMetadata.mediaUri ?: songUri(mediaId)).build()
