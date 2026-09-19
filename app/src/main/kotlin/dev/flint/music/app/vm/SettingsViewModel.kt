@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.flint.music.ffi.IngestStats
 import dev.flint.music.playback.DacState
+import dev.flint.music.playback.DeviceSound
+import dev.flint.music.playback.Outputs
 import dev.flint.music.settings.Prefs
 import dev.flint.music.settings.ServerProfile
 import dev.flint.music.net.describeConnectionError
@@ -24,10 +26,22 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 
 data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
 data class AutoEqUi(val count: Int = 0, val query: String = "", val hits: List<AutoEqEntry> = emptyList(), val busy: Boolean = false, val applied: String? = null, val error: String? = null)
+
+/**
+ * One output device in the equalizer's device list: [name] is what it calls itself, [kind] where it is
+ * plugged in, [sound] what it gets (a profile's name, "Flat", "Automatic", "Leave as is").
+ */
+data class DeviceRow(val output: String, val name: String, val kind: String?, val current: Boolean, val sound: String, val choice: DeviceSound.Choice)
+
+/** A line for the snackbar about the device that just connected, with the one thing it offers to do. */
+data class EqNotice(val message: String, val action: String, val source: DeviceSound.Notice)
 
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
@@ -97,6 +111,7 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
      * else returns false so a typo in a script fails loudly instead of silently doing nothing.
      */
     fun setByName(name: String, value: String): Boolean {
+        if (testDevice(name, value)) return true
         val on = value.equals("true", true) || value == "1"
         val change: (dev.flint.music.settings.Prefs) -> dev.flint.music.settings.Prefs? = {
             when (name) {
@@ -119,11 +134,50 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
+                "autoEqAuto" -> it.copy(autoEqAuto = on)
+                "profilePerOutput" -> it.copy(profilePerOutput = on)
                 else -> null
             }
         }
         if (change(prefs.value) == null) return false
         update { change(it) ?: it }
+        return true
+    }
+
+    /**
+     * The device-sound half of the test bridge: `set deviceSound "<output>=flat|auto|quiet|profile:<name>|curve:<search>"`,
+     * `set saveProfile <name>`, `set deleteProfile <name>`, `set forgetDevice <output>`, `set autoEqIndex 1`,
+     * `set eqNotice apply|undo` (presses the snackbar's button, whichever notice is up).
+     */
+    private fun testDevice(name: String, value: String): Boolean {
+        when (name) {
+            "deviceSound" -> viewModelScope.launch {
+                val output = value.substringBeforeLast('=')
+                val spec = value.substringAfterLast('=')
+                val choice = when {
+                    spec == "flat" -> DeviceSound.Choice.Flat
+                    spec == "quiet" -> DeviceSound.Choice.Quiet
+                    spec.startsWith("profile:") -> DeviceSound.Choice.Profile(spec.removePrefix("profile:"))
+                    spec.startsWith("curve:") -> withContext(Dispatchers.IO) { flint.core.autoeqSearch(spec.removePrefix("curve:"), 1u) }.firstOrNull()?.let { DeviceSound.Choice.Curve(it) } ?: return@launch
+                    else -> DeviceSound.Choice.Automatic
+                }
+                assignDevice(output, choice)
+            }
+            "saveProfile" -> saveProfile(value)
+            "deleteProfile" -> deleteProfile(value)
+            "forgetDevice" -> forgetDevice(value)
+            "autoEqIndex" -> downloadAutoEqIndex()
+            "eqNotice" -> devices.lastNotice?.let { n ->
+                viewModelScope.launch {
+                    when (n) {
+                        is DeviceSound.Offer -> if (value == "apply") devices.accept(n)
+                        is DeviceSound.Applied -> if (value == "undo") devices.undo(n)
+                    }
+                    devices.consume(n)
+                }
+            }
+            else -> return false
+        }
         return true
     }
 
@@ -157,29 +211,105 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
 
     // ---- saved profiles and the AutoEQ database ----
 
-    private val _profiles = MutableStateFlow<List<SoundProfile>>(emptyList())
-    val profiles: StateFlow<List<SoundProfile>> = _profiles
-    val outputs: StateFlow<List<String>> = flint.outputs.known
+    private val devices = flint.deviceSound
+    val profiles: StateFlow<List<SoundProfile>> = devices.profiles
     val currentOutput: StateFlow<String> = flint.outputs.current
 
     init { refreshProfiles() }
-    private fun refreshProfiles() = viewModelScope.launch { _profiles.value = runCatching { flint.core.profiles() }.getOrDefault(emptyList()) }
+    private fun refreshProfiles() = viewModelScope.launch { devices.refresh() }
+
+    /** Every output seen, the one playing now first, each with the sound it gets. */
+    val deviceRows: StateFlow<List<DeviceRow>> = combine(flint.outputs.known, currentOutput, profiles, devices.quiet, ::deviceRowsOf)
+        // Filled from the start, so the list is there on the screen's first frame rather than popping in.
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), deviceRowsOf(flint.outputs.known.value, currentOutput.value, profiles.value, devices.quiet.value))
+
+    private fun deviceRowsOf(known: List<String>, current: String, profiles: List<SoundProfile>, quiet: Set<String>): List<DeviceRow> =
+        (known + current).distinct().map { o ->
+            val bound = profiles.firstOrNull { o in it.outputs }?.name
+            val choice = when {
+                bound == DeviceSound.FLAT -> DeviceSound.Choice.Flat
+                bound != null -> DeviceSound.Choice.Profile(bound)
+                o in quiet -> DeviceSound.Choice.Quiet
+                else -> DeviceSound.Choice.Automatic
+            }
+            val sound = when (choice) {
+                DeviceSound.Choice.Automatic -> "Automatic"
+                DeviceSound.Choice.Quiet -> "Leave as is"
+                DeviceSound.Choice.Flat -> "Flat"
+                else -> bound.orEmpty()
+            }
+            val kind = o.substringBefore(": ", "").ifEmpty { null }
+            DeviceRow(o, o.substringAfter(": "), kind, o == current, sound, choice)
+        }.sortedWith(compareBy({ it.output != Outputs.SPEAKER }, { it.name.lowercase() }))
+
+    private val _assigning = MutableStateFlow<String?>(null)
+    /** The device whose sound is being fetched and saved right now (an AutoEQ curve is a download). */
+    val assigning: StateFlow<String?> = _assigning
+    private val _assignError = MutableStateFlow<String?>(null)
+    val assignError: StateFlow<String?> = _assignError
+
+    /** Gives [output] its own sound; [onDone] runs once it is saved (and loaded, if that device is playing). */
+    fun assignDevice(output: String, choice: DeviceSound.Choice, onDone: () -> Unit = {}) = viewModelScope.launch {
+        _assigning.value = output
+        _assignError.value = null
+        try {
+            devices.assign(output, choice, currentOutput.value)
+            onDone()
+        } catch (e: Exception) {
+            _assignError.value = describeConnectionError(e)
+        } finally {
+            _assigning.value = null
+        }
+    }
+
+    fun clearAssignError() { _assignError.value = null }
+
+    /** Takes a device out of the list, with whatever was chosen for it. */
+    fun forgetDevice(output: String) = viewModelScope.launch {
+        devices.forget(output)
+        flint.outputs.forget(output)
+    }
+
+    /** What to say about the device that just connected; only while it is still the one playing. */
+    val eqNotice: StateFlow<EqNotice?> = combine(devices.notice, currentOutput) { n, current ->
+        when {
+            n == null || n.output != current -> null
+            n is DeviceSound.Offer -> EqNotice("${n.entry.name} connected. Use its AutoEQ curve?", "Apply", n)
+            n is DeviceSound.Applied -> EqNotice("Using AutoEQ for ${n.curve}", "Undo", n)
+            else -> null
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** The notice is on screen now, so it is not shown again. */
+    fun eqNoticeShown(n: EqNotice) = devices.consume(n.source)
+
+    /** "Apply" on an offer, "Undo" on a curve applied without asking. */
+    fun eqNoticeAction(n: EqNotice) = viewModelScope.launch {
+        when (val src = n.source) {
+            is DeviceSound.Offer -> try {
+                devices.accept(src)
+            } catch (e: Exception) {
+                _autoEq.update { it.copy(error = describeConnectionError(e)) }
+            }
+            is DeviceSound.Applied -> devices.undo(src)
+        }
+    }
 
     /** Saves the sound settings as they are now under [name]. */
-    fun saveProfile(name: String, outputs: List<String> = emptyList()) = viewModelScope.launch {
-        runCatching { flint.core.profileSave(SoundProfile(name.trim(), Sound.of(prefs.value).toJson(), outputs)) }
+    fun saveProfile(name: String) = viewModelScope.launch {
+        val sound = Sound.of(prefs.value).toJson()
+        // Saving over a profile keeps the devices it is chosen for.
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val kept = flint.core.profiles().firstOrNull { it.name == name.trim() }?.outputs.orEmpty()
+                flint.core.profileSave(SoundProfile(name.trim(), sound, kept))
+            }
+        }
         refreshProfiles()
     }
 
     fun applyProfile(p: SoundProfile) = Sound.fromJson(p.json)?.let { s -> update { it.withSound(s) } }
     fun deleteProfile(name: String) = viewModelScope.launch { runCatching { flint.core.profileDelete(name) }; refreshProfiles() }
-
-    /** Binds or unbinds an output device to a profile; the service applies it when that device becomes active. */
-    fun bindProfile(p: SoundProfile, output: String, bound: Boolean) = viewModelScope.launch {
-        val outs = if (bound) (p.outputs + output).distinct() else p.outputs - output
-        runCatching { flint.core.profileSave(p.copy(outputs = outs)) }
-        refreshProfiles()
-    }
 
     private val _autoEq = MutableStateFlow(AutoEqUi())
     val autoEq: StateFlow<AutoEqUi> = _autoEq
@@ -207,23 +337,11 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
     }
 
     /**
-     * What an output device might be in the AutoEQ database: "Bluetooth: LE_WH-1000XM5" -> "WH-1000XM5".
-     * Empty when the index is not downloaded or the name says nothing (the speaker, a generic "USB Audio").
+     * What an output device might be in the AutoEQ database, best first: "Bluetooth: LE_WH-1000XM5" finds
+     * "Sony WH-1000XM5". Empty when the index is not downloaded or the name says nothing (the speaker, a
+     * generic "USB Audio").
      */
-    suspend fun autoEqFor(output: String): List<AutoEqEntry> {
-        val name = output.substringAfter(": ", "").replace(Regex("^(LE[_-]|BT[_-])", RegexOption.IGNORE_CASE), "").replace('_', ' ').trim()
-        if (name.length < 3 || name.equals("DAC", true) || name.contains("USB Audio", true) || name.equals("device", true)) return emptyList()
-        return withContext(Dispatchers.IO) { runCatching { flint.core.autoeqSearch(name, 5u) }.getOrDefault(emptyList()) }
-    }
-
-    /** Applies [entry]'s curve and binds it, as a profile named after it, to [output]: next time it loads by itself. */
-    fun adoptAutoEq(entry: AutoEqEntry, output: String) = viewModelScope.launch {
-        applyAutoEq(entry).join()
-        if (_autoEq.value.applied == entry.name) {
-            runCatching { flint.core.profileSave(SoundProfile(entry.name, Sound.of(prefs.value).toJson(), listOf(output))) }
-            refreshProfiles()
-        }
-    }
+    suspend fun autoEqFor(output: String): List<AutoEqEntry> = devices.curvesFor(output)
 
     /** Fetches one headphone's parametric preset and makes it the current curve. */
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {

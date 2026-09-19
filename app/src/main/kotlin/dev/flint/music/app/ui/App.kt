@@ -130,14 +130,19 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
         var menuSong by remember { mutableStateOf<Song?>(null) }
         var menuFromPlayer by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
-        // Headphones or a DAC connected and nothing is bound to them yet: offer their AutoEQ curve, once per device.
-        val output by settings.currentOutput.collectAsStateWithLifecycle()
-        val profiles by settings.profiles.collectAsStateWithLifecycle()
-        LaunchedEffect(output) {
-            if (output == dev.flint.music.playback.Outputs.SPEAKER || profiles.any { output in it.outputs }) return@LaunchedEffect
-            val hit = settings.autoEqFor(output).firstOrNull() ?: return@LaunchedEffect
-            val result = snackbar.showSnackbar("${hit.name} connected. Use its AutoEQ curve?", actionLabel = "Apply", withDismissAction = true, duration = androidx.compose.material3.SnackbarDuration.Long)
-            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) settings.adoptAutoEq(hit, output)
+        // Headphones or a DAC connected with nothing chosen for them: the service decided (see DeviceSound);
+        // this only says so - "use its AutoEQ curve?", or "using AutoEQ for X" with an undo.
+        // Marked as seen only once it has been on screen; unplugging the device takes it away with it.
+        val eqNotice by settings.eqNotice.collectAsStateWithLifecycle()
+        LaunchedEffect(eqNotice) {
+            val n = eqNotice ?: return@LaunchedEffect
+            val offer = n.action != "Undo"
+            val result = snackbar.showSnackbar(
+                n.message, actionLabel = n.action, withDismissAction = offer,
+                duration = if (offer) androidx.compose.material3.SnackbarDuration.Long else androidx.compose.material3.SnackbarDuration.Short,
+            )
+            settings.eqNoticeShown(n)
+            if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) settings.eqNoticeAction(n)
         }
         val context = LocalContext.current
         LaunchedEffect(Unit) {

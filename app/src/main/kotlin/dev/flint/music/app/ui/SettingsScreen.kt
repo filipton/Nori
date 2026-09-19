@@ -202,6 +202,7 @@ private val index = listOf(
     Entry("audio", "Playback speed", ""),
     Entry("audio", "Skip silence", "Cuts silent stretches inside and between tracks"),
     Entry("audio", "Equalizer and crossfeed", ""),
+    Entry("audio", "Apply AutoEQ automatically", "Headphones with a known AutoEQ curve get it as soon as they connect, instead of being asked"),
     Entry("features", "Listening history and taste model", "Kept on this device only; powers mixes, smart playlists and your listening stats."),
     Entry("features", "Spread artists when shuffling", "Shuffle avoids two songs by the same artist or album in a row"),
     Entry("features", "Apply a profile per output", "When headphones or a DAC are connected, load the sound profile bound to them"),
@@ -393,6 +394,12 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 Text("Equalizer and crossfeed", Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                 Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
             }
+            Hairline(startIndent = 16.dp)
+            Toggle(
+                "Apply AutoEQ automatically",
+                "Headphones with a known AutoEQ curve get it as soon as they connect, instead of being asked. Choose a curve for a single device, like a DAC, under Equalizer → Devices.",
+                p.autoEqAuto,
+            ) { on -> vm.update { it.copy(autoEqAuto = on) } }
             Toggle(
                 "AutoMix",
                 "Blends the next track in like a DJ set: matching tempo, aligning beats, swapping the bass and filtering out the ending.",

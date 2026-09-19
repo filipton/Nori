@@ -11,13 +11,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.FilterChip
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -172,10 +173,10 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             FlintSlider(p.limiterThresholdDb, -12f..0f, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = Space.gutter))
         }
 
+        DevicesSection(vm)
+
         SectionTitle("Profiles")
         val profiles by vm.profiles.collectAsStateWithLifecycle()
-        val outputs by vm.outputs.collectAsStateWithLifecycle()
-        val output by vm.currentOutput.collectAsStateWithLifecycle()
         var naming by remember { mutableStateOf(false) }
         var newName by remember { mutableStateOf("") }
         if (naming) AlertDialog(
@@ -184,30 +185,16 @@ fun EqualizerScreen(vm: SettingsViewModel) {
             confirmButton = { TextButton({ vm.saveProfile(newName); newName = ""; naming = false }, enabled = newName.isNotBlank()) { Text("Save") } },
             dismissButton = { TextButton({ naming = false }) { Text("Cancel") } },
         )
-        Text("Playing through: $output", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        val suggestions by produceState(emptyList<dev.flint.music.ffi.AutoEqEntry>(), output) { value = vm.autoEqFor(output) }
-        suggestions.take(3).forEach { e ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text("${e.name} · ${e.source}", Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                TextButton({ vm.adoptAutoEq(e, output) }) { Text("Use for this device") }
-            }
+        val rows by vm.deviceRows.collectAsStateWithLifecycle()
+        AnimatedRows(profiles, { it.name }) { profile ->
+            val used = rows.filter { it.output in profile.outputs }.joinToString(", ") { it.name }
+            NavRow(
+                profile.name, { vm.applyProfile(profile) },
+                subtitle = if (used.isEmpty()) "Tap to load" else "Used for $used",
+                action = { IconButton({ vm.deleteProfile(profile.name) }) { Icon(Icons.Outlined.Delete, "Delete ${profile.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
+            )
         }
-        profiles.forEach { profile ->
-            Column(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(profile.name, Modifier.weight(1f).clickable { vm.applyProfile(profile) })
-                    TextButton({ vm.applyProfile(profile) }) { Text("Apply") }
-                    TextButton({ vm.deleteProfile(profile.name) }) { Text("Delete") }
-                }
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(outputs) { o ->
-                        FilterChip(o in profile.outputs, { vm.bindProfile(profile, o, o !in profile.outputs) }, { Text(o, style = MaterialTheme.typography.labelSmall) })
-                    }
-                }
-            }
-        }
-        TextButton({ naming = true }, Modifier.padding(horizontal = 8.dp)) { Text("Save current settings as a profile") }
-        Text("A profile bound to an output is applied when that output becomes active; switch that off in Settings → Features.", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ActionRow("Save current settings as a profile", Icons.Filled.Add, { naming = true }, divider = false)
 
         SectionTitle("Crossfeed")
         Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

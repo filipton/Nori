@@ -42,7 +42,6 @@ import dev.flint.music.data.AlbumSort
 import dev.flint.music.ffi.PlayQueue
 import dev.flint.music.ffi.Song
 import dev.flint.music.settings.Prefs
-import dev.flint.music.settings.withSound
 import dev.flint.music.settings.ReplayGainMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -189,17 +188,14 @@ class PlaybackService : MediaLibraryService() {
             flint.outputs.usb.collect { applyAudio(flint.settings.value) }
         }
         scope.launch {
-            flint.outputs.current.collect { output ->
-                if (!flint.settings.value.profilePerOutput) return@collect
-                val sound = withContext(Dispatchers.IO) { runCatching { flint.core.profileForOutput(output) }.getOrNull() }?.let { dev.flint.music.settings.Sound.fromJson(it.json) } ?: return@collect
-                flint.settings.update { it.withSound(sound) }
-            }
+            // The device's own sound (a bound profile or AutoEQ curve), or the sound from before it came back.
+            flint.outputs.current.collect { output -> flint.deviceSound.onOutput(output) }
         }
         applyAudio(flint.settings.value)
         scope.launch {
             var last = flint.settings.value
             flint.settings.prefs.collect { p ->
-                if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, untaggedGainDb = last.untaggedGainDb, scrobblePercent = last.scrobblePercent, listPrefs = last.listPrefs, homeRows = last.homeRows, pinnedPlaylists = last.pinnedPlaylists) != last) applyAudio(p)
+                if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, untaggedGainDb = last.untaggedGainDb, scrobblePercent = last.scrobblePercent, listPrefs = last.listPrefs, homeRows = last.homeRows, pinnedPlaylists = last.pinnedPlaylists, autoEqAuto = last.autoEqAuto) != last) applyAudio(p)
                 if (p.replayGain != last.replayGain || p.preampDb != last.preampDb || p.untaggedGainDb != last.untaggedGainDb) applyGain()
                 last = p
             }

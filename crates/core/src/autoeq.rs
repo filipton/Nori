@@ -80,6 +80,90 @@ pub fn search(c: &Connection, query: &str, limit: u32) -> rusqlite::Result<Vec<A
     rows.collect()
 }
 
+/// Letters and digits only, lowercased: "WH-1000XM5", "wh1000xm5" and "WH 1000 XM5" are one name.
+fn compact(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// Words that say what kind of thing a device is, not which one. A name made only of these ("USB Audio",
+/// "USB-C to 3.5mm Headphone Jack Adapter", "Headset") cannot be looked up.
+const GENERIC: &[&str] = &[
+    "usb", "usbc", "c", "type", "typec", "audio", "device", "dac", "digital", "analog", "analogue", "headset", "headsets",
+    "headphone", "headphones", "earphone", "earphones", "earbuds", "speaker", "speakers", "adapter", "adaptor", "jack",
+    "to", "35mm", "3", "5mm", "the", "stereo", "wireless", "bluetooth", "le", "bt", "hifi", "hi", "fi", "out", "output",
+];
+
+/// The part of a device's own name that can be looked up: "LE_WH-1000XM5" -> "WH-1000XM5", "Filip's
+/// AirPods Pro" -> "AirPods Pro", "Galaxy Buds2 Pro (1A2B)" -> "Galaxy Buds2 Pro". None when nothing is
+/// left that names a model.
+pub fn device_query(device: &str) -> Option<String> {
+    let mut name = device.trim().replace('_', " ");
+    for prefix in ["LE ", "LE-", "BT ", "BT-"] {
+        if name.len() > prefix.len() && name.is_char_boundary(prefix.len()) && name[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            name = name[prefix.len()..].to_string();
+        }
+    }
+    // "Filip's AirPods Pro": the owner is not part of the model.
+    for mark in ["'s ", "\u{2019}s "] {
+        if let Some(i) = name.find(mark) {
+            name = name[i + mark.len()..].to_string();
+        }
+    }
+    // A pairing suffix: "(1A2B)", "[LE]".
+    while let Some(open) = name.rfind(['(', '[']) {
+        if open == 0 {
+            break;
+        }
+        name.truncate(open);
+    }
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let meaningful = name
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && !GENERIC.contains(&w.to_lowercase().as_str()))
+        .map(str::len)
+        .sum::<usize>();
+    (meaningful >= 3 && compact(&name).len() >= 3).then_some(name)
+}
+
+/// Measurements from these rigs are the ones AutoEQ itself recommends first.
+fn source_rank(source: &str) -> u8 {
+    match source {
+        "oratory1990" => 0,
+        "crinacle" => 1,
+        "Rtings" => 2,
+        _ => 3,
+    }
+}
+
+/// The curves that are this device, best first. Unlike [search] this ignores spacing and punctuation
+/// ("WH1000XM5" finds "Sony WH-1000XM5") and prefers the exact model over a longer one that contains it.
+/// A short name must be a whole model name (with or without its brand): "Buds" alone matches nothing
+/// rather than every Galaxy, Pixel and Nothing earbud.
+pub fn matching(c: &Connection, device: &str, limit: u32) -> rusqlite::Result<Vec<AutoEqEntry>> {
+    let Some(query) = device_query(device) else { return Ok(Vec::new()) };
+    let q = compact(&query);
+    let mut st = c.prepare_cached("SELECT name, source, form, target, path FROM autoeq")?;
+    let rows = st.query_map([], |r| Ok(AutoEqEntry { name: r.get(0)?, source: r.get(1)?, form: r.get(2)?, target: r.get(3)?, path: r.get(4)? }))?;
+    let mut hits: Vec<(u8, usize, u8, AutoEqEntry)> = Vec::new();
+    for e in rows {
+        let e = e?;
+        let name = compact(&e.name);
+        let model = e.name.split_once(' ').map(|(_, m)| compact(m)).unwrap_or_default();
+        let fit = if name == q || model == q {
+            0
+        } else if q.len() >= 5 && name.ends_with(&q) {
+            1
+        } else if q.len() >= 5 && name.contains(&q) {
+            2
+        } else {
+            continue;
+        };
+        hits.push((fit, name.len(), source_rank(&e.source), e));
+    }
+    hits.sort_by(|a, b| (a.0, a.1, a.2, &a.3.name).cmp(&(b.0, b.1, b.2, &b.3.name)));
+    Ok(hits.into_iter().take(limit as usize).map(|h| h.3).collect())
+}
+
 pub fn count(c: &Connection) -> rusqlite::Result<u32> {
     c.query_row("SELECT count(*) FROM autoeq", [], |r| r.get(0))
 }
@@ -105,6 +189,36 @@ mod tests {
         // Storing again replaces rather than duplicates.
         assert_eq!(store(&mut c, MD).unwrap(), 3);
         assert_eq!(count(&c).unwrap(), 3);
+    }
+
+    #[test]
+    fn device_names_are_cleaned_before_lookup() {
+        assert_eq!(device_query("LE_WH-1000XM5").as_deref(), Some("WH-1000XM5"));
+        assert_eq!(device_query("Filip's AirPods Pro").as_deref(), Some("AirPods Pro"));
+        assert_eq!(device_query("Filip\u{2019}s AirPods Pro").as_deref(), Some("AirPods Pro"));
+        assert_eq!(device_query("Galaxy Buds2 Pro (1A2B)").as_deref(), Some("Galaxy Buds2 Pro"));
+        for generic in ["USB Audio", "USB-C to 3.5mm Headphone Jack Adapter", "DAC", "device", "Headset", "BT", ""] {
+            assert_eq!(device_query(generic), None, "{generic}");
+        }
+    }
+
+    #[test]
+    fn devices_find_their_curve() {
+        let mut c = crate::db::open("").unwrap();
+        let md = "- [Sony WH-1000XM5](./Rtings/over-ear/Sony%20WH-1000XM5) by Rtings\n\
+- [Sony WH-1000XM5](./oratory1990/over-ear/Sony%20WH-1000XM5) by oratory1990\n\
+- [Sony WH-1000XM5 (ANC off)](./crinacle/over-ear/Sony%20WH-1000XM5%20(ANC%20off)) by crinacle\n\
+- [Apple AirPods Pro](./crinacle/in-ear/Apple%20AirPods%20Pro) by crinacle\n\
+- [Apple AirPods Pro 2](./crinacle/in-ear/Apple%20AirPods%20Pro%202) by crinacle\n\
+- [Samsung Galaxy Buds2 Pro](./Rtings/in-ear/Samsung%20Galaxy%20Buds2%20Pro) by Rtings\n\
+- [Google Pixel Buds](./Rtings/in-ear/Google%20Pixel%20Buds) by Rtings\n";
+        store(&mut c, md).unwrap();
+        let hit = |d: &str| matching(&c, d, 5).unwrap().first().map(|e| (e.name.clone(), e.source.clone()));
+        assert_eq!(hit("LE_WH1000XM5"), Some(("Sony WH-1000XM5".into(), "oratory1990".into())), "spacing ignored, best rig first");
+        assert_eq!(hit("Filip's AirPods Pro"), Some(("Apple AirPods Pro".into(), "crinacle".into())), "the exact model beats the Pro 2");
+        assert_eq!(hit("Galaxy Buds2 Pro"), Some(("Samsung Galaxy Buds2 Pro".into(), "Rtings".into())));
+        assert_eq!(hit("Buds"), None, "a short name has to be a whole model");
+        assert_eq!(hit("USB Audio"), None);
     }
 
     #[test]
