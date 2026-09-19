@@ -24,7 +24,10 @@ enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
  */
 private const val SWIPE_LEFT = "swipeLeft3"
 
-enum class HomeRow(val title: String) { PINNED("Pinned playlists"), RECENT("Recently played"), NEWEST("Recently added"), FREQUENT("Most played"), RANDOM("Random"), STARRED("Favourite albums") }
+enum class HomeRow(val title: String) {
+    PINNED("Pinned playlists"), PLAYLISTS("Playlists"), RECENT("Recently played"), NEWEST("Recently added"),
+    FREQUENT("Most played albums"), TOP_SONGS("Most played songs"), RANDOM("Random"), STARRED("Favourite albums"),
+}
 
 /**
  * One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.

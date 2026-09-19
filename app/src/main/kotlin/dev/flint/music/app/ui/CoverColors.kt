@@ -58,13 +58,22 @@ fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePale
 private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette {
     val edge = Color(bottomAverage(bitmap))
     val p = Palette.from(bitmap).maximumColorCount(16).generate()
-    val body = p.dominantSwatch?.rgb ?: p.mutedSwatch?.rgb ?: edge.toArgb()
+    val body = dominant(bitmap, edge.toArgb())
     val accentSeed = (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
-    // The page colour keeps the cover's hue but goes where text can live: deep in dark mode, pale in light.
-    val hsl = FloatArray(3).also { ColorUtils.colorToHSL(mix(body, edge.toArgb()), it) }
+    // The page colour keeps the cover's hue but goes where text can live: deep in dark mode, pale in
+    // light. It is [body] alone, with none of [edge] mixed in any more. Both branches below throw the
+    // seed's lightness away and clamp it into a narrow band, so all a dark bottom row ever contributed
+    // was its hue and its greyness - which is exactly what turned a sleeve of pale dusty pink into a
+    // brown page, because that sleeve has dark hair along its bottom edge. Carrying the seam is not
+    // this colour's job: [edge] is handed out separately and the wash still starts from it.
+    val hsl = FloatArray(3).also { ColorUtils.colorToHSL(body, it) }
     val background = when {
         dark && amoled -> Color.Black
-        dark -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.75f).coerceAtMost(0.5f), hsl[2].coerceIn(0.07f, 0.14f))))
+        // Clamping to 0.14 and taking a quarter off the saturation left pale sleeves with no colour a
+        // viewer would name - a dusty pink arrived as a neutral brown. There was room to spare: white
+        // text has about 14:1 on that pink at 0.20, and better than 8:1 on the worst case the band
+        // allows (a yellow at the top of it), which still holds after the wash's own +0.05 of lightness.
+        dark -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceIn(0.10f, 0.20f))))
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
@@ -151,6 +160,72 @@ private fun blur(px: IntArray) {
     }
 }
 
+/** Hue buckets the histogram counts into, plus one past the end for pixels too grey to have a hue. */
+private const val HUES = 18
+private const val NEUTRAL = HUES
+
+/**
+ * The colour there is most of, which is not the question `Palette.dominantSwatch` answers. Palette
+ * quantises to sixteen clusters and discards whole families of colour on the way in: its default
+ * filter drops anything within a few points of white or black, and anything in the 10-37 degree band
+ * unless it is strongly saturated. On a sleeve that is a field of pale dusty pink with a dark head of
+ * hair down one side, the pink is thinned across several clusters and the hair comes through whole, so
+ * the "dominant" swatch was the hair and the page took a hue the sleeve barely contains.
+ *
+ * So count pixels instead. Each sampled pixel votes for its hue in twenty-degree buckets - wide enough
+ * that a field of one colour does not split across two of them - the heaviest bucket wins, and the
+ * answer is that bucket's own weighted mean, so the page keeps the character of the field and not only
+ * its hue. A pixel with almost no saturation votes at a quarter weight, and one so dark or so pale that
+ * its hue is guesswork at less again, both into a bucket of their own: a sleeve that really is mostly
+ * ink or mostly paper still gets a neutral page, but a white paper flower does not outvote the pink it
+ * lies on. Nothing here rewards a colour for standing out - a small vivid mark loses to a large dull
+ * field, which is the whole point.
+ *
+ * Every second row and column of a 160 px copy is ~6k pixels, on the same background pass as Palette
+ * and cached with it, so this is paid once per cover.
+ */
+private fun dominant(bitmap: Bitmap, fallback: Int): Int {
+    val w = bitmap.width
+    val h = bitmap.height
+    if (w <= 0 || h <= 0) return fallback
+    val rowStep = (h / 64).coerceAtLeast(1)
+    val colStep = (w / 64).coerceAtLeast(1)
+    val row = IntArray(w)
+    val hsl = FloatArray(3)
+    val weight = FloatArray(HUES + 1)
+    val sumR = FloatArray(HUES + 1)
+    val sumG = FloatArray(HUES + 1)
+    val sumB = FloatArray(HUES + 1)
+    var y = 0
+    while (y < h) {
+        bitmap.getPixels(row, 0, w, 0, y, w, 1)
+        var x = 0
+        while (x < w) {
+            val px = row[x]
+            ColorUtils.colorToHSL(px, hsl)
+            val extreme = hsl[2] < 0.06f || hsl[2] > 0.97f
+            val bucket =
+                if (extreme || hsl[1] < 0.10f) NEUTRAL
+                else (hsl[0] / (360f / HUES)).toInt().coerceIn(0, HUES - 1)
+            val wt = (0.25f + 0.75f * (hsl[1] / 0.25f).coerceAtMost(1f)) * (if (extreme) 0.4f else 1f)
+            weight[bucket] += wt
+            sumR[bucket] += wt * ((px shr 16) and 0xFF)
+            sumG[bucket] += wt * ((px shr 8) and 0xFF)
+            sumB[bucket] += wt * (px and 0xFF)
+            x += colStep
+        }
+        y += rowStep
+    }
+    var best = 0
+    for (i in weight.indices) if (weight[i] > weight[best]) best = i
+    val n = weight[best]
+    if (n <= 0f) return fallback
+    return (0xFF shl 24) or
+        ((sumR[best] / n).toInt().coerceIn(0, 255) shl 16) or
+        ((sumG[best] / n).toInt().coerceIn(0, 255) shl 8) or
+        (sumB[best] / n).toInt().coerceIn(0, 255)
+}
+
 /** The colour of the cover's last rows: what the page has to start from for the picture to melt into it. */
 private fun bottomAverage(bitmap: Bitmap): Int {
     val h = bitmap.height
@@ -165,8 +240,6 @@ private fun bottomAverage(bitmap: Bitmap): Int {
     val n = (w * rows).coerceAtLeast(1)
     return (0xFF shl 24) or ((r / n).toInt() shl 16) or ((g / n).toInt() shl 8) or (b / n).toInt()
 }
-
-private fun mix(a: Int, b: Int) = ColorUtils.blendARGB(a, b, 0.5f)
 
 /** Pushes a colour lighter or darker in its own hue until it has contrast against the page. */
 private fun readable(color: Color, background: Color, fallback: Color): Color {

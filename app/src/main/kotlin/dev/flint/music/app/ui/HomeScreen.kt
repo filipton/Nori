@@ -1,6 +1,6 @@
 package dev.flint.music.app.ui
 
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.ui.zIndex
@@ -90,9 +90,13 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
             // The shelves carry on the count the sections above started, so each one arrives a moment
             // after the one over it; an empty shelf is not drawn and does not take a place in the order.
             var place = if (ui.pinned.isNotEmpty()) 3 else 2
-            ui.rows.forEach { (row, albums) ->
-                if (albums.isEmpty()) return@forEach
-                shelf(row.title, albums, vm, arrival, place++, rise)
+            ui.rows.forEach { s ->
+                if (s.isEmpty) return@forEach
+                when (s) {
+                    is dev.flint.music.app.vm.Shelf.Albums -> shelf(s.row.title, s.albums, vm, arrival, place++, rise)
+                    is dev.flint.music.app.vm.Shelf.Playlists -> playlistShelf(s.row.title, s.playlists, vm, arrival, place++, rise)
+                    is dev.flint.music.app.vm.Shelf.Songs -> songShelf(s.row.title, s.songs, vm, actions, arrival, place++, rise)
+                }
             }
         }
     }
@@ -112,6 +116,50 @@ private fun androidx.compose.foundation.lazy.LazyListScope.shelf(
             SectionTitle(title)
             LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(albums, key = { it.id }, contentType = { "album" }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 150.dp, { nav.album(a.id) }) }
+            }
+        }
+    }
+}
+
+/** Playlists laid out as the albums are, so a shelf of them reads as the same kind of thing. */
+private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
+    title: String,
+    playlists: List<dev.flint.music.ffi.Playlist>,
+    vm: HomeViewModel,
+    arrival: State<Float>,
+    place: Int,
+    rise: Float,
+) {
+    item(key = title, contentType = "shelf") {
+        val nav = LocalNav.current
+        Column(Modifier.arriving(arrival, place, rise)) {
+            SectionTitle(title)
+            LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(playlists, key = { it.id }, contentType = { "playlist" }) { p ->
+                    CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id) })
+                }
+            }
+        }
+    }
+}
+
+/** A shelf of songs plays from where it is tapped, the rest of the shelf behind it, as a list would. */
+private fun androidx.compose.foundation.lazy.LazyListScope.songShelf(
+    title: String,
+    songs: List<dev.flint.music.ffi.Song>,
+    vm: HomeViewModel,
+    actions: dev.flint.music.app.vm.ActionsViewModel,
+    arrival: State<Float>,
+    place: Int,
+    rise: Float,
+) {
+    item(key = title, contentType = "shelf") {
+        Column(Modifier.arriving(arrival, place, rise)) {
+            SectionTitle(title)
+            LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                itemsIndexed(songs, key = { _, s -> s.id }, contentType = { _, _ -> "song" }) { i, s ->
+                    CoverCard(s.title, s.artist, vm.cover(s.coverArt, CoverSize.CARD), 150.dp, { actions.play(songs, i) })
+                }
             }
         }
     }
@@ -170,13 +218,19 @@ private fun Modifier.arriving(arrival: State<Float>, place: Int, rise: Float) = 
 
 
 /**
- * Drag the shelves into the order you want them in. Whoever likes "Random" at the top of their home
- * page should not have to go hunting through Settings for a column of Up buttons to get it there.
+ * Which shelves the home page has, and in what order. Both live here rather than half here and half in
+ * Settings: the rows are one thing, and hunting through a settings page for a switch that belongs to a
+ * page you are looking at is the sort of thing this app is trying not to do.
+ *
+ * A row is picked up by holding it anywhere, not by a handle at its edge - there is nothing else to do
+ * to a row here, so the whole row may as well be the grip. A long press is what starts it, because the
+ * list itself scrolls and a plain drag could not mean both.
  */
 @Composable
 private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone: () -> Unit) {
     val prefs by settings.prefs.collectAsStateWithLifecycle()
-    val order = prefs.homeRows
+    val shown = prefs.homeRows
+    val hidden = HomeRow.entries.filter { it !in shown }
     // Tracked by which shelf is being held, never by its position: the position changes the instant the
     // list reorders, and a gesture keyed on that is cancelled mid-drag - which is why a row could only
     // be moved one place per press. The offset keeps the held row under the finger while the rest slide
@@ -187,12 +241,12 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     Column(Modifier.fillMaxSize()) {
-        LargeTitle("Rearrange") {
+        LargeTitle("Rows") {
             androidx.compose.material3.TextButton(onDone) { Text("Done", style = MaterialTheme.typography.titleSmall) }
         }
-        Caption("Hold a handle and drag", Modifier.padding(start = Space.gutter, bottom = 8.dp))
+        Caption("Hold a row to move it", Modifier.padding(start = Space.gutter, bottom = 8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            itemsIndexed(order, key = { _, r -> r.name }) { _, row ->
+            items(shown, key = { it.name }) { row ->
                 val dragged = held == row
                 Row(
                     Modifier.fillMaxWidth()
@@ -201,16 +255,9 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
                             if (dragged) { translationY = dragOffset; shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f }
                         }
                         .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
-                        .padding(horizontal = Space.gutter, vertical = 14.dp),
-                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                ) {
-                    Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                    Icon(
-                        androidx.compose.material.icons.Icons.Filled.DragHandle, "Reorder",
-                        tint = if (dragged) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         // Keyed on the row, which never changes, so one press can carry it the whole way.
-                        modifier = Modifier.size(44.dp).padding(10.dp).pointerInput(row) {
-                            detectDragGestures(
+                        .pointerInput(row) {
+                            detectDragGesturesAfterLongPress(
                                 onDragStart = {
                                     held = row; dragOffset = 0f
                                     haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
@@ -220,7 +267,7 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
                             ) { change, drag ->
                                 change.consume()
                                 dragOffset += drag.y
-                                val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGestures
+                                val h = rowHeight.takeIf { it > 0f } ?: return@detectDragGesturesAfterLongPress
                                 var at = settings.prefs.value.homeRows.indexOf(row)
                                 while (dragOffset >= h && at < settings.prefs.value.homeRows.lastIndex) {
                                     settings.moveHomeRow(at, at + 1); at++; dragOffset -= h
@@ -231,10 +278,31 @@ private fun RowOrder(settings: dev.flint.music.app.vm.SettingsViewModel, onDone:
                                     haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
                                 }
                             }
-                        },
-                    )
+                        }
+                        .padding(horizontal = Space.gutter, vertical = 14.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                ) {
+                    Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    // Turning a row off leaves it in the list below rather than taking it away, so it is
+                    // clear where it went and how to have it back.
+                    FlintSwitch(true, { _ -> settings.update { p -> p.copy(homeRows = p.homeRows - row) } })
                 }
                 Hairline()
+            }
+            if (hidden.isNotEmpty()) {
+                item(key = "hidden") { SectionTitle("Not shown") }
+                items(hidden, key = { it.name }) { row ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 14.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        // It comes back at the end of the page, where it can be seen, and can be carried
+                        // up from there.
+                        FlintSwitch(false, { _ -> settings.update { p -> p.copy(homeRows = p.homeRows + row) } })
+                    }
+                    Hairline()
+                }
             }
         }
     }

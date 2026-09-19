@@ -29,7 +29,29 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 
-data class HomeUi(val rows: List<Pair<HomeRow, List<Album>>> = emptyList(), val pinned: List<Playlist> = emptyList())
+/**
+ * One row of the home page. Not every shelf is a shelf of albums: the playlists are playlists and the
+ * songs someone plays most are songs, and both were asked for by name. Each kind knows whether it has
+ * anything to show, so an empty shelf can be left out without the page having to ask what it holds.
+ */
+sealed interface Shelf {
+    val row: HomeRow
+    val isEmpty: Boolean
+
+    data class Albums(override val row: HomeRow, val albums: List<Album>) : Shelf {
+        override val isEmpty get() = albums.isEmpty()
+    }
+
+    data class Playlists(override val row: HomeRow, val playlists: List<Playlist>) : Shelf {
+        override val isEmpty get() = playlists.isEmpty()
+    }
+
+    data class Songs(override val row: HomeRow, val songs: List<Song>) : Shelf {
+        override val isEmpty get() = songs.isEmpty()
+    }
+}
+
+data class HomeUi(val rows: List<Shelf> = emptyList(), val pinned: List<Playlist> = emptyList())
 
 class HomeViewModel(app: Application) : FlintViewModel(app) {
     // The app was opened: a good moment to replay whatever was starred, rated or played while offline.
@@ -37,16 +59,33 @@ class HomeViewModel(app: Application) : FlintViewModel(app) {
 
     private fun row(sort: AlbumSort) = flint.library.albums(sort, size = 20).catch { emit(emptyList()) }.onStart { emit(emptyList()) }
 
-    private fun source(r: HomeRow) = when (r) {
-        HomeRow.RECENT -> row(AlbumSort.RECENT); HomeRow.NEWEST -> row(AlbumSort.NEWEST); HomeRow.FREQUENT -> row(AlbumSort.FREQUENT)
-        HomeRow.RANDOM -> row(AlbumSort.RANDOM); HomeRow.STARRED -> row(AlbumSort.STARRED); HomeRow.PINNED -> flowOf(emptyList())
+    private fun albumShelf(r: HomeRow, sort: AlbumSort) = row(sort).map { Shelf.Albums(r, it) }
+
+    private fun source(r: HomeRow): kotlinx.coroutines.flow.Flow<Shelf> = when (r) {
+        HomeRow.RECENT -> albumShelf(r, AlbumSort.RECENT)
+        HomeRow.NEWEST -> albumShelf(r, AlbumSort.NEWEST)
+        HomeRow.FREQUENT -> albumShelf(r, AlbumSort.FREQUENT)
+        HomeRow.RANDOM -> albumShelf(r, AlbumSort.RANDOM)
+        HomeRow.STARRED -> albumShelf(r, AlbumSort.STARRED)
+        // Every playlist there is, newest first, as against the handful the user pinned. Somebody who
+        // keeps six playlists does not want to choose which of them is worth pinning.
+        HomeRow.PLAYLISTS -> flint.library.playlists().map { Shelf.Playlists(r, it.take(20)) }
+            .catch { emit(Shelf.Playlists(r, emptyList())) }.onStart { emit(Shelf.Playlists(r, emptyList())) }
+        // Straight out of the offline index, so it costs no request at all.
+        HomeRow.TOP_SONGS -> flow {
+            emit(Shelf.Songs(r, emptyList()))
+            emit(Shelf.Songs(r, runCatching { flint.library.browseSongs("playCount", true, false, null, 0, 20) }.getOrDefault(emptyList())))
+        }
+        // The pinned playlists are fetched once for the whole page, below, because the row is a
+        // selection of something the page already has to hold.
+        HomeRow.PINNED -> flowOf(Shelf.Playlists(r, emptyList()))
     }
 
     /** Only the rows the user kept are requested at all; a hidden shelf costs no request. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val ui: StateFlow<Load<HomeUi>> = flint.settings.prefs.map { it.homeRows to it.pinnedPlaylists }.distinctUntilChanged().flatMapLatest { (rows, pins) ->
         val pinned = if (HomeRow.PINNED in rows && pins.isNotEmpty()) flint.library.playlists().map { all -> all.filter { it.id in pins } }.catch { emit(emptyList()) }.onStart { emit(emptyList()) } else flowOf(emptyList())
-        combine(combine(rows.map { r -> source(r).map { r to it } }) { it.toList() }.onStart { emit(emptyList()) }, pinned) { shelves, p -> HomeUi(shelves, p) }
+        combine(combine(rows.map(::source)) { it.toList() }.onStart { emit(emptyList()) }, pinned) { shelves, p -> HomeUi(shelves, p) }
     }.asLoad()
 }
 

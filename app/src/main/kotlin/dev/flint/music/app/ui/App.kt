@@ -405,7 +405,11 @@ private fun PlayerLayer(sheet: PlayerSheet, content: @Composable () -> Unit) {
             // catch a touch meant for the mini player (a transparent layer would still be hit).
             val parked = sheet.progress.value == 0f && sheet.progress.targetValue == 0f
             translationY = if (parked) sheet.rootHeight * 2f + 1f else sheet.offset()
-            alpha = if (parked) 0f else 1f
+            // It comes up *through* the now playing bar rather than on top of it: for the first tenth of
+            // the rise the player is still part transparent, so the bar shows through its own place in
+            // it. Snapping to full strength on the first frame of a drag - which is what this did - made
+            // a whole dark page appear out of nothing before it had moved anywhere.
+            alpha = if (parked) 0f else (sheet.progress.value / 0.1f).coerceIn(0f, 1f)
             val r = radius * (1f - sheet.progress.value).coerceIn(0f, 1f) * 4f
             shape = androidx.compose.foundation.shape.RoundedCornerShape(topStart = r.coerceAtMost(radius), topEnd = r.coerceAtMost(radius))
             clip = true

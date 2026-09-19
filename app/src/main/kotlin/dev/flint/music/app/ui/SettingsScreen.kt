@@ -468,20 +468,12 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Toggle("Skip explicit songs", "Songs the server marks explicit are skipped during playback", p.skipExplicit) { on -> vm.update { it.copy(skipExplicit = on) } }
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text("Home shelves", style = MaterialTheme.typography.titleSmall)
+                // The switches used to be here and the order was set on the home page, which meant
+                // knowing about two places to arrange one thing. Both are on the page itself now.
                 Text(
-                    "Choose which shelves appear. To reorder them, drag on the home page.",
+                    "Which shelves appear, and in what order, is on the home page: ⋯ then Rearrange rows.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-            }
-            HomeRow.entries.forEach { row ->
-                val on = row in p.homeRows
-                Column {
-                    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                        FlintSwitch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } })
-                    }
-                    Hairline(startIndent = 16.dp)
-                }
             }
 
         }
