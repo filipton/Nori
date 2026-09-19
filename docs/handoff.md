@@ -19,10 +19,16 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   bar thickens and grows a dot while held, and the seek happens once, on release. `build/seek.sh
   <slant px per step> <end x>` scrubs it on the emulator and prints where it landed.
 - **Long titles read themselves out.** `Modifier.readable()` in PlayerScreen (`basicMarquee`) walks a
-  title that does not fit, after a 2.6 s pause, in the full player and the lyrics header. It is off
-  unless `LocalPlayerShown` is true: the player stays composed behind the rest of the app, and a
-  title scrolling down there would hold the frame clock awake (measured: 0 frames in 5 s with the
-  player closed, about 37 fps while it is open and a title is walking).
+  title that does not fit, after a 2.6 s pause, in the full player, the lyrics header and the now
+  playing bar. The last one passes `iterations = 2` - it reads itself out when the song comes on and
+  then settles back - because that bar is on screen for as long as the app is, which is the same
+  reason it has no progress bar. On the full player it runs while you are looking at it and not
+  otherwise (`LocalPlayerShown`): the player stays composed behind the rest of the app, and a title
+  scrolling down there would hold the frame clock awake. Measured on the emulator: 0 frames in 5 s
+  with the player closed, ~37 fps while it is open and a title walks, and the now playing bar goes
+  quiet (0 frames per 10 s) about 40 s after a long title starts.
+  A marquee lays its text out unbounded, so there is no ellipsis; the line goes soft over its last
+  20 dp instead (an offscreen layer and a `DstIn` gradient in `readable`).
 - **Up Next.** Play next and Add to queue (the default right swipe) work as in Apple Music: the songs
   go right after the playing one, "last" ones after the songs added by hand before them, in order,
   and then the queue carries on. Items carry `queued` = "next"/"last" in their extras

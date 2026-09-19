@@ -236,7 +236,16 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
                         } else Modifier, radius = 7.dp,
                     )
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                        Text(s?.title ?: title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
+                        // A long title here reads itself out twice when the song comes on and then
+                        // settles back to the ellipsis. The full player scrolls its title for as long
+                        // as it is open; this bar is open for as long as the app is, and a line
+                        // walking there all afternoon is exactly the kind of thing the missing
+                        // progress bar above is missing for.
+                        Text(
+                            s?.title ?: title, Modifier.readable(iterations = 2),
+                            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
                         Text(
                             (if (real) state.error else null) ?: s?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,

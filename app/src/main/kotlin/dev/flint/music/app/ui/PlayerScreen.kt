@@ -90,6 +90,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -902,15 +905,31 @@ private fun VolumeRow(vm: PlayerViewModel) {
  * read, then walks slowly sideways and comes back round, the way the title does in Apple's player.
  * A line that fits is left alone - the modifier only animates while the text overflows.
  *
- * It scrolls only while the player is really on screen. The player stays composed behind the rest of
- * the app (see LocalPlayerShown), and a title quietly walking about down there would hold a frame
- * clock awake for nothing.
+ * On the full player it runs for as long as you are looking at it, and only then: the player stays
+ * composed behind the rest of the app (see LocalPlayerShown), and a title quietly walking about down
+ * there would hold a frame clock awake for nothing. The now playing bar passes a small [iterations]
+ * instead, because that bar is on screen for as long as the app is - see MiniPlayer.
  */
 @Composable
-internal fun Modifier.readable(): Modifier =
+internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier =
     if (!LocalPlayerShown.current) this
-    else basicMarquee(
-        iterations = Int.MAX_VALUE,
+    // A marquee lays its text out unbounded, so there is no ellipsis to fall back on and the line
+    // would otherwise end on a half-drawn letter at the edge. It goes soft over the last 20 dp
+    // instead, both while it walks and once it has settled back at the start.
+    else graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+        .drawWithContent {
+            drawContent()
+            val fade = 20.dp.toPx()
+            drawRect(
+                Brush.horizontalGradient(
+                    listOf(Color.Black, Color.Transparent),
+                    startX = size.width - fade, endX = size.width,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+        .basicMarquee(
+        iterations = iterations,
         repeatDelayMillis = 2600,
         initialDelayMillis = 2600,
         spacing = MarqueeSpacing(46.dp),
