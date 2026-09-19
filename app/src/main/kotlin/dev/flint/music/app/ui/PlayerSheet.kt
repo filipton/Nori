@@ -55,7 +55,22 @@ class PlayerSheet(private val scope: CoroutineScope) {
     fun offset(): Float = (1f - progress.value) * travel
 
     fun open() = settle(1f, 0f)
+
+    /**
+     * The back gesture at [progress] (0..1): the sheet sinks with it, a fifth of the way at most - a hint
+     * of where it is going, not the whole trip, which is the release's to make.
+     */
+    suspend fun backBy(progress: Float) {
+        val eased = 1f - (1f - progress.coerceIn(0f, 1f)).let { it * it }
+        this.progress.snapTo(1f - BACK_TRAVEL * eased)
+    }
     fun close() = settle(0f, 0f)
+
+    /**
+     * Put away by the back gesture: quicker than a close from a tap. The gesture has already carried the
+     * sheet part of the way, and the rest at the drag's pace read as the app lagging behind the thumb.
+     */
+    fun backClose() = settle(0f, 0f, stiffness = 1100f)
 
     /** Which end the sheet was nearer when the finger went down. */
     private var from = 0f
@@ -85,11 +100,11 @@ class PlayerSheet(private val scope: CoroutineScope) {
         settle(target, -velocityY / travel)
     }
 
-    private fun settle(target: Float, velocity: Float) {
+    private fun settle(target: Float, velocity: Float, stiffness: Float = 420f) {
         scope.launch {
             // Critically damped: it arrives with the finger's speed and does not bounce past either end.
             if (plain) progress.animateTo(target, tween(120))
-            else progress.animateTo(target, spring(dampingRatio = 1f, stiffness = 420f), initialVelocity = velocity)
+            else progress.animateTo(target, spring(dampingRatio = 1f, stiffness = stiffness), initialVelocity = velocity)
         }
     }
 
@@ -99,6 +114,9 @@ class PlayerSheet(private val scope: CoroutineScope) {
 
         /** How far a slow drag has to come, as a share of the travel, to finish rather than go back. */
         const val COMMIT = 0.15f
+
+        /** How far the back gesture takes the sheet down before it is let go. */
+        const val BACK_TRAVEL = 0.2f
     }
 }
 

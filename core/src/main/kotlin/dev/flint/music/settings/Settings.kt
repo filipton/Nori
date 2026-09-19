@@ -106,6 +106,11 @@ data class Prefs(
     val download: Quality = Quality(),
     /** Songs downloaded at the same time, 1 to 10; the rest wait their turn in the order they were asked for. */
     val parallelDownloads: Int = 5,
+    /**
+     * Covers of the songs coming up in the queue, fetched into the cache before they are shown, so a
+     * skip or a swipe lands on a picture that is already there. 0 to 10; the one before is always kept.
+     */
+    val coversAhead: Int = 3,
     val cacheMb: Int = 1024,
     val replayGain: ReplayGainMode = ReplayGainMode.OFF,
     val preampDb: Float = 0f,
@@ -317,6 +322,7 @@ class Settings(context: Context) {
             download = quality("download", d.download),
             cacheMb = sp.getInt("cacheMb", d.cacheMb),
             parallelDownloads = sp.getInt("parallelDownloads", d.parallelDownloads).coerceIn(1, 10),
+            coversAhead = sp.getInt("coversAhead", d.coversAhead).coerceIn(0, 10),
             replayGain = ReplayGainMode.entries[sp.getInt("replayGain", 0).coerceIn(0, 3)],
             preampDb = sp.getFloat("preampDb", 0f),
             untaggedGainDb = sp.getFloat("untaggedGainDb", d.untaggedGainDb), fadeMs = sp.getInt("fadeMs", 0), pitch = sp.getFloat("pitch", 1f),
@@ -362,7 +368,7 @@ class Settings(context: Context) {
         for ((n, q) in listOf("wifi" to p.wifi, "mobile" to p.mobile, "download" to p.download)) {
             putInt("${n}BitRate", q.bitRate); putString("${n}Format", q.format)
         }
-        putInt("cacheMb", p.cacheMb); putInt("parallelDownloads", p.parallelDownloads)
+        putInt("cacheMb", p.cacheMb); putInt("parallelDownloads", p.parallelDownloads); putInt("coversAhead", p.coversAhead)
         putInt("replayGain", p.replayGain.ordinal); putFloat("preampDb", p.preampDb)
         putFloat("untaggedGainDb", p.untaggedGainDb); putInt("fadeMs", p.fadeMs); putFloat("pitch", p.pitch)
         putBoolean("previousAlwaysSkips", p.previousAlwaysSkips); putInt("precacheWifi", p.precacheWifi); putInt("precacheMobile", p.precacheMobile)

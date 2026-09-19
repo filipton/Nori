@@ -27,6 +27,9 @@ data class PlayerState(
     val connected: Boolean = false,
     val queue: List<Song> = emptyList(),
     val index: Int = -1,
+    /** What a skip either way lands on, shuffle and repeat included; -1 at an end. Not [index] ± 1 under shuffle. */
+    val nextIndex: Int = -1,
+    val previousIndex: Int = -1,
     val radio: String? = null,
     val playing: Boolean = false,
     val buffering: Boolean = false,
@@ -127,6 +130,8 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         val queue = if (queueChanged || !old.connected) (0 until p.mediaItemCount).map { p.getMediaItemAt(it).toSong() } else old.queue
         _state.value = old.copy(
             connected = true, queue = queue, index = if (p.mediaItemCount == 0) -1 else p.currentMediaItemIndex,
+            nextIndex = if (p.mediaItemCount == 0) -1 else p.nextMediaItemIndex,
+            previousIndex = if (p.mediaItemCount == 0) -1 else p.previousMediaItemIndex,
             // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
             radio = item?.takeIf { it.isRadio }?.let { p.mediaMetadata.title?.toString()?.takeIf(String::isNotBlank) ?: it.mediaMetadata.title?.toString() },
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
@@ -176,6 +181,8 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     fun toggle() = with { Util.handlePlayPauseButtonAction(it) }
     fun next() = with { it.seekToNextMediaItem() }
     fun previous() = with { it.seekToPrevious() }
+    /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
+    fun previousItem() = with { it.seekToPreviousMediaItem() }
     fun seekTo(ms: Long) = with { it.seekTo(ms) }
     fun setShuffle(on: Boolean) = with { it.shuffleModeEnabled = on }
 

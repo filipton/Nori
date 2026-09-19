@@ -56,9 +56,14 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
         // The artwork either side of what is playing, fetched before it is asked for. A skip used to
         // show an empty sleeve for as long as the server took to render the next cover - on a slow one,
         // seconds. Same sizes and requests as the player and the rows, so a warmed cover is a cache hit.
+        // How far ahead is the user's (Settings, "Covers fetched ahead"); already-cached ones cost a
+        // memory lookup and nothing else.
         viewModelScope.launch {
-            state.map { s -> listOf(s.index - 1, s.index + 1, s.index + 2).mapNotNull { s.queue.getOrNull(it)?.coverArt } }
-                .distinctUntilChanged()
+            kotlinx.coroutines.flow.combine(state, flint.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead ->
+                // Both neighbours as a skip would reach them (shuffle included), then onward in queue order.
+                (listOf(s.previousIndex, s.nextIndex) + ((s.index + 2)..(s.index + ahead)))
+                    .take(if (ahead == 0) 1 else ahead + 1).distinct().filter { it != s.index }.mapNotNull { s.queue.getOrNull(it)?.coverArt }
+            }.distinctUntilChanged()
                 .collect { arts ->
                     val context = getApplication<Application>()
                     val loader = coil3.SingletonImageLoader.get(context)
@@ -78,6 +83,7 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     fun toggle() = player.toggle()
     fun next() = player.next()
     fun previous() = player.previous()
+    fun previousItem() = player.previousItem()
     fun seekTo(ms: Long) = player.seekTo(ms)
     fun skipTo(index: Int) = player.skipTo(index)
     fun remove(index: Int) = player.remove(index)

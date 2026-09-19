@@ -116,6 +116,7 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "crossfadeKeepAlbums" -> it.copy(crossfadeKeepAlbums = on)
                 "lyricsSweep" -> it.copy(lyricsSweep = on)
                 "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
+                "coversAhead" -> it.copy(coversAhead = value.toIntOrNull()?.coerceIn(0, 10) ?: it.coversAhead)
                 "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)

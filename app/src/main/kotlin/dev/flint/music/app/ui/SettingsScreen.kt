@@ -499,6 +499,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 TextButton({ vm.downloadLibrary() }, enabled = sync.indexed.songs > 0u) { Text("Download") }
             }
             Choice("Downloads at once", p.parallelDownloads, (1..10).map { it to "$it" }) { n -> vm.update { it.copy(parallelDownloads = n) } }
+            Choice("Covers fetched ahead", p.coversAhead, listOf(0 to "Off", 1 to "1", 2 to "2", 3 to "3", 5 to "5", 8 to "8", 10 to "10")) { n -> vm.update { it.copy(coversAhead = n) } }
 
         }
         "servers" -> SettingsCard {
