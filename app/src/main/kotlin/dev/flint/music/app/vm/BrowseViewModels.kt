@@ -106,7 +106,15 @@ class StarredViewModel(app: Application) : FlintViewModel(app) {
     // Re-queried on every star change: the one-shot read would otherwise keep a removed favourite
     // until the screen is reopened. The stored answer paints first, so there is no loading flash.
     @OptIn(ExperimentalCoroutinesApi::class)
-    val starred: StateFlow<Load<Starred>> = flint.library.starsVersion.flatMapLatest { flint.library.starred() }.asLoad()
+    // This session's marks are applied on top, so an unstarred item leaves the list at once rather than
+    // when the server's new answer arrives.
+    val starred: StateFlow<Load<Starred>> = combine(flint.library.starsVersion.flatMapLatest { flint.library.starred() }, flint.library.starMarks) { s, marks ->
+        s.copy(
+            artists = s.artists.filter { marks["artistId:${it.id}"] != false },
+            albums = s.albums.filter { marks["albumId:${it.id}"] != false },
+            songs = s.songs.filter { marks["id:${it.id}"] != false },
+        )
+    }.asLoad()
 }
 
 class GenresViewModel(app: Application) : FlintViewModel(app) {

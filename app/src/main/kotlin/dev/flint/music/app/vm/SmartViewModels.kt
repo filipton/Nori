@@ -2,7 +2,6 @@ package dev.flint.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.flint.music.data.Mix
 import dev.flint.music.ffi.HistoryEntry
 import dev.flint.music.ffi.ListeningStats
 import dev.flint.music.ffi.SmartPlaylist
@@ -115,17 +114,4 @@ class HistoryViewModel(app: Application) : FlintViewModel(app) {
     }
 
     fun clear() = viewModelScope.launch { flint.library.clearHistory(); _entries.value = emptyList(); exhausted = true }
-}
-
-/** The mixes the core can make from the index and the listening history; each tile plays one. */
-class MixesViewModel(app: Application) : FlintViewModel(app) {
-    val tiles = listOf(Mix.QUICK_PICKS, Mix.DISCOVER, Mix.LISTEN_AGAIN, Mix.TOP)
-    private var seed = System.currentTimeMillis() / 3_600_000 // a new draw every hour, stable in between
-
-    fun play(kind: Mix, arg: String = "", onEmpty: () -> Unit = {}) = viewModelScope.launch {
-        val songs = runCatching { flint.library.mix(kind, seed++, arg) }.getOrDefault(emptyList())
-        // With no listening history yet the personal mixes are empty: fall back to what the server thinks is random.
-        val list = songs.ifEmpty { runCatching { flint.library.randomSongs(50) }.getOrDefault(emptyList()) }
-        if (list.isEmpty()) onEmpty() else flint.player.play(list)
-    }
 }

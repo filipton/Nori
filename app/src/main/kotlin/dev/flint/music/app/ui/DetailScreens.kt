@@ -116,7 +116,7 @@ private fun quality(songs: List<Song>): String? {
  * when there is nothing left.
  */
 @Composable
-private fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
+internal fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
     val missing = songs.filterNot { it.id in done }
     return when {
         songs.isEmpty() -> "Download" to { actions.download(songs) }

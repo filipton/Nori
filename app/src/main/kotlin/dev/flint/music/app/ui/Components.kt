@@ -94,9 +94,12 @@ object CoverSize { const val ROW = 320; const val CARD = 320; const val FULL = 8
  * (one from the memory cache is simply there - fading those in made every scroll shimmer); one that
  * takes a while shows a soft sheen crossing the plate, so a slow server reads as loading rather than
  * as a missing cover; and one that never comes settles into the plate's note glyph, faded in too.
+ *
+ * [plate] false draws nothing of its own - no plate, sheen or note - so the picture fades in over
+ * whatever is behind it (a mix tile's colour), and a missing one simply leaves that showing.
  */
 @Composable
-fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Radius.cover) {
+fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Radius.cover, plate: Boolean = true) {
     val context = LocalContext.current
     val px = with(LocalDensity.current) { size.roundToPx() }
     val request = remember(url, px) {
@@ -113,7 +116,7 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     // A flat grey square is what makes a library of half-loaded covers look broken. Underneath every
     // cover sits a soft two-tone plate with a note on it, which is what shows while the picture loads
     // and what stays when a track simply has no artwork. It is one gradient, drawn, and costs nothing.
-    val plate = remember(scheme.surfaceVariant) {
+    val plateBrush = remember(scheme.surfaceVariant) {
         Brush.linearGradient(listOf(scheme.onSurface.copy(alpha = 0.13f).over(scheme.background), scheme.onSurface.copy(alpha = 0.06f).over(scheme.background)))
     }
     var loading by remember(request) { mutableStateOf(url != null) }
@@ -122,10 +125,10 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     // picture that is already covering it instead of vanishing from on top of the plate.
     var sheen by remember(request) { mutableStateOf(loading) }
     androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
-    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).background(plate)) {
-        if (sheen) Box(Modifier.matchParentSize().loadingSheen(true, scheme.onSurface))
+    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).then(if (plate) Modifier.background(plateBrush) else Modifier)) {
+        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true, scheme.onSurface))
         androidx.compose.animation.AnimatedVisibility(
-            missing, Modifier.align(Alignment.Center),
+            missing && plate, Modifier.align(Alignment.Center),
             enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)), exit = androidx.compose.animation.fadeOut(),
         ) {
             Icon(
@@ -279,11 +282,17 @@ fun LazyListScope.songRows(
      * Apple's album page does - repeating "Radiohead" down ten rows of a Radiohead album says nothing.
      */
     pageArtist: String? = null,
+    /**
+     * Rows keyed by song alone (the ids must be unique) that fade and slide when the list changes under
+     * them - a favourite unstarred, a mix drawn again - instead of the rows below jumping up in one frame.
+     */
+    animated: Boolean = false,
 ) {
     val swipe = actions.swipeEnabled
-    itemsIndexed(songs, key = { i, s -> "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
+    itemsIndexed(songs, key = { i, s -> if (animated) "$keyPrefix${s.id}" else "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
         SongRow(
             s, if (numbered) null else cover(s), onClick = { if (context === songs) actions.tap(songs, i) else actions.tap(context, context.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) }, onMenu = { menu(s) },
+            modifier = if (!animated) Modifier else if (AppMotion.reduce) Modifier.animateItem(null, null, null) else Modifier.animateItem(),
             number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
             selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, onSwipe = if (swipe) ({ right -> actions.swipe(s, right) }) else null,
             divider = i < songs.lastIndex,
