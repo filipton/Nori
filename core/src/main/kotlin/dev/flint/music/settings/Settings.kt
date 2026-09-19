@@ -19,6 +19,17 @@ enum class TapAction { PLAY_LIST, PLAY_ONE, QUEUE, PLAY_NEXT }
 enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
 
 /**
+ * What the queue is extended with when the last song starts, and where that comes from. Someone who
+ * listens to records wants the next record, not fifteen loose songs, so the two are separate choices:
+ * what is added, and what it is chosen by.
+ */
+enum class AutoFillKind(val label: String) { SONGS("Songs"), ALBUMS("Albums") }
+
+enum class AutoFillBasis(val label: String) {
+    SIMILAR("Similar music"), ARTIST("The same artist"), GENRE("The same genre"), ERA("The same era")
+}
+
+/**
  * Where the left swipe is stored. It used to default to Play next and be saved along with everything
  * else, so a new key is what gives existing installs the new default (the left swipe favourites).
  */
@@ -144,8 +155,12 @@ data class Prefs(
     /** 32-bit float to the mixer so 24-bit files are not cut to 16. media3 skips audio processors in this mode, so no equalizer. Read when the service starts. */
     val hiRes: Boolean = false,
     val scrobble: Boolean = true,
-    /** When the last queued song starts, queue songs similar to it. */
+    /** When the last queued song starts, keep the music going past the end of the queue. */
     val autoFill: Boolean = true,
+    /** Songs, or one whole album at a time, queued in its own order. */
+    val autoFillKind: AutoFillKind = AutoFillKind.SONGS,
+    /** What the next songs are chosen by: what the server thinks is similar, or the artist, genre or decade. */
+    val autoFillBasis: AutoFillBasis = AutoFillBasis.SIMILAR,
     val eqEnabled: Boolean = false,
     val eqBands: List<Band> = Band.GRAPHIC,
     /** Null: pulled down automatically by the largest boost, so the curve cannot clip. */
@@ -348,6 +363,8 @@ class Settings(context: Context) {
             hiRes = sp.getBoolean("hiRes", false),
             scrobble = sp.getBoolean("scrobble", true),
             autoFill = sp.getBoolean("autoFill", true),
+            autoFillKind = AutoFillKind.entries.getOrElse(sp.getInt("autoFillKind", 0)) { d.autoFillKind },
+            autoFillBasis = AutoFillBasis.entries.getOrElse(sp.getInt("autoFillBasis", 0)) { d.autoFillBasis },
             eqEnabled = sp.getBoolean("eqEnabled", false),
             eqBands = Band.decode(sp.getString("eqBands", null)) ?: d.eqBands,
             eqPreampDb = if (sp.contains("eqPreampDb")) sp.getFloat("eqPreampDb", 0f) else null,
@@ -388,6 +405,7 @@ class Settings(context: Context) {
         putBoolean("previousAlwaysSkips", p.previousAlwaysSkips); putInt("precacheWifi", p.precacheWifi); putInt("precacheMobile", p.precacheMobile)
         putBoolean("skipOnError", p.skipOnError); putBoolean("crossfadeKeepAlbums", p.crossfadeKeepAlbums)
         putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
+        putInt("autoFillKind", p.autoFillKind.ordinal); putInt("autoFillBasis", p.autoFillBasis.ordinal)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqBands", Band.encode(p.eqBands))
         if (p.eqPreampDb == null) remove("eqPreampDb") else putFloat("eqPreampDb", p.eqPreampDb)
         putFloat("crossfeedDb", p.crossfeedDb); putFloat("balance", p.balance); putBoolean("mono", p.mono)

@@ -12,6 +12,33 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **What plays when the queue runs out is a choice.** Keep playing now has two settings beside it
+  (Settings → Library): songs or a whole album at a time, and what that is chosen by - what the
+  server calls similar, the same artist, the same genre or the same decade. Albums queue the record
+  in its own order, skipping one the queue has already played. `PlaybackService.autoFill`.
+- **Tracks are measured before they are played.** `AutoMixPrefetch` decodes the track playing and the
+  two after it with MediaCodec on a background thread and feeds the streaming analyser, so a
+  transition has both halves' tempo, beats and cues the first time those two songs meet - until now
+  the tap only finished a track as it ended, which is one boundary too late. It never fetches
+  anything: a track is measured only once its bytes are on the device (downloaded, or brought in by
+  the precacher), and the whole thing is off unless AutoMix is on.
+- **The mix no longer allocates as it starts.** The tail buffer, the mixer, the time stretcher and
+  the chunk pool are built when the plan is made, at the start of the outgoing track, instead of
+  between two buffers on the audio thread at the moment the mix begins (`TransitionSink.prepare`).
+- The word "Mixing" is gone from the middle of the seek row.
+- **The sleeve's swipe waits for a sideways finger.** The full-screen cover claimed any drag that
+  passed sideways touch slop, so putting the player away with the slightest slant changed the song;
+  it now takes the gesture only when it has gone nearly twice as far across as down.
+- The player's ⋯ has a heart again, at the top of the sheet, reading this session's marks.
+- **Favourite albums refresh at once.** Starring evicted every cached read but the starred album
+  list, which is the home shelf; that list is dropped now, the shelf re-queries on a star, and this
+  session's marks are applied on top so an album leaves it the moment its heart goes out.
+- **The home page pulls to refresh.** A thin ring, no plate: it drops the stored answers behind the
+  shelves, re-queries them and walks the offline index.
+- **The chrome stands off the page.** The floating slab was a ninth of the text colour over the
+  background, which over a dark page and the AMOLED black one was nothing at all; the lift now
+  follows the page's own luminance and the slab carries a hairline and a deeper shadow.
+
 - **The wash without stairs.** The page's blur was a 32 px texture stretched over the screen, and the
   sleeve's melt read it a row at a time in 28 slices, so both came down in visible steps. The wash is
   still worked out at 32 px but handed to the GPU at 128 (`CoverColors.smooth`: bilinear, two light

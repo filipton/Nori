@@ -206,15 +206,37 @@ echo "-- automix over a real album"
 # Consecutive tracks of one album are meant to stay gapless, so that setting has to be off for a
 # transition to be planned at all - otherwise this checks the wrong thing and calls the feature broken.
 "$app" set crossfadeKeepAlbums false >/dev/null
+# From nothing measured, so the measuring ahead is this run's work and not an earlier one's.
+"$app" set clearAnalyses true >/dev/null
 adb logcat -c
 "$app" play "album:6Lt5zppPoP7FGBYqInxzZB" >/dev/null; sleep 10
 # Jump to just before the end so the next track starts decoding and a transition has to be planned.
 dur=$(field durationMs); "$app" do "seek $(( ${dur:-240000} - 14000 ))" >/dev/null; sleep 18
 planned=$(adb logcat -d -s flint:I | grep -cE "transition .* -> ")
 analysed=$(adb logcat -d -s flint:I | grep -c "analysed")
+ahead=$(adb logcat -d -s flint:I | grep -c "analysed .* ahead")
 check "a transition is planned at a track boundary ($planned)" test "${planned:-0}" -ge 1
+# The tracks are measured before they are played, so the first meeting of two songs is a real mix
+# rather than a fade; the measurement only runs on audio already on the device, so this is a report
+# rather than a check - an empty cache legitimately has nothing to measure yet.
+check "the tracks coming up are measured before they are played ($ahead)" test "${ahead:-0}" -ge 1
 echo "     (analysis events seen: $analysed)"
 "$app" set crossfadeKeepAlbums true >/dev/null
+
+echo "-- what plays when the queue runs out"
+# One song on its own, so the queue really does run out; the album basis is the one that has to queue a
+# whole record rather than a handful of songs.
+"$app" set autoFill true >/dev/null
+"$app" set autoFillBasis SIMILAR >/dev/null
+"$app" set autoFillKind SONGS >/dev/null
+"$app" play "search:creep" >/dev/null; sleep 10
+grew=$(field queue)
+check "the queue is carried on past its last song ($grew)" test "${grew:-0}" -gt 1
+"$app" set autoFillKind ALBUMS >/dev/null
+"$app" play "search:creep" >/dev/null; sleep 16
+album=$(field queue)
+check "a whole album is queued when albums are chosen ($album)" test "${album:-0}" -gt 2
+"$app" set autoFillKind SONGS >/dev/null
 
 echo "-- a USB DAC, faked"
 # A DAC cannot be plugged into an emulator, so the app is pointed at a mock one (ActionsViewModel, "dac").

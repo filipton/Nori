@@ -480,7 +480,19 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
         "library" -> SettingsCard {
             Toggle("Scrobble", "Report plays and the play queue to the server", p.scrobble) { on -> vm.update { it.copy(scrobble = on) } }
             if (p.scrobble) Choice("Count a play after", p.scrobblePercent, listOf(25 to "25 %", 50 to "50 %", 75 to "75 %", 90 to "90 %", 100 to "the whole track")) { v -> vm.update { it.copy(scrobblePercent = v) } }
-            Toggle("Keep playing", "When the queue runs out, continue with similar songs from the library", p.autoFill) { on -> vm.update { it.copy(autoFill = on) } }
+            Toggle("Keep playing", "When the queue runs out, carry on with more music from the library", p.autoFill) { on -> vm.update { it.copy(autoFill = on) } }
+            // What arrives and what it is chosen by are two separate questions, so they are two rows:
+            // somebody who listens to records wants the next record, whatever it is picked by.
+            if (p.autoFill) {
+                Choice("Carry on with", p.autoFillKind, dev.flint.music.settings.AutoFillKind.entries.map { it to it.label }) { v -> vm.update { it.copy(autoFillKind = v) } }
+                Choice("Chosen by", p.autoFillBasis, dev.flint.music.settings.AutoFillBasis.entries.map { it to it.label }) { v -> vm.update { it.copy(autoFillBasis = v) } }
+                Text(
+                    if (p.autoFillKind == dev.flint.music.settings.AutoFillKind.ALBUMS) "A whole album is queued in its own order each time the queue runs out."
+                    else "Songs are queued a handful at a time as the queue runs out.",
+                    Modifier.padding(horizontal = Space.gutter, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             Choice("Live search delay", p.liveSearchDelayMs, listOf(150 to "150 ms", 250 to "250 ms", 350 to "350 ms", 500 to "500 ms", 800 to "800 ms")) { ms -> vm.update { it.copy(liveSearchDelayMs = ms) } }
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

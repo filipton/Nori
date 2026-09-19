@@ -10,6 +10,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshState
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
@@ -50,6 +53,7 @@ import dev.flint.music.app.vm.HomeViewModel
 import dev.flint.music.settings.HomeRow
 import dev.flint.music.ffi.Album
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val load by vm.ui.collectAsStateWithLifecycle()
@@ -60,6 +64,14 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     LoadBox(load) { ui ->
         val arrival = rememberArrival()
         val rise = with(LocalDensity.current) { Arrival.RISE.toPx() }
+        val refreshing by vm.refreshing.collectAsStateWithLifecycle()
+        val pull = rememberPullToRefreshState()
+        PullToRefreshBox(
+            isRefreshing = refreshing,
+            onRefresh = vm::refresh,
+            state = pull,
+            indicator = { RefreshMark(pull, refreshing) },
+        ) {
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             // Shuffling the whole library and picking the server's queue back up are things you do
             // occasionally, so they live behind the title's menu rather than as two buttons across the
@@ -96,6 +108,38 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                 }
             }
         }
+        }
+    }
+}
+
+/**
+ * What a pull at the top of the page looks like: a thin ring, no container and nothing behind it. The
+ * Material indicator is a filled circle on a raised plate, which on this page reads as a button that
+ * has landed in the wrong place. While the finger is down the ring fills as far as the pull has come,
+ * which is a static value read in the draw phase; only once the refresh is really running does it turn,
+ * and it is gone the moment that is over. At rest it is drawn at zero opacity, so an idle page has
+ * nothing at its top and nothing animating there either.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.RefreshMark(state: PullToRefreshState, refreshing: Boolean) {
+    val tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+    Box(
+        Modifier.align(androidx.compose.ui.Alignment.TopCenter)
+            .graphicsLayer {
+                val d = state.distanceFraction
+                alpha = if (refreshing) 1f else (d * 1.6f - 0.15f).coerceIn(0f, 1f)
+                translationY = d.coerceIn(0f, 1.3f) * 52.dp.toPx()
+            }
+            .padding(top = 12.dp),
+    ) {
+        if (refreshing) androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), color = tint, strokeWidth = 2.dp)
+        else androidx.compose.material3.CircularProgressIndicator(
+            progress = { state.distanceFraction.coerceIn(0f, 1f) },
+            modifier = Modifier.size(18.dp), color = tint, strokeWidth = 2.dp,
+            trackColor = androidx.compose.ui.graphics.Color.Transparent,
+            gapSize = 0.dp,
+        )
     }
 }
 

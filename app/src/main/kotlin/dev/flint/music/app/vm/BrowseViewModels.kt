@@ -53,11 +53,23 @@ sealed interface Shelf {
 
 data class HomeUi(val rows: List<Shelf> = emptyList(), val pinned: List<Playlist> = emptyList())
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class HomeViewModel(app: Application) : FlintViewModel(app) {
     // The app was opened: a good moment to replay whatever was starred, rated or played while offline.
     init { viewModelScope.launch { runCatching { flint.library.flushPending() } } }
 
-    private fun row(sort: AlbumSort) = flint.library.albums(sort, size = 20).catch { emit(emptyList()) }.onStart { emit(emptyList()) }
+    /**
+     * Bumped by [refresh]. Every shelf hangs off it rather than the page hanging off it as a whole, so
+     * a re-query replaces each shelf's contents where they are instead of emptying the page first and
+     * filling it again - the difference between a refresh and the page being built a second time.
+     */
+    private val refreshes = MutableStateFlow(0)
+    private val _refreshing = MutableStateFlow(false)
+    /** True while a manual refresh is running, so the page can show that it is and then stop. */
+    val refreshing: StateFlow<Boolean> = _refreshing
+
+    private fun row(sort: AlbumSort) = refreshes.flatMapLatest { flint.library.albums(sort, size = 20) }
+        .catch { emit(emptyList()) }.onStart { emit(emptyList()) }
 
     private fun albumShelf(r: HomeRow, sort: AlbumSort) = row(sort).map { Shelf.Albums(r, it) }
 
@@ -66,27 +78,54 @@ class HomeViewModel(app: Application) : FlintViewModel(app) {
         HomeRow.NEWEST -> albumShelf(r, AlbumSort.NEWEST)
         HomeRow.FREQUENT -> albumShelf(r, AlbumSort.FREQUENT)
         HomeRow.RANDOM -> albumShelf(r, AlbumSort.RANDOM)
-        HomeRow.STARRED -> albumShelf(r, AlbumSort.STARRED)
+        // The one shelf that answers a star, the way the favourites screen does: the list is asked for
+        // again whenever something is starred, and this session's marks are applied on top so an album
+        // that has just lost its heart leaves the shelf at once rather than when the server replies. No
+        // other shelf re-queries on a star, because a star changes nothing in any of them.
+        HomeRow.STARRED -> combine(
+            combine(refreshes, flint.library.starsVersion) { _, v -> v }.flatMapLatest { flint.library.albums(AlbumSort.STARRED, size = 20) },
+            flint.library.starMarks,
+        ) { albums, marks -> Shelf.Albums(r, albums.filter { marks["albumId:${it.id}"] != false }) }
+            .catch { emit(Shelf.Albums(r, emptyList())) }.onStart { emit(Shelf.Albums(r, emptyList())) }
         // Every playlist there is, newest first, as against the handful the user pinned. Somebody who
         // keeps six playlists does not want to choose which of them is worth pinning.
-        HomeRow.PLAYLISTS -> flint.library.playlists().map { Shelf.Playlists(r, it.take(20)) }
+        HomeRow.PLAYLISTS -> refreshes.flatMapLatest { flint.library.playlists() }.map { Shelf.Playlists(r, it.take(20)) }
             .catch { emit(Shelf.Playlists(r, emptyList())) }.onStart { emit(Shelf.Playlists(r, emptyList())) }
-        // Straight out of the offline index, so it costs no request at all.
-        HomeRow.TOP_SONGS -> flow {
-            emit(Shelf.Songs(r, emptyList()))
-            emit(Shelf.Songs(r, runCatching { flint.library.browseSongs("playCount", true, false, null, 0, 20) }.getOrDefault(emptyList())))
-        }
+        // Straight out of the offline index, so it costs no request at all - and worth reading again
+        // after a refresh, which is the one thing that changes what the index holds.
+        HomeRow.TOP_SONGS -> refreshes.flatMapLatest {
+            flow { emit(Shelf.Songs(r, runCatching { flint.library.browseSongs("playCount", true, false, null, 0, 20) }.getOrDefault(emptyList()))) }
+        }.onStart { emit(Shelf.Songs(r, emptyList())) }
         // The pinned playlists are fetched once for the whole page, below, because the row is a
         // selection of something the page already has to hold.
         HomeRow.PINNED -> flowOf(Shelf.Playlists(r, emptyList()))
     }
 
     /** Only the rows the user kept are requested at all; a hidden shelf costs no request. */
-    @OptIn(ExperimentalCoroutinesApi::class)
     val ui: StateFlow<Load<HomeUi>> = flint.settings.prefs.map { it.homeRows to it.pinnedPlaylists }.distinctUntilChanged().flatMapLatest { (rows, pins) ->
-        val pinned = if (HomeRow.PINNED in rows && pins.isNotEmpty()) flint.library.playlists().map { all -> all.filter { it.id in pins } }.catch { emit(emptyList()) }.onStart { emit(emptyList()) } else flowOf(emptyList())
+        val pinned = if (HomeRow.PINNED in rows && pins.isNotEmpty()) refreshes.flatMapLatest { flint.library.playlists() }.map { all -> all.filter { it.id in pins } }.catch { emit(emptyList()) }.onStart { emit(emptyList()) } else flowOf(emptyList())
         combine(combine(rows.map(::source)) { it.toList() }.onStart { emit(emptyList()) }, pinned) { shelves, p -> HomeUi(shelves, p) }
     }.asLoad()
+
+    /**
+     * The pull at the top of the page. The stored answers behind the shelves go first, so asking again
+     * really does reach the server rather than being told the two-minute-old copy is still fresh, and
+     * then the offline index is walked the way the settings page walks it. A refresh that fails is
+     * still over: the page has whatever it had before, and the spinner must not be left turning.
+     */
+    fun refresh() {
+        if (_refreshing.value) return
+        _refreshing.value = true
+        viewModelScope.launch {
+            try {
+                runCatching { flint.library.dropCached("getAlbumList2", "getPlaylists", "getStarred2") }
+                refreshes.update { it + 1 }
+                runCatching { flint.library.sync().collect { } }
+            } finally {
+                _refreshing.value = false
+            }
+        }
+    }
 }
 
 /** The album grid: one sort order at a time, pages appended as the list nears its end. */

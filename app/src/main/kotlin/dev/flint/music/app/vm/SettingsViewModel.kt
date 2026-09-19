@@ -112,6 +112,9 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
      */
     fun setByName(name: String, value: String): Boolean {
         if (testDevice(name, value)) return true
+        // Not a setting: the one button on that screen a check needs, so a run can start from a phone
+        // that has measured nothing and see the measuring happen.
+        if (name == "clearAnalyses") { clearAnalyses(); return true }
         val on = value.equals("true", true) || value == "1"
         val change: (dev.flint.music.settings.Prefs) -> dev.flint.music.settings.Prefs? = {
             when (name) {
@@ -135,6 +138,9 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
+                "autoFill" -> it.copy(autoFill = on)
+                "autoFillKind" -> dev.flint.music.settings.AutoFillKind.entries.firstOrNull { k -> k.name.equals(value, true) }?.let { k -> it.copy(autoFillKind = k) }
+                "autoFillBasis" -> dev.flint.music.settings.AutoFillBasis.entries.firstOrNull { b -> b.name.equals(value, true) }?.let { b -> it.copy(autoFillBasis = b) }
                 "autoEqAuto" -> it.copy(autoEqAuto = on)
                 "profilePerOutput" -> it.copy(profilePerOutput = on)
                 else -> null

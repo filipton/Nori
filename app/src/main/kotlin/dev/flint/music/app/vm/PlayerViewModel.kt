@@ -31,12 +31,6 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     val sounding: StateFlow<Boolean> = state.map { it.playing }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /**
-     * A crossfade or AutoMix transition is playing. Read, not observed: the seek bar is the only thing
-     * that ticks while the player is open, and it asks on the same beat rather than starting a watcher.
-     */
-    val mixing: Boolean get() = dev.flint.music.playback.TransitionSink.mixing
-
-    /**
      * Lyrics of whatever is playing; fetched only while a lyrics view is collecting. Each song starts
      * from Loading, so the view shows its loader and then the new words, instead of holding the last
      * song's lyrics on screen while the next ones are fetched.

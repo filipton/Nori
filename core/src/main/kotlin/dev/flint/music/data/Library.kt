@@ -122,6 +122,15 @@ class Library(
         }
     }.flowOn(Dispatchers.IO)
 
+    /**
+     * Throws away the stored answers whose key starts with one of [prefixes], so the next read of them
+     * has to ask the server. A key is the endpoint followed by its parameters in the order they were
+     * passed, so an endpoint on its own drops every read of it. This is what a manual refresh is for:
+     * the freshness window exists so that browsing costs no requests, and the only way past it is to
+     * be told the stored answer is not wanted.
+     */
+    suspend fun dropCached(vararg prefixes: String) = withContext(Dispatchers.IO) { prefixes.forEach(core::cacheEvict) }
+
     // ---- session ----
 
     suspend fun musicFolders(): List<dev.flint.music.ffi.MusicFolder> = call("getMusicFolders", emptyList()) { core.parseMusicFolders(it) }
@@ -300,7 +309,10 @@ class Library(
         _starMarks.update { it + (key to on) }
         _starsVersion.update { it + 1 }
         try {
-            write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist")
+            // The favourite albums shelf on the home page is an album list like any other, so the
+            // stored answer for that one list has to go as well; the prefix stops short of the size
+            // and the offset, and leaves the newest, recent and frequent lists alone.
+            write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist", "getAlbumList2&type=starred")
         } catch (e: Exception) {
             // Offline is not a failure: write() queues those and replays them. Anything else is, and the
             // screen must not keep showing a favourite the server never took.

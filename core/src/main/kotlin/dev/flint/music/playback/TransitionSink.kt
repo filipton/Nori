@@ -90,6 +90,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var mixer = 0L
     private var mixerFormat = 0
     private var stretch = 0L
+    /** Built with the plan, taken up when the next track begins; see [prepare]. */
+    private var pendingStretch = 0L
+    private var pendingKeepPitch = false
     private var scratch: ByteBuffer? = null
 
     private var analyzer = 0L
@@ -191,10 +194,55 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         return accepted
     }
 
+    /**
+     * Something the plan was made without - an analysis measured since - has arrived, so the plan for
+     * the track playing is asked for again at the next buffer. A transition is planned as soon as a
+     * track's audio starts arriving, which is well before the track it was measured against has been
+     * measured; without this the listener would be stuck with the answer it gave in the first second.
+     */
+    fun replan() { replanWanted = true }
+    @Volatile private var replanWanted = false
+
     private fun planFor(id: String?): Plan? {
         if (id == null) return null
-        if (planFor != id) { plan = listener.planFor(id); planFor = id }
+        val again = replanWanted
+        if (planFor != id || again) {
+            replanWanted = false
+            plan = listener.planFor(id)
+            planFor = id
+            plan?.let(::prepare)
+        }
         return plan
+    }
+
+    /**
+     * Everything the transition needs, built when the plan is made rather than when it starts. A plan is
+     * asked for as soon as a track's audio begins arriving, which is minutes of slack; the mix itself
+     * begins between two buffers, and a megabyte of direct memory and a stretcher's tables allocated
+     * right then are exactly the kind of work that leaves the sink with nothing to write - the catch in
+     * the sound that the mixes had.
+     */
+    private fun prepare(p: Plan) {
+        if (!pcm) return
+        val bytes = (p.durationUs * rate / 1_000_000).toInt() * frameBytes
+        if (bytes > 0 && (tail?.capacity() ?: 0) < bytes) tail = ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
+        if (mixer == 0L || mixerFormat != rate * 100 + channels) {
+            if (mixer != 0L) AutoMixMixer.destroy(mixer)
+            mixer = AutoMixMixer.create(rate, channels)
+            mixerFormat = rate * 100 + channels
+        }
+        val stretching = kotlin.math.abs(p.tempoRatio - 1f) > 1e-4f
+        if (stretching && pendingStretch != 0L && pendingKeepPitch != p.keepPitch) {
+            AutoMixStretch.destroy(pendingStretch)
+            pendingStretch = 0L
+        }
+        if (stretching && pendingStretch == 0L) {
+            pendingStretch = AutoMixStretch.create(rate, channels, p.keepPitch)
+            pendingKeepPitch = p.keepPitch
+        }
+        // The mixed audio is handed on in chunks; a pool that is already full means the mix itself
+        // allocates nothing at all.
+        while (pool.size < 8) pool += ByteBuffer.allocateDirect(16384).order(ByteOrder.nativeOrder())
     }
 
     private fun beginHold(p: Plan) {
@@ -223,6 +271,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         val p = plan
         if (phase == Phase.HOLD && p != null && tailLen > 0) {
             // The next track begins: its opening is mixed into what was held.
+            // Both were built when the plan was made; either is still made here if something changed
+            // under them (a format switch) since.
             if (mixer == 0L || mixerFormat != rate * 100 + channels) {
                 if (mixer != 0L) AutoMixMixer.destroy(mixer)
                 mixer = AutoMixMixer.create(rate, channels)
@@ -230,7 +280,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             }
             AutoMixMixer.configure(mixer, p.mixer)
             if (kotlin.math.abs(p.tempoRatio - 1f) > 1e-4f) {
-                stretch = AutoMixStretch.create(rate, channels, p.keepPitch)
+                stretch = if (pendingStretch != 0L && pendingKeepPitch == p.keepPitch) pendingStretch.also { pendingStretch = 0L }
+                else AutoMixStretch.create(rate, channels, p.keepPitch)
                 AutoMixStretch.configure(stretch, p.tempoRatio, p.durationUs * rate / 1_000_000, p.rampUs * rate / 1_000_000)
             }
             skipLeft = p.inSkipUs * rate / 1_000_000 * frameBytes
@@ -399,6 +450,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         resyncNext = false
         syntheticPtsUs = C.TIME_UNSET
         if (stretch != 0L) { AutoMixStretch.destroy(stretch); stretch = 0L }
+        if (pendingStretch != 0L) { AutoMixStretch.destroy(pendingStretch); pendingStretch = 0L }
         // A seek: the analyser has not heard this track continuously any more.
         if (analyzer != 0L) { AutoMixAnalyzer.destroy(analyzer); analyzer = 0L }
         analysisTainted = true

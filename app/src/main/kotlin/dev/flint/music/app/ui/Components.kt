@@ -223,18 +223,23 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
 }
 
 /**
- * A drag the row takes only when it is plainly sideways: once the finger has gone past the touch slop,
- * it has to have moved at least twice as far across as down (within about 27 degrees of level).
- * Anything steeper, or anything the list has already taken, is left alone, so a scroll that is a
- * little off vertical scrolls instead of swiping a song. ([detectHorizontalDragGestures] claims a
- * drag on the sideways distance alone, which a slanted scroll easily reaches first.)
+ * A drag taken only when it is plainly sideways: once the finger has gone [slop] times the touch slop,
+ * it has to have moved at least [ratio] times as far across as down. Anything steeper, or anything
+ * something else has already taken, is left alone, so a scroll that is a little off vertical scrolls
+ * instead of swiping a song, and a diagonal pull upwards opens the player instead of changing it.
+ * ([detectHorizontalDragGestures] claims a drag on the sideways distance alone, which a slanted drag
+ * easily reaches first - which is what every one of those was.)
+ *
+ * Everywhere a sideways drag shares its space with an up-and-down one uses this: the rows of a list,
+ * the now playing bar and the full-screen sleeve, so the three feel like one gesture.
  */
-private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sidewaysDrag(
+internal suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sidewaysDrag(
     onDragStart: () -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
+    slop: Float = 1f, ratio: Float = 2f,
     onDrag: (androidx.compose.ui.input.pointer.PointerInputChange, Float) -> Unit,
 ) = awaitEachGesture {
     val down = awaitFirstDown(requireUnconsumed = false)
-    val slop = viewConfiguration.touchSlop
+    val decide = viewConfiguration.touchSlop * slop
     var dx = 0f
     var dy = 0f
     while (true) {
@@ -242,8 +247,8 @@ private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sideways
         if (!c.pressed || c.isConsumed) return@awaitEachGesture
         val d = c.positionChange()
         dx += d.x; dy += d.y
-        if (dx * dx + dy * dy < slop * slop) continue
-        if (kotlin.math.abs(dx) < 2f * kotlin.math.abs(dy)) return@awaitEachGesture
+        if (dx * dx + dy * dy < decide * decide) continue
+        if (kotlin.math.abs(dx) < ratio * kotlin.math.abs(dy)) return@awaitEachGesture
         c.consume()
         break
     }

@@ -30,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -48,7 +49,6 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Spacer
@@ -80,7 +80,7 @@ import dev.flint.music.app.vm.PlayerViewModel
  */
 @Composable
 fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp) {
-    val (slab, content, page) = chromeColours()
+    val (slab, content, page, edge) = chromeColours()
     // A soft wash under the chrome so the list fades out as it passes behind it. Apple gets this from
     // blurring what is behind the bars; one vertical gradient costs nothing and reads much the same.
     Column(
@@ -93,7 +93,7 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlaye
         },
     ) {
         SelectionBar(actions)
-        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, slab, content) }
+        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, slab, content, edge) }
         Spacer(Modifier.height(tabsHeight))
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -107,7 +107,7 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlaye
 @Composable
 fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val (slab, content, _) = chromeColours()
+    val (slab, content, _, edge) = chromeColours()
     val search = tabs.firstOrNull { it.route == "search" }
     val rest = tabs.filter { it.route != "search" }
     val sheet = LocalPlayerSheet.current
@@ -123,14 +123,19 @@ fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (
                 .padding(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 4.dp),
             Arrangement.spacedBy(8.dp), Alignment.CenterVertically,
         ) {
-            Surface(shape = PillShape, color = slab, contentColor = content, shadowElevation = 8.dp, modifier = Modifier.weight(1f)) {
+            Surface(
+                shape = PillShape, color = slab, contentColor = content, shadowElevation = 12.dp,
+                border = androidx.compose.foundation.BorderStroke(androidx.compose.ui.unit.Dp.Hairline, edge),
+                modifier = Modifier.weight(1f),
+            ) {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 5.dp),
                     Arrangement.SpaceEvenly, Alignment.CenterVertically,
                 ) { rest.forEach { t -> TabButton(t, selected = route == t.route, content = content) { onTab(t.route) } } }
             }
             if (search != null) Surface(
-                onClick = { onTab(search.route) }, shape = CircleShape, color = slab, shadowElevation = 8.dp,
+                onClick = { onTab(search.route) }, shape = CircleShape, color = slab, shadowElevation = 12.dp,
+                border = androidx.compose.foundation.BorderStroke(androidx.compose.ui.unit.Dp.Hairline, edge),
                 modifier = Modifier.size(58.dp).semantics { contentDescription = search.label },
             ) {
                 Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -149,12 +154,28 @@ fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (
  * nothing to do with the record.
  */
 @Composable
-private fun chromeColours(): Triple<Color, Color, Color> {
+private fun chromeColours(): ChromeColours {
     val scheme = MaterialTheme.colorScheme
     val tint = currentPageTint()
-    val slab = tint?.let { blend(it.background, it.edge, 0.12f) } ?: scheme.onSurface.copy(alpha = 0.09f).over(scheme.background)
-    return Triple(slab, tint?.onBackground ?: scheme.onSurface, tint?.background ?: scheme.background)
+    val page = tint?.background ?: scheme.background
+    val content = tint?.onBackground ?: scheme.onSurface
+    // How far the slab is lifted off the page. One figure could not do both ends: a ninth of the text
+    // colour is plenty over white, and over a dark page - the AMOLED black most of all - it leaves the
+    // slab with nothing under it to lift, which is the bar that could not be told from the page at all.
+    // The theme is read off the page's own luminance rather than off prefs.theme, so a light cover on a
+    // dark page gets the treatment its own colour asks for.
+    val dark = page.luminance() < 0.5f
+    val lift = if (dark) 0.20f else 0.11f
+    // A tinted page lends the slab its cover's edge first, so it still belongs to the record, and the
+    // lift goes on top of that rather than instead of it.
+    val slab = content.copy(alpha = lift).over(tint?.let { blend(page, it.edge, 0.30f) } ?: page)
+    // The faint line Apple's floating bars carry along their top edge. It does most of the work in the
+    // light theme, where a shadow on a white page is barely there.
+    return ChromeColours(slab, content, page, content.copy(alpha = if (dark) 0.14f else 0.07f))
 }
+
+/** The slab's colour, what is written on it, the page it fades into, and the hairline round its edge. */
+private data class ChromeColours(val slab: Color, val content: Color, val page: Color, val edge: Color)
 
 data class Tab(val route: String, val label: String, val icon: ImageVector)
 
@@ -192,7 +213,7 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
  * No progress bar on purpose: it would tick for as long as the app is open.
  */
 @Composable
-fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, slab: Color, content: Color) {
+fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, slab: Color, content: Color, edge: Color) {
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     val settings: dev.flint.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
@@ -213,7 +234,8 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     NowPlayingPalette(palette)
     Surface(
         shape = CardShape, color = slab, contentColor = content,
-        shadowElevation = 6.dp,
+        shadowElevation = 10.dp,
+        border = androidx.compose.foundation.BorderStroke(androidx.compose.ui.unit.Dp.Hairline, edge),
         modifier = Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
             .onGloballyPositioned { sheet.miniTop = it.positionInRoot().y }
@@ -393,7 +415,11 @@ internal fun <T> SwipeCarousel(
                     }
                 }
             }
-            detectHorizontalDragGestures(
+            // The bar answers an upward drag by opening the player (dragsSheet, on the surface around
+            // this), so the sideways drag has to be plainly sideways or the two fight over every
+            // diagonal - which is the bar changing the song when it was asked to open.
+            sidewaysDrag(
+                slop = 1.5f, ratio = 1.8f,
                 onDragStart = { tracker.resetTracking(); x = 0f; moving?.cancel() },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },

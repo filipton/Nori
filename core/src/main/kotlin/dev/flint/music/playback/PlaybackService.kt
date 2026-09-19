@@ -44,6 +44,8 @@ import dev.flint.music.data.AlbumSort
 import dev.flint.music.data.StarKind
 import dev.flint.music.ffi.PlayQueue
 import dev.flint.music.ffi.Song
+import dev.flint.music.settings.AutoFillBasis
+import dev.flint.music.settings.AutoFillKind
 import dev.flint.music.settings.Prefs
 import dev.flint.music.settings.ReplayGainMode
 import kotlinx.coroutines.CoroutineScope
@@ -91,6 +93,8 @@ class PlaybackService : MediaLibraryService() {
     private val equalizer = Equalizer()
     private var hiRes = false
     private var burst: BurstSink? = null
+    /** Kept so a freshly measured track can have its transition planned again; see AutoMixPrefetch. */
+    private var transitionSink: TransitionSink? = null
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
@@ -104,7 +108,9 @@ class PlaybackService : MediaLibraryService() {
     @Volatile private var upcoming: List<MediaItem> = emptyList()
     private val analysisWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "flint-analysis").apply { priority = Thread.MIN_PRIORITY } }
     private lateinit var precacher: Precacher
-    private val precache = Runnable { precacheAhead() }
+    private lateinit var analyser: AutoMixPrefetch
+    private val precache = Runnable { precacheAhead(); analyseAhead() }
+    private val measure = Runnable { analyseAhead() }
     /** What the volume should be once no fade is running: 1, or the ReplayGain attenuation. */
     private var targetVolume = 1f
     private var fade: Runnable? = null
@@ -157,7 +163,7 @@ class PlaybackService : MediaLibraryService() {
                         }
                         .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                         .setAudioTrackProvider(tracks).build()
-                ).also { burst = it }, transitions)
+                ).also { burst = it }, transitions).also { transitionSink = it }
         }
         hiRes = flint.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
@@ -178,6 +184,7 @@ class PlaybackService : MediaLibraryService() {
             )
             .build()
         precacher = Precacher(flint.sources)
+        analyser = AutoMixPrefetch(flint.sources, { flint.core }) { transitionSink?.replan() }
         player.addListener(listener)
         player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
             override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
@@ -237,7 +244,9 @@ class PlaybackService : MediaLibraryService() {
         persistQueue(push = false)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
         main.removeCallbacks(precache)
+        main.removeCallbacks(measure)
         precacher.release()
+        analyser.release()
         flint.dac.onChanged = {}
         flint.dac.stop()
         flint.outputs.stop()
@@ -288,7 +297,14 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
             refreshUpcoming()
-            if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) scheduleSave()
+            if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
+                scheduleSave()
+                // The queue was edited: what comes next is not what it was, and measuring the new next
+                // track is the whole point of measuring ahead at all. Only that - the fetching ahead is
+                // left alone, since restarting it would throw away a track it is halfway through.
+                main.removeCallbacks(measure)
+                main.postDelayed(measure, 2_000)
+            }
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -629,20 +645,85 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /**
-     * Keeps the music going past the end of the queue. Runs once, when the last
-     * song starts: the radio is up for that song anyway. Only library songs come
-     * back from getSimilarSongs2, so this never makes octo-fiesta download anything.
+     * Measures the track playing and the two after it, unless they have been measured before. AutoMix
+     * plans a transition from both halves' analyses, and until this existed the only way to get one was
+     * to have played the track through: the first time two songs met they were faded rather than mixed,
+     * and the plan for the boundary the listener was already in the middle of arrived too late to use.
+     * Off entirely when AutoMix is, and it never fetches anything (see AutoMixPrefetch).
+     */
+    private fun analyseAhead() {
+        if (!flint.settings.value.autoMix) return analyser.cancel()
+        analyser.update(upcoming.take(3).map { it.mediaId })
+    }
+
+    /**
+     * Keeps the music going past the end of the queue. Runs once, when the last song starts: the radio
+     * is up for that song anyway. What arrives is the user's choice twice over - songs or a whole album
+     * ([AutoFillKind]), chosen by what the server calls similar or by the artist, genre or decade
+     * ([AutoFillBasis]) - and every route here reads the library, so this never makes octo-fiesta
+     * download a provider track.
      */
     private fun autoFill(item: MediaItem?) {
-        if (item == null || item.isRadio || player.hasNextMediaItem() || player.repeatMode != Player.REPEAT_MODE_OFF || !flint.settings.value.autoFill) return
+        val p = flint.settings.value
+        if (item == null || item.isRadio || player.hasNextMediaItem() || player.repeatMode != Player.REPEAT_MODE_OFF || !p.autoFill) return
         val seed = item.toSong()
         if (seed.isExternal) return
+        // Both read off the queue before anything suspends: the player belongs to this looper, and what
+        // follows runs on an IO thread.
+        val queued = (0 until player.mediaItemCount).mapTo(HashSet()) { player.getMediaItemAt(it).mediaId }
+        val played = (0 until player.mediaItemCount).mapNotNullTo(HashSet()) { player.getMediaItemAt(it).mediaMetadata.extras?.getString("albumId") }
         scope.launch {
-            val more = runCatching { flint.library.similarSongs(seed.id, 25) }.getOrNull().orEmpty()
-            val queued = (0 until player.mediaItemCount).mapTo(HashSet()) { player.getMediaItemAt(it).mediaId }
-            val fresh = more.filter { it.id !in queued && !it.isExternal }.take(15)
+            val fresh = withContext(Dispatchers.IO) {
+                if (p.autoFillKind == AutoFillKind.ALBUMS) nextAlbum(seed, p.autoFillBasis, queued, played)
+                else nextSongs(seed, p.autoFillBasis).filter { it.id !in queued && !it.isExternal }.take(15)
+            }
             if (fresh.isNotEmpty() && !player.hasNextMediaItem()) player.addMediaItems(fresh.map(::item))
         }
+    }
+
+    /** The decade [seed] belongs to, for the era basis; empty when the server gave no year. */
+    private fun era(seed: Song): IntRange? = seed.year.toInt().takeIf { it > 0 }?.let { (it / 10 * 10)..(it / 10 * 10 + 9) }
+
+    /** Loose songs to carry on with. Whatever the basis, the order they come back in is kept. */
+    private suspend fun nextSongs(seed: Song, basis: AutoFillBasis): List<Song> = runCatching {
+        when (basis) {
+            AutoFillBasis.SIMILAR -> flint.library.similarSongs(seed.id, 25)
+            // The artist's best-known songs first, then the rest of their records, so a long evening
+            // does not stop after ten tracks.
+            AutoFillBasis.ARTIST -> flint.library.topSongs(seed.artist).first().ifEmpty {
+                seed.artistId?.let { id -> flint.library.artist(id).first().albums.take(3).flatMap { flint.library.albumSongs(it.id) } }.orEmpty()
+            }
+            AutoFillBasis.GENRE -> seed.genre?.let { flint.library.songsByGenre(it, 100).shuffled() }.orEmpty()
+            // Out of the offline index rather than the server: nothing in Subsonic asks for a decade of songs.
+            AutoFillBasis.ERA -> era(seed)?.let { flint.library.browseSongs("playCount", true, false, it, 0, 100).shuffled() }.orEmpty()
+        }
+    }.getOrDefault(emptyList())
+
+    /**
+     * One whole album, in its own order, for someone who listens to records. The album is picked from the
+     * same four bases; one already in the queue is passed over, so an evening moves on rather than
+     * playing the same record twice.
+     */
+    private suspend fun nextAlbum(seed: Song, basis: AutoFillBasis, queued: Set<String>, played: Set<String>): List<Song> {
+        val candidates = runCatching {
+            when (basis) {
+                // The records the songs the server calls similar come from.
+                AutoFillBasis.SIMILAR -> flint.library.similarSongs(seed.id, 50).filterNot { it.isExternal }.mapNotNull { it.albumId }.distinct()
+                AutoFillBasis.ARTIST -> seed.artistId?.let { id -> flint.library.artist(id).first().albums.filterNot { it.isExternal }.map { it.id } }.orEmpty()
+                AutoFillBasis.GENRE -> seed.genre?.let { g -> flint.library.albums(AlbumSort.BY_GENRE, 30, genre = g).first().filterNot { it.isExternal }.map { it.id }.shuffled() }.orEmpty()
+                AutoFillBasis.ERA -> era(seed)?.let { years -> flint.library.albumsByYear(years.first, years.last, 30).first().filterNot { it.isExternal }.map { it.id }.shuffled() }.orEmpty()
+            }
+        }.getOrDefault(emptyList())
+        // A single is an album as far as the server is concerned, and stopping the evening on one track
+        // is not what "carry on with albums" means: the first record with a side to it wins, and a short
+        // one is only taken if nothing else is on offer.
+        var short = emptyList<Song>()
+        for (pick in candidates.filter { it != seed.albumId && it !in played }.take(6)) {
+            val songs = runCatching { flint.library.albumSongs(pick).filter { it.id !in queued && !it.isExternal } }.getOrDefault(emptyList())
+            if (songs.size >= 3) return songs
+            if (songs.size > short.size) short = songs
+        }
+        return short
     }
 
     // ---- the queue outlives the process ----

@@ -989,7 +989,10 @@ private fun SleeveCarousel(
                     } else land(go, v, 520f)
                 }
             }
-            detectHorizontalDragGestures(
+            // Sideways only, and plainly so: the sleeve sits inside the sheet that is pulled down to
+            // put the player away, and a dismissal with any slant at all used to change the song.
+            sidewaysDrag(
+                slop = 1.5f, ratio = 1.8f,
                 onDragStart = {
                     tracker.resetTracking(); x = 0f
                     holding = true
@@ -1363,12 +1366,12 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
         )
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
             Text(duration(shown / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty
-            // the rest of the time, holding the space so the times never move.
-            // Apple writes a word here while a transition is running; the rest of the time the slot holds
-            // its space so the two times either side never move. `pos` above ticks this once a second.
+            // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty the
+            // rest of the time, holding its space so the two times either side never move. It said
+            // "Mixing" through every crossfade as well, which is a word about the plumbing rather than
+            // about the music, and it flickered up between songs for no reason anyone could see.
+            // `pos` above ticks this once a second.
             val centre = state.error ?: when {
-                vm.mixing -> "Mixing"
                 state.sleepAtEndOfTrack -> "Sleep · end of track"
                 // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
                 // and subtracting one from the other gives a number about fifty years wide, which the

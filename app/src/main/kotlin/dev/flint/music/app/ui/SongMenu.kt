@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.IosShare
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -121,6 +123,18 @@ fun SongMenu(
             Hairline(startIndent = Space.gutter)
             // What someone opened this menu to do: queue it, keep it, or leave for where it came
             // from. Everything one reaches for perhaps once a month waits under "More" below.
+            // The heart comes first because it is the one thing here that is about the song rather than
+            // about the queue, and it reads this session's marks rather than the snapshot the song was
+            // handed over with: one starred a moment ago from the bar above still says so, without
+            // waiting for the server's list to come round again. The marks are collected here rather
+            // than taken from LocalStarMarks because the sheet is put up outside the provider, at the
+            // top of the app, so that it outlives the row or the player that asked for it.
+            val marks by actions.starMarks.collectAsState()
+            val starred = marks.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)
+            Item(
+                if (starred) "Remove from favourites" else "Add to favourites",
+                if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            ) { actions.star(song, !starred); onDismiss() }
             Item("Play next", Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
             Item("Add to queue", Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
             Item("Add to playlist…", Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
