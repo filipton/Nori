@@ -12,6 +12,24 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The record change, second pass.** Four things the owner saw on a real phone, all in
+  SleeveCarousel. The record overshot the middle on a button press: the lift sprang past its mark
+  (damping 0.9), and since the gap the arriving record waits in is measured from the lift, a lift
+  that overshot pulled the incoming record past centre and back. Every spring here is critically
+  damped now, and `liftedScale` clamps the lift to 0..1 - a spring settling back used to dip below
+  nought, which made the record a shade bigger than the sleeve and left a line at the bottom where
+  the page's wash, drawn to the sleeve's own size, stopped short. A press while the change before it
+  was still settling slid in a copy of the cover already showing ("it changes the cover first and
+  then animates from it to itself"): each change now waits for the player to be on the song the last
+  one asked for (`committed`, which is set whether or not there was a picture to hold over - waiting
+  on the picture let a cover that failed to load release the next change against a queue that had not
+  moved). And a swipe that catches a record mid-flight commits the change only once the record has
+  really gone (half a span), rebasing the offset onto the arriving record so the drag carries on from
+  the cover it can see; caught earlier, nothing changes and the record stays under the finger.
+- **Covers ahead, both ways.** The prefetch walked forwards from the playing song and only one song
+  back, so the second swipe backwards always waited on the server. It now steps outwards in both
+  directions. A neighbour whose picture has not arrived is drawn as a record - same square, same
+  corners - with the app's loading sheen rather than a flat grey card.
 - **The record change, properly.** Three faults sat on top of each other in SleeveCarousel, all from
   the same root: a `pointerInput` keyed on `Unit` is created once and never replaced, so the gesture
   closed over the first composition's addresses and painters - back then there was no queue at all.

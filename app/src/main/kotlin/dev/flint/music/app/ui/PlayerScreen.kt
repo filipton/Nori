@@ -714,6 +714,8 @@ private fun SleeveCarousel(
     // picture itself, not the painter: the painter is handed the following song's address next.
     var landed by remember { mutableStateOf<androidx.compose.ui.graphics.painter.Painter?>(null) }
     var landedUrl by remember { mutableStateOf<String?>(null) }
+    /** The address of the song the last change asked the player for; see land. */
+    var committed by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(landedUrl) {
         val url = landedUrl ?: return@LaunchedEffect
         // A second and a half, not four: if the sleeve has not arrived by then something is wrong with
@@ -726,7 +728,7 @@ private fun SleeveCarousel(
     val widthPx = constraints.maxWidth.toFloat()
     val heightPx = constraints.maxHeight.toFloat()
     val sideDp = with(density) { heightPx.toDp() }
-    val down = spring<Float>(dampingRatio = 0.8f, stiffness = 240f)
+    val down = spring<Float>(dampingRatio = 1f, stiffness = 300f, visibilityThreshold = 0.001f)
 
     /**
      * The record goes [go] (-1 for the next one, 1 for the one before), the song changes as it arrives,
@@ -735,49 +737,82 @@ private fun SleeveCarousel(
      */
     suspend fun land(go: Int, velocity: Float, stiffness: Float, liftDown: Float = 240f, keepLift: Boolean = false) {
         val turn = gesture
-        // One change at a time. The song that has just landed is only the song the player is playing a
-        // frame or two later, and until it is, the record waiting off the edge is still the one that is
-        // showing - sliding that in would bring in a copy of the cover being left.
-        val waitingFor = landedUrl
+        // One change at a time. The song a record has just landed on is only the song the player is
+        // playing a frame or two later, and until it is, the record waiting off the edge is still the
+        // one that is showing: starting now would slide in a copy of the cover already in the middle,
+        // which is the press that seems to change the cover first and then animate from it to itself.
+        val waitingFor = committed
         if (waitingFor != null && currentUrlNow != waitingFor) {
-            kotlinx.coroutines.withTimeoutOrNull(400) {
+            kotlinx.coroutines.withTimeoutOrNull(500) {
                 androidx.compose.runtime.snapshotFlow { currentUrlNow }.first { it == waitingFor }
             }
         }
+        val painter = if (go < 0) afterNow else beforeNow
+        val url = if (go < 0) nextUrlNow else previousUrlNow
+        // Still the song that is showing: the player never caught up, so there is nothing to slide.
+        // Change the song plainly rather than send the same record across the screen.
+        if (url != null && url == currentUrlNow) {
+            committed = null
+            if (go < 0) onNextNow() else onPreviousNow()
+            return
+        }
+        // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
+        // A record is the whole square, as tall as the sleeve.
+        val span = heightPx * liftedScale(lift.targetValue, widthPx, heightPx) + gap
+
+        /**
+         * The record has arrived, wherever it got to: the song changes, and the picture that came in is
+         * held over the sleeve until the sleeve has it too. [rest] is where the record is left - the
+         * middle when nothing else has hold of it, and the arriving record's own place when a finger
+         * has, so the drag carries on from the record it can see instead of jumping.
+         */
+        fun arrive(rest: Float) {
+            // Only hold the picture over if it is really there: as a bare plate it is a grey square, and
+            // the sleeve's own cross-fade is the better answer.
+            val picture = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
+            landed = picture
+            landedUrl = url.takeIf { picture != null }
+            // What the player has been asked for, whether or not there was a picture to hold over. The
+            // next change waits for this, not for the picture: a cover that failed to load used to let
+            // the one after it start against a queue that had not moved yet.
+            committed = url
+            art.snapNext = true
+            offset = rest
+            if (go < 0) onNextNow() else onPreviousNow()
+        }
+
         var changed = false
         try {
             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-            val painter = if (go < 0) afterNow else beforeNow
-            val url = if (go < 0) nextUrlNow else previousUrlNow
-            // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
-            // A record is the whole square, as tall as the sleeve.
-            val span = heightPx * liftedScale(lift.targetValue, widthPx, heightPx) + gap
             // A tenth of a pixel is not worth animating to: the default threshold kept the spring
             // running long after the record had arrived, which is what made a button press take half a
             // second to do a quarter of a second's work.
             val settle = spring(dampingRatio = 1f, stiffness = stiffness, visibilityThreshold = 1f)
             if (AppMotion.reduce) offset = go * span
             else androidx.compose.animation.core.animate(offset, go * span, velocity, settle) { v, _ -> offset = v }
-            // Same frame: the incoming record takes the middle, the sleeve goes back under it. Only if
-            // its picture is really there - held over the page as a bare plate it is a grey square, and
-            // the sleeve's own fade is the better answer.
-            val picture = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
-            landed = picture
-            landedUrl = url.takeIf { picture != null }
-            art.snapNext = true
-            offset = 0f
             changed = true
-            if (go < 0) onNextNow() else onPreviousNow()
-            // The new record settles back into the sleeve, with the slightest give - unless another
-            // press is already waiting, in which case the record stays up and goes straight on.
-            if (!keepLift) lift.animateTo(0f, spring(dampingRatio = 0.8f, stiffness = liftDown, visibilityThreshold = 0.001f))
+            // Same frame: the incoming record takes the middle, the sleeve goes back under it.
+            arrive(0f)
+            // The new record settles back into the sleeve - unless another press is already waiting, in
+            // which case it stays up and goes straight on.
+            if (!keepLift) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
         } finally {
             if (!changed) {
-                // Cancelled: the song still changes, because the move was asked for. The record is only
-                // put back if nobody else has hold of it, and the new picture arrives by the sleeve's
-                // own cross-fade rather than snapping under a finger that is mid-drag.
-                if (gesture == turn) offset = 0f
-                if (go < 0) onNextNow() else onPreviousNow()
+                val caught = gesture != turn
+                when {
+                    // Cancelled by something that is not a finger - the screen going away. Honour it.
+                    !caught -> arrive(0f)
+                    // A finger caught the record after it had all but gone: the change has happened as
+                    // far as the eye is concerned, so it counts, and the record that was coming in keeps
+                    // the place it is already in - a span along - so the drag carries straight on from
+                    // the cover it can see. Putting the offset back to nought instead dropped the old
+                    // cover into the middle for a frame, which is the jump with no slide.
+                    kotlin.math.abs(offset) > span / 2f -> arrive(offset - go * span)
+                    // Caught early, before the record had really left: the song does not change at all,
+                    // and the record stays under the finger where it was. Committing it here would have
+                    // left the finger dragging a record that is no longer the one playing.
+                    else -> Unit
+                }
             }
         }
     }
@@ -796,7 +831,11 @@ private fun SleeveCarousel(
             queued--
             if ((go < 0 && !hasAfter) || (go > 0 && !hasBefore)) continue
             val job = launch {
-                if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 520f)) }
+                // No bounce in the lift, and quicker than the slide. A record that is still being
+                // picked up is still shrinking, and the gap the next one waits in shrinks with it; a
+                // lift that sprang past its mark pulled the arriving record past the middle and back,
+                // which is the overshoot you see when a button sends it across.
+                if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
                 land(go, 0f, BUTTON_STIFFNESS, liftDown = 600f, keepLift = queued > 0)
             }
             moving = job
@@ -842,7 +881,7 @@ private fun SleeveCarousel(
                     gesture++
                     while (asks.tryReceive().isSuccess) queued--
                     moving?.cancel()
-                    if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 420f)) }
+                    if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 420f, visibilityThreshold = 0.001f)) }
                 },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
@@ -879,11 +918,17 @@ private fun SleeveCarousel(
         val o0 = { offset }
         Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) { SleeveImage(art, Modifier.fillMaxSize()) }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
-        // from a little dimmer as it arrives.
-        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).background(plateColour)) {
+        // from a little dimmer as it arrives. One whose picture has not arrived is still a record - the
+        // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
+        // than a flat grey card: the covers are fetched ahead (PlayerViewModel) but a cold queue, or a
+        // slow server, can still be reached before they land.
+        val afterHere = after.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
+        val beforeHere = before.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
+        val sheen = MaterialTheme.colorScheme.onSurface
+        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!afterHere, sheen)) {
             androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
-        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).background(plateColour)) {
+        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!beforeHere, sheen)) {
             androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
         // It is the record that is showing, so it moves with the record: held still in the middle it
@@ -917,7 +962,10 @@ private const val LIFTED_WIDTH = 0.86f
 /** The scale of a record [side] tall at lift [l], on a sleeve [width] wide: 1 at rest, the whole square at 86 % of the width held. */
 private fun liftedScale(l: Float, width: Float, side: Float): Float {
     val held = if (side > 0f) (LIFTED_WIDTH * width / side).coerceAtMost(1f) else 1f
-    return 1f - (1f - held) * l
+    // Never past either end. A spring settling back to nought used to dip below it for a few frames,
+    // which made the record a shade bigger than the sleeve - enough for the page's wash, which is drawn
+    // to the sleeve's own size, to stop short of the bottom edge and leave a line there.
+    return 1f - (1f - held) * l.coerceIn(0f, 1f)
 }
 
 /** Past this share of the width a slow drag changes the record. */

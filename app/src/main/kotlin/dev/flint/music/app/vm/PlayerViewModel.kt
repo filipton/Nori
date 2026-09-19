@@ -60,9 +60,16 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
         // memory lookup and nothing else.
         viewModelScope.launch {
             kotlinx.coroutines.flow.combine(state, flint.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead ->
-                // Both neighbours as a skip would reach them (shuffle included), then onward in queue order.
-                (listOf(s.previousIndex, s.nextIndex) + ((s.index + 2)..(s.index + ahead)))
-                    .take(if (ahead == 0) 1 else ahead + 1).distinct().filter { it != s.index }.mapNotNull { s.queue.getOrNull(it)?.coverArt }
+                // Both neighbours first, as a skip would reach them (shuffle included), and then outwards
+                // in both directions a step at a time. Backwards as well as forwards: going back through
+                // a queue is as ordinary as going on, and with only the one song behind warmed, the
+                // second swipe back always waited on the server.
+                val out = ArrayList<Int>()
+                out += s.previousIndex
+                out += s.nextIndex
+                for (d in 2..ahead) { out += s.index + d; out += s.index - d }
+                out.take(if (ahead == 0) 1 else ahead * 2)
+                    .distinct().filter { it != s.index }.mapNotNull { s.queue.getOrNull(it)?.coverArt }
             }.distinctUntilChanged()
                 .collect { arts ->
                     val context = getApplication<Application>()
