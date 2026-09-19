@@ -12,6 +12,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The now playing bar's heart updates.** The bar sat outside the `LocalStarMarks` provider, so it
+  only ever saw the server's answer and a tap changed nothing on screen until the song came round
+  again. It is inside it now.
+- **A song row's marks are columns.** Heart, download mark, time and menu each have a fixed-width
+  slot on every row, the time last before the ⋯ and right-aligned in a 36 dp box, so hearts line up
+  in a list of favourites and the time sits against the menu instead of across an empty download
+  slot from it.
 - **Home rows, owned by the home page.** ⋯ → Rearrange rows lists every shelf: the shown ones in
   order, held anywhere to move (a long press, since the list scrolls), each with a switch, and the
   hidden ones under "Not shown". Settings only points there now. Two new shelves: all Playlists, and

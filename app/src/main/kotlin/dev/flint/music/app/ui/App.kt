@@ -278,7 +278,12 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               Box(
                   Modifier.align(Alignment.BottomCenter)
                       .onGloballyPositioned { chromeHeight = with(density) { it.size.height.toDp() } },
-              ) { BottomChrome(player, actions, nav::player, tabsHeight) }
+              ) {
+                  // The now playing bar has a heart now, and it reads the stars the user has just
+                  // changed from here like every other one. Outside this, it saw only the server's
+                  // answer, so a tap on it changed nothing until the song came round again.
+                  CompositionLocalProvider(LocalStarMarks provides marks) { BottomChrome(player, actions, nav::player, tabsHeight) }
+              }
               }
               PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
               // The tab bar is over the player, not under it: as the player rises it slides down off the

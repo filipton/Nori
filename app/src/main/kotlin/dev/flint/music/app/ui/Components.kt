@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
@@ -327,12 +328,21 @@ fun SongRow(
                 Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
                 providerOf(song.id)?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
             }
-            if (LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, "Favourite", Modifier.padding(start = 4.dp).size(15.dp), tint)
-            if (song.duration > 0u) Text(duration(song.duration.toLong()), Modifier.padding(start = 8.dp), textAlign = TextAlign.End, style = MaterialTheme.typography.bodySmall, color = tint)
-            // The download mark sits in a slot of its own width, right before the menu: every row puts
-            // the ring, the tick and the menu in the same column whatever comes before them, and a mark
-            // arriving or leaving moves nothing else on the row.
+            // Every row's marks sit in columns of their own, the same width on every row: the heart, then
+            // the download ring or tick, then the time, then the menu. A list of favourites then puts all
+            // its hearts one above another - placed after the title, the heart moved with the width of
+            // the time beside it, "3:44" against "12:05" - and a mark arriving or leaving moves nothing
+            // else. The time is last before the menu and in a box of one fixed width, its digits held to
+            // the right edge, so it sits against the ⋯ rather than with an empty download slot between.
+            Box(Modifier.padding(start = 4.dp).width(15.dp), Alignment.Center) {
+                if (LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, "Favourite", Modifier.size(15.dp), tint)
+            }
             Box(Modifier.width(MARK_SLOT), Alignment.Center) { DownloadSlot(song.id, downloaded, tint) }
+            Text(
+                if (song.duration > 0u) duration(song.duration.toLong()) else "",
+                Modifier.widthIn(min = TIME_SLOT), textAlign = TextAlign.End,
+                style = MaterialTheme.typography.bodySmall, color = tint, maxLines = 1, softWrap = false,
+            )
             IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(20.dp), tint) }
         }
       }
@@ -525,3 +535,9 @@ fun PrefetchCovers(urls: List<String?>) {
         }
     }
 }
+
+/**
+ * The time's column: wide enough for "59:59" in the row's small type, so every ordinary track's time
+ * ends in the same place. A track over an hour is wider and pushes left, which is rare enough to allow.
+ */
+private val TIME_SLOT = 36.dp
