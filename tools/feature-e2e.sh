@@ -101,6 +101,49 @@ check "adding to the queue grows it ($before -> $after)" test "${after:-0}" -gt 
 "$app" do "playnext search:let down" >/dev/null; sleep 4
 check "play next grows it too ($after -> $(field queue))" test "$(field queue)" -gt "${after:-0}"
 
+echo "-- for you: favourites and mixes open as pages"
+# What a mix page shows, read from the screen: "<count>|<title>@<x>,<y>|..." for the song count in its
+# caption and every fully visible row title (rows sit below the Play pill and above the mini player).
+page() {
+  adb shell uiautomator dump /sdcard/flint-ui.xml >/dev/null 2>&1
+  adb shell cat /sdcard/flint-ui.xml | python3 -c "
+import sys,re
+nodes=[(t,d,*map(int,b)) for t,d,b in ((m.group(1),m.group(2),re.findall(r'\d+',m.group(3))) for m in re.finditer(r'text=\"([^\"]*)\"[^>]*content-desc=\"([^\"]*)\"[^>]*bounds=\"([^\"]*)\"',sys.stdin.read()))]
+count=next((int(m.group(1)) for t,*_ in nodes for m in [re.match(r'(\d+) songs? ',t)] if m),0)
+bar=next((y1 for t,d,x1,y1,x2,y2 in nodes if d=='Now playing bar'),10**6)
+play=next((y2 for t,d,x1,y1,x2,y2 in nodes if t=='Play'),0)
+rows=[n for n in nodes if n[0] and n[3]>=play and n[5]<=bar and 150<n[2]<260]
+titles=[n for i,n in enumerate(rows) if i%2==0]
+print('|'.join([str(count)]+['%s@%d,%d'%(t,(x1+x2)//2,(y1+y2)//2) for t,d,x1,y1,x2,y2 in titles]))"
+}
+starred_count() { api getStarred2 | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['subsonic-response'].get('starred2',{})
+print(sum(1 for s in d.get('song',[]) if not s.get('isExternal') and not s['id'].startswith(('ext-','pl-'))))"; }
+"$app" open mix/favourites >/dev/null; sleep 4
+check "the favourites tile opens its page" test "$(field route)" = "mix/{id}"
+favs=$(page | cut -d'|' -f1); server=$(starred_count)
+check "it lists the songs the server has starred ($favs, server $server)" test "${favs:-x}" = "$server"
+"$app" do "star song:$id" >/dev/null; sleep 5
+check "starring a song adds it while the page is open" test "$(page | cut -d'|' -f1)" = "$((server + 1))"
+"$app" do "star song:$id" >/dev/null; sleep 5   # put it back
+check "and unstarring takes it away again" test "$(page | cut -d'|' -f1)" = "$server"
+"$app" open mix/discover >/dev/null; sleep 4
+first=$(page)
+"$app" open home >/dev/null; sleep 2; "$app" open mix/discover >/dev/null; sleep 4
+check "a mix stays the same when it is opened again" test "$first" = "$(page)"
+# What you see is what plays: a tap on the third row starts the whole mix at that row.
+n=$(echo "$first" | cut -d'|' -f1); third=$(echo "$first" | cut -d'|' -f4)
+if [ -n "$third" ]; then
+  xy=${third##*@}; adb shell input tap "${xy%,*}" "${xy#*,}"; sleep 6
+  check "tapping a row plays that song (${third%@*})" test "$(field title)" = "${third%@*}"
+  check "with the rest of the mix around it ($(field index) of $(field queue), page $n)" \
+    test "$(field index)" = "2" -a "$(field queue)" = "$n"
+  "$app" do pause >/dev/null
+else
+  check "the mix has songs to play" false
+fi
+
 echo "-- automix over a real album"
 "$app" set autoMix true >/dev/null
 # Consecutive tracks of one album are meant to stay gapless, so that setting has to be off for a

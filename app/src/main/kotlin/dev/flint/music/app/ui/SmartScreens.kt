@@ -57,6 +57,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.HistoryViewModel
 import dev.flint.music.app.vm.MixesViewModel
+import dev.flint.music.app.vm.MixViewModel
+import dev.flint.music.app.vm.MixCard
+import dev.flint.music.app.vm.FAVOURITES_MIX
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.foundation.layout.fillMaxSize
 import dev.flint.music.app.vm.PlayerViewModel
 import dev.flint.music.app.vm.SmartDraft
 import dev.flint.music.app.vm.SmartRule
@@ -69,28 +75,112 @@ private fun <T> Pick(value: T, options: List<T>, modifier: Modifier = Modifier, 
     DropdownMenu(open, { open = false }) { options.forEach { o -> DropdownMenuItem({ Text(label(o)) }, { onPick(o); open = false }) } }
 }
 
-/** The mixes the core draws from the index and the listening history. */
+/** Each tile's own colour: what it wears before its covers arrive, and the band its name sits on. */
+private fun mixColour(id: String) = androidx.compose.ui.graphics.Color(
+    when (id) {
+        FAVOURITES_MIX -> 0xFFE0335A; "quick-picks" -> 0xFF8E3BD6; "discover" -> 0xFF1E88E5
+        "listen-again" -> 0xFF00897B; "top" -> 0xFFE0662B; else -> 0xFF5C6BC0
+    },
+)
+
+/**
+ * A mix's artwork: four covers of what is in it, the mix's colour rising from the bottom under its
+ * name. Before there is anything in it, the colour alone. The covers cross-fade in and out, so a tile
+ * never changes in one frame. Nothing here moves on its own: it is drawn once and then only redrawn
+ * when its covers change.
+ */
+@Composable
+private fun MixArt(card: MixCard, size: androidx.compose.ui.unit.Dp, onClick: (() -> Unit)? = null, large: Boolean = false) {
+    val seed = mixColour(card.id)
+    val deep = blend(seed, androidx.compose.ui.graphics.Color.Black, 0.45f)
+    val white = androidx.compose.ui.graphics.Color.White
+    Box(
+        Modifier.size(size).clip(if (large) TileShape else CardShape)
+            .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(seed, deep)))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+    ) {
+        androidx.compose.animation.Crossfade(
+            card.covers, Modifier.matchParentSize(),
+            animationSpec = androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 320), label = "mix art",
+        ) { urls ->
+            val half = size / 2
+            when {
+                urls.size >= 4 -> Column {
+                    Row { Cover(urls[0], half, radius = 0.dp, plate = false); Cover(urls[1], half, radius = 0.dp, plate = false) }
+                    Row { Cover(urls[2], half, radius = 0.dp, plate = false); Cover(urls[3], half, radius = 0.dp, plate = false) }
+                }
+                urls.isNotEmpty() -> Cover(urls[0], size, radius = 0.dp, plate = false)
+                else -> Box(Modifier.fillMaxSize())
+            }
+        }
+        // The mix's colour rising under its name, so the name reads on any artwork. Always drawn: on the
+        // bare colour it only deepens the bottom a little, and nothing appears when the covers do.
+        Box(
+            Modifier.matchParentSize().background(
+                androidx.compose.ui.graphics.Brush.verticalGradient(
+                    0.38f to deep.copy(alpha = 0f), 0.72f to deep.copy(alpha = 0.72f), 1f to deep.copy(alpha = 0.94f),
+                ),
+            ),
+        )
+        Column(Modifier.align(Alignment.BottomStart).padding(if (large) 18.dp else 12.dp)) {
+            Icon(
+                if (card.favourites) Icons.Filled.Favorite else Icons.Filled.AutoAwesome, null,
+                Modifier.size(if (large) 22.dp else 16.dp), tint = white.copy(alpha = 0.9f),
+            )
+            Text(
+                card.title, Modifier.padding(top = 4.dp),
+                style = if (large) MaterialTheme.typography.headlineSmall else MaterialTheme.typography.titleMedium, color = white,
+                maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** "For you": favourites first, then the mixes. Each tile opens a page that shows what is in it. */
 @Composable
 fun MixTiles(vm: MixesViewModel = viewModel()) {
-    // A mix has no artwork, so it gets a colour of its own instead: a tile the size of a cover, with the
-    // name on it. Chips made the row read as a filter bar; these read as something to play.
-    val palette = listOf(0xFF8E3BD6, 0xFFD63B6B, 0xFF1E88E5, 0xFF00897B, 0xFFE0662B, 0xFF5C6BC0)
+    val cards by vm.cards.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
     LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        itemsIndexed(vm.tiles, key = { _, m -> m.title }) { i, m ->
-            val seed = androidx.compose.ui.graphics.Color(palette[i % palette.size])
-            Box(
-                Modifier.size(150.dp).clip(CardShape)
-                    .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(seed, blend(seed, androidx.compose.ui.graphics.Color.Black, 0.45f))))
-                    .clickable { vm.play(m) }
-                    .padding(14.dp),
-            ) {
-                Icon(Icons.Filled.AutoAwesome, null, Modifier.align(Alignment.TopEnd).size(18.dp), tint = androidx.compose.ui.graphics.Color.White.copy(alpha = 0.75f))
-                Text(
-                    m.title, Modifier.align(Alignment.BottomStart),
-                    style = MaterialTheme.typography.titleMedium, color = androidx.compose.ui.graphics.Color.White,
-                    maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        items(cards, key = { it.id }) { c -> MixArt(c, 150.dp, onClick = { nav.mix(c.id) }) }
+    }
+}
+
+/**
+ * A mix as a page, laid out like a playlist: the mix's artwork, its name, Play and Shuffle, then the
+ * songs. What is listed is exactly what plays - a tap on a row starts the mix at that row - and it
+ * stays put while the page is open; the circular arrow asks for a new draw.
+ */
+@Composable
+fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewModel()) {
+    LaunchedEffect(id) { vm.open(id) }
+    val load by vm.ui.collectAsStateWithLifecycle()
+    val done = actions.downloads.collectAsState().value.doneIds
+    val selection by actions.selection.collectAsStateWithLifecycle()
+    val selected = remember(selection) { selection.mapTo(HashSet()) { it.id } }
+    val player: PlayerViewModel = viewModel()
+    val playing by player.currentId.collectAsStateWithLifecycle()
+    val menu = LocalSongMenu.current
+    LoadBox(load) { m ->
+        HeroPage(
+            coverUrl = null,
+            title = m.title,
+            caption = if (m.songs.isEmpty()) "" else "${m.songs.size} song${if (m.songs.size == 1) "" else "s"} · ${duration(m.songs.sumOf { it.duration.toLong() })}",
+            onPlay = { if (m.songs.isNotEmpty()) actions.play(m.songs) },
+            onShuffle = { if (m.songs.isNotEmpty()) actions.shuffle(m.songs) },
+            art = { MixArt(MixCard(m.id, m.title, m.covers, m.favourites), 236.dp, large = true) },
+            actions = {
+                if (m.refreshable) CircleButton(Icons.Filled.Refresh, "New mix") { vm.refresh() }
+                MoreCircle(listOf("Add to queue" to { actions.enqueue(m.songs) }, downloadEntry(m.songs, done, actions)))
+            },
+        ) {
+            if (m.songs.isEmpty()) item(key = "empty") {
+                EmptyNote(
+                    if (m.favourites) "No favourite songs yet. Tap the heart on a song and it will be here."
+                    else "Nothing to mix yet. Play some music, or sync the library in Settings.",
                 )
             }
+            songRows(m.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, animated = true)
         }
     }
 }

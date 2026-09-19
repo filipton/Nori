@@ -61,6 +61,7 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
     fun folder(id: String) = go("folder/${Uri.encode(id)}")
     fun decade(year: Int) = go("decade/$year")
     fun smart(id: String) = go("smart/${Uri.encode(id)}")
+    fun mix(id: String) = go("mix/${Uri.encode(id)}")
     fun smartEdit(id: String) = go("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
     fun stats() = go("stats")
     /** The download queue. Asked for again while it is showing (the notification tapped), it only puts the player away. */
@@ -256,6 +257,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("mix/{id}") { MixScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("genre/{id}") { Inset { GenreScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("smart/{id}") { Inset { SmartScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("smartEdit/{id}") { Inset { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) } }
