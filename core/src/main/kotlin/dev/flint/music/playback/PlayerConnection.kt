@@ -199,6 +199,20 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_TUNING, Bundle.EMPTY), Bundle().apply { putBoolean(PlaybackService.ARG_ON, on) })
     }
 
+    /** Presses one of the session's own buttons (the notification's heart or shuffle) the way the notification does; for the test bridge. */
+    fun pressSessionButton(action: String) = with { it.sendCustomCommand(SessionCommand(action, Bundle.EMPTY), Bundle.EMPTY) }
+
+    /** The notification's extra buttons as the session last published them, e.g. "heart_filled shuffle_off"; for the test bridge. */
+    val sessionButtons: String get() = controller?.mediaButtonPreferences.orEmpty().joinToString(" ") {
+        when (it.icon) {
+            androidx.media3.session.CommandButton.ICON_HEART_FILLED -> "heart_filled"
+            androidx.media3.session.CommandButton.ICON_HEART_UNFILLED -> "heart"
+            androidx.media3.session.CommandButton.ICON_SHUFFLE_ON -> "shuffle_on"
+            androidx.media3.session.CommandButton.ICON_SHUFFLE_OFF -> "shuffle_off"
+            else -> it.sessionCommand?.customAction ?: "?"
+        }
+    }
+
     /** [minutes] 0 and [endOfTrack] false cancels. */
     fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = with { c ->
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_SLEEP, Bundle.EMPTY), Bundle().apply {

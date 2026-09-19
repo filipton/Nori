@@ -110,6 +110,8 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             // Everything not yet downloaded is dropped; finished downloads stay.
             "canceldownloads" -> cancelAllDownloads()
             "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
+            // "notification favourite" / "notification shuffle": the session command the notification's button sends.
+            "notification" -> flint.player.pressSessionButton(if (ref == "shuffle") dev.flint.music.playback.PlaybackService.CMD_SHUFFLE else dev.flint.music.playback.PlaybackService.CMD_FAVOURITE)
             "pause" -> player.toggle()
             "resume" -> player.toggle()
             "next" -> player.next()
