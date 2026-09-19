@@ -205,9 +205,16 @@ look like waiting. The pieces:
 - The player's sleeve (`SleeveArt`) keeps the old cover while the next one loads and cross-fades;
   after 600 ms without it, the old one fades out to the sheen so it never stands under the wrong
   title. The page colours cross-fade with it and hold the old palette while the new one is worked out.
-  `PlayerViewModel` warms the covers of the previous and next two tracks.
+  `PlayerViewModel` warms the covers of the previous track and `Prefs.coversAhead` (default 3)
+  upcoming ones, taking shuffle into account via `PlayerState.nextIndex` / `previousIndex`.
+- A sideways swipe on the sleeve is a carousel (`SleeveCarousel`): the neighbour's picture waits off
+  the edge and follows the finger in; on commit the old record goes all the way off, and the incoming
+  picture stays drawn over the sleeve until `SleeveArt.shownUrl` matches it (`snapNext` makes that
+  load skip its cross-fade), so the change has no second step. A swipe back is `previousItem()`
+  (always the previous song), not `previous()` (which restarts the song past 3 s).
 - Lyrics go back through the loader on every song (`PlayerViewModel.lyrics` starts each song from
-  `Loading`), and an empty server answer is not emitted while LRCLIB may still answer.
+  `Loading`), and an empty server answer is not emitted while LRCLIB may still answer. The lyrics
+  loader sits centred, where "No lyrics" would be.
 - `PlayPauseGlyph`: play, pause and the buffering spinner cross-fade, the spinner only after 300 ms.
 
 ## Animation and Android's animation setting
@@ -228,6 +235,18 @@ frame over 20 %.
 Measure motion with `glide3.py`-style frame differencing (share of a change in its biggest frame),
 not by matching vertical shifts: lyric lines are evenly spaced, so "moved one line" and "did not
 move" look the same to a shift search.
+
+## The back gesture
+
+Predictive back is on (`enableOnBackInvokedCallback`), so Navigation Compose scrubs a page transition
+with the finger. Unless `NavHost` is given `predictivePopEnterTransition` / `predictivePopExitTransition`
+it uses its own defaults - the page being left scales to 70 % with no fade over the page underneath,
+already fully drawn - which is what the owner saw as the animation "breaking" on a back swipe.
+`PredictiveBack` in App.kt is a linear fade-through: the page leaving is gone by 60 % of the way and
+slides a fifth of the width towards the edge the finger moves to; the page underneath fades in over the
+second half. Cancelled, it runs back. The player sheet takes the gesture itself (`SheetBack`,
+`PredictiveBackHandler`): it sinks up to a fifth with the finger and closes on a stiffer spring than a
+tap-close (`PlayerSheet.backClose`).
 
 ## Interface size
 
