@@ -23,7 +23,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -75,7 +74,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
             Text("Equalizer", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
-            Switch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } })
+            FlintSwitch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } })
         }
         Text(
             "Tap a band's label to change its frequency, width or type.",
@@ -111,7 +110,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
                 if (b.kind.usesGain) {
                     FlintSlider(b.gainDb, -12f..12f, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
                     Text(
-                        "%+.1f".format(b.gainDb), Modifier.width(42.dp),
+                        signedDb(b.gainDb), Modifier.width(42.dp),
                         style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.End,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -133,10 +132,10 @@ fun EqualizerScreen(vm: SettingsViewModel) {
 
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Pre-amp ${"%+.1f".format(p.effectivePreampDb)} dB${if (p.eqPreampDb == null) " (automatic)" else ""}")
+                Text("Pre-amp ${signedDb(p.effectivePreampDb)} dB${if (p.eqPreampDb == null) " (automatic)" else ""}")
                 Text("Automatic pulls the level down by the largest boost so the curve cannot clip", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Switch(p.eqPreampDb == null, { auto -> vm.update { it.copy(eqPreampDb = if (auto) null else it.effectivePreampDb) } })
+            FlintSwitch(p.eqPreampDb == null, { auto -> vm.update { it.copy(eqPreampDb = if (auto) null else it.effectivePreampDb) } })
         }
         p.eqPreampDb?.let { v -> FlintSlider(v, -20f..6f, { x -> vm.update { it.copy(eqPreampDb = x) } }, Modifier.padding(horizontal = Space.gutter), enabled = p.eqEnabled) }
 

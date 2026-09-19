@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import kotlin.math.roundToInt
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.zIndex
 import androidx.compose.runtime.mutableIntStateOf
@@ -194,11 +195,25 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // instead left a band of empty wash under it twice as deep as Apple's, because the
                 // controls below are shorter than the space that was left over; the spare height now
                 // sits above the volume slider, which is where Apple's is.
+                // The sleeve draws further down than it takes up: the title and artist are laid out over
+                // its last stretch, which is already going soft, the way Apple's are. Measured on `w4`,
+                // their cover is sharp to about 53 % of the screen and still leaves a faint trace behind
+                // the title at 56.5 % and the artist at 59-61 %. A sleeve that ended above the text left
+                // the text sitting on bare page, which is what read as the cover being out of place.
                 if (panel == Panel.ART) Box(
-                    Modifier.fillMaxWidth().onGloballyPositioned {
-                        sleeveBottom = it.positionInRoot().y + it.size.height
-                        sleeveHeight = it.size.height.toFloat()
-                    },
+                    Modifier.fillMaxWidth()
+                        .layout { measurable, constraints ->
+                            val placeable = measurable.measure(constraints)
+                            val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
+                            layout(placeable.width, takes) { placeable.place(0, 0) }
+                        }
+                        .onGloballyPositioned {
+                            // What is drawn, not what the column was told: the wash lines up with the
+                            // picture, and the picture runs on under the title.
+                            val drawn = it.size.width / SLEEVE
+                            sleeveBottom = it.positionInRoot().y + drawn
+                            sleeveHeight = drawn
+                        },
                 ) {
                     Artwork(vm, coverUrl, palette)
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), nav::back)
@@ -215,11 +230,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // that here - the owner found Apple's own spacing too loose on a 20:9 screen, which is
                 // taller than the 19.5:9 those percentages were taken from - and the space that frees
                 // up goes underneath them rather than between them.
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.16f))
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.02f))
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
                 if (panel != Panel.LYRICS) Row(
-                    Modifier.fillMaxWidth().padding(start = 26.dp, end = 16.dp, top = 2.dp),
+                    Modifier.fillMaxWidth().padding(start = PLAYER_GUTTER, end = PLAYER_GUTTER, top = 2.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -237,7 +252,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                     state.current?.let { s ->
                         val starred = marks.effectiveStar(dev.flint.music.data.StarKind.SONG, s.id, s.starred)
-                        Row(Modifier, Arrangement.spacedBy(10.dp), Alignment.CenterVertically) {
+                        Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
                             TitleCircle(
                                 if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
                                 "Favourite", starred,
@@ -246,7 +261,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         }
                     }
                 }
-                state.error?.let { Text(it, Modifier.padding(horizontal = 26.dp), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
+                state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (panel != Panel.LYRICS) state.current?.let { s ->
                     val line = listOfNotNull(
                         s.suffix.uppercase().ifEmpty { null },
@@ -256,7 +271,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // Apple shows nothing here. This audience wants it, so it stays - but well under
                     // the artist line, as a caption you read when you look for it.
                     Text(
-                        line, Modifier.padding(horizontal = 26.dp),
+                        line, Modifier.padding(horizontal = PLAYER_GUTTER),
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurface.copy(alpha = 0.38f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -266,19 +281,22 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 SeekBar(vm, state.playing, state.durationMs)
 
                 // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
+                // Sized off `w4` as a share of the screen's width: Apple's pause glyph stands 9.8 % of the
+                // width tall and the skip glyphs are 9.7 % wide; these were about a fifth smaller. The
+                // seek bar, volume bar and bottom icons below were scaled by their own measured ratios.
                 // Apple leaves a clear gap between the times and these, rather than letting them follow on.
-                Row(Modifier.fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(46.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
-                    IconButton(vm::previous, Modifier.size(64.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(46.dp)) }
-                    IconButton(vm::toggle, Modifier.size(72.dp)) {
+                Row(Modifier.fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(34.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
+                    IconButton(vm::previous, Modifier.size(72.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
+                    IconButton(vm::toggle, Modifier.size(84.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
                             if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
                             else Icon(
                                 if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause",
-                                Modifier.size(58.dp),
+                                Modifier.size(70.dp),
                             )
                         }
                     }
-                    IconButton(vm::next, Modifier.size(64.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(46.dp)) }
+                    IconButton(vm::next, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
                 }
 
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.17f))
@@ -336,7 +354,7 @@ private fun OutputButton() {
         else -> Icons.Filled.Cast
     }
     IconButton({ openOutputPicker(context, output) }) {
-        Icon(icon, "Output: $output", Modifier.size(23.dp), tint = if (elsewhere) scheme.primary else scheme.onSurfaceVariant)
+        Icon(icon, "Output: $output", Modifier.size(27.dp), tint = if (elsewhere) scheme.primary else scheme.onSurfaceVariant)
     }
 }
 
@@ -358,7 +376,21 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
     android.widget.Toast.makeText(context, "Playing through $output", android.widget.Toast.LENGTH_SHORT).show()
 }
 
-private const val SLEEVE = 0.80f
+/**
+ * The player's side margin. Apple keeps its title, seek bar and title-row buttons 8.2 % of the
+ * screen's width in from each edge - measured on `w4` - which on a 411 dp wide phone is 33 dp; ours sat
+ * at 26 and 16, so everything read as pushed against the sides.
+ */
+private val PLAYER_GUTTER = 33.dp
+
+private const val SLEEVE = 0.74f
+
+/**
+ * How much of the sleeve's height runs on underneath the title block instead of above it. With the
+ * sleeve at [SLEEVE] this puts the title where `w4` has it, 56.5 % of the screen, with the picture's
+ * blurred tail behind it.
+ */
+private const val SLEEVE_UNDER_TEXT = 0.095f
 
 /** Drag it down, or tap it, to put the player away. */
 @Composable
@@ -400,7 +432,7 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
             // The sleeve goes soft rather than stopping: its bottom third cross-fades into the same
             // cover, blurred, which the page behind it is already drawing at the same scale.
             if (palette != null) Box(
-                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.28f) },
+                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.19f) },
             )
         }
     }
@@ -416,7 +448,7 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
         contentColor = if (selected) scheme.primary else scheme.onSurface,
         modifier = Modifier.size(42.dp),
     ) {
-        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(20.dp)) }
+        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(25.dp)) }
     }
 }
 
@@ -459,7 +491,7 @@ private fun VolumeRow(vm: PlayerViewModel) {
                 }
                 .pointerInput(Unit) { detectTapGestures { pick(it.x, size.width.toFloat()) } }
                 .drawBehind {
-                    val h = 8.dp.toPx()
+                    val h = 7.dp.toPx()
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
@@ -476,7 +508,7 @@ private fun VolumeRow(vm: PlayerViewModel) {
 @Composable
 private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    IconButton(onClick) { Icon(icon, label, Modifier.size(23.dp), tint = if (on) scheme.primary else scheme.onSurfaceVariant) }
+    IconButton(onClick) { Icon(icon, label, Modifier.size(27.dp), tint = if (on) scheme.primary else scheme.onSurfaceVariant) }
 }
 
 /** The only ticking thing in the app, and only while this screen is resumed and music is playing. */
@@ -506,7 +538,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val fraction = (if (dragging) drag else pos.toFloat() / d).coerceIn(0f, 1f)
     val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
     val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-    Column(Modifier.padding(horizontal = 26.dp, vertical = 8.dp)) {
+    Column(Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 8.dp)) {
         Box(
             Modifier.fillMaxWidth().height(26.dp)
                 .pointerInput(d) {
@@ -518,7 +550,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                 }
                 .pointerInput(d) { detectTapGestures { vm.seekTo(((it.x / size.width).coerceIn(0f, 1f) * d).toLong()) } }
                 .drawBehind {
-                    val h = 5.dp.toPx()
+                    val h = 7.3f.dp.toPx()
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)

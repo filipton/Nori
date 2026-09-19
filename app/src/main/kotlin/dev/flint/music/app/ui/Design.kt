@@ -61,6 +61,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.role
 import dev.flint.music.app.R
 
 /**
@@ -266,7 +269,11 @@ fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
             wash,
             srcOffset = IntOffset(0, v0), srcSize = IntSize(WASH_ROWS, v1 - v0),
             dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
-            alpha = t * t,
+            // Quick at first and then a long tail, measured off `w4`: their cover's detail halves within
+            // a percent or two of the screen and then lingers as a faint trace for several more, which
+            // is what runs behind the title. An ease-in (t squared) did the opposite - sharp for most of
+            // the way, then gone all at once just before the text.
+            alpha = 1f - (1f - t) * (1f - t) * (1f - t),
             filterQuality = FilterQuality.Low,
         )
     }
@@ -549,12 +556,12 @@ fun FlintSlider(
     val scheme = MaterialTheme.colorScheme
     val track = scheme.onSurface.copy(alpha = if (enabled) 0.16f else 0.07f)
     val fill = if (enabled) scheme.primary else scheme.onSurface.copy(alpha = 0.25f)
-    val knob = if (enabled) scheme.onSurface else scheme.onSurface.copy(alpha = 0.4f)
+    val knob = if (enabled) Color.White else Color(0xFFBDBDBD)
     val span = (range.endInclusive - range.start).takeIf { it > 0f } ?: 1f
     val fraction = ((value - range.start) / span).coerceIn(0f, 1f)
     val pick: (Float, Float) -> Unit = { x, w -> onChange(range.start + (x / w).coerceIn(0f, 1f) * span) }
     Box(
-        modifier.fillMaxWidth().height(34.dp)
+        modifier.fillMaxWidth().height(40.dp)
             .pointerInput(enabled, range) {
                 if (!enabled) return@pointerInput
                 detectHorizontalDragGestures(
@@ -566,7 +573,9 @@ fun FlintSlider(
                 detectTapGestures { pick(it.x, size.width.toFloat()) }
             }
             .drawBehind {
-                val h = 6.dp.toPx()
+                // UISlider's proportions: a 4 pt track and a 28 pt white knob sitting on a soft shadow.
+                // The old 6 dp track with a 17 dp grey knob was Material's shape in Apple's colours.
+                val h = 4.dp.toPx()
                 val y = (size.height - h) / 2f
                 val radius = androidx.compose.ui.geometry.CornerRadius(h / 2f, h / 2f)
                 drawRoundRect(track, androidx.compose.ui.geometry.Offset(0f, y), androidx.compose.ui.geometry.Size(size.width, h), radius)
@@ -576,7 +585,10 @@ fun FlintSlider(
                     fill, androidx.compose.ui.geometry.Offset(minOf(from, to), y),
                     androidx.compose.ui.geometry.Size(kotlin.math.abs(to - from), h), radius,
                 )
-                drawCircle(knob, h * 1.45f, androidx.compose.ui.geometry.Offset(to, size.height / 2f))
+                val r = 14.dp.toPx()
+                val cx = to.coerceIn(r, size.width - r)
+                drawCircle(Color.Black.copy(alpha = if (enabled) 0.18f else 0.08f), r + 1.dp.toPx(), androidx.compose.ui.geometry.Offset(cx, size.height / 2f + 1.5f.dp.toPx()))
+                drawCircle(knob, r, androidx.compose.ui.geometry.Offset(cx, size.height / 2f))
             },
     )
 }
@@ -716,3 +728,49 @@ fun reduceMotion(): Boolean {
     }
     return prefs.reduceMotion || systemOff
 }
+
+
+/**
+ * A switch drawn the way iOS draws one: UISwitch's 51 by 31 pt track and a 27 pt white thumb on a
+ * soft shadow, the track filling with the page's accent when on. Material's switch - a thin outlined
+ * pill whose thumb grows when it is on - was the most Android-looking thing left in settings.
+ *
+ * The thumb slides when it is tapped, which is the one kind of motion this app allows: something the
+ * user touched, answering. Nothing moves otherwise.
+ */
+@Composable
+fun FlintSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifier: Modifier = Modifier, enabled: Boolean = true) {
+    val scheme = MaterialTheme.colorScheme
+    val t by androidx.compose.animation.core.animateFloatAsState(
+        if (checked) 1f else 0f, androidx.compose.animation.core.tween(if (reduceMotion()) 0 else 180), label = "switch",
+    )
+    val on = scheme.primary
+    val off = scheme.onSurface.copy(alpha = 0.16f).over(scheme.background)
+    val track = androidx.compose.ui.graphics.lerp(off, on, t).let { if (enabled) it else it.copy(alpha = 0.4f) }
+    Box(
+        modifier.size(width = 51.dp, height = 31.dp)
+            .then(
+                if (onCheckedChange != null) Modifier.clickable(
+                    enabled = enabled,
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                ) { onCheckedChange(!checked) } else Modifier,
+            )
+            .semantics { role = androidx.compose.ui.semantics.Role.Switch; toggleableState = androidx.compose.ui.state.ToggleableState(checked) }
+            .drawBehind {
+                val h = size.height
+                drawRoundRect(track, cornerRadius = androidx.compose.ui.geometry.CornerRadius(h / 2f, h / 2f))
+                val r = 13.5f.dp.toPx()
+                val pad = 2.dp.toPx()
+                val cx = pad + r + (size.width - 2 * (pad + r)) * t
+                drawCircle(Color.Black.copy(alpha = 0.16f), r + 0.5f.dp.toPx(), androidx.compose.ui.geometry.Offset(cx, h / 2f + 1.dp.toPx()))
+                drawCircle(if (enabled) Color.White else Color(0xFFE0E0E0), r, androidx.compose.ui.geometry.Offset(cx, h / 2f))
+            },
+    )
+}
+
+/**
+ * A decibel figure with its sign, one decimal. `-0.0f` is a real float - the automatic pre-amp is
+ * minus the largest boost, and minus nothing is negative zero - and `"%+.1f"` prints it as "-0.0 dB".
+ */
+fun signedDb(db: Float): String = "%+.1f".format(if (db == 0f) 0f else db)

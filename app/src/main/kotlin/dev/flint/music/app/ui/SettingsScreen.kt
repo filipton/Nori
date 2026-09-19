@@ -41,7 +41,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -110,7 +109,7 @@ fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = tru
             Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Switch(value, onChange, enabled = enabled)
+        FlintSwitch(value, onChange, enabled = enabled)
     }
     Hairline(startIndent = 16.dp)
     }
@@ -370,7 +369,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Toggle("Hi-res output", "Plays 24-bit files at full quality instead of 16-bit; the equalizer isn't available in this mode, and it takes effect next time you start playback.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
             Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
             if (p.replayGain != ReplayGainMode.OFF) {
-                Text("Pre-amp ${"%+.1f".format(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
+                Text("Pre-amp ${signedDb(p.preampDb)} dB", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall)
                 FlintSlider(p.preampDb, -12f..6f, { v -> vm.update { it.copy(preampDb = v) } }, Modifier.padding(horizontal = 16.dp), centred = true)
             }
             Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 15.dp)) {
@@ -455,7 +454,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 Column {
                     Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                        Switch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } })
+                        FlintSwitch(on, { show -> vm.update { s -> s.copy(homeRows = if (show) s.homeRows + row else s.homeRows - row) } })
                     }
                     Hairline(startIndent = 16.dp)
                 }

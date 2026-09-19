@@ -117,6 +117,32 @@ leaves a fifth of a pixel behind on each slice, and by the last one that is six 
 cover lying across the bottom of the sleeve — a bright hairline. Round the *edges*, not the heights,
 and pin the last slice to the sleeve's own bottom. `drawSleeveWash`'s three bands have the same trap.
 
+## Sizes, measured
+
+Everything on the player was measured against `w4` as a share of the screen's *width*, so a 977 px
+iPhone and a 1080 px Android compare directly. Apple / ours after the change:
+
+| | Apple | ours |
+|---|---|---|
+| title top, artist top | 56.5 %, 59.3 % of height | 56.3 %, 59.3 % |
+| cover detail at 53 / 55 / 57 % of height | 5.0 / 1.9 / 0.8 | 4.5 / 2.4 / 0.7 |
+| side margin (title, seek bar, discs) | 8.2 % | 8.3 % (`PLAYER_GUTTER`, 33 dp) |
+| pause glyph height | 9.8 % | 10.0 % |
+| skip glyph width | 9.7 % | 9.6 % |
+| seek bar thickness | 1.64 % | 1.67 % |
+| volume bar thickness | 1.84 % | 1.76 % |
+| title-row disc | 7.9 %, glyph 60 % of it | 7.9 %, glyph 60 % |
+| bottom icons | 5.4 × 5.1 % | 5.5 × 5.0 % |
+
+The title sits over the sleeve's blurred tail, as Apple's does: the sleeve is laid out shorter than it
+is drawn (`SLEEVE_UNDER_TEXT`), and its melt is quick-then-long (`1 - (1-t)³`) so a faint trace of
+the cover is still there behind the title, which is what the numbers above show on theirs.
+
+Settings and menus had two Material shapes left in them. The switch is now UISwitch's 51 × 31 pt
+track with a 27 pt white thumb (`FlintSwitch`), and `FlintSlider` is UISlider's 4 pt track with a
+28 pt white knob on a soft shadow. Neither of those was measured off a screenshot — there is no
+settings screen in the App Store set — they are UIKit's own defaults.
+
 ## The album page's seam
 
 An album page has no wash (see above) and no separate gradient under its artwork either. It used to:
