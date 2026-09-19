@@ -68,11 +68,22 @@ class Nav(private val c: NavHostController) {
      * the way back, which meant tapping Home from an album popped the album and then put it straight
      * back - the tab looked dead. Nothing above the tab roots survives a tab tap now.
      */
-    fun tab(route: String) = c.navigate(route) {
-        popUpTo(c.graph.startDestinationId)
-        launchSingleTop = true
+    fun tab(route: String) {
+        // Tapping Search is a request for the keyboard, whether or not the screen is already open -
+        // and with launchSingleTop it is not recomposed, so nothing else would notice the tap.
+        if (route == "search") searchTaps.intValue++
+        c.navigate(route) {
+            popUpTo(c.graph.startDestinationId)
+            launchSingleTop = true
+        }
     }
 }
+
+/** Counts taps on the search tab; the search field takes focus again on each one. */
+private val searchTaps = androidx.compose.runtime.mutableIntStateOf(0)
+
+@Composable
+internal fun searchFocusKey(): Int = searchTaps.intValue
 
 val LocalNav = staticCompositionLocalOf<Nav> { error("no nav") }
 val LocalSongMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
@@ -144,7 +155,9 @@ fun App() {
                         """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
                             """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""
                     }.orEmpty() +
-                    """"starred":${st.current?.starred ?: false},""" +
+                    // What the screen shows, mark included - not the snapshot the queue was painted with,
+                    // which is what a favourite toggled this session no longer agrees with.
+                    """"starred":${st.current?.let { actions.starMarks.value.effectiveStar(dev.flint.music.data.StarKind.SONG, it.id, it.starred) } ?: false},""" +
                     """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
             }
             onDispose {

@@ -28,7 +28,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.composed
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -39,7 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.FastForward
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.PlayerViewModel
 
@@ -155,7 +166,7 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
         modifier = Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
             .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-            .flingActions(horizontal = false, threshold = 0.5f, onEnd = onOpen),
+            .riseToPlayer(onOpen),
     ) {
         // The tap has to be a child of the drag detectors, not a sibling behind them: a pointerInput
         // waiting for drag slop swallows a tap offered to a clickable further up the same chain.
@@ -172,9 +183,48 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
             }
             if (state.buffering) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
             IconButton(vm::toggle) { Icon(if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause", Modifier.size(26.dp)) }
-            IconButton(vm::next) { Icon(Icons.Filled.SkipNext, "Next", Modifier.size(24.dp)) }
+            IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
         }
         }
+    }
+}
+
+/**
+ * The mini player rises with the finger and hands over to the full player part-way through the drag,
+ * rather than springing back and letting a separate slide begin afterwards - which is the jump this
+ * replaces. It grows and fades as it goes, so the bar reads as becoming the player.
+ *
+ * Downward drags do nothing: the bar already sits at the bottom of the screen.
+ */
+private fun Modifier.riseToPlayer(onOpen: () -> Unit): Modifier = composed {
+    val lift = remember { Animatable(0f) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    pointerInput(Unit) {
+        val trigger = 64.dp.toPx()
+        // Inside the gesture block, not remembered outside it: a value captured at composition time is
+        // the one this file has been bitten by before, and here it would fire the navigation once and
+        // then never again.
+        var opened = false
+        val settle: () -> Unit = {
+            opened = false
+            scope.launch { lift.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
+        }
+        detectVerticalDragGestures(onDragEnd = settle, onDragCancel = settle) { _: PointerInputChange, d: Float ->
+            val next = (lift.value + d).coerceIn(-trigger * 2f, 0f)
+            scope.launch { lift.snapTo(next) }
+            if (!opened && -next >= trigger) {
+                opened = true
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                onOpen()
+            }
+        }
+    }.graphicsLayer {
+        translationY = lift.value
+        val t = (-lift.value / (64.dp.toPx() * 2f)).coerceIn(0f, 1f)
+        scaleX = 1f + t * 0.04f
+        scaleY = 1f + t * 0.04f
+        alpha = 1f - t * 0.3f
     }
 }
 

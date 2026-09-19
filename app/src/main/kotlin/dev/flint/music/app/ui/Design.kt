@@ -229,10 +229,10 @@ fun LargeTitle(text: String, modifier: Modifier = Modifier, trailing: @Composabl
 
 /** Small grey capitals under a title: "2019 · ALTERNATIVE · LOSSLESS". */
 @Composable
-fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = TextAlign.Start) {
+fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = TextAlign.Start, caps: Boolean = true) {
     if (text.isEmpty()) return
     Text(
-        text.uppercase(), modifier, style = MaterialTheme.typography.labelSmall,
+        if (caps) text.uppercase() else text, modifier, style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = align, maxLines = 2, overflow = TextOverflow.Ellipsis,
     )
 }
@@ -323,16 +323,26 @@ fun ScrimIconButton(icon: ImageVector, description: String, onClick: () -> Unit,
 @Composable
 fun SearchField(
     value: String, onValue: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier,
-    testTag: String? = null, autofocus: Boolean = false,
+    testTag: String? = null, autofocus: Boolean = false, focusKey: Any = Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     // Asked for by hand: opening search focuses the field so the keyboard is already there.
     val focus = remember(autofocus) { if (autofocus) FocusRequester() else null }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
-    LaunchedEffect(focus) {
-        // Focus alone does not always raise the keyboard when it lands before the window is ready;
-        // ask for it explicitly, which is the whole point of autofocus.
-        if (focus != null) { focus.requestFocus(); keyboard?.show() }
+    LaunchedEffect(focus, focusKey) {
+        if (focus == null) return@LaunchedEffect
+        // The field's node is not attached on the frame this first runs, and requestFocus on an
+        // unattached one throws and leaves the screen with no keyboard at all - which is what tapping
+        // Search used to do about half the time. Ask again for a few frames until it takes.
+        repeat(12) {
+            androidx.compose.runtime.withFrameNanos {}
+            if (runCatching { focus.requestFocus() }.isSuccess) {
+                // Focus alone does not always raise the keyboard when it lands before the window is
+                // ready; ask for it explicitly, which is the whole point of autofocus.
+                keyboard?.show()
+                return@LaunchedEffect
+            }
+        }
     }
     Surface(
         shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background),

@@ -289,8 +289,22 @@ class Library(
     }
 
     suspend fun star(kind: StarKind, id: String, on: Boolean) {
-        write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist")
-        _starMarks.update { it + ("${kind.param}:$id" to on) }
+        val key = "${kind.param}:$id"
+        val was = _starMarks.value[key]
+        // The mark goes up first, so the heart fills under the finger. Doing it after the request meant
+        // waiting a round trip to the server - which is what "favourites do not refresh" was.
+        _starMarks.update { it + (key to on) }
+        _starsVersion.update { it + 1 }
+        try {
+            write(if (on) "star" else "unstar", params(kind.param to id), "getStarred2", "getAlbum", "getArtist", "getPlaylist")
+        } catch (e: Exception) {
+            // Offline is not a failure: write() queues those and replays them. Anything else is, and the
+            // screen must not keep showing a favourite the server never took.
+            _starMarks.update { if (was == null) it - key else it + (key to was) }
+            _starsVersion.update { it + 1 }
+            throw e
+        }
+        // Now the server has it, so the lists that come from it can be asked again.
         _starsVersion.update { it + 1 }
     }
 

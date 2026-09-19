@@ -45,6 +45,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
         SearchField(
             ui.query, vm::setQuery, "Songs, albums, artists",
             Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), testTag = "search", autofocus = true,
+            focusKey = searchFocusKey(),
         )
         if (ui.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text("Server search failed: $it — showing offline results", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
