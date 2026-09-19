@@ -236,29 +236,19 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               // a layer at zero alpha is skipped, so a page left animating underneath costs nothing.
               Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (sheet.progress.value >= 1f) 0f else 1f }) {
               CompositionLocalProvider(LocalStarMarks provides marks, LocalChromeInset provides chromeHeight) {
-                // One transition for the whole app, and a quiet one: pages slide a little and fade, the
-                // way a push does on a phone. The default jumps and the horizontal slide across the
-                // full width reads as a lurch on a large screen.
+                // One transition for the whole app, and the same one in both directions. See PageMotion.
                 val plain = reduceMotion()
-                val slide = if (plain) 0 else 40
-                val fast = if (plain) 90 else 220
                 NavHost(
                     controller, "home",
-                    enterTransition = {
-                        androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(fast)) { slide } +
-                            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180))
-                    },
-                    exitTransition = { androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 140)) },
-                    popEnterTransition = { androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180)) },
-                    popExitTransition = {
-                        androidx.compose.animation.slideOutHorizontally(androidx.compose.animation.core.tween(if (plain) 90 else 200)) { slide } +
-                            androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 160))
-                    },
+                    enterTransition = { PageMotion.enter(plain) },
+                    exitTransition = { PageMotion.exit(plain) },
+                    popEnterTransition = { PageMotion.enter(plain) },
+                    popExitTransition = { PageMotion.exit(plain) },
                     // The back gesture scrubs these with the finger. Left to the library's defaults, the page
                     // being left shrank to 70 % without fading, over a page that was already fully drawn -
                     // two pages on top of each other for the whole gesture. See PredictiveBack.
                     predictivePopEnterTransition = { _ -> PredictiveBack.enter(plain) },
-                    predictivePopExitTransition = { edge -> PredictiveBack.exit(plain, edge) },
+                    predictivePopExitTransition = { _ -> PredictiveBack.exit(plain) },
                 ) {
                     composable("home") { Inset { HomeScreen(actions) } }
                     composable("search") { Inset { SearchScreen(actions) } }
@@ -320,29 +310,72 @@ private fun SheetBack(sheet: PlayerSheet) {
 }
 
 /**
- * The back gesture's page transition. It is scrubbed by the finger, so it is linear in time - the page
- * moves as far as the finger has - and the two pages do not show through each other: the one being left
- * is gone by 60 % of the way, the one coming back comes in over the second half. The page slides
- * towards the edge the finger is moving to.
+ * How every page comes and goes. A page arrives from a little above where it will sit and settles down
+ * into place as it fades up; it leaves by lifting back off the same way. Pages used to slide sideways
+ * instead, and with the fade running underneath the owner read that as the whole page flying out of the
+ * top left corner rather than as anything moving in one direction - a vertical arrival has the direction
+ * the eye already reads a list in.
+ *
+ * The movement is a fraction of the height rather than a slide across the screen: far enough to see
+ * where the page came from, short enough that a tap on a shelf is not a scene change. It decelerates,
+ * so the page is quick to appear and slow to come to rest, and the fade finishes first - by the time
+ * the page is fully drawn it is only easing the last few pixels into place.
+ */
+private object PageMotion {
+    /** A twelfth of the screen on the way in, and less on the way out: leaving is the quieter half. */
+    private const val DROP = 12
+    private const val LIFT = 16
+
+    /** Nearly all of the travel is spent in the first third of the time. */
+    private val Settle = androidx.compose.animation.core.CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
+
+    fun enter(plain: Boolean): androidx.compose.animation.EnterTransition {
+        val fade = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180, easing = Settle))
+        if (plain) return fade
+        return fade + androidx.compose.animation.slideInVertically(
+            androidx.compose.animation.core.tween(220, easing = Settle),
+        ) { -it / DROP }
+    }
+
+    fun exit(plain: Boolean): androidx.compose.animation.ExitTransition {
+        val fade = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 140, easing = Settle))
+        if (plain) return fade
+        return fade + androidx.compose.animation.slideOutVertically(
+            androidx.compose.animation.core.tween(180, easing = Settle),
+        ) { -it / LIFT }
+    }
+}
+
+/**
+ * The back gesture's page transition: the same arrival and departure as [PageMotion], but scrubbed by
+ * the finger, so it is linear in time - the page moves as far as the finger has, and no further. The
+ * two pages do not show through each other: the one being left is gone by 60 % of the way, and the one
+ * coming back fades and settles down into place over the second half.
  */
 private object PredictiveBack {
     // The owner wanted the gesture to let go of the page a little sooner than it did (it was 320 ms).
     private const val MS = 240
 
-    fun enter(plain: Boolean): androidx.compose.animation.EnterTransition =
-        androidx.compose.animation.fadeIn(
+    fun enter(plain: Boolean): androidx.compose.animation.EnterTransition {
+        val fade = androidx.compose.animation.fadeIn(
             androidx.compose.animation.core.tween(MS / 2, delayMillis = if (plain) 0 else MS / 2, easing = androidx.compose.animation.core.LinearEasing),
         )
+        if (plain) return fade
+        return fade + androidx.compose.animation.slideInVertically(
+            androidx.compose.animation.core.tween(MS / 2, delayMillis = MS / 2, easing = androidx.compose.animation.core.LinearEasing),
+        ) { -it / 16 }
+    }
 
-    fun exit(plain: Boolean, edge: Int): androidx.compose.animation.ExitTransition {
+    fun exit(plain: Boolean): androidx.compose.animation.ExitTransition {
         val fade = androidx.compose.animation.fadeOut(
             androidx.compose.animation.core.tween(MS * 6 / 10, easing = androidx.compose.animation.core.LinearEasing),
         )
         if (plain) return fade
-        val sign = if (edge == androidx.activity.BackEventCompat.EDGE_RIGHT) -1 else 1
-        return fade + androidx.compose.animation.slideOutHorizontally(
+        // A little further than a page leaving on its own: this one is following a thumb, and the
+        // movement is what says the gesture has been understood.
+        return fade + androidx.compose.animation.slideOutVertically(
             androidx.compose.animation.core.tween(MS, easing = androidx.compose.animation.core.LinearEasing),
-        ) { sign * it / 5 }
+        ) { -it / 10 }
     }
 }
 

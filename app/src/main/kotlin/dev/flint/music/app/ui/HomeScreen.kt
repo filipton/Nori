@@ -33,7 +33,14 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -51,13 +58,15 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     var rearranging by remember { mutableStateOf(false) }
     if (rearranging) { RowOrder(settings) { rearranging = false }; return }
     LoadBox(load) { ui ->
+        val arrival = rememberArrival()
+        val rise = with(LocalDensity.current) { Arrival.RISE.toPx() }
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             // Shuffling the whole library and picking the server's queue back up are things you do
             // occasionally, so they live behind the title's menu rather than as two buttons across the
             // top of the page: what belongs at the top of this screen is music.
             item(key = "title") {
                 var menu by remember { mutableStateOf(false) }
-                LargeTitle("Listen now") {
+                LargeTitle("Listen now", Modifier.arriving(arrival, 0, rise)) {
                     Box {
                         IconButton({ menu = true }) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(22.dp)) }
                         DropdownMenu(menu, { menu = false }) {
@@ -69,27 +78,94 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                 }
             }
             // Favourites are always here; the mixes join them when the taste model is on (MixesViewModel).
-            item(key = "mixes") { SectionTitle("For you"); MixTiles() }
+            item(key = "mixes") { Column(Modifier.arriving(arrival, 1, rise)) { SectionTitle("For you"); MixTiles() } }
             if (ui.pinned.isNotEmpty()) item(key = "pinned") {
-                SectionTitle("Pinned playlists")
-                LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id) }) }
+                Column(Modifier.arriving(arrival, 2, rise)) {
+                    SectionTitle("Pinned playlists")
+                    LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        items(ui.pinned, key = { it.id }) { p -> CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id) }) }
+                    }
                 }
             }
-            ui.rows.forEach { (row, albums) -> shelf(row.title, albums, vm) }
+            // The shelves carry on the count the sections above started, so each one arrives a moment
+            // after the one over it; an empty shelf is not drawn and does not take a place in the order.
+            var place = if (ui.pinned.isNotEmpty()) 3 else 2
+            ui.rows.forEach { (row, albums) ->
+                if (albums.isEmpty()) return@forEach
+                shelf(row.title, albums, vm, arrival, place++, rise)
+            }
         }
     }
 }
 
-private fun androidx.compose.foundation.lazy.LazyListScope.shelf(title: String, albums: List<Album>, vm: HomeViewModel) {
-    if (albums.isEmpty()) return
+private fun androidx.compose.foundation.lazy.LazyListScope.shelf(
+    title: String,
+    albums: List<Album>,
+    vm: HomeViewModel,
+    arrival: State<Float>,
+    place: Int,
+    rise: Float,
+) {
     item(key = title, contentType = "shelf") {
         val nav = LocalNav.current
-        SectionTitle(title)
-        LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(albums, key = { it.id }, contentType = { "album" }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 150.dp, { nav.album(a.id) }) }
+        Column(Modifier.arriving(arrival, place, rise)) {
+            SectionTitle(title)
+            LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(albums, key = { it.id }, contentType = { "album" }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 150.dp, { nav.album(a.id) }) }
+            }
         }
     }
+}
+
+/**
+ * The home page's sections do not appear all at once: each one fades up and rises the last few pixels
+ * into place a moment after the one above it, so the page reads top to bottom the way the pages it is
+ * part of now arrive (see PageMotion in App.kt). It is one run, started when the page's content first
+ * exists and over inside four tenths of a second, and the fourth section is the last to wait - with a
+ * dozen shelves the page would otherwise still be assembling itself after the user had begun to scroll.
+ */
+private object Arrival {
+    /** How long the whole run lasts, and how far apart two sections start within it. */
+    const val RUN = 380
+    private const val STEP = 40
+    /** Each section's own move, and the last place that still waits its turn. */
+    private const val MOVE = 220
+    private const val LAST = 4
+
+    /** The same curve the pages use: quick to appear, unhurried about coming to rest. */
+    private val Settle = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
+
+    val RISE = 14.dp
+
+    /** Where one section is in its own move, given how far the single run driving all of them has got. */
+    fun at(run: Float, place: Int): Float {
+        val ms = run * RUN - minOf(place, LAST) * STEP
+        return Settle.transform((ms / MOVE).coerceIn(0f, 1f))
+    }
+}
+
+/**
+ * The one animation behind the whole page. It runs once: a section scrolled away and back reads a run
+ * that finished long ago, and fresh data for a page already showing does not start it again, so nothing
+ * here moves while the page is sitting still.
+ */
+@Composable
+private fun rememberArrival(): State<Float> {
+    val plain = reduceMotion()
+    val progress = remember { Animatable(0f) }
+    // Linear, because the curve belongs to each section's own move and not to the clock they share.
+    LaunchedEffect(plain) {
+        if (plain) progress.snapTo(1f)
+        else if (progress.value < 1f) progress.animateTo(1f, tween(Arrival.RUN, easing = LinearEasing))
+    }
+    return progress.asState()
+}
+
+/** Read in the draw phase: the run redraws the sections on screen and recomposes none of them. */
+private fun Modifier.arriving(arrival: State<Float>, place: Int, rise: Float) = graphicsLayer {
+    val t = Arrival.at(arrival.value, place)
+    alpha = t
+    translationY = rise * (1f - t)
 }
 
 

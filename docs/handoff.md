@@ -12,6 +12,30 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The player's own furniture.** The close chevron and the drag bar are gone - a pull anywhere on
+  the artwork already puts the player away, and the lyrics and queue keep a plain invisible strip at
+  the top for the same drag. The title block now carries the artist and the album on their own
+  lines, each a tap to that page; the format caption moved to the very foot of the page, centred
+  under everything; and the favourite here is a heart, as it is on albums, artists and playlists. The
+  now playing bar has a heart of its own.
+- **The panel's text fades with the panel.** The title, artist, album and the buttons beside them are
+  part of the panel, so they take the same fade as the artwork and the queue; before, they were left
+  behind and cut.
+- **The cover's flight, again.** It grows about its own middle and is under the middle of the screen
+  by the time the sheet is half way, instead of carrying its left edge the whole climb and spending
+  it in the corner with the page showing beside it. Its last frame now matches the sleeve exactly
+  (it used to arrive about forty pixels off). The melt at the sleeve's bottom is drawn where the
+  sleeve will be rather than on the record that is still travelling, so it stays in one place instead
+  of sliding up the screen with the picture.
+- **The song menu, ⋯.** One stage, so the back gesture closes the whole sheet rather than collapsing
+  it. The favourite row is gone (the player has a heart and a swipe does it on any row). Seven
+  everyday actions carry icons at the top - play next, queue, playlist, download, album, artist,
+  sleep timer - and radio, instant mix, exclude, share and details are behind a "More" row that opens
+  in place.
+- **Page transitions.** Pages arrive from a little above and settle down into place with a decelerate
+  ease, and leave the same way; the home page's sections follow one another down the screen over
+  about a third of a second, once per visit. The owner read the old horizontal slide as things flying
+  out of the top left corner.
 - **A record left standing up.** A button press that turned out to have nothing to slide to (the
   player had not caught up, so the record waiting off the edge was the one already showing) changed
   the song and returned without putting the record back down, and the cover stayed at its small

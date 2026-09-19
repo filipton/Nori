@@ -61,8 +61,8 @@ import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.automirrored.filled.VolumeDown
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
@@ -181,6 +181,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val sheet = LocalPlayerSheet.current
     val menu = LocalSongMenu.current
     val playerMenu = LocalPlayerMenu.current
+    // The artist and album lines under the title lead somewhere; going there puts the player away, which
+    // Nav does for every route while the sheet is up.
+    val nav = LocalNav.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
     // A panel's button opens it, and pressed again goes back to the artwork.
     val choose: (Panel) -> Unit = { panel = if (panel == it) Panel.ART else it }
@@ -313,9 +316,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             slide,
                         )
                     }
-                    Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
                 } else {
-                    Handle(Modifier.statusBarsPadding().graphicsLayer { alpha = panelFade }, scheme.onSurface.copy(alpha = 0.35f), sheet)
+                    // Where the handle used to be. The bar and the close button below it were two more
+                    // things to look at for something the page already does - a pull anywhere on the
+                    // artwork puts the player away - so only the drag is left, over the strip the lyrics
+                    // and the queue cannot have (they need their own vertical drag to scroll).
+                    Spacer(Modifier.fillMaxWidth().statusBarsPadding().height(22.dp).dragsSheet(sheet))
                     Box(
                         Modifier.weight(1f).graphicsLayer { alpha = panelFade }
                             .then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier),
@@ -334,7 +340,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
                 if (panel != Panel.LYRICS) Row(
-                    Modifier.fillMaxWidth().padding(start = PLAYER_GUTTER, end = PLAYER_GUTTER, top = 2.dp),
+                    Modifier.fillMaxWidth().graphicsLayer { alpha = panelFade }
+                        .padding(start = PLAYER_GUTTER, end = PLAYER_GUTTER, top = 2.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
@@ -343,21 +350,39 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             Modifier.readable(), style = MaterialTheme.typography.titleLarge,
                             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                         )
+                        // Artist and album, each on its own line and each a way there. On one line they
+                        // ran two ellipses into each other as soon as the album had a long name, which
+                        // is why the album used to be on the ⋯ menu and nowhere else.
+                        //
+                        // Apple holds these lines back from the title rather than colouring them: a
+                        // saturated accent here is the one thing that made the screen read as Material.
                         Text(
-                            // The artist alone, as Apple writes it. "Artist · Album" ran two ellipses into each
-                            // other the moment the album had a long name; the album is one tap away on ⋯.
                             state.current?.artist ?: "",
-                            // Apple holds this line back from the title rather than colouring it: a
-                            // saturated accent here is the one thing that made the screen read as Material.
+                            Modifier.clickable(enabled = state.current?.artistId != null) {
+                                state.current?.artistId?.let(nav::artist)
+                            },
                             style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                         )
+                        state.current?.album?.takeIf { it.isNotEmpty() }?.let { album ->
+                            Text(
+                                album,
+                                Modifier.clickable(enabled = state.current?.albumId != null) {
+                                    state.current?.albumId?.let(nav::album)
+                                },
+                                style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface.copy(alpha = 0.45f),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                     state.current?.let { s ->
                         val starred = marks.effectiveStar(dev.flint.music.data.StarKind.SONG, s.id, s.starred)
                         Row(Modifier, Arrangement.spacedBy(16.dp), Alignment.CenterVertically) {
+                            // A heart, as on an album, an artist and a playlist. The star here was the
+                            // odd one out, and a song being "starred" while everything else is
+                            // "favourited" is a distinction the server makes and nobody else does.
                             TitleCircle(
-                                if (starred) Icons.Filled.Star else Icons.Filled.StarBorder,
+                                if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                                 "Favourite", starred,
                             ) { actions.star(s, !starred) }
                             TitleCircle(Icons.Filled.MoreHoriz, "More", false) { playerMenu(s) }
@@ -365,21 +390,6 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
-                if (panel != Panel.LYRICS) state.current?.let { s ->
-                    val line = listOfNotNull(
-                        s.suffix.uppercase().ifEmpty { null },
-                        s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
-                        s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" },
-                    ).joinToString(" · ")
-                    // Apple shows nothing here. This audience wants it, so it stays - but well under
-                    // the artist line, as a caption you read when you look for it.
-                    Text(
-                        line, Modifier.padding(horizontal = PLAYER_GUTTER),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = scheme.onSurface.copy(alpha = 0.38f),
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
 
                 Box(kept("seek")) { SeekBar(vm, state.playing, state.durationMs) }
 
@@ -418,15 +428,26 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     OutputButton()
                     PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { choose(Panel.QUEUE) }
                 }
+                // Apple shows nothing of the kind anywhere. This audience wants it, so it stays - but at
+                // the very foot of the page and centred under everything else, a caption you read when
+                // you go looking for it rather than a label under the title.
+                state.current?.let { s ->
+                    val line = listOfNotNull(
+                        s.suffix.uppercase().ifEmpty { null },
+                        s.bitRate.takeIf { it > 0u }?.let { "$it kbps" },
+                        s.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" },
+                    ).joinToString(" · ")
+                    Text(
+                        line, Modifier.fillMaxWidth().padding(horizontal = PLAYER_GUTTER).padding(top = 2.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurface.copy(alpha = 0.38f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
             }
-            }
-            if (panel == Panel.ART) ScrimIconButton(
-                Icons.Filled.KeyboardArrowDown, "Close", sheet::close,
-                Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 6.dp),
-            ) else IconButton(sheet::close, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
-                Icon(Icons.Filled.KeyboardArrowDown, "Close", Modifier.size(26.dp))
             }
         }
     }
@@ -634,29 +655,42 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
                     val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
                     scaleX = k; scaleY = k
-                    // The square is wider than the screen, so layout centres it with its sides hanging
-                    // off both edges; that is where it ends up. It starts on the thumbnail.
-                    val overhang = (w - size.width) / 2f
-                    translationX = mix(from.left, overhang) - overhang
-                    translationY = mix(from.top, 0f)
+                    // The square grows about its own middle and travels from the middle of the
+                    // thumbnail to the middle of the screen, which is where the sleeve's middle is.
+                    // Carrying its left edge instead - what this did - left it hanging in the top left
+                    // corner of the sheet for the whole climb, with the page showing down the right
+                    // hand side, and it arrived a little way off the sleeve it was handing over to.
+                    val drawn = size.width * k
+                    // Sideways it is most of the way over before it is half way up. The thumbnail sits
+                    // at the very left of the bar and the sheet under it is already the full width, so
+                    // a square that crosses at the same rate as it climbs spends the whole climb in the
+                    // corner with the page showing beside it. Easing only this axis keeps both ends
+                    // exact - the thumbnail at the start, the sleeve at the end - and has the record
+                    // under the middle of the screen by the time the sheet is half way, after which it
+                    // only grows.
+                    val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
+                    translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f
+                    translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
                     shape = RoundedCornerShape(thumbRadius * (1f - t) / k)
                     clip = true
                 },
         ) {
             if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
             SleeveImage(art, Modifier.fillMaxSize())
-            // The sleeve's melt into the page, over the part of the square the screen will show. It fades
-            // in only over the last stretch, once the square's sides are nearly off the screen: earlier,
-            // the melt stopping short of the square's edges showed as a notch at its bottom corners.
-            if (palette != null) Box(
-                Modifier.align(Alignment.Center).requiredSize(with(density) { w.toDp() }, side)
-                    .graphicsLayer {
-                        val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
-                        alpha = e * e * (3f - 2f * e)
-                    }
-                    .drawBehind { drawSleeveMelt(palette, 0.19f) },
-            )
         }
+        // Where the sleeve melts into the page - drawn where the sleeve will be and not on the record
+        // that is still on its way there, so it stays put while the picture comes to it. Riding along
+        // inside the square, it travelled and grew with it, and near the end there were two of them in
+        // two different places: this one and the page's own, which is drawn to the sleeve's geometry.
+        // It fades in over the last stretch, once the square is nearly the size of the sleeve.
+        if (palette != null) Box(
+            Modifier.align(Alignment.TopStart).requiredSize(with(density) { w.toDp() }, side)
+                .graphicsLayer {
+                    val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
+                    alpha = e * e * (3f - 2f * e)
+                }
+                .drawBehind { drawSleeveMelt(palette, 0.19f) },
+        )
     }
 }
 

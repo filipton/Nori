@@ -62,6 +62,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.FastForward
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Favorite
 import dev.flint.music.app.vm.ActionsViewModel
 import dev.flint.music.app.vm.PlayerViewModel
 
@@ -91,7 +93,7 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlaye
         },
     ) {
         SelectionBar(actions)
-        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, onOpenPlayer, slab, content) }
+        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, slab, content) }
         Spacer(Modifier.height(tabsHeight))
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -190,7 +192,7 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
  * No progress bar on purpose: it would tick for as long as the app is open.
  */
 @Composable
-fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Color) {
+fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, slab: Color, content: Color) {
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     val settings: dev.flint.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
@@ -264,6 +266,19 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
                 modifier = Modifier.weight(1f),
                 item = track,
             )
+            // The one judgement worth making without opening the player: whether this is a song to keep.
+            // Apple has only the transport here; the owner asked for the heart, and the bar has the room
+            // for it because the title beside it is already allowed to run out of space gracefully.
+            song?.let { s ->
+                val starred = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, s.id, s.starred)
+                IconButton({ actions.star(s, !starred) }) {
+                    Icon(
+                        if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                        "Favourite", Modifier.size(22.dp),
+                        tint = if (starred) content else content.copy(alpha = 0.75f),
+                    )
+                }
+            }
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
             IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
         }
