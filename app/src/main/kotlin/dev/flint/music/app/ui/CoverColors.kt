@@ -74,19 +74,30 @@ suspend fun warmCoverPalette(context: android.content.Context, url: String?, dar
     runCatching { paletteOf(context, url, dark, amoled) }
 }
 
+/**
+ * A cover's colours together with the cover they came from. The two are handed out as one because the
+ * colours arrive a frame or two after the song does, and a caller that cannot tell whose colours it is
+ * holding treats the last song's as the new one's.
+ */
+data class CoverTint(val url: String?, val palette: PagePalette?)
+
 @Composable
-fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePalette? {
+fun rememberCoverTint(url: String?, dark: Boolean, amoled: Boolean): CoverTint {
     val context = LocalContext.current
     val key = url?.let { paletteKey(it, dark, amoled) }
-    val palette by produceState(key?.let(CoverPalette.cache::get), key) {
+    val tint by produceState(CoverTint(url, key?.let(CoverPalette.cache::get)), key) {
         // Drop the previous cover's colours the moment the track changes: holding them while the new
         // artwork loads leaves the mini player wearing the last song's tint for a second.
-        value = key?.let(CoverPalette.cache::get)
-        if (url == null || value != null) return@produceState
-        value = paletteOf(context, url, dark, amoled)
+        value = CoverTint(url, key?.let(CoverPalette.cache::get))
+        if (url == null || value.palette != null) return@produceState
+        value = CoverTint(url, paletteOf(context, url, dark, amoled))
     }
-    return palette
+    return tint
 }
+
+@Composable
+fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePalette? =
+    rememberCoverTint(url, dark, amoled).palette
 
 /**
  * The seam is the whole trick. A page tinted with the cover's *dominant* colour still shows a line
@@ -131,8 +142,13 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
  */
 private const val WASH = 32
 
-/** How far each pixel of the wash is pulled back towards the flat page colour. */
-private const val MUTE = 0.62f
+/**
+ * How far each pixel of the wash is pulled back towards the flat page colour. Two thirds of the way
+ * left the page reading as one flat tint with a hint of movement in it - the owner's words were that
+ * the colours "aren't good" and that the page should look like a blurred mirror of the record. It is
+ * pulled back much less now, and the extra blur below is what keeps that from turning into patches.
+ */
+private const val MUTE = 0.38f
 
 /**
  * Apple's player is not painted one flat colour. Measure across their screenshot and the page varies
@@ -153,17 +169,22 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
     val px = IntArray(WASH * WASH)
     small.getPixels(px, 0, WASH, 0, 0, WASH, WASH)
     if (small !== bitmap) small.recycle()
-    repeat(3) { blur(px) }
+    // Five passes rather than three. The cover has to become colour and light with no forms left in
+    // it at all: at three, a strong shape near the middle of a record still arrived as a shape on the
+    // page, and with the colours no longer muted down it would arrive as a bright one.
+    repeat(5) { blur(px) }
 
     val pageHsl = FloatArray(3).also { ColorUtils.colorToHSL(background.toArgb(), it) }
     val hsl = FloatArray(3)
     var meanL = 0f
     for (p in px) { ColorUtils.colorToHSL(p, hsl); meanL += hsl[2] }
     meanL /= px.size
-    // How far from the page colour a pixel may stray. Wider and text starts to sit on a light patch.
-    val spread = if (dark) 0.05f else 0.035f
-    val pull = if (dark) 0.9f else 0.7f
-    val maxSat = if (dark) 0.5f else 0.32f
+    // How far from the page colour a pixel may stray. Wide enough for the record's own light and dark
+    // to show through, narrow enough that white text never lands on a pale patch: at 0.11 the page's
+    // own 0.20 lightness reaches 0.31 at its brightest, where white still reads at about five to one.
+    val spread = if (dark) 0.11f else 0.055f
+    val pull = if (dark) 1f else 0.85f
+    val maxSat = if (dark) 0.62f else 0.40f
     for (i in px.indices) {
         ColorUtils.colorToHSL(px[i], hsl)
         hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)

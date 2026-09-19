@@ -12,6 +12,26 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The page's colours travel with the record.** The song only changes when the record has finished
+  sliding, so the page's colours could not start before that either - the whole change happened after
+  the move. `PageShift` carries how far the record has gone and which cover it is going to, the page
+  draws the arriving cover's blur over its own at that strength, and when the song finally changes the
+  page takes those colours over underneath instead of fading to them a second time (`CoverTint` keeps
+  a palette with the cover it came from, so the hand-over cannot happen a frame early, which showed as
+  a flick back to the old colour).
+- **The page follows the record as it is picked up.** The blur behind is the record at the record's own
+  size, so when the record shrinks the blur shrinks with it; left at the resting size, it carried on
+  below a card that had shrunk away from it as a band at the wrong scale. The sleeve's soft bottom
+  fades out over the same move, since a card that is up has its own clean edge.
+- **The page is more of a blurred mirror, less of a tint.** Each pixel of the wash was pulled two
+  thirds of the way back to a flat colour; it is pulled about a third now, with a wider lightness band
+  and more of the record's own saturation, and two more blur passes so that more colour does not
+  become patches.
+- **The three buttons under the volume read as centred.** They were evenly spaced already, but the ink
+  inside the glyphs is not centred in its own square and the queue's marks came out a sixth narrower
+  than the others, so the row leaned. `PanelButton` takes an optical size and nudge; measured on
+  screen, the outer two now sit within a pixel of each other's mirror.
+
 - **The page's colour changes with the song.** The covers either side of what is playing were already
   fetched ahead, but their colours were only worked out once the song had changed, so the page wore
   the last song's colour for a beat and then caught up. `warmCoverPalette` does that work in advance,

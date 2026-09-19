@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -194,6 +195,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var sleepMenu by remember { mutableStateOf(false) }
     // The transport's way of asking the sleeve to change record; see SleeveSlide.
     val slide = remember { SleeveSlide() }
+    // Where the page's colours are between records while one is moving; see PageShift.
+    val shift = remember { PageShift() }
     // How far the panel that is arriving has arrived. One number for the whole screen, driven here
     // rather than inside AnimatedContent: a child animation started by the content that is entering
     // reads its own state as already settled and never runs, which is why the sleeve used to be
@@ -235,7 +238,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
     // carries the record's colour down the whole screen.
     val black = prefs.amoled && !prefs.playerColours
-    val found = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, black) else null
+    val rowUrl = vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover)
+    val tint = if (prefs.coverColors) rememberCoverTint(rowUrl, dark, black) else CoverTint(rowUrl, null)
+    val found = tint.palette
+    // The colours of the record on its way in, already worked out by the time it is asked for (the now
+    // playing bar measures both neighbours ahead; see warmCoverPalette).
+    val arriving = if (prefs.coverColors) rememberCoverPalette(shift.towards, dark, black) else null
     // The page's colours change with the song by cross-fading, not in one frame, and they hold the last
     // song's colours while the new cover's are worked out - going to the plain page and then to the new
     // colours was two changes where there should be one. A song that really has none (no artwork) gets
@@ -243,11 +251,21 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     var palette by remember { mutableStateOf(found) }
     var fadingFrom by remember { mutableStateOf<PagePalette?>(null) }
     val washFade = remember { androidx.compose.animation.core.Animatable(1f) }
-    LaunchedEffect(found) {
-        if (found == palette) return@LaunchedEffect
+    LaunchedEffect(tint) {
+        // Still the last song's colours, which the song after it must not be given: the page keeps
+        // wearing what the record brought in until this song's own colours are really in hand.
+        if (tint.url != rowUrl) return@LaunchedEffect
+        if (found == palette) { shift.adopted = rowUrl; return@LaunchedEffect }
         if (found == null) delay(1200)
-        fadingFrom = palette
+        // A record that carried its colours in with it has them on screen already, so the page takes
+        // them over underneath rather than fading to them a second time; anything else - a song tapped
+        // in the queue, the notification, the queue running on by itself - cross-fades.
+        val carried = shift.amount > 0.9f && shift.towards == rowUrl
+        fadingFrom = if (carried) null else palette
         palette = found
+        // In the same breath as the colours themselves, so the sleeve lets go of them on a frame where
+        // the page is already drawing them.
+        shift.adopted = rowUrl
         // As long as the record takes to slide across, so the page and the sleeve arrive together.
         if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(420)) }
         fadingFrom = null
@@ -269,14 +287,25 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // Lyrics and queue have no sleeve on screen, and a player opened straight into
                     // one of them has never measured it: use where it would be, so those panels get
                     // the same picture behind them rather than one stretched row from the very top.
-                    val h = if (sleeveHeight > 0f) sleeveHeight else size.width / SLEEVE
-                    val b = if (sleeveBottom > 0f) sleeveBottom else h
+                    val resting = if (sleeveHeight > 0f) sleeveHeight else size.width / SLEEVE
+                    val bottom = if (sleeveBottom > 0f) sleeveBottom else resting
+                    // With the record picked up, the blurred copy shrinks about the same middle, so the
+                    // two are still the same picture at the same size and the card's edge still meets
+                    // its own blur rather than a band of it left behind at the resting scale.
+                    val h = resting * liftedScale(shift.lifted, size.width, resting)
+                    val b = bottom - resting / 2f + h / 2f
                     drawSleeveWash(p, b, h, size.height)
                 } else drawRect(scheme.background)
             }
             // While the colours change, the old page stays underneath and the new one fades in over it.
             Box(Modifier.matchParentSize().drawBehind { wash(fadingFrom ?: palette) })
             if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.drawBehind { wash(palette) })
+            // The arriving record's page, brought up as the record itself crosses. Only while there is
+            // something to bring up: with no colours worked out yet this would be the plain page sliding
+            // in, which is worse than the page simply waiting.
+            if (arriving != null && arriving != palette) Box(
+                Modifier.matchParentSize().graphicsLayer { alpha = shift.amount }.drawBehind { wash(arriving) },
+            )
             if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, palette, sleeveHeight > 0f)
             // Put away from the lyrics, the cover still travels - from the header's thumbnail to the one
             // in the now playing bar. Without it the lyrics simply went down behind the bar and a cover
@@ -345,7 +374,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             vm, sleeveArt, palette, coverUrl,
                             state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
                             state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
-                            slide,
+                            state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) },
+                            state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) },
+                            slide, shift,
                         )
                     }
                 } else {
@@ -453,12 +484,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 Box(kept("volume")) { VolumeRow(vm) }
 
                 Row(kept("icons").fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                    PanelButton(Icons.Filled.Lyrics, "Lyrics", page == Panel.LYRICS) { choose(Panel.LYRICS) }
+                    PanelButton(Icons.Filled.Lyrics, "Lyrics", page == Panel.LYRICS, nudge = (-1.5).dp) { choose(Panel.LYRICS) }
                     // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
                     // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
                     // which is where a setting for the evening belongs.
                     OutputButton()
-                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", page == Panel.QUEUE) { choose(Panel.QUEUE) }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", page == Panel.QUEUE, size = 30.dp, nudge = 0.5.dp) { choose(Panel.QUEUE) }
                 }
                 if (page == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
@@ -576,7 +607,13 @@ private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
  * line where the picture ends - the same dissolve the album page uses.
  */
 @Composable
-private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, currentUrl: String?, previousUrl: String?, nextUrl: String?, slide: SleeveSlide) {
+private fun Artwork(
+    vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, currentUrl: String?,
+    previousUrl: String?, nextUrl: String?,
+    /** The same two records at the size the colours are worked out from; see PageShift. */
+    previousTint: String?, nextTint: String?,
+    slide: SleeveSlide, shift: PageShift,
+) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
@@ -585,7 +622,7 @@ private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, 
             // behind the title; a full-width square can only do one or the other. Cover crops already.
             Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
-            SleeveCarousel(art, currentUrl, previousUrl, nextUrl, onPrevious = vm::previousItem, onNext = vm::next, slide = slide)
+            SleeveCarousel(art, currentUrl, previousUrl, nextUrl, previousTint, nextTint, onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift)
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
@@ -598,7 +635,9 @@ private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, 
             // stop dead: it goes soft into the plain page instead - black, on an AMOLED phone.
             val page = MaterialTheme.colorScheme.background
             Box(
-                Modifier.fillMaxSize().drawBehind {
+                // Gone by the time the record is properly up: a card that has shrunk away from it has
+                // its own rounded edge, and the soft bottom left behind sat across the page under it.
+                Modifier.fillMaxSize().graphicsLayer { alpha = (1f - shift.lifted * 1.6f).coerceIn(0f, 1f) }.drawBehind {
                     if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
                 },
             )
@@ -829,7 +868,8 @@ private const val HOLD_MS = 600L
 @Composable
 private fun SleeveCarousel(
     art: SleeveArt, currentUrl: String?, previousUrl: String?, nextUrl: String?,
-    onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide,
+    previousTint: String?, nextTint: String?,
+    onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide, shift: PageShift,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -878,6 +918,10 @@ private fun SleeveCarousel(
     val nextUrlNow by androidx.compose.runtime.rememberUpdatedState(nextUrl)
     val previousUrlNow by androidx.compose.runtime.rememberUpdatedState(previousUrl)
     val currentUrlNow by androidx.compose.runtime.rememberUpdatedState(currentUrl)
+    val nextTintNow by androidx.compose.runtime.rememberUpdatedState(nextTint)
+    val previousTintNow by androidx.compose.runtime.rememberUpdatedState(previousTint)
+    /** The colours the last change asked for, held until the page is showing them. */
+    var committedTint by remember { mutableStateOf<String?>(null) }
     val onNextNow by androidx.compose.runtime.rememberUpdatedState(onNext)
     val onPreviousNow by androidx.compose.runtime.rememberUpdatedState(onPrevious)
     // The record that has been slid in, drawn over the sleeve until the sleeve shows it too. The drawn
@@ -899,6 +943,31 @@ private fun SleeveCarousel(
     val heightPx = constraints.maxHeight.toFloat()
     val sideDp = with(density) { heightPx.toDp() }
     val down = spring<Float>(dampingRatio = 1f, stiffness = 300f, visibilityThreshold = 0.001f)
+    // The page's colours follow the record across (see PageShift). Once a record has arrived the song
+    // takes a frame or two to catch up, and the offset is back at nought by then, so the colours are
+    // held at the arriving record until the player has it - otherwise the page fell back to the old
+    // song's colour for those frames and then changed again.
+    val travel = heightPx * liftedScale(if (AppMotion.reduce) 0f else 1f, widthPx, heightPx) + gap
+    LaunchedEffect(shift, travel) {
+        androidx.compose.runtime.snapshotFlow { listOf(offset, committed, currentUrlNow, shift.adopted) }.collect { (o, waiting, showing, taken) ->
+            // Held from the moment a record is sent until the page is drawing its colours, and taken
+            // from the record's own position the rest of the time.
+            if (committedTint != null && (waiting != showing || taken != committedTint)) {
+                shift.towards = committedTint
+                shift.amount = 1f
+            } else {
+                val at = o as? Float ?: 0f
+                shift.towards = if (at < 0f) nextTintNow else if (at > 0f) previousTintNow else null
+                shift.amount = (kotlin.math.abs(at) / travel).coerceIn(0f, 1f)
+            }
+        }
+    }
+    LaunchedEffect(shift) {
+        androidx.compose.runtime.snapshotFlow { lift.value }.collect { shift.lifted = it }
+    }
+    androidx.compose.runtime.DisposableEffect(shift) {
+        onDispose { shift.towards = null; shift.amount = 0f; shift.lifted = 0f }
+    }
 
     /**
      * The record goes [go] (-1 for the next one, 1 for the one before), the song changes as it arrives,
@@ -956,6 +1025,7 @@ private fun SleeveCarousel(
             // next change waits for this, not for the picture: a cover that failed to load used to let
             // the one after it start against a queue that had not moved yet.
             committed = url
+            committedTint = if (go < 0) nextTintNow else previousTintNow
             art.snapNext = true
             offset = rest
             if (go < 0) onNextNow() else onPreviousNow()
@@ -1133,6 +1203,35 @@ private fun SleeveCarousel(
         }
     }
 }
+}
+
+/**
+ * How far the page's colour has travelled towards the record coming in, and which record that is.
+ * Written by the sleeve as it moves and read in the draw phase, so the page's colours cross over with
+ * the record rather than waiting for it to land: the song itself only changes when the record arrives,
+ * and until this existed so did its colour, a whole slide late.
+ */
+@Stable
+internal class PageShift {
+    /** The cover coming in, or null when nothing is on its way. */
+    var towards by mutableStateOf<String?>(null)
+    /** 0 at the record showing, 1 at the one arriving. */
+    var amount by mutableFloatStateOf(0f)
+
+    /**
+     * The cover whose colours the page itself is now drawing. The sleeve holds a landed record's
+     * colours up until this says the page has them: the song changes a frame or two before its colours
+     * are looked up, and letting go in between dropped the page back to the last song for those frames.
+     */
+    var adopted by mutableStateOf<String?>(null)
+
+    /**
+     * How far the record is picked up off the page, 0 at rest and 1 held. The page behind it is the
+     * same picture blurred, drawn to the sleeve's own size and place, so it has to shrink with the
+     * record: left at the resting size it carried on below a record that had shrunk away from it, as a
+     * band of blur at the wrong scale under a card with a hard edge.
+     */
+    var lifted by mutableFloatStateOf(0f)
 }
 
 /**
@@ -1335,9 +1434,29 @@ internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
 }
 
 @Composable
-private fun PanelButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, on: Boolean, onClick: () -> Unit) {
+private fun PanelButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    on: Boolean,
+    /**
+     * Optical alignment. The three boxes are spaced evenly and the glyphs are centred in them, but the
+     * ink inside a Material glyph is not centred in its own square and no two of these three fill it
+     * the same way: measured on screen, the queue's marks came out a sixth narrower than the other two
+     * and the row read as leaning. [size] evens out how much of the box each one covers and [nudge]
+     * moves its ink, not its touch target, so the three sit symmetrically about the middle one.
+     */
+    size: androidx.compose.ui.unit.Dp = 27.dp,
+    nudge: androidx.compose.ui.unit.Dp = 0.dp,
+    onClick: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
-    IconButton(onClick) { Icon(icon, label, Modifier.size(27.dp), tint = if (on) scheme.primary else scheme.onSurfaceVariant) }
+    IconButton(onClick) {
+        Icon(
+            icon, label,
+            Modifier.size(size).offset(x = nudge),
+            tint = if (on) scheme.primary else scheme.onSurfaceVariant,
+        )
+    }
 }
 
 /**
