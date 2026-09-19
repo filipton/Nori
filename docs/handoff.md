@@ -21,8 +21,9 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   shuffles only the rest (`shuffleAroundCurrent`). The queue panel lists songs in play order
   (`PlayerState.order`), marks hand-added ones, and hides reordering under shuffle. Checked with
   `build/upnext.sh`-style runs via `do enqueue|playnext|shuffle` and the `upNext` state field.
-- **Swipes.** A song row moves only in a direction that has an action; the left swipe now does nothing
-  by default (stored under a new key, `swipeLeft2`, so old installs get it too). The drag uncovers the
+- **Swipes.** A song row moves only in a direction that has an action. Right adds to the queue, left
+  favourites (or unfavourites) by default; the left one is stored under a new key, `swipeLeft3`, so
+  old installs get the new default too. The drag uncovers the
   action's icon and words; past 30% of the width the strip turns accent, the phone ticks and the row
   goes heavier, and letting go acts. 5-star ratings are gone (nobody used them).
 - **The silent USB DAC.** Audio offload hands the compressed stream to the phone's audio chip, and

@@ -7,6 +7,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -19,7 +20,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -189,13 +193,16 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val back = remember { spring<Float>(dampingRatio = 0.8f, stiffness = 520f) }
+    // The gesture outlives recompositions (it is keyed on which sides act, not on the actions), so it
+    // reads the actions as they are now: a favourite swiped once must offer "Remove" the second time.
+    val acts by rememberUpdatedState(right to left)
     pointerInput(right != null, left != null) {
         var x = 0f
         fun settle() { s.armed = false; scope.launch { s.offset.animateTo(0f, back) } }
-        detectHorizontalDragGestures(
+        sidewaysDrag(
             onDragStart = { x = s.offset.value; scope.launch { s.offset.stop() } },
             onDragEnd = {
-                if (s.armed) (if (x > 0f) right else left)?.action?.invoke()
+                if (s.armed) (if (x > 0f) acts.first else acts.second)?.action?.invoke()
                 settle()
             },
             onDragCancel = { settle() },
@@ -204,7 +211,7 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
             val arm = w * SWIPE_ARM
             val heavy = kotlin.math.abs(x) > arm && (delta > 0f) == (x > 0f)
             x = (x + if (heavy) delta * 0.4f else delta).coerceIn(if (left != null) -w * 0.6f else 0f, if (right != null) w * 0.6f else 0f)
-            if (x != 0f) change.consume()
+            change.consume()
             val armed = kotlin.math.abs(x) > arm
             if (armed != s.armed) { s.armed = armed; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
             scope.launch { s.offset.snapTo(x) }
@@ -212,6 +219,36 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
     }
         .graphicsLayer { translationX = s.offset.value }
         .drawBehind { if (s.offset.value != 0f) drawRect(fill) }
+}
+
+/**
+ * A drag the row takes only when it is plainly sideways: once the finger has gone past the touch slop,
+ * it has to have moved at least twice as far across as down (within about 27 degrees of level).
+ * Anything steeper, or anything the list has already taken, is left alone, so a scroll that is a
+ * little off vertical scrolls instead of swiping a song. ([detectHorizontalDragGestures] claims a
+ * drag on the sideways distance alone, which a slanted scroll easily reaches first.)
+ */
+private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sidewaysDrag(
+    onDragStart: () -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
+    onDrag: (androidx.compose.ui.input.pointer.PointerInputChange, Float) -> Unit,
+) = awaitEachGesture {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    val slop = viewConfiguration.touchSlop
+    var dx = 0f
+    var dy = 0f
+    while (true) {
+        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+        if (!c.pressed || c.isConsumed) return@awaitEachGesture
+        val d = c.positionChange()
+        dx += d.x; dy += d.y
+        if (dx * dx + dy * dy < slop * slop) continue
+        if (kotlin.math.abs(dx) < 2f * kotlin.math.abs(dy)) return@awaitEachGesture
+        c.consume()
+        break
+    }
+    onDragStart()
+    val finished = horizontalDrag(down.id) { onDrag(it, it.positionChange().x) }
+    if (finished) onDragEnd() else onDragCancel()
 }
 
 /**
@@ -389,7 +426,7 @@ private fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel)
     SwipeAction.DOWNLOAD -> RowSwipe(Icons.Filled.Download, "Download") { actions.download(listOf(song)) }
     SwipeAction.FAVOURITE -> {
         val on = LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)
-        RowSwipe(if (on) Icons.Filled.HeartBroken else Icons.Filled.Favorite, if (on) "Remove from favourites" else "Favourite") { actions.star(song, !on) }
+        RowSwipe(if (on) Icons.Filled.HeartBroken else Icons.Filled.Favorite, if (on) "Remove" else "Favourite") { actions.star(song, !on) }
     }
 }
 

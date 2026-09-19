@@ -20,9 +20,9 @@ enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
 
 /**
  * Where the left swipe is stored. It used to default to Play next and be saved along with everything
- * else, so a new key is what gives existing installs the new default (the left swipe does nothing).
+ * else, so a new key is what gives existing installs the new default (the left swipe favourites).
  */
-private const val SWIPE_LEFT = "swipeLeft2"
+private const val SWIPE_LEFT = "swipeLeft3"
 
 enum class HomeRow(val title: String) { PINNED("Pinned playlists"), RECENT("Recently played"), NEWEST("Recently added"), FREQUENT("Most played"), RANDOM("Random"), STARRED("Favourite albums") }
 
@@ -235,7 +235,7 @@ data class Prefs(
     val uiScale: Float = 0f,
     val tapAction: TapAction = TapAction.PLAY_LIST,
     val swipeRight: SwipeAction = SwipeAction.QUEUE,
-    val swipeLeft: SwipeAction = SwipeAction.NONE,
+    val swipeLeft: SwipeAction = SwipeAction.FAVOURITE,
     /** Songs the server marks explicit are skipped instead of played. */
     val skipExplicit: Boolean = false,
     /** Home shelves, in order; a row that is not listed is hidden. */
