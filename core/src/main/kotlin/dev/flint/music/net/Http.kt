@@ -50,8 +50,13 @@ class Http(private val context: Context) {
      */
     private val dispatcher = Dispatcher().apply { maxRequestsPerHost = 24; maxRequests = 48 }
 
-    /** Long streams get their own dispatcher so they cannot occupy the slots the UI needs. */
-    private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = 6; maxRequests = 12 }
+    /**
+     * Long streams get their own dispatcher so they cannot occupy the slots the UI needs. Room for the
+     * most downloads the setting allows (10) plus the song playing and the one being fetched ahead:
+     * media3's OkHttp source queues on this dispatcher, so a lower cap would quietly override
+     * "Downloads at once".
+     */
+    private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = 16; maxRequests = 24 }
     @Volatile private var profile: ServerProfile? = null
 
     @Volatile var api: OkHttpClient = build(null)

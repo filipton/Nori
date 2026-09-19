@@ -113,6 +113,9 @@ private class LastGlyph(var value: Glyph, val bornEmpty: Boolean)
 /** How big the mark is: the size of the downloaded icon it grew out of. */
 private val MARK = 15.dp
 
+/** The fixed width a song row gives its download mark, so the marks of every row line up. */
+val MARK_SLOT = 26.dp
+
 /**
  * Where a song row says how its download stands: a faint empty ring while it waits, a ring closing
  * clockwise while it arrives, the downloaded icon once it is here, a quiet warning if it failed. Rows
