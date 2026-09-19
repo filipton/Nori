@@ -366,20 +366,34 @@ private fun OutputButton() {
 }
 
 private fun openOutputPicker(context: android.content.Context, output: String) {
-    val tries = listOfNotNull(
-        // Settings.Panel.ACTION_MEDIA_OUTPUT, spelled out: the constant is API 29 and this file is
-        // compiled against a lower floor, and the string is what the panel actually matches on.
-        if (android.os.Build.VERSION.SDK_INT >= 29) {
-            android.content.Intent("android.settings.panel.action.MEDIA_OUTPUT")
-                .putExtra("com.android.settings.panel.extra.PACKAGE_NAME", context.packageName)
-        } else null,
-        android.content.Intent("com.android.systemui.action.LAUNCH_MEDIA_OUTPUT_DIALOG")
-            .setPackage("com.android.systemui")
-            .putExtra("package_name", context.packageName),
-    )
-    for (intent in tries) {
-        if (runCatching { context.startActivity(intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)); true }.getOrDefault(false)) return
+    // Android 14 and later have a public call for exactly this, and it is the one that works on a
+    // current phone: the same output switcher the media controls open, listing Bluetooth, wired, USB
+    // and any Cast target the system knows about.
+    if (android.os.Build.VERSION.SDK_INT >= 34 &&
+        runCatching { android.media.MediaRouter2.getInstance(context).showSystemOutputSwitcher() }.getOrDefault(false)
+    ) return
+    // Android 11 to 13: SystemUI opens the same dialog on a *broadcast*, not an activity. The first
+    // version of this started it as an activity, which can never resolve - on a phone the button did
+    // nothing but name the output.
+    if (android.os.Build.VERSION.SDK_INT >= 30) {
+        val sent = runCatching {
+            context.sendBroadcast(
+                android.content.Intent("com.android.systemui.action.LAUNCH_MEDIA_OUTPUT_DIALOG")
+                    .setPackage("com.android.systemui")
+                    .putExtra("package_name", context.packageName),
+            )
+        }.isSuccess
+        if (sent && android.os.Build.VERSION.SDK_INT < 34) return
     }
+    // Android 10: the Settings panel.
+    if (android.os.Build.VERSION.SDK_INT >= 29 && runCatching {
+            context.startActivity(
+                android.content.Intent("android.settings.panel.action.MEDIA_OUTPUT")
+                    .putExtra("com.android.settings.panel.extra.PACKAGE_NAME", context.packageName)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        }.isSuccess
+    ) return
     android.widget.Toast.makeText(context, "Playing through $output", android.widget.Toast.LENGTH_SHORT).show()
 }
 

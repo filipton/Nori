@@ -38,8 +38,12 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   outgoing track's duration while the mixed tail plays, which looks like a stall and is not one.
 - **The output switcher.** The middle glyph at the bottom of the player is where the sound is going,
   as Apple's AirPlay mark is: a cast glyph on the phone's speaker, headphones or Bluetooth in the
-  accent colour when something else carries it. It opens Android's own media output panel
-  (`android.settings.panel.action.MEDIA_OUTPUT`), falling back to SystemUI's dialog. The sleep timer
+  accent colour when something else carries it. It opens Android's own output picker: on 14 and
+  later through the public `MediaRouter2.showSystemOutputSwitcher()`; on 11-13 through SystemUI's
+  `LAUNCH_MEDIA_OUTPUT_DIALOG`, which is a **broadcast** — the first version started it as an
+  activity, which cannot resolve, so on a real phone the button only named the output; on 10 through
+  the Settings panel. Cast speakers will not appear in it until the app implements casting
+  (`docs/features.md`, build step 8); USB, Bluetooth and wired outputs do. The sleep timer
   that used to sit there is on the player's ⋯ instead — `LocalPlayerMenu`, the same song menu with
   the playback-wide entry added, so a row's menu in a list does not grow one.
 - **Favourites, search and the mini player.** A favourite flips under the finger instead of after a
@@ -142,6 +146,17 @@ Settings and menus had two Material shapes left in them. The switch is now UISwi
 track with a 27 pt white thumb (`FlintSwitch`), and `FlintSlider` is UISlider's 4 pt track with a
 28 pt white knob on a soft shadow. Neither of those was measured off a screenshot — there is no
 settings screen in the App Store set — they are UIKit's own defaults.
+
+## Interface size
+
+Every size above was measured on a phone 411 dp wide. The owner's phone is about 358 dp wide
+(measured off a screenshot: the 64 dp lyrics thumbnail is 17.9 % of its width against 15.6 % on the
+emulator), which is Android's display-size setting, and at that width every dp-sized thing is a
+seventh larger - the whole app looked zoomed in. `Prefs.uiScale` defaults to automatic, which scales
+the app's density so it lays out as if the screen were at least 411 dp wide (`Theme.uiScale`). It
+only ever shrinks, and it leaves the system font scale alone, since that one is the reader's.
+Checked with `adb shell wm density 483`: pause glyph and title margin come out at the same share of
+the width as at 411 dp. `wm density reset` afterwards.
 
 ## The album page's seam
 
