@@ -121,10 +121,8 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         ) { p ->
             when (p) {
                 is dev.flint.music.data.FoundLyrics -> LyricsBody(vm, p, playing)
-                // Where the first line will be, a third of the way down, so the words take its place.
-                LyricsPhase.LOADING -> BoxWithConstraints(Modifier.fillMaxSize()) {
-                    LoadingDots(Modifier.padding(start = 24.dp, top = maxHeight / 3), dot = 9.dp)
-                }
+                // In the middle, where "No lyrics" would be: it is waiting, not a line of words yet.
+                LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text("No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }

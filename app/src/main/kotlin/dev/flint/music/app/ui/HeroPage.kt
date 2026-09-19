@@ -68,6 +68,11 @@ fun HeroPage(
     onShuffle: (() -> Unit)? = null,
     /** Icon buttons on the line with the pills: favourite, queue, download. */
     actions: @Composable RowScope.() -> Unit = {},
+    /**
+     * Artwork of the page's own making, for a page with no cover to bleed (a mix): drawn as a tile in the
+     * middle, below the status bar, the way Apple shows a made-for-you mix. Used only when [coverUrl] is null.
+     */
+    art: (@Composable () -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val settings: SettingsViewModel = viewModel()
@@ -126,7 +131,10 @@ fun HeroPage(
                                     drawRect(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 0.16f to Color.Transparent))
                                 },
                             )
-                        } else Spacer(Modifier.statusBarsPadding().height(72.dp))
+                        } else if (art != null) Box(
+                            Modifier.fillMaxWidth().statusBarsPadding().padding(top = 64.dp, bottom = 18.dp),
+                            Alignment.Center,
+                        ) { art() } else Spacer(Modifier.statusBarsPadding().height(72.dp))
 
                         // Nothing is painted here: the artwork above has already dissolved onto the page
                         // colour, and the page colour is what the root is painted with.

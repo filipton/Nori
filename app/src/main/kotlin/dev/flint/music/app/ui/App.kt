@@ -61,6 +61,7 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
     fun folder(id: String) = go("folder/${Uri.encode(id)}")
     fun decade(year: Int) = go("decade/$year")
     fun smart(id: String) = go("smart/${Uri.encode(id)}")
+    fun mix(id: String) = go("mix/${Uri.encode(id)}")
     fun smartEdit(id: String) = go("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
     fun stats() = go("stats")
     /** The download queue. Asked for again while it is showing (the notification tapped), it only puts the player away. */
@@ -185,6 +186,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     // What the screen shows, mark included - not the snapshot the queue was painted with,
                     // which is what a favourite toggled this session no longer agrees with.
                     """"starred":${st.current?.let { actions.starMarks.value.effectiveStar(dev.flint.music.data.StarKind.SONG, it.id, it.starred) } ?: false},""" +
+                    """"notification":"${dev.flint.music.Flint.get(context).player.sessionButtons}",""" +
                     """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
             }
             onDispose {
@@ -248,6 +250,11 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                         androidx.compose.animation.slideOutHorizontally(androidx.compose.animation.core.tween(if (plain) 90 else 200)) { slide } +
                             androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 160))
                     },
+                    // The back gesture scrubs these with the finger. Left to the library's defaults, the page
+                    // being left shrank to 70 % without fading, over a page that was already fully drawn -
+                    // two pages on top of each other for the whole gesture. See PredictiveBack.
+                    predictivePopEnterTransition = { _ -> PredictiveBack.enter(plain) },
+                    predictivePopExitTransition = { edge -> PredictiveBack.exit(plain, edge) },
                 ) {
                     composable("home") { Inset { HomeScreen(actions) } }
                     composable("search") { Inset { SearchScreen(actions) } }
@@ -261,6 +268,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
+                    composable("mix/{id}") { MixScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("genre/{id}") { Inset { GenreScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("smart/{id}") { Inset { SmartScreen(it.arguments!!.getString("id")!!, actions) } }
                     composable("smartEdit/{id}") { Inset { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) } }
@@ -294,7 +302,43 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
  */
 @Composable
 private fun SheetBack(sheet: PlayerSheet) {
-    androidx.activity.compose.BackHandler(sheet.isOpen) { sheet.close() }
+    // With the back gesture the sheet sinks a little with the finger, the way a page does, and goes
+    // on down if the gesture is let go, or back up if it is called off.
+    androidx.activity.compose.PredictiveBackHandler(sheet.isOpen) { events ->
+        try {
+            events.collect { sheet.backBy(it.progress) }
+            sheet.backClose()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            sheet.open()
+            throw e
+        }
+    }
+}
+
+/**
+ * The back gesture's page transition. It is scrubbed by the finger, so it is linear in time - the page
+ * moves as far as the finger has - and the two pages do not show through each other: the one being left
+ * is gone by 60 % of the way, the one coming back comes in over the second half. The page slides
+ * towards the edge the finger is moving to.
+ */
+private object PredictiveBack {
+    private const val MS = 320
+
+    fun enter(plain: Boolean): androidx.compose.animation.EnterTransition =
+        androidx.compose.animation.fadeIn(
+            androidx.compose.animation.core.tween(MS / 2, delayMillis = if (plain) 0 else MS / 2, easing = androidx.compose.animation.core.LinearEasing),
+        )
+
+    fun exit(plain: Boolean, edge: Int): androidx.compose.animation.ExitTransition {
+        val fade = androidx.compose.animation.fadeOut(
+            androidx.compose.animation.core.tween(MS * 6 / 10, easing = androidx.compose.animation.core.LinearEasing),
+        )
+        if (plain) return fade
+        val sign = if (edge == androidx.activity.BackEventCompat.EDGE_RIGHT) -1 else 1
+        return fade + androidx.compose.animation.slideOutHorizontally(
+            androidx.compose.animation.core.tween(MS, easing = androidx.compose.animation.core.LinearEasing),
+        ) { sign * it / 5 }
+    }
 }
 
 /**

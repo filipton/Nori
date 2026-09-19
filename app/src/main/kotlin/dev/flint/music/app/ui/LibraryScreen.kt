@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -98,7 +99,7 @@ private fun <T> SortMenu(options: List<Pair<T, String>>, value: T, onChange: (T)
     }
 }
 
-private val sections = listOf("Albums", "Artists", "Songs", "Playlists", "Smart", "Favourites", "History", "Genres", "Decades", "Folders", "Radio", "Downloads")
+private val sections = listOf("Albums", "Favourites", "Artists", "Songs", "Playlists", "Smart", "History", "Genres", "Decades", "Folders", "Radio", "Downloads")
 
 @Composable
 fun LibraryScreen(actions: ActionsViewModel) {
@@ -288,6 +289,14 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
     val menu = LocalSongMenu.current
     LoadBox(load) { s ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
+            // The songs as one list to play, the page the "Favourites" tile on Home opens too.
+            item(key = "all") {
+                NavRow(
+                    "Favourite songs", { nav.mix(dev.flint.music.app.vm.FAVOURITES_MIX) }, chevron = true,
+                    subtitle = s.songs.count { !it.isExternal }.let { n -> "$n song${if (n == 1) "" else "s"}" },
+                    leading = { Icon(Icons.Filled.Favorite, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
+                )
+            }
             if (s.albums.isNotEmpty()) item(key = "albums") {
                 LazyRow(contentPadding = PaddingValues(Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(s.albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id) }) }

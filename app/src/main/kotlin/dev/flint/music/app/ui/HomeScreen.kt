@@ -48,8 +48,6 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
     val load by vm.ui.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     val settings: dev.flint.music.app.vm.SettingsViewModel = viewModel()
-    val prefs by settings.prefs.collectAsStateWithLifecycle()
-    val mixes = prefs.tasteModel
     var rearranging by remember { mutableStateOf(false) }
     if (rearranging) { RowOrder(settings) { rearranging = false }; return }
     LoadBox(load) { ui ->
@@ -70,7 +68,8 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                     }
                 }
             }
-            if (mixes) item(key = "mixes") { SectionTitle("For you"); MixTiles() }
+            // Favourites are always here; the mixes join them when the taste model is on (MixesViewModel).
+            item(key = "mixes") { SectionTitle("For you"); MixTiles() }
             if (ui.pinned.isNotEmpty()) item(key = "pinned") {
                 SectionTitle("Pinned playlists")
                 LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {

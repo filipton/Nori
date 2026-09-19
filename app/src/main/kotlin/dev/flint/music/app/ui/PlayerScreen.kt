@@ -111,6 +111,7 @@ import dev.flint.music.settings.ThemeMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 /**
  * A drag that follows the finger and decides on release: past [threshold] of the element's size in
@@ -278,7 +279,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
                     // the moment the sheet arrives, in exactly the same place.
                     Box(Modifier.graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f }) {
-                        Artwork(vm, sleeveArt, palette)
+                        Artwork(
+                            vm, sleeveArt, palette,
+                            state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                        )
                     }
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
                 } else {
@@ -489,17 +494,16 @@ private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
  * line where the picture ends - the same dissolve the album page uses.
  */
 @Composable
-private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?) {
+private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, previousUrl: String?, nextUrl: String?) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
             // to about half of it - 977 wide by roughly 1050 tall - so it is the cover scaled to fill and
             // cropped a little at the sides. That is how it manages to have no top edge *and* reach down
             // behind the title; a full-width square can only do one or the other. Cover crops already.
-            Modifier.fillMaxWidth().aspectRatio(SLEEVE)
-                .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
+            Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
-            SleeveImage(art, Modifier.fillMaxSize())
+            SleeveCarousel(art, previousUrl, nextUrl, onPrevious = vm::previousItem, onNext = vm::next)
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
@@ -601,6 +605,10 @@ private class SleeveArt {
     var previous by mutableStateOf<androidx.compose.ui.graphics.painter.Painter?>(null)
     val previousAlpha = androidx.compose.animation.core.Animatable(1f)
     var loading by mutableStateOf(true)
+    /** The address of [current]: what a swipe waits for before it hands the sleeve back. */
+    var shownUrl by mutableStateOf<String?>(null)
+    /** The next picture goes straight in: a swipe has already slid it into place. */
+    var snapNext = false
 
     /** Lets the current picture go, fading it out to the plate. */
     suspend fun letGo() {
@@ -613,6 +621,103 @@ private class SleeveArt {
 }
 
 private const val HOLD_MS = 600L
+
+/**
+ * The sleeve as one record in a row of them: a sideways drag slides it and brings the next (or the
+ * last) record in from the other edge, already drawn, the way Apple's does. Let go past a third of the
+ * way, or flicked, the old one goes all the way off and the new one all the way in, and only then does
+ * the song change. The new record then stays drawn over the sleeve until the sleeve has the same
+ * picture, so there is no second change: no fade, no plate, no old cover coming back for a frame.
+ *
+ * The neighbours' pictures come from the cache the player keeps warm (PlayerViewModel's covers ahead),
+ * so they are normally there before the finger is. Nothing here runs until a finger is down.
+ */
+@Composable
+private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String?, onPrevious: () -> Unit, onNext: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    val offset = remember { Animatable(0f) }
+    val gap = with(androidx.compose.ui.platform.LocalDensity.current) { 14.dp.toPx() }
+    @Composable fun neighbour(url: String?) = coil3.compose.rememberAsyncImagePainter(
+        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
+        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
+    )
+    val before = neighbour(previousUrl)
+    val after = neighbour(nextUrl)
+    val hasBefore by androidx.compose.runtime.rememberUpdatedState(previousUrl != null)
+    val hasAfter by androidx.compose.runtime.rememberUpdatedState(nextUrl != null)
+    // The record that has been slid in, drawn over the sleeve until the sleeve shows it too. The drawn
+    // picture itself, not the painter: the painter is handed the following song's address next.
+    var landed by remember { mutableStateOf<androidx.compose.ui.graphics.painter.Painter?>(null) }
+    var landedUrl by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(landedUrl) {
+        val url = landedUrl ?: return@LaunchedEffect
+        kotlinx.coroutines.withTimeoutOrNull(4_000) { androidx.compose.runtime.snapshotFlow { art.shownUrl }.first { it == url } }
+        landed = null; landedUrl = null
+    }
+    val plateColour = MaterialTheme.colorScheme.surfaceVariant
+    Box(
+        Modifier.fillMaxSize().pointerInput(Unit) {
+            val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
+            var x = 0f
+            val release: (Float) -> Unit = { v ->
+                val o = offset.value
+                val w = size.width.toFloat()
+                val go = when {
+                    o < 0f && hasAfter && (v < -FLICK_PX || o < -w * TURN) -> -1
+                    o > 0f && hasBefore && (v > FLICK_PX || o > w * TURN) -> 1
+                    else -> 0
+                }
+                scope.launch {
+                    val settle = spring<Float>(dampingRatio = 1f, stiffness = 520f)
+                    if (go == 0) { offset.animateTo(0f, settle, initialVelocity = v); return@launch }
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    val painter = if (go < 0) after else before
+                    val url = if (go < 0) nextUrl else previousUrl
+                    if (AppMotion.reduce) offset.snapTo(go * (w + gap)) else offset.animateTo(go * (w + gap), settle, initialVelocity = v)
+                    // Same frame: the incoming record takes the middle, the sleeve goes back under it.
+                    landed = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
+                    landedUrl = url
+                    art.snapNext = true
+                    offset.snapTo(0f)
+                    if (go < 0) onNext() else onPrevious()
+                }
+            }
+            detectHorizontalDragGestures(
+                onDragStart = { tracker.resetTracking(); x = 0f; scope.launch { offset.stop() } },
+                onDragEnd = { release(tracker.calculateVelocity().x) },
+                onDragCancel = { release(0f) },
+            ) { change, d ->
+                x += d
+                tracker.addPosition(change.uptimeMillis, Offset(x, 0f))
+                val w = size.width.toFloat()
+                val next = offset.value + d
+                // Towards a record that is not there it gives a little and no more.
+                val allowed = (next > 0f && hasBefore) || (next < 0f && hasAfter)
+                scope.launch { offset.snapTo(if (allowed) next.coerceIn(-w, w) else (offset.value + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)) }
+            }
+        },
+    ) {
+        Box(Modifier.fillMaxSize().graphicsLayer { translationX = offset.value }) { SleeveImage(art, Modifier.fillMaxSize()) }
+        // Each neighbour waits just off its edge and is drawn only while it is being pulled in.
+        Box(Modifier.fillMaxSize().graphicsLayer { val o = offset.value; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width + gap }.background(plateColour)) {
+            androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        }
+        Box(Modifier.fillMaxSize().graphicsLayer { val o = offset.value; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width - gap }.background(plateColour)) {
+            androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        }
+        if (landedUrl != null) Box(Modifier.fillMaxSize().background(plateColour)) {
+            landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+        }
+    }
+}
+
+/** Past this share of the width a slow drag changes the record. */
+private const val TURN = 0.3f
+
+/** A release faster than this, in pixels a second, changes the record whatever the distance. */
+private const val FLICK_PX = 1000f
 
 @Composable
 private fun rememberSleeveArt(url: String?): SleeveArt {
@@ -627,7 +732,9 @@ private fun rememberSleeveArt(url: String?): SleeveArt {
         when (val st = state) {
             is coil3.compose.AsyncImagePainter.State.Success -> if (st.painter !== art.current) {
                 art.loading = false
-                val instant = art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
+                art.shownUrl = url
+                val swiped = art.snapNext.also { art.snapNext = false }
+                val instant = swiped || art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
                 // The picture on screen stays underneath at full strength while the new one covers it; one
                 // already fading out to the plate carries on from where it is.
                 art.current?.let { art.previous = it; art.previousAlpha.snapTo(1f) }
