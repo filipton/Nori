@@ -12,6 +12,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The page's colour changes with the song.** The covers either side of what is playing were already
+  fetched ahead, but their colours were only worked out once the song had changed, so the page wore
+  the last song's colour for a beat and then caught up. `warmCoverPalette` does that work in advance,
+  from the now playing bar (which is on screen whenever music is, so a skip from the notification
+  counts too), and one cover is measured only once however many places ask for it at the same moment.
+  The cross-fade is 420 ms, about as long as the record takes to slide across.
+
 - **Settings, regrouped and in plain words.** Seven pages now, each about one thing: Playing, Sound,
   Downloads and data, Look, Lyrics, Library and lists, Servers. Every title and description was
   rewritten short and plain, with no dashes or semicolons, and the dead "Home shelves" note in Lists

@@ -20,6 +20,7 @@ import coil3.request.SuccessResult
 import coil3.request.allowHardware
 import coil3.toBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
@@ -28,23 +29,61 @@ import kotlinx.coroutines.withContext
  */
 private object CoverPalette {
     val cache = LruCache<String, PagePalette>(128)
+
+    /**
+     * One lock per cover, so a picture the bar, the player and the warm-up all ask for at once is
+     * measured once and the others wait for it. Bounded: an evicted lock costs one repeated
+     * measurement, which is the behaviour this replaces.
+     */
+    private val locks = LruCache<String, kotlinx.coroutines.sync.Mutex>(64)
+
+    suspend fun <T> once(key: String, block: suspend () -> T): T =
+        synchronized(locks) { locks.get(key) ?: kotlinx.coroutines.sync.Mutex().also { locks.put(key, it) } }.withLock { block() }
 }
 
-@Composable
-fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePalette? {
-    val context = LocalContext.current
-    val key = url?.let { "$it|$dark|$amoled" }
-    val palette by produceState(key?.let(CoverPalette.cache::get), key) {
-        // Drop the previous cover's colours the moment the track changes: holding them while the new
-        // artwork loads leaves the mini player wearing the last song's tint for a second.
-        value = key?.let(CoverPalette.cache::get)
-        if (key == null || value != null) return@produceState
-        value = withContext(Dispatchers.Default) {
+private fun paletteKey(url: String, dark: Boolean, amoled: Boolean) = "$url|$dark|$amoled"
+
+/**
+ * Fetches the cover and works its colours out, unless that has been done before. Slow the first time
+ * (a decode the picture's own cache cannot serve, because the colours have to be read back off the
+ * bitmap) and a map lookup every time after.
+ */
+private suspend fun paletteOf(context: android.content.Context, url: String, dark: Boolean, amoled: Boolean): PagePalette? {
+    val key = paletteKey(url, dark, amoled)
+    CoverPalette.cache.get(key)?.let { return it }
+    // One cover is only ever worked out once, even when the bar, the player and the warm-up below all
+    // ask for it in the same frame: the others wait here and then find it in the cache.
+    return CoverPalette.once(key) {
+        CoverPalette.cache.get(key) ?: withContext(Dispatchers.Default) {
             val result = SingletonImageLoader.get(context).execute(
                 ImageRequest.Builder(context).data(url).size(CoverSize.ROW).allowHardware(false).build(),
             ) as? SuccessResult ?: return@withContext null
             derive(result.image.toBitmap(), dark, amoled)
         }?.also { CoverPalette.cache.put(key, it) }
+    }
+}
+
+/**
+ * Works a cover's colours out before anything asks for them. The covers either side of what is playing
+ * are fetched ahead (PlayerViewModel) so a skip lands on a picture that is already there, but the page's
+ * colour was still being worked out after the fact, which is the beat the page spent wearing the last
+ * song's colour. Done here, the cross-fade starts with the song.
+ */
+suspend fun warmCoverPalette(context: android.content.Context, url: String?, dark: Boolean, amoled: Boolean) {
+    if (url == null || CoverPalette.cache.get(paletteKey(url, dark, amoled)) != null) return
+    runCatching { paletteOf(context, url, dark, amoled) }
+}
+
+@Composable
+fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePalette? {
+    val context = LocalContext.current
+    val key = url?.let { paletteKey(it, dark, amoled) }
+    val palette by produceState(key?.let(CoverPalette.cache::get), key) {
+        // Drop the previous cover's colours the moment the track changes: holding them while the new
+        // artwork loads leaves the mini player wearing the last song's tint for a second.
+        value = key?.let(CoverPalette.cache::get)
+        if (url == null || value != null) return@produceState
+        value = paletteOf(context, url, dark, amoled)
     }
     return palette
 }

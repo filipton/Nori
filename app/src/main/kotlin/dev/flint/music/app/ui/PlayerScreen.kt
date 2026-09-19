@@ -248,7 +248,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         if (found == null) delay(1200)
         fadingFrom = palette
         palette = found
-        if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(520)) }
+        // As long as the record takes to slide across, so the page and the sleeve arrive together.
+        if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(420)) }
         fadingFrom = null
     }
 

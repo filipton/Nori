@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -229,6 +230,27 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     val palette = if (prefs.coverColors) {
         rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled)
     } else null
+    // The colours of the songs either side, worked out before they are reached. Their covers are
+    // already fetched ahead (PlayerViewModel); this is the other half of that, and it is what stops the
+    // page wearing the last song's colour for a moment after a skip. It happens here rather than in the
+    // player because the bar is on screen whenever something is playing, so a skip from the
+    // notification or the lock screen is covered too.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val around = remember(state.nextIndex, state.previousIndex, state.queue) {
+        listOfNotNull(
+            vm.cover(state.queue.getOrNull(state.nextIndex)?.coverArt, CoverSize.ROW),
+            vm.cover(state.queue.getOrNull(state.previousIndex)?.coverArt, CoverSize.ROW),
+        ).filterNot(::isProviderCover)
+    }
+    LaunchedEffect(around, dark, prefs.coverColors, prefs.amoled, prefs.playerColours) {
+        if (!prefs.coverColors) return@LaunchedEffect
+        for (url in around) {
+            warmCoverPalette(context, url, dark, prefs.amoled)
+            // The full-screen player keeps the record's colours where the bar goes black, so that is a
+            // second set of colours for the same cover.
+            if (prefs.playerColours) warmCoverPalette(context, url, dark, false)
+        }
+    }
     val scheme = MaterialTheme.colorScheme
     val sheet = LocalPlayerSheet.current
     NowPlayingPalette(palette)
