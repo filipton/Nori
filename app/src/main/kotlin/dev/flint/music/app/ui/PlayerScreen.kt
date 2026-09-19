@@ -1,5 +1,6 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -179,19 +180,28 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
     val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
-    // One painter for the sleeve and for the cover in flight. Two requests for the same picture, made in
-    // the same frame, each decoded their own bitmap before either reached the cache, and the second one
-    // was uploaded to the GPU on the frame the sleeve took over - a stall exactly at the landing.
-    val context = LocalContext.current
-    val sleevePainter = coil3.compose.rememberAsyncImagePainter(
-        remember(coverUrl) { coil3.request.ImageRequest.Builder(context).data(coverUrl).size(CoverSize.FULL).build() },
-        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
-    )
+    // One picture for the sleeve and for the cover in flight (see SleeveArt).
+    val sleeveArt = rememberSleeveArt(coverUrl)
     // AMOLED black everywhere else, but the player keeps the cover's colours unless asked not to: in
     // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
     // carries the record's colour down the whole screen.
     val black = prefs.amoled && !prefs.playerColours
-    val palette = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, black) else null
+    val found = if (prefs.coverColors) rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, black) else null
+    // The page's colours change with the song by cross-fading, not in one frame, and they hold the last
+    // song's colours while the new cover's are worked out - going to the plain page and then to the new
+    // colours was two changes where there should be one. A song that really has none (no artwork) gets
+    // the plain page once it has had a moment to find some.
+    var palette by remember { mutableStateOf(found) }
+    var fadingFrom by remember { mutableStateOf<PagePalette?>(null) }
+    val washFade = remember { androidx.compose.animation.core.Animatable(1f) }
+    LaunchedEffect(found) {
+        if (found == palette) return@LaunchedEffect
+        if (found == null) delay(1200)
+        fadingFrom = palette
+        palette = found
+        if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(520)) }
+        fadingFrom = null
+    }
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
@@ -199,21 +209,25 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         Box(
             // Pull down from anywhere on the artwork page and the whole player follows the finger down;
             // the lyrics and queue need a vertical drag to scroll, so there only the handle does.
-            Modifier.fillMaxSize().dragsSheet(sheet, enabled = panel == Panel.ART).drawBehind {
-                // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
-                // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
-                // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
-                if (palette != null) {
+            Modifier.fillMaxSize().dragsSheet(sheet, enabled = panel == Panel.ART),
+        ) {
+            // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
+            // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
+            // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
+            val wash: androidx.compose.ui.graphics.drawscope.DrawScope.(PagePalette?) -> Unit = { p ->
+                if (p != null) {
                     // Lyrics and queue have no sleeve on screen, and a player opened straight into
                     // one of them has never measured it: use where it would be, so those panels get
                     // the same picture behind them rather than one stretched row from the very top.
                     val h = if (sleeveHeight > 0f) sleeveHeight else size.width / SLEEVE
                     val b = if (sleeveBottom > 0f) sleeveBottom else h
-                    drawSleeveWash(palette, b, h, size.height)
+                    drawSleeveWash(p, b, h, size.height)
                 } else drawRect(scheme.background)
-            },
-        ) {
-            if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleevePainter, palette, sleeveHeight > 0f)
+            }
+            // While the colours change, the old page stays underneath and the new one fades in over it.
+            Box(Modifier.matchParentSize().drawBehind { wash(fadingFrom ?: palette) })
+            if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.drawBehind { wash(palette) })
+            if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, palette, sleeveHeight > 0f)
             // Artwork, lyrics and queue dissolve into each other rather than cutting. The incoming panel
             // fades in over the outgoing one, which stays fully drawn underneath until it is covered: the
             // transport is the same in all three, and fading both copies at once dimmed it half-way. (A
@@ -264,7 +278,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
                     // the moment the sheet arrives, in exactly the same place.
                     Box(Modifier.graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f }) {
-                        Artwork(vm, sleevePainter, palette)
+                        Artwork(vm, sleeveArt, palette)
                     }
                     Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
                 } else {
@@ -340,13 +354,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 Row(kept("transport").fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(34.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
                     IconButton(vm::previous, Modifier.size(72.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
                     IconButton(vm::toggle, Modifier.size(84.dp)) {
-                        Box(Modifier.fillMaxSize(), Alignment.Center) {
-                            if (state.buffering) CircularProgressIndicator(Modifier.size(28.dp), color = LocalContentColor.current, strokeWidth = 2.dp)
-                            else Icon(
-                                if (state.playing) Icons.Filled.Pause else Icons.Filled.PlayArrow, "Play/pause",
-                                Modifier.size(70.dp),
-                            )
-                        }
+                        PlayPauseGlyph(state.playing, state.buffering, 70.dp, 28.dp)
                     }
                     IconButton(vm::next, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
                 }
@@ -481,7 +489,7 @@ private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
  * line where the picture ends - the same dissolve the album page uses.
  */
 @Composable
-private fun Artwork(vm: PlayerViewModel, painter: androidx.compose.ui.graphics.painter.Painter, palette: PagePalette?) {
+private fun Artwork(vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
@@ -491,7 +499,7 @@ private fun Artwork(vm: PlayerViewModel, painter: androidx.compose.ui.graphics.p
             Modifier.fillMaxWidth().aspectRatio(SLEEVE)
                 .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
         ) {
-            androidx.compose.foundation.Image(painter, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            SleeveImage(art, Modifier.fillMaxSize())
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
@@ -513,10 +521,14 @@ private fun Artwork(vm: PlayerViewModel, painter: androidx.compose.ui.graphics.p
  * coordinates - the thumbnail's place relative to the mini player's top at 0, the sleeve's at 1 - so it
  * moves with the sheet and only has to grow.
  *
- * The picture is laid out once, as the full square at the sleeve's height, and everything else is a
- * layer transform: a scale, and a clip that goes from the whole square to the sleeve's narrower
- * window on it. That is exactly what the sleeve shows (the square cropped at the sides), so the last
- * frame is the real sleeve pixel for pixel, and the hand-over cannot be seen. Growing it by layout
+ * It is the whole square the entire way, never a cropped window on it: as it grows it simply runs off
+ * both sides of the screen, and at the end the screen's own edges crop it to exactly what the sleeve
+ * shows (the sleeve is the square cropped at the sides), so the last frame is the real sleeve pixel
+ * for pixel and the hand-over cannot be seen. A window narrowing from square to the sleeve's shape
+ * read as the picture being cut while it moved.
+ *
+ * The picture is laid out once, as the full square at the sleeve's height, and moved and grown only
+ * by a layer transform. Growing it by layout
  * instead gave the image a new size every frame, and each new size was a new decode and a new texture:
  * the flight stalled for a third of a second at a time.
  *
@@ -524,7 +536,7 @@ private fun Artwork(vm: PlayerViewModel, painter: androidx.compose.ui.graphics.p
  * flight shows the picture even before the large one has come out of the cache.
  */
 @Composable
-private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, painter: androidx.compose.ui.graphics.painter.Painter, palette: PagePalette?, measured: Boolean) {
+private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, palette: PagePalette?, measured: Boolean) {
     val flying by remember { androidx.compose.runtime.derivedStateOf { sheet.progress.value < 1f } }
     if (!flying || !measured || sheet.miniCover == Rect.Zero) return
     val density = androidx.compose.ui.platform.LocalDensity.current
@@ -539,43 +551,109 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, painter: androidx.c
                     val t = sheet.progress.value.coerceIn(0f, 1f)
                     val from = sheet.miniCover.translate(0f, -sheet.travel)
                     fun mix(a: Float, b: Float) = a + (b - a) * t
-                    // The window on the picture: square at the start, the sleeve's shape at the end.
-                    val shownW = mix(from.width, w)
-                    val shownH = mix(from.height, h)
-                    val k = shownH / h
+                    val k = mix(from.height, h) / h
                     transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
                     scaleX = k; scaleY = k
-                    // Unscaled, the window sits centred in the square, and the square - wider than the
-                    // screen - is itself centred across it. Put the window's left edge where it belongs.
-                    val inset = (size.width - shownW / k) / 2f
+                    // The square is wider than the screen, so layout centres it with its sides hanging
+                    // off both edges; that is where it ends up. It starts on the thumbnail.
                     val overhang = (w - size.width) / 2f
-                    translationX = mix(from.left, 0f) - inset * k - overhang
+                    translationX = mix(from.left, overhang) - overhang
                     translationY = mix(from.top, 0f)
-                    shape = CentredWindow(shownW / k, thumbRadius * (1f - t) / k)
+                    shape = RoundedCornerShape(thumbRadius * (1f - t) / k)
                     clip = true
                 },
         ) {
-            coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-            androidx.compose.foundation.Image(painter, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-            // The sleeve's melt into the page, on the sleeve's own window of the square, fading in as it lands.
+            if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            SleeveImage(art, Modifier.fillMaxSize())
+            // The sleeve's melt into the page, over the part of the square the screen will show. It fades
+            // in only over the last stretch, once the square's sides are nearly off the screen: earlier,
+            // the melt stopping short of the square's edges showed as a notch at its bottom corners.
             if (palette != null) Box(
                 Modifier.align(Alignment.Center).requiredSize(with(density) { w.toDp() }, side)
-                    .graphicsLayer { alpha = sheet.progress.value }
+                    .graphicsLayer {
+                        val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
+                        alpha = e * e * (3f - 2f * e)
+                    }
                     .drawBehind { drawSleeveMelt(palette, 0.19f) },
             )
         }
     }
 }
 
-/** A rounded window [width] wide and the full height, centred across whatever it clips. */
-private class CentredWindow(private val width: Float, private val radius: Float) : androidx.compose.ui.graphics.Shape {
-    override fun createOutline(size: androidx.compose.ui.geometry.Size, layoutDirection: androidx.compose.ui.unit.LayoutDirection, density: androidx.compose.ui.unit.Density) =
-        androidx.compose.ui.graphics.Outline.Rounded(
-            androidx.compose.ui.geometry.RoundRect(
-                (size.width - width) / 2f, 0f, (size.width + width) / 2f, size.height,
-                androidx.compose.ui.geometry.CornerRadius(radius),
-            ),
-        )
+/**
+ * The sleeve's picture across songs. On a skip the old cover stays while the new one loads, and the
+ * new one fades in over it; the sleeve used to go blank for as long as the server took to render the
+ * next cover. But only briefly: a cover that has not come after [HOLD_MS] means the old picture is
+ * now standing under the wrong title, so it fades out to the plate, whose sheen says the new one is on
+ * its way, and the new one fades in from there. The very first picture fades in from the plate too,
+ * unless it came straight from memory, where a fade would only be a delay.
+ *
+ * One of these feeds both the sleeve and the cover in flight: two requests for the same picture in the
+ * same frame each decoded their own bitmap, and the second was uploaded to the GPU on the frame the
+ * sleeve took over - a stall exactly at the landing.
+ */
+@androidx.compose.runtime.Stable
+private class SleeveArt {
+    /** What is showing, fading in over [previous] at [fade]. */
+    var current by mutableStateOf<androidx.compose.ui.graphics.painter.Painter?>(null)
+    val fade = androidx.compose.animation.core.Animatable(1f)
+    /** The picture being left, at [previousAlpha]. */
+    var previous by mutableStateOf<androidx.compose.ui.graphics.painter.Painter?>(null)
+    val previousAlpha = androidx.compose.animation.core.Animatable(1f)
+    var loading by mutableStateOf(true)
+
+    /** Lets the current picture go, fading it out to the plate. */
+    suspend fun letGo() {
+        val leaving = current ?: return
+        previous = leaving; current = null
+        if (AppMotion.reduce) previousAlpha.snapTo(0f)
+        else { previousAlpha.snapTo(1f); previousAlpha.animateTo(0f, androidx.compose.animation.core.tween(360)) }
+        previous = null
+    }
+}
+
+private const val HOLD_MS = 600L
+
+@Composable
+private fun rememberSleeveArt(url: String?): SleeveArt {
+    val context = LocalContext.current
+    val art = remember { SleeveArt() }
+    val painter = coil3.compose.rememberAsyncImagePainter(
+        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
+        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
+    )
+    val state by painter.state.collectAsState()
+    LaunchedEffect(state) {
+        when (val st = state) {
+            is coil3.compose.AsyncImagePainter.State.Success -> if (st.painter !== art.current) {
+                art.loading = false
+                val instant = art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
+                // The picture on screen stays underneath at full strength while the new one covers it; one
+                // already fading out to the plate carries on from where it is.
+                art.current?.let { art.previous = it; art.previousAlpha.snapTo(1f) }
+                art.current = st.painter
+                if (instant || AppMotion.reduce) art.fade.snapTo(1f)
+                else { art.fade.snapTo(0f); art.fade.animateTo(1f, androidx.compose.animation.core.tween(if (art.previous == null) 320 else 480)) }
+                art.previous = null
+            }
+            is coil3.compose.AsyncImagePainter.State.Loading -> {
+                if (art.current == null) art.loading = true
+                else { delay(HOLD_MS); art.loading = true; art.letGo() }
+            }
+            // Nothing to show for this song: back to the plate rather than keep the last cover.
+            is coil3.compose.AsyncImagePainter.State.Error -> { art.loading = false; art.letGo() }
+            else -> {}
+        }
+    }
+    return art
+}
+
+@Composable
+private fun SleeveImage(art: SleeveArt, modifier: Modifier) {
+    Box(modifier.loadingSheen(art.loading, MaterialTheme.colorScheme.onSurface)) {
+        art.previous?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = art.previousAlpha.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+        art.current?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = art.fade.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+    }
 }
 
 /** A title-row circle: translucent fill, light glyph, 48 dp across with a 44 dp hit region or better. */

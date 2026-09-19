@@ -1,5 +1,6 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -100,19 +101,45 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val playerState by vm.state.collectAsStateWithLifecycle()
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
-    val found = (load as? Load.Ready)?.data
-    val lyrics = found?.lyrics
     val shown = LocalPlayerShown.current
     if (prefs.lyricsKeepScreenOn && shown) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
-    val song = playerState.current
-    if (lyrics == null || lyrics.lines.isEmpty()) {
-        Column(Modifier.fillMaxSize()) {
-            LyricsHeader(vm, actions, song)
-            Box(Modifier.fillMaxSize().weight(1f), Alignment.Center) { Text(if (load is Load.Loading) "Loading…" else "No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    Column(Modifier.fillMaxSize()) {
+        LyricsHeader(vm, actions, playerState.current)
+        // Loading, nothing found, or the words - each fades into the next rather than replacing it, the
+        // words included: they rise out of the loader instead of appearing in one frame. A new song goes
+        // back through the loader, so the last song's lyrics never sit on screen under the new title.
+        val found = (load as? Load.Ready)?.data?.takeIf { it.lyrics.lines.isNotEmpty() }
+        val phase: Any = found ?: if (load is Load.Loading) LyricsPhase.LOADING else LyricsPhase.NONE
+        androidx.compose.animation.AnimatedContent(
+            phase, Modifier.fillMaxSize().weight(1f),
+            transitionSpec = {
+                (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(380, delayMillis = 80)) +
+                    androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(420, delayMillis = 80)) { it / 40 }) togetherWith
+                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(200))
+            },
+            label = "lyrics",
+        ) { p ->
+            when (p) {
+                is dev.flint.music.data.FoundLyrics -> LyricsBody(vm, p, playing)
+                // Where the first line will be, a third of the way down, so the words take its place.
+                LyricsPhase.LOADING -> BoxWithConstraints(Modifier.fillMaxSize()) {
+                    LoadingDots(Modifier.padding(start = 24.dp, top = maxHeight / 3), dot = 9.dp)
+                }
+                else -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text("No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
         }
-        return
     }
+}
 
+private enum class LyricsPhase { LOADING, NONE }
+
+/** The words of one song, in time with it. */
+@Composable
+private fun LyricsBody(vm: PlayerViewModel, found: dev.flint.music.data.FoundLyrics, playing: Boolean) {
+    val lyrics = found.lyrics
+    val settings: SettingsViewModel = viewModel()
+    val prefs by settings.prefs.collectAsStateWithLifecycle()
+    val shown = LocalPlayerShown.current
     var nudgeMs by remember(lyrics) { mutableLongStateOf(0L) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
@@ -161,9 +188,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
     val page = MaterialTheme.colorScheme.background
     val list = rememberLazyListState()
-    Column(Modifier.fillMaxSize()) {
-        LyricsHeader(vm, actions, song)
-        BoxWithConstraints(Modifier.fillMaxSize().weight(1f)) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
         // The line being sung rests a third of the way down, and the list glides there. It used to call
         // animateScrollToItem, whose default spring is so stiff that over one line's distance it is
@@ -269,7 +294,6 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 }
             }
         }
-    }
     }
 }
 

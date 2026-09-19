@@ -181,6 +181,26 @@ settings screen in the App Store set — they are UIKit's own defaults.
   buffer comes back at the next pause, where a rebuild is silent. Counted from the `AudioTrack` log
   line: 0 / 1 / 0 / 0 / 1 for open, first change, second change, leave, pause.
 
+## Loading, and nothing appearing in one frame
+
+The owner's rule: with animations on, nothing may appear or change in one frame, and waiting must
+look like waiting. The pieces:
+
+- `LoadingDots` (Design.kt): three breathing dots, Apple's lyric-interlude mark. Invisible for the
+  first 250 ms, then fades in, so fast loads never show a loader. Used by `LoadBox` (every page's
+  loading state, whose content now fades in over it) and by the lyrics, placed where the first line
+  will be.
+- `Modifier.loadingSheen`: a faint band crossing a cover's plate while it loads, same 250 ms grace.
+  Every `Cover` uses it, fades its picture in (coil crossfade, which skips memory hits) and fades in
+  the note glyph when there is no picture.
+- The player's sleeve (`SleeveArt`) keeps the old cover while the next one loads and cross-fades;
+  after 600 ms without it, the old one fades out to the sheen so it never stands under the wrong
+  title. The page colours cross-fade with it and hold the old palette while the new one is worked out.
+  `PlayerViewModel` warms the covers of the previous and next two tracks.
+- Lyrics go back through the loader on every song (`PlayerViewModel.lyrics` starts each song from
+  `Loading`), and an empty server answer is not emitted while LRCLIB may still answer.
+- `PlayPauseGlyph`: play, pause and the buffering spinner cross-fade, the spinner only after 300 ms.
+
 ## Animation and Android's animation setting
 
 Compose scales every animation by Android's animator duration scale. Plenty of people switch that off

@@ -16,6 +16,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.onStart
 
 class PlayerViewModel(app: Application) : FlintViewModel(app) {
     private val player = flint.player
@@ -33,14 +36,40 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
      */
     val mixing: Boolean get() = dev.flint.music.playback.TransitionSink.mixing
 
-    /** Lyrics of whatever is playing; fetched only while a lyrics view is collecting. */
+    /**
+     * Lyrics of whatever is playing; fetched only while a lyrics view is collecting. Each song starts
+     * from Loading, so the view shows its loader and then the new words, instead of holding the last
+     * song's lyrics on screen while the next ones are fetched.
+     */
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
         .flatMapLatest { song ->
             val p = flint.settings.value
-            if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+            val found = if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
             else flint.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
-        }.asLoad()
+            found.map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) }
+                .onStart { emit(Load.Loading) }
+                .catch { emit(Load.Failed(it.message ?: it.javaClass.simpleName)) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Load.Loading)
+
+    init {
+        // The artwork either side of what is playing, fetched before it is asked for. A skip used to
+        // show an empty sleeve for as long as the server took to render the next cover - on a slow one,
+        // seconds. Same sizes and requests as the player and the rows, so a warmed cover is a cache hit.
+        viewModelScope.launch {
+            state.map { s -> listOf(s.index - 1, s.index + 1, s.index + 2).mapNotNull { s.queue.getOrNull(it)?.coverArt } }
+                .distinctUntilChanged()
+                .collect { arts ->
+                    val context = getApplication<Application>()
+                    val loader = coil3.SingletonImageLoader.get(context)
+                    arts.filterNot { it.startsWith("ext-") || it.startsWith("pl-") }.forEach { art ->
+                        for (size in intArrayOf(320, 800)) {
+                            loader.enqueue(coil3.request.ImageRequest.Builder(context).data(flint.library.coverUrl(art, size)).size(size).build())
+                        }
+                    }
+                }
+        }
+    }
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs

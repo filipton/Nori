@@ -109,7 +109,7 @@ private val tabs = listOf(
 fun App() {
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
-    androidx.compose.runtime.SideEffect { AppMotion.force = prefs.ignoreSystemMotion }
+    androidx.compose.runtime.SideEffect { AppMotion.force = prefs.ignoreSystemMotion; AppMotion.reduce = prefs.reduceMotion }
     FlintTheme(prefs) {
         if (!prefs.loggedIn) { LoginScreen(settings); return@FlintTheme }
 

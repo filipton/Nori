@@ -1,5 +1,8 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.runtime.mutableStateOf
+import coil3.request.crossfade
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -87,6 +90,11 @@ object CoverSize { const val ROW = 320; const val CARD = 320; const val FULL = 8
  * neither rebuilds it nor waits for layout to size it; the rounded clip is a plain render-node clip,
  * which the GPU does for free and which a grid of covers needs to not look like a spreadsheet.
  * Pass `radius = 0.dp` for the full-bleed artwork at the top of a page.
+ *
+ * Nothing about it appears in one frame. A picture that has to be fetched fades in over its plate
+ * (one from the memory cache is simply there - fading those in made every scroll shimmer); one that
+ * takes a while shows a soft sheen crossing the plate, so a slow server reads as loading rather than
+ * as a missing cover; and one that never comes settles into the plate's note glyph, faded in too.
  */
 @Composable
 fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Radius.cover) {
@@ -95,6 +103,7 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     val request = remember(url, px) {
         ImageRequest.Builder(context).data(url).apply {
             if (px > 0) size(px)
+            if (!AppMotion.reduce) crossfade(260)
             // octo-fiesta draws a "not downloaded" badge on provider covers and replaces the picture once the
             // track is in the library, under the same id. Never store those, or the badge sticks forever.
             if (url != null && isProviderCover(url)) { diskCachePolicy(CachePolicy.DISABLED); memoryCachePolicy(CachePolicy.READ_ONLY) }
@@ -108,15 +117,31 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     val plate = remember(scheme.surfaceVariant) {
         Brush.linearGradient(listOf(scheme.onSurface.copy(alpha = 0.13f).over(scheme.background), scheme.onSurface.copy(alpha = 0.06f).over(scheme.background)))
     }
+    var loading by remember(request) { mutableStateOf(url != null) }
+    var missing by remember(request) { mutableStateOf(url == null) }
+    // The sheen outlives the load by the length of the picture's fade, so it goes away underneath a
+    // picture that is already covering it instead of vanishing from on top of the plate.
+    var sheen by remember(request) { mutableStateOf(loading) }
+    androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
     Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).background(plate)) {
-        if (url == null) Icon(
-            Icons.Filled.MusicNote, null,
-            Modifier.align(Alignment.Center).size(if (size > 0.dp) size * 0.34f else 40.dp),
-            tint = scheme.onSurface.copy(alpha = 0.22f),
-        )
+        if (sheen) Box(Modifier.matchParentSize().loadingSheen(true, scheme.onSurface))
+        androidx.compose.animation.AnimatedVisibility(
+            missing, Modifier.align(Alignment.Center),
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)), exit = androidx.compose.animation.fadeOut(),
+        ) {
+            Icon(
+                Icons.Filled.MusicNote, null,
+                Modifier.size(if (size > 0.dp) size * 0.34f else 40.dp),
+                tint = scheme.onSurface.copy(alpha = 0.22f),
+            )
+        }
         AsyncImage(
             model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
             modifier = Modifier.fillMaxSize(),
+            onState = {
+                loading = it is coil3.compose.AsyncImagePainter.State.Loading
+                missing = url == null || it is coil3.compose.AsyncImagePainter.State.Error
+            },
         )
     }
 }
@@ -319,12 +344,23 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) = SectionHeader(te
 
 @Composable
 fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
-    when (load) {
-        is Load.Ready -> content(load.data)
-        is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator(strokeWidth = 2.dp) }
-        is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
-            Text("Could not load", style = MaterialTheme.typography.titleLarge)
-            Text(load.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+    // A page's content fades in over its loader instead of replacing it in one frame. Keyed on the kind
+    // of state only: fresh data for a page already showing just recomposes it, with no fade.
+    androidx.compose.animation.AnimatedContent(
+        load, contentKey = { it::class },
+        transitionSpec = {
+            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260, delayMillis = 60)) togetherWith
+                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+        },
+        label = "load",
+    ) { state ->
+        when (state) {
+            is Load.Ready -> content(state.data)
+            is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { LoadingDots() }
+            is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
+                Text("Could not load", style = MaterialTheme.typography.titleLarge)
+                Text(state.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            }
         }
     }
 }

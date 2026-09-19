@@ -1,5 +1,13 @@
 package dev.flint.music.app.ui
 
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.composed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -761,6 +769,13 @@ fun reduceMotion(): Boolean {
  */
 object AppMotion : androidx.compose.ui.MotionDurationScale {
     @Volatile var force = false
+
+    /**
+     * The user's reduce-motion answer, for code that must not look it up per call - a cover in a grid
+     * of a hundred cannot each collect the settings. Kept current by App; [reduceMotion] is the same
+     * answer for everything else.
+     */
+    @Volatile var reduce = false
     // A static read, and the process is told when the setting changes: nothing to observe.
     override val scaleFactor: Float get() = if (force) 1f else android.animation.ValueAnimator.getDurationScale()
 }
@@ -810,3 +825,112 @@ fun FlintSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifie
  * minus the largest boost, and minus nothing is negative zero - and `"%+.1f"` prints it as "-0.0 dB".
  */
 fun signedDb(db: Float): String = "%+.1f".format(if (db == 0f) 0f else db)
+
+
+/**
+ * Something is on its way: three dots breathing one after another, the mark Apple's lyrics show for an
+ * instrumental break. Quiet on purpose - it says "coming", not "look at me". It stays invisible for the
+ * first quarter-second, so anything that arrives quickly never shows a loader at all, and then fades
+ * in rather than appearing. Only animates while it is on screen; with reduce motion it holds still.
+ */
+@Composable
+fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp = 7.dp, color: Color = MaterialTheme.colorScheme.onSurface) {
+    val plain = AppMotion.reduce
+    val appear = remember { androidx.compose.animation.core.Animatable(0f) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(250)
+        appear.animateTo(1f, androidx.compose.animation.core.tween(350))
+    }
+    val phase = if (plain) null else androidx.compose.animation.core.rememberInfiniteTransition(label = "dots").animateFloat(
+        0f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(androidx.compose.animation.core.tween(1300, easing = androidx.compose.animation.core.LinearEasing)),
+        label = "dots",
+    )
+    androidx.compose.foundation.Canvas(modifier.size(dot * 4.4f, dot).graphicsLayer { alpha = appear.value }) {
+        val r = size.height / 2f
+        val gap = (size.width - size.height * 3f) / 2f
+        for (i in 0..2) {
+            // Each dot swells and brightens in turn, a third of a cycle behind the one before it.
+            val t = phase?.value?.let { ((it - i / 3f) % 1f + 1f) % 1f } ?: 0.5f
+            val pulse = 0.5f - 0.5f * kotlin.math.cos(t * 2f * Math.PI.toFloat())
+            drawCircle(
+                color.copy(alpha = 0.22f + 0.5f * pulse),
+                radius = r * (0.78f + 0.22f * pulse),
+                center = androidx.compose.ui.geometry.Offset(r + i * (size.height + gap), r),
+            )
+        }
+    }
+}
+
+/**
+ * A soft sheen gliding across a placeholder while its picture is on the way, so a slow cover reads as
+ * loading rather than missing. Like [LoadingDots] it waits a quarter-second before showing and fades
+ * in, so a cover that comes from the cache never shimmers. Draw-phase only: a running sheen redraws
+ * one layer and recomposes nothing, and when [active] goes false it stops entirely.
+ */
+fun Modifier.loadingSheen(active: Boolean, color: Color): Modifier = if (!active) this else composed {
+    val appear = remember { androidx.compose.animation.core.Animatable(0f) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(250)
+        appear.animateTo(1f, androidx.compose.animation.core.tween(400))
+    }
+    val plain = AppMotion.reduce
+    val sweep = if (plain) null else androidx.compose.animation.core.rememberInfiniteTransition(label = "sheen").animateFloat(
+        0f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(1500, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            initialStartOffset = androidx.compose.animation.core.StartOffset(0),
+        ),
+        label = "sheen",
+    )
+    drawWithContent {
+        drawContent()
+        val a = appear.value
+        if (a <= 0f) return@drawWithContent
+        if (sweep == null) { drawRect(color.copy(alpha = 0.05f * a)); return@drawWithContent }
+        val band = size.width * 0.9f
+        val x = -band + sweep.value * (size.width + band * 2f)
+        drawRect(
+            Brush.linearGradient(
+                0f to Color.Transparent, 0.5f to color.copy(alpha = 0.10f * a), 1f to Color.Transparent,
+                start = androidx.compose.ui.geometry.Offset(x - band / 2f, 0f),
+                end = androidx.compose.ui.geometry.Offset(x + band / 2f, size.height),
+            ),
+        )
+    }
+}
+
+/**
+ * Play, pause, or "starting": the glyph changes by cross-fading with a slight scale, never by swapping
+ * in one frame. The spinner only comes in when the wait is long enough to notice - past 300 ms - since
+ * most skips start playing within that, and a spinner flicking in and out of the pause button for a
+ * frame was one of the things that made skipping feel rough.
+ */
+@Composable
+fun PlayPauseGlyph(playing: Boolean, buffering: Boolean, size: androidx.compose.ui.unit.Dp, spinner: androidx.compose.ui.unit.Dp) {
+    var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(buffering) {
+        if (buffering) kotlinx.coroutines.delay(300)
+        busy = buffering
+    }
+    val glyph = when { busy -> 2; playing -> 1; else -> 0 }
+    androidx.compose.animation.AnimatedContent(
+        glyph,
+        transitionSpec = {
+            (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)) +
+                androidx.compose.animation.scaleIn(androidx.compose.animation.core.tween(180), initialScale = 0.8f)) togetherWith
+                (androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(140)) +
+                    androidx.compose.animation.scaleOut(androidx.compose.animation.core.tween(140), targetScale = 0.8f))
+        },
+        contentAlignment = Alignment.Center,
+        label = "playPause",
+    ) { g ->
+        Box(Modifier.size(size), Alignment.Center) {
+            when (g) {
+                2 -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
+                1 -> androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.Pause, "Pause", Modifier.fillMaxSize())
+                else -> androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize())
+            }
+        }
+    }
+}
