@@ -38,6 +38,9 @@ import androidx.compose.ui.input.pointer.PointerInputChange
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.graphics.vector.ImageVector
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Spacer
@@ -159,20 +162,23 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
         rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled)
     } else null
     val scheme = MaterialTheme.colorScheme
+    val sheet = LocalPlayerSheet.current
     NowPlayingPalette(palette)
     Surface(
         shape = CardShape, color = slab, contentColor = content,
         shadowElevation = 6.dp,
         modifier = Modifier.fillMaxWidth()
             .semantics { contentDescription = "Now playing bar" }
+            .onGloballyPositioned { sheet.miniTop = it.positionInRoot().y }
             .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next)
-            .riseToPlayer(onOpen),
+            // Up opens the player, following the finger the whole way; see PlayerSheet.
+            .dragsSheet(sheet),
     ) {
         // The tap has to be a child of the drag detectors, not a sibling behind them: a pointerInput
         // waiting for drag slop swallows a tap offered to a clickable further up the same chain.
         Surface(onClick = onOpen, color = Color.Transparent, contentColor = content) {
         Row(Modifier.fillMaxWidth().padding(start = 8.dp, end = 4.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-            Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 42.dp, radius = 7.dp)
+            Cover(vm.cover(state.current?.coverArt, CoverSize.ROW), 42.dp, Modifier.onGloballyPositioned { sheet.miniCover = it.boundsInRoot() }, radius = 7.dp)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
                 Text(
@@ -186,45 +192,6 @@ fun MiniPlayer(vm: PlayerViewModel, onOpen: () -> Unit, slab: Color, content: Co
             IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
         }
         }
-    }
-}
-
-/**
- * The mini player rises with the finger and hands over to the full player part-way through the drag,
- * rather than springing back and letting a separate slide begin afterwards - which is the jump this
- * replaces. It grows and fades as it goes, so the bar reads as becoming the player.
- *
- * Downward drags do nothing: the bar already sits at the bottom of the screen.
- */
-private fun Modifier.riseToPlayer(onOpen: () -> Unit): Modifier = composed {
-    val lift = remember { Animatable(0f) }
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
-    val haptics = LocalHapticFeedback.current
-    pointerInput(Unit) {
-        val trigger = 64.dp.toPx()
-        // Inside the gesture block, not remembered outside it: a value captured at composition time is
-        // the one this file has been bitten by before, and here it would fire the navigation once and
-        // then never again.
-        var opened = false
-        val settle: () -> Unit = {
-            opened = false
-            scope.launch { lift.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
-        }
-        detectVerticalDragGestures(onDragEnd = settle, onDragCancel = settle) { _: PointerInputChange, d: Float ->
-            val next = (lift.value + d).coerceIn(-trigger * 2f, 0f)
-            scope.launch { lift.snapTo(next) }
-            if (!opened && -next >= trigger) {
-                opened = true
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                onOpen()
-            }
-        }
-    }.graphicsLayer {
-        translationY = lift.value
-        val t = (-lift.value / (64.dp.toPx() * 2f)).coerceIn(0f, 1f)
-        scaleX = 1f + t * 0.04f
-        scaleY = 1f + t * 0.04f
-        alpha = 1f - t * 0.3f
     }
 }
 

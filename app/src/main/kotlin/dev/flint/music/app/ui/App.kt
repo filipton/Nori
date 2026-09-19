@@ -25,7 +25,9 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Box
@@ -46,29 +48,34 @@ import dev.flint.music.ffi.Song
 @Composable
 private fun Inset(content: @Composable () -> Unit) = androidx.compose.foundation.layout.Box(Modifier.statusBarsPadding()) { content() }
 
-/** Navigation as the screens see it; they never touch the NavController. */
-class Nav(private val c: NavHostController) {
-    fun album(id: String) = c.navigate("album/${Uri.encode(id)}")
-    fun artist(id: String) = c.navigate("artist/${Uri.encode(id)}")
-    fun playlist(id: String) = c.navigate("playlist/${Uri.encode(id)}")
-    fun genre(name: String) = c.navigate("genre/${Uri.encode(name)}")
-    fun folder(id: String) = c.navigate("folder/${Uri.encode(id)}")
-    fun decade(year: Int) = c.navigate("decade/$year")
-    fun smart(id: String) = c.navigate("smart/${Uri.encode(id)}")
-    fun smartEdit(id: String) = c.navigate("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
-    fun stats() = c.navigate("stats")
+/**
+ * Navigation as the screens see it; they never touch the NavController. Going anywhere puts the player
+ * away first, the way an artist tapped on Apple's player drops it and opens the artist underneath.
+ */
+class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
+    fun go(route: String) { if (sheet.isOpen) sheet.close(); c.navigate(route) }
+    fun album(id: String) = go("album/${Uri.encode(id)}")
+    fun artist(id: String) = go("artist/${Uri.encode(id)}")
+    fun playlist(id: String) = go("playlist/${Uri.encode(id)}")
+    fun genre(name: String) = go("genre/${Uri.encode(name)}")
+    fun folder(id: String) = go("folder/${Uri.encode(id)}")
+    fun decade(year: Int) = go("decade/$year")
+    fun smart(id: String) = go("smart/${Uri.encode(id)}")
+    fun smartEdit(id: String) = go("smartEdit/${Uri.encode(id.ifEmpty { "new" })}")
+    fun stats() = go("stats")
     /** A settings group, optionally landing on one row of it (from the settings search). */
-    fun settingsGroup(id: String, key: String = "") = c.navigate("settings/$id?key=${Uri.encode(key)}")
-    fun player() = c.navigate("player") { launchSingleTop = true }
-    fun equalizer() = c.navigate("equalizer")
-    fun autoEq() = c.navigate("autoeq")
-    fun back() { c.popBackStack() }
+    fun settingsGroup(id: String, key: String = "") = go("settings/$id?key=${Uri.encode(key)}")
+    fun player() = sheet.open()
+    fun equalizer() = go("equalizer")
+    fun autoEq() = go("autoeq")
+    fun back() { if (sheet.isOpen) sheet.close() else c.popBackStack() }
     /**
      * A tab always lands on that tab's own page. It used to save the stack it popped and restore it on
      * the way back, which meant tapping Home from an album popped the album and then put it straight
      * back - the tab looked dead. Nothing above the tab roots survives a tab tap now.
      */
     fun tab(route: String) {
+        if (sheet.isOpen) sheet.close()
         // Tapping Search is a request for the keyboard, whether or not the screen is already open -
         // and with launchSingleTop it is not recomposed, so nothing else would notice the tap.
         if (route == "search") searchTaps.intValue++
@@ -102,11 +109,15 @@ private val tabs = listOf(
 fun App() {
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
+    androidx.compose.runtime.SideEffect { AppMotion.force = prefs.ignoreSystemMotion }
     FlintTheme(prefs) {
         if (!prefs.loggedIn) { LoginScreen(settings); return@FlintTheme }
 
         val controller = rememberNavController()
-        val nav = remember(controller) { Nav(controller) }
+        val sheetScope = androidx.compose.runtime.rememberCoroutineScope()
+        val sheet = remember { PlayerSheet(sheetScope) }
+        sheet.plain = reduceMotion()
+        val nav = remember(controller) { Nav(controller, sheet) }
         val actions: ActionsViewModel = viewModel()
         val player: PlayerViewModel = viewModel()
         val snackbar = remember { SnackbarHostState() }
@@ -132,7 +143,7 @@ fun App() {
         // The test bridge's handles, live for as long as the app is on screen. See TestHooks.
         val player2 = player
         androidx.compose.runtime.DisposableEffect(controller) {
-            dev.flint.music.app.TestHooks.open = { route -> controller.navigate(route) }
+            dev.flint.music.app.TestHooks.open = { route -> if (route == "player") sheet.open() else nav.go(route) }
             dev.flint.music.app.TestHooks.set = { name, value -> settings.setByName(name, value) }
             dev.flint.music.app.TestHooks.play = { what -> actions.playByRef(what) }
             dev.flint.music.app.TestHooks.login = { spec ->
@@ -143,7 +154,7 @@ fun App() {
             dev.flint.music.app.TestHooks.state = {
                 val st = player2.state.value
                 val p = settings.prefs.value
-                """{"route":"${controller.currentBackStackEntry?.destination?.route}",""" +
+                """{"route":"${if (sheet.isOpen) "player" else controller.currentBackStackEntry?.destination?.route}",""" +
                     """"playing":${st.playing},"title":"${st.current?.title.orEmpty()}","artist":"${st.current?.artist.orEmpty()}",""" +
                     """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
                     """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
@@ -175,6 +186,7 @@ fun App() {
 
         CompositionLocalProvider(
             LocalNav provides nav,
+            LocalPlayerSheet provides sheet,
             LocalSongMenu provides { menuSong = it; menuFromPlayer = false },
             LocalPlayerMenu provides { menuSong = it; menuFromPlayer = true },
         ) {
@@ -191,8 +203,11 @@ fun App() {
             // showing the window's default grey, lighter than our own cards) and a content colour for
             // text that does not name one (which left titles rendering almost black).
             Surface(color = MaterialTheme.colorScheme.background, contentColor = MaterialTheme.colorScheme.onBackground) {
-            Box(Modifier.fillMaxSize()) {
-              CompositionLocalProvider(LocalStarMarks provides marks, LocalChromeInset provides if (route == "player") 0.dp else chromeHeight) {
+            Box(Modifier.fillMaxSize().onGloballyPositioned { sheet.rootHeight = it.size.height.toFloat() }) {
+              // Everything under the player. Once the player covers it completely it is not drawn at all:
+              // a layer at zero alpha is skipped, so a page left animating underneath costs nothing.
+              Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (sheet.progress.value >= 1f) 0f else 1f }) {
+              CompositionLocalProvider(LocalStarMarks provides marks, LocalChromeInset provides chromeHeight) {
                 // One transition for the whole app, and a quiet one: pages slide a little and fade, the
                 // way a push does on a phone. The default jumps and the horizontal slide across the
                 // full width reads as a lurch on a large screen.
@@ -221,20 +236,6 @@ fun App() {
                     }
                     composable("equalizer") { Inset { EqualizerScreen(settings) } }
                     composable("autoeq") { Inset { AutoEqScreen(settings) } }
-                    composable(
-                        "player",
-                        // The mini player opens with an upward swipe, so the full player rises with it -
-                        // the default sideways slide reads as a jump after a vertical gesture. Other
-                        // routes keep the app-wide transition; back needs no theatre.
-                        enterTransition = {
-                            androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(if (plain) 90 else 260)) { it } +
-                                androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (plain) 90 else 180))
-                        },
-                        popExitTransition = {
-                            androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(if (plain) 90 else 240)) { it } +
-                                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (plain) 70 else 160))
-                        },
-                    ) { PlayerScreen(player, actions) }
                     composable("album/{id}") { AlbumScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("artist/{id}") { ArtistScreen(it.arguments!!.getString("id")!!, actions) }
                     composable("playlist/{id}") { PlaylistScreen(it.arguments!!.getString("id")!!, actions) }
@@ -246,14 +247,62 @@ fun App() {
                     composable("decade/{year}") { Inset { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) } }
                 }
               }
-              if (route != "player") Box(
+              Box(
                   Modifier.align(Alignment.BottomCenter)
                       .onGloballyPositioned { chromeHeight = with(density) { it.size.height.toDp() } },
               ) { BottomChrome(player, actions, route, tabs, nav::tab, nav::player) }
+              }
+              PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
               SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
             }
+            SheetBack(sheet)
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer }) }
         }
+    }
+}
+
+/**
+ * Back puts the player away while it is up. Registered after the NavHost's own, so it goes first; and
+ * its own small scope, so the sheet opening and closing recomposes this and not the whole app.
+ */
+@Composable
+private fun SheetBack(sheet: PlayerSheet) {
+    androidx.activity.compose.BackHandler(sheet.isOpen) { sheet.close() }
+}
+
+/**
+ * The player sheet over everything else, present only while it is open or moving. The page behind
+ * darkens as it rises; the sheet's top corners round off while it is in flight and square up once it
+ * fills the screen. All of it is read in the draw phase, so a drag redraws two layers and recomposes
+ * nothing.
+ */
+@Composable
+private fun PlayerLayer(sheet: PlayerSheet, content: @Composable () -> Unit) {
+    val shown by remember { androidx.compose.runtime.derivedStateOf { sheet.progress.value > 0f || sheet.progress.targetValue > 0f } }
+    // Built once, shortly after the app is up, and kept: opening the player then only moves it. Until
+    // then, and on a phone too slow to have got there, the first open builds it.
+    var warm by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { kotlinx.coroutines.delay(1500); warm = true }
+    if (!shown && !warm) return
+    val radius = with(androidx.compose.ui.platform.LocalDensity.current) { 14.dp.toPx() }
+    if (shown) Box(
+        Modifier.fillMaxSize().drawBehind {
+            drawRect(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.45f * sheet.progress.value))
+        },
+    )
+    Box(
+        Modifier.fillMaxSize().graphicsLayer {
+            // Put away, it is parked a whole screen below the bottom edge: nothing drawn, and nothing to
+            // catch a touch meant for the mini player (a transparent layer would still be hit).
+            val parked = sheet.progress.value == 0f && sheet.progress.targetValue == 0f
+            translationY = if (parked) sheet.rootHeight * 2f + 1f else sheet.offset()
+            alpha = if (parked) 0f else 1f
+            val r = radius * (1f - sheet.progress.value).coerceIn(0f, 1f) * 4f
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(topStart = r.coerceAtMost(radius), topEnd = r.coerceAtMost(radius))
+            clip = true
+        },
+    ) {
+        CompositionLocalProvider(LocalChromeInset provides 0.dp, LocalPlayerShown provides shown) { content() }
     }
 }

@@ -1,0 +1,132 @@
+package dev.flint.music.app.ui
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
+
+/**
+ * The full player as a sheet over the app rather than a page navigated to. It is one number,
+ * [progress], from 0 (only the mini player showing) to 1 (the player filling the screen), and every
+ * part of the transition is drawn from it: the sheet's top edge travels from the mini player's top to
+ * the top of the screen, and the cover grows from the mini player's thumbnail into the sleeve. A drag
+ * sets the number directly, so the whole thing follows the finger and holds wherever it is held; a
+ * release settles it with the finger's own speed. Closing is the same path backwards.
+ *
+ * Before this the player was a route: a drag on the mini player had to cross a threshold, and then a
+ * separate slide played on its own - you pulled, and then something else happened.
+ */
+@Stable
+class PlayerSheet(private val scope: CoroutineScope) {
+    val progress = Animatable(0f).also { it.updateBounds(0f, 1f) }
+
+    /** The mini player's artwork, in root coordinates: where the cover flies from and back to. */
+    var miniCover by mutableStateOf(Rect.Zero)
+
+    /** The top of the mini player, in root coordinates: where the sheet's top edge starts. */
+    var miniTop by mutableFloatStateOf(0f)
+
+    /** The window's height, for when there is no mini player to start from. */
+    var rootHeight by mutableFloatStateOf(0f)
+
+    /** Settle quickly and without a spring: the user's reduce-motion switch. */
+    var plain = false
+
+    /** Open, or on the way there. What the back button, the test bridge and the chrome go by. */
+    val isOpen: Boolean get() = progress.targetValue == 1f
+
+    /** How far the sheet's top edge travels, in pixels. */
+    val travel: Float get() = if (miniTop > 0f) miniTop else rootHeight.coerceAtLeast(1f)
+
+    /** The sheet's top edge, relative to the top of the screen. */
+    fun offset(): Float = (1f - progress.value) * travel
+
+    fun open() = settle(1f, 0f)
+    fun close() = settle(0f, 0f)
+
+    /** Which end the sheet was nearer when the finger went down. */
+    private var from = 0f
+
+    fun dragStart() { from = if (progress.value > 0.5f) 1f else 0f }
+
+    /** Moves the sheet with a finger that moved [dy] pixels (down is positive). */
+    fun dragBy(dy: Float) {
+        scope.launch { progress.snapTo((progress.value - dy / travel).coerceIn(0f, 1f)) }
+    }
+
+    /**
+     * The finger let go at [velocityY] pixels a second. A flick goes the way it was flicked; otherwise a
+     * drag that has come a little way - [COMMIT] of the travel - finishes the move it started, and a
+     * smaller one goes back. Deciding by the halfway point instead meant a pull down from the player had
+     * to cover half the screen before it would close.
+     */
+    fun release(velocityY: Float) {
+        val moved = progress.value - from
+        val target = when {
+            velocityY < -FLICK -> 1f
+            velocityY > FLICK -> 0f
+            moved > COMMIT -> 1f
+            moved < -COMMIT -> 0f
+            else -> from
+        }
+        settle(target, -velocityY / travel)
+    }
+
+    private fun settle(target: Float, velocity: Float) {
+        scope.launch {
+            // Critically damped: it arrives with the finger's speed and does not bounce past either end.
+            if (plain) progress.animateTo(target, tween(120))
+            else progress.animateTo(target, spring(dampingRatio = 1f, stiffness = 420f), initialVelocity = velocity)
+        }
+    }
+
+    private companion object {
+        /** A release faster than this, in pixels a second, goes the way it was flicked. */
+        const val FLICK = 900f
+
+        /** How far a slow drag has to come, as a share of the travel, to finish rather than go back. */
+        const val COMMIT = 0.15f
+    }
+}
+
+val LocalPlayerSheet = staticCompositionLocalOf<PlayerSheet> { error("no player sheet") }
+
+/**
+ * Whether the player is on screen at all. It stays composed while it is put away, so that opening it
+ * only has to move it - building it from nothing on the first frame of the drag stalled that frame -
+ * and everything in it that ticks, or reaches outside the player, checks this first.
+ */
+val LocalPlayerShown = androidx.compose.runtime.compositionLocalOf { true }
+
+/**
+ * Vertical drags on this element move the sheet. The velocity is taken from the summed deltas, not
+ * from the pointer's position: inside the sheet the element moves with the finger, so its local
+ * position barely changes and would report a flick as standing still.
+ */
+internal fun Modifier.dragsSheet(sheet: PlayerSheet, enabled: Boolean = true): Modifier =
+    if (!enabled) this else pointerInput(sheet) {
+        val tracker = VelocityTracker()
+        var y = 0f
+        detectVerticalDragGestures(
+            onDragStart = { tracker.resetTracking(); y = 0f; sheet.dragStart() },
+            onDragEnd = { sheet.release(tracker.calculateVelocity().y) },
+            onDragCancel = { sheet.release(0f) },
+        ) { change, dy ->
+            y += dy
+            tracker.addPosition(change.uptimeMillis, Offset(0f, y))
+            sheet.dragBy(dy)
+        }
+    }

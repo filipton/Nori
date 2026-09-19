@@ -149,15 +149,31 @@ settings screen in the App Store set — they are UIKit's own defaults.
 
 ## Gestures and the equalizer
 
-- **Pull down anywhere on the player** closes it, and the whole screen follows the finger
-  (`PlayerScreen.pullToDismiss`); past a fifth of the height or a flick closes it, less springs
-  back. Only the handle strip used to answer, and once the sleeve filled the top half nearly every
-  pull landed on artwork that knew only sideways swipes - reported as "there is no pull down". Off
-  in the lyrics and queue, where a vertical drag scrolls. Checked: flick and slow drag on the
-  artwork close it, a short nudge springs back, a sideways swipe still skips.
-- **Test trap:** `app.sh open player` pushes another player every time, so Back or a dismiss just
-  reveals the one underneath and looks broken. Open the player by tapping the mini player after a
-  fresh launch.
+- **The player is a sheet, not a route** (`PlayerSheet`). One number, `progress` 0..1, drives the
+  whole transition: the sheet's top edge goes from the mini player's top to the screen's top, the
+  page behind darkens, and the cover flies from the mini player's thumbnail into the sleeve
+  (`FlyingCover`). A drag sets the number directly, so it follows the finger and holds where it is
+  held; a release goes the way of a flick, else finishes once it has come 15 % of the way, else goes
+  back. Up on the mini player opens it; down anywhere on the artwork (or on the handle, in lyrics
+  and queue) closes it. Modelled on the reference recording of Apple's (owner's `otherappanim.mp4`).
+- **The flying cover is laid out once** as the full square at the sleeve's height and moved only by
+  a layer transform (scale plus a clip from square to the sleeve's window). Growing it by layout gave
+  the image a new size per frame, and every size was a new decode and texture: 300 ms stalls. The
+  sleeve and the flight share one painter; two requests for the same picture in one frame decoded
+  two bitmaps and uploaded the second at the landing.
+- **The player stays composed** once the app has been up 1.5 s, parked a screen below the bottom
+  edge (off-screen, so it draws nothing and catches no touch meant for the mini player). Building it
+  on the first frame of the drag stalled that frame. Anything in it that ticks or reaches outside
+  (seek bar, lyric timing, status-bar icons, keep-screen-on) checks `LocalPlayerShown`.
+- **Panels dissolve** (artwork, lyrics, queue): `AnimatedContent`, the old panel held opaque under
+  the new one (`ExitTransition.KeepUntilTransitionsFinished`; a zero-length delayed fade-out was not
+  held), and the seek bar, transport, volume and icons are shared elements so one copy moves rather
+  than two showing.
+- **Measuring on the emulator:** it renders with SwiftShader (CPU), so GPU time per frame is 30-60 ms
+  even idle and first draws take hundreds. Judge smoothness on a phone; on the emulator, check that
+  nothing recomposes per frame (log from the composables) and read the UI-thread columns of
+  `dumpsys gfxinfo framestats`. Raw gestures: `adb shell input motionevent DOWN/MOVE/UP x y`, which
+  can hold a drag mid-way for a screenshot.
 - **The equalizer no longer drops the sound on entry.** Opening it sent `CMD_TUNING`, and the
   service rebuilt the sink (stop, prepare) to swap the 10 s buffer for a shallow one - an audible
   break, on a DAC or anywhere, and again on leaving. Now: nothing on opening; one rebuild on the
@@ -171,10 +187,14 @@ Compose scales every animation by Android's animator duration scale. Plenty of p
 for speed (and GrapheneOS users often do), and at 0 every tween finishes on its first frame - the
 owner's lyrics jumped from line to line on the phone while gliding on the emulator. `reduceMotion()`
 also followed that switch. `Prefs.ignoreSystemMotion` ("Animate even when Android's are off") makes
-`reduceMotion()` ignore it, and `appMotion()` supplies a `MotionDurationScale` of 1 to put in an
-animation's coroutine context, which is the only way to override the system scale for one
-animation. The lyric glide runs under it. Measured with the system scale at 0: off, a line change is
-over in 66 ms with 60 % of the movement in one frame; on, 600-730 ms with no frame over 20 %.
+`reduceMotion()` ignore it. The speed itself is app-wide: `MainActivity` builds the window's
+recomposer with `AppMotion` (a `MotionDurationScale`) in its context, and every animation in the
+composition, ours and the libraries' (page transitions, sheets, fades, the lyrics), reads its scale
+from there - the system's normally, 1 when the switch is on. It replaced a per-animation override
+that only the few animations wrapped in it obeyed. Measured with the system scale at 0: the sheet
+opens through intermediate frames with the switch on and in one frame with it off; earlier, off, a
+lyric line change was over in 66 ms with 60 % of the movement in one frame, on, 600-730 ms with no
+frame over 20 %.
 
 Measure motion with `glide3.py`-style frame differencing (share of a change in its biggest frame),
 not by matching vertical shifts: lyric lines are evenly spaced, so "moved one line" and "did not
@@ -351,7 +371,7 @@ Check for these before believing a screen is fine — each has bitten more than 
    a stable identity, or do not reorder until the finger lifts (the queue does the latter).
 3. **State read at composition time inside a `pointerInput(Unit)` block.** The block is created once
    and keeps the values it captured. Read `MutableState` or a view model at event time, or keep the
-   flag inside the gesture block itself (the mini player's `riseToPlayer` does).
+   flag inside the gesture block itself (`dragsSheet` keeps its velocity tracker there).
 4. **Sentinels used in arithmetic.** `AudioSink.getCurrentPositionUs` returns
    `CURRENT_POSITION_NOT_SET` (`Long.MIN_VALUE`) when stopped; subtracting it produced an enormous
    "already buffered" figure and the sink refused audio for ever, which is what made playback silent

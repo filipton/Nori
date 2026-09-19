@@ -102,7 +102,8 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val found = (load as? Load.Ready)?.data
     val lyrics = found?.lyrics
-    if (prefs.lyricsKeepScreenOn) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
+    val shown = LocalPlayerShown.current
+    if (prefs.lyricsKeepScreenOn && shown) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
     val song = playerState.current
     if (lyrics == null || lyrics.lines.isEmpty()) {
         Column(Modifier.fillMaxSize()) {
@@ -115,6 +116,8 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     var nudgeMs by remember(lyrics) { mutableLongStateOf(0L) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    // Put away with the player is the same as paused: nothing to keep in step.
+    val live = resumed && shown
     // Only sweep when the lyrics actually carry per-word times (enhanced LRC, or a server's structured
     // cues). Spreading a line's duration across its words by length looks right for a beat and then
     // drifts badly on a held note or a fast line, which reads as broken sync - a line at a time is
@@ -130,11 +133,11 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     // own change.
     val timing = remember(lyrics) { LyricTiming.of(lyrics.lines.map { it.startMs.toLong() }) }
     // Keyed on the lyrics themselves: on the next song this loop must time the new lines, not the old.
-    LaunchedEffect(playing, resumed, sweep, lyrics) {
+    LaunchedEffect(playing, live, sweep, lyrics) {
         now = vm.positionMs + nudgeMs
         if (!lyrics.synced) return@LaunchedEffect
         var frame = 0
-        while (playing && resumed && isActive) {
+        while (playing && live && isActive) {
             // Every second display frame is plenty for a text fill, and half the redraws.
             if (sweep) { withFrameMillis { }; if (++frame % 2 == 1) continue } else {
                 // Sleep until the next line takes over and wake once, instead of looking three times a
@@ -169,7 +172,6 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         // all (a seek, the first line after opening) is still jumped to: gliding past a whole song's
         // worth of words is not a transition, it is a wait.
         val plain = reduceMotion()
-        val motion = appMotion()
         // Only the scroll lives here; each line's brightness is its own (below). A scroll cut short by the
         // next line is simply continued from wherever the list is, so it cannot jump either.
         LaunchedEffect(active, plain, lyrics) {
@@ -181,11 +183,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
             val distance = (here.offset - third).toFloat()
             if (kotlin.math.abs(distance) < 1f) return@LaunchedEffect
-            // Under the app's own motion scale: with Android's animations off, Compose would otherwise
-            // finish this on the first frame, which is exactly the jump it is here to prevent.
-            withContext(motion) {
-                list.animateScrollBy(distance, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
-            }
+            list.animateScrollBy(distance, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
         }
         // The words fade out towards both ends of the panel by becoming transparent, not by having a
         // colour painted over them. The page behind is the cover's blur and varies across the width;
@@ -221,9 +219,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                     val strength = remember { Animatable(target) }
                     LaunchedEffect(target, plain) {
                         if (plain) strength.snapTo(target)
-                        else withContext(motion) {
-                            strength.animateTo(target, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
-                        }
+                        else strength.animateTo(target, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
                     }
                     when {
                         !lyrics.synced -> Text(line.text, style = style, color = bright)

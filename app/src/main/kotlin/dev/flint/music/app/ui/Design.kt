@@ -752,19 +752,17 @@ fun reduceMotion(): Boolean {
 }
 
 /**
- * What to run an animation's coroutine under so it plays at its real speed. Compose scales every
- * animation by Android's animator duration scale, so with system animations off a tween of any length
- * finishes on the first frame; putting this in the coroutine's context overrides that scale for the
- * one animation it runs. Empty - follow the system - unless the user asked to animate regardless.
+ * How fast every animation in the app runs. Compose scales each one by whatever MotionDurationScale is
+ * in its coroutine's context, and by default that is Android's animator duration scale - so with system
+ * animations off, every tween and spring in the app finished on its first frame. The activity starts
+ * the whole composition with this object in its context instead (see MainActivity), so every animation
+ * there is, ours and the libraries', reads it: the system's scale normally, full speed when the user
+ * asked this app to animate regardless of the rest of the phone.
  */
-@Composable
-fun appMotion(): kotlin.coroutines.CoroutineContext {
-    val prefs by (androidx.lifecycle.viewmodel.compose.viewModel<dev.flint.music.app.vm.SettingsViewModel>()).prefs.collectAsStateWithLifecycle()
-    return if (prefs.ignoreSystemMotion) RealSpeed else kotlin.coroutines.EmptyCoroutineContext
-}
-
-private object RealSpeed : androidx.compose.ui.MotionDurationScale {
-    override val scaleFactor: Float get() = 1f
+object AppMotion : androidx.compose.ui.MotionDurationScale {
+    @Volatile var force = false
+    // A static read, and the process is told when the setting changes: nothing to observe.
+    override val scaleFactor: Float get() = if (force) 1f else android.animation.ValueAnimator.getDurationScale()
 }
 
 

@@ -95,6 +95,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.geometry.Rect
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -154,14 +158,17 @@ private enum class Panel { ART, QUEUE, LYRICS }
  *
  * The only thing that ticks is the seek bar, and only while this screen is resumed and playing.
  */
+@OptIn(androidx.compose.animation.ExperimentalSharedTransitionApi::class)
 @Composable
 fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     val marks = LocalStarMarks.current
-    val nav = LocalNav.current
+    val sheet = LocalPlayerSheet.current
     val menu = LocalSongMenu.current
     val playerMenu = LocalPlayerMenu.current
     var panel by rememberSaveable { mutableStateOf(Panel.ART) }
+    // A panel's button opens it, and pressed again goes back to the artwork.
+    val choose: (Panel) -> Unit = { panel = if (panel == it) Panel.ART else it }
     // Where the sleeve ends, so the page behind it can be drawn at the same scale. Written on layout,
     // read in the draw phase; it only moves when the window does.
     var sleeveBottom by remember { mutableFloatStateOf(0f) }
@@ -172,6 +179,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val prefs by settingsVm.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
     val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
+    // One painter for the sleeve and for the cover in flight. Two requests for the same picture, made in
+    // the same frame, each decoded their own bitmap before either reached the cache, and the second one
+    // was uploaded to the GPU on the frame the sleeve took over - a stall exactly at the landing.
+    val context = LocalContext.current
+    val sleevePainter = coil3.compose.rememberAsyncImagePainter(
+        remember(coverUrl) { coil3.request.ImageRequest.Builder(context).data(coverUrl).size(CoverSize.FULL).build() },
+        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
+    )
     // AMOLED black everywhere else, but the player keeps the cover's colours unless asked not to: in
     // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
     // carries the record's colour down the whole screen.
@@ -180,9 +195,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
-        SystemBarIcons(scheme.background)
+        if (LocalPlayerShown.current) SystemBarIcons(scheme.background)
         Box(
-            Modifier.fillMaxSize().pullToDismiss(panel == Panel.ART, nav::back).drawBehind {
+            // Pull down from anywhere on the artwork page and the whole player follows the finger down;
+            // the lyrics and queue need a vertical drag to scroll, so there only the handle does.
+            Modifier.fillMaxSize().dragsSheet(sheet, enabled = panel == Panel.ART).drawBehind {
                 // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
                 // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
                 // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
@@ -196,6 +213,24 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 } else drawRect(scheme.background)
             },
         ) {
+            if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleevePainter, palette, sleeveHeight > 0f)
+            // Artwork, lyrics and queue dissolve into each other rather than cutting. The incoming panel
+            // fades in over the outgoing one, which stays fully drawn underneath until it is covered: the
+            // transport is the same in all three, and fading both copies at once dimmed it half-way. (A
+            // zero-length fade-out delayed to the end was not held: the old panel vanished on frame one.)
+            androidx.compose.animation.SharedTransitionLayout {
+            androidx.compose.animation.AnimatedContent(
+                targetState = panel,
+                transitionSpec = {
+                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(240)) togetherWith
+                        androidx.compose.animation.ExitTransition.KeepUntilTransitionsFinished
+                },
+                label = "panel",
+            ) { panel ->
+            // The seek bar, the transport, the volume and the icons are in every panel but not at the same
+            // height. Shared, only one copy of each is drawn during the dissolve, and it moves from where it
+            // was to where it goes; dissolved like the rest, both copies showed and the controls doubled.
+            @Composable fun kept(key: String) = Modifier.sharedElement(rememberSharedContentState(key), this@AnimatedContent)
             Column(Modifier.fillMaxSize().navigationBarsPadding()) {
                 // The artwork bleeds to all three edges like the sleeve it is - up under the status bar
                 // as well, which is the whole point: Apple's has no top edge, and giving it one drew a
@@ -226,10 +261,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             sleeveHeight = drawn
                         },
                 ) {
-                    Artwork(vm, coverUrl, palette)
-                    Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), nav::back)
+                    // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
+                    // the moment the sheet arrives, in exactly the same place.
+                    Box(Modifier.graphicsLayer { alpha = if (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero) 1f else 0f }) {
+                        Artwork(vm, sleevePainter, palette)
+                    }
+                    Handle(Modifier.align(Alignment.TopCenter).statusBarsPadding(), Color.White.copy(alpha = 0.55f), sheet)
                 } else {
-                    Handle(Modifier.statusBarsPadding(), scheme.onSurface.copy(alpha = 0.35f), nav::back)
+                    Handle(Modifier.statusBarsPadding(), scheme.onSurface.copy(alpha = 0.35f), sheet)
                     Box(Modifier.weight(1f).then(if (panel == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier)) {
                         if (panel == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
                     }
@@ -291,14 +330,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     )
                 }
 
-                SeekBar(vm, state.playing, state.durationMs)
+                Box(kept("seek")) { SeekBar(vm, state.playing, state.durationMs) }
 
                 // Three controls, plain glyphs with no containers. Shuffle and repeat live in the queue header.
                 // Sized off `w4` as a share of the screen's width: Apple's pause glyph stands 9.8 % of the
                 // width tall and the skip glyphs are 9.7 % wide; these were about a fifth smaller. The
                 // seek bar, volume bar and bottom icons below were scaled by their own measured ratios.
                 // Apple leaves a clear gap between the times and these, rather than letting them follow on.
-                Row(Modifier.fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(34.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
+                Row(kept("transport").fillMaxWidth().padding(top = 24.dp), Arrangement.spacedBy(34.dp, Alignment.CenterHorizontally), Alignment.CenterVertically) {
                     IconButton(vm::previous, Modifier.size(72.dp)) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
                     IconButton(vm::toggle, Modifier.size(84.dp)) {
                         Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -313,22 +352,24 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 }
 
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.17f))
-                VolumeRow(vm)
+                Box(kept("volume")) { VolumeRow(vm) }
 
-                Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                    PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { panel = if (panel == Panel.LYRICS) Panel.ART else Panel.LYRICS }
+                Row(kept("icons").fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
+                    PanelButton(Icons.Filled.Lyrics, "Lyrics", panel == Panel.LYRICS) { choose(Panel.LYRICS) }
                     // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
                     // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
                     // which is where a setting for the evening belongs.
                     OutputButton()
-                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { panel = if (panel == Panel.QUEUE) Panel.ART else Panel.QUEUE }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", panel == Panel.QUEUE) { choose(Panel.QUEUE) }
                 }
                 if (panel == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
+            }
+            }
             if (panel == Panel.ART) ScrimIconButton(
-                Icons.Filled.KeyboardArrowDown, "Close", nav::back,
+                Icons.Filled.KeyboardArrowDown, "Close", sheet::close,
                 Modifier.align(Alignment.TopStart).statusBarsPadding().padding(start = 8.dp, top = 6.dp),
-            ) else IconButton(nav::back, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
+            ) else IconButton(sheet::close, Modifier.align(Alignment.TopStart).statusBarsPadding().padding(4.dp)) {
                 Icon(Icons.Filled.KeyboardArrowDown, "Close", Modifier.size(26.dp))
             }
         }
@@ -419,44 +460,12 @@ private const val SLEEVE = 0.74f
  */
 private const val SLEEVE_UNDER_TEXT = 0.095f
 
-/**
- * Pull the player down from anywhere on it and the whole screen follows the finger; let go past a
- * fifth of the way, or with a flick, and it closes, otherwise it springs back. That is how Apple's
- * player goes away. Before this only the thin handle strip at the top answered, and once the sleeve
- * filled the top half of the screen almost every pull landed on the artwork instead - which only knew
- * sideways swipes - so the player could hardly be pulled down at all.
- *
- * Sideways gestures underneath (skipping on the artwork, the seek bar, the volume slider) still work:
- * a vertical drag detector only claims a drag once it has moved further up or down than across.
- * Off in the lyrics and queue, where a vertical drag has to scroll the list.
- */
-private fun Modifier.pullToDismiss(enabled: Boolean, onDismiss: () -> Unit): Modifier = composed {
-    val offset = remember { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    pointerInput(enabled) {
-        if (!enabled) return@pointerInput
-        val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
-        detectVerticalDragGestures(
-            onDragStart = { tracker.resetTracking() },
-            onDragEnd = {
-                val flick = tracker.calculateVelocity().y
-                if (offset.value > size.height * 0.2f || (flick > 1600f && offset.value > 0f)) onDismiss()
-                else scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
-            },
-            onDragCancel = { scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) } },
-        ) { change, delta ->
-            tracker.addPosition(change.uptimeMillis, change.position)
-            // Down follows the finger one to one; up does nothing - the player is already all the way up.
-            scope.launch { offset.snapTo((offset.value + delta).coerceAtLeast(0f)) }
-        }
-    }.graphicsLayer { translationY = offset.value }
-}
-
 /** Drag it down, or tap it, to put the player away. */
 @Composable
-private fun Handle(modifier: Modifier, colour: Color, onBack: () -> Unit) {
+private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
+    val onBack = sheet::close
     Box(
-        modifier.fillMaxWidth().flingActions(horizontal = false, threshold = 0.5f, onStart = onBack).padding(vertical = 10.dp),
+        modifier.fillMaxWidth().dragsSheet(sheet).padding(vertical = 10.dp),
         Alignment.Center,
     ) {
         // Clickable inside the drag detector, not outside it, or the tap never arrives.
@@ -472,7 +481,7 @@ private fun Handle(modifier: Modifier, colour: Color, onBack: () -> Unit) {
  * line where the picture ends - the same dissolve the album page uses.
  */
 @Composable
-private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette?) {
+private fun Artwork(vm: PlayerViewModel, painter: androidx.compose.ui.graphics.painter.Painter, palette: PagePalette?) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
             // Not square. Measure `w4` and Apple's sleeve runs from the very top edge of the screen down
@@ -482,7 +491,7 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
             Modifier.fillMaxWidth().aspectRatio(SLEEVE)
                 .flingActions(horizontal = true, onStart = vm::previous, onEnd = vm::next),
         ) {
-            Cover(coverUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp)
+            androidx.compose.foundation.Image(painter, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
@@ -496,6 +505,77 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
             )
         }
     }
+}
+
+/**
+ * The cover in flight: from the mini player's thumbnail to the sleeve, one picture changing size and
+ * place with the sheet's progress, never a thumbnail swapped for a sleeve. It rides in the sheet's own
+ * coordinates - the thumbnail's place relative to the mini player's top at 0, the sleeve's at 1 - so it
+ * moves with the sheet and only has to grow.
+ *
+ * The picture is laid out once, as the full square at the sleeve's height, and everything else is a
+ * layer transform: a scale, and a clip that goes from the whole square to the sleeve's narrower
+ * window on it. That is exactly what the sleeve shows (the square cropped at the sides), so the last
+ * frame is the real sleeve pixel for pixel, and the hand-over cannot be seen. Growing it by layout
+ * instead gave the image a new size every frame, and each new size was a new decode and a new texture:
+ * the flight stalled for a third of a second at a time.
+ *
+ * The small rendition the mini player already has sits under the large one, so the first frame of a
+ * flight shows the picture even before the large one has come out of the cache.
+ */
+@Composable
+private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, painter: androidx.compose.ui.graphics.painter.Painter, palette: PagePalette?, measured: Boolean) {
+    val flying by remember { androidx.compose.runtime.derivedStateOf { sheet.progress.value < 1f } }
+    if (!flying || !measured || sheet.miniCover == Rect.Zero) return
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val thumbRadius = with(density) { 7.dp.toPx() }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = constraints.maxWidth.toFloat()
+        val h = w / SLEEVE
+        val side = with(density) { h.toDp() }
+        Box(
+            Modifier.requiredSize(side).align(Alignment.TopStart)
+                .graphicsLayer {
+                    val t = sheet.progress.value.coerceIn(0f, 1f)
+                    val from = sheet.miniCover.translate(0f, -sheet.travel)
+                    fun mix(a: Float, b: Float) = a + (b - a) * t
+                    // The window on the picture: square at the start, the sleeve's shape at the end.
+                    val shownW = mix(from.width, w)
+                    val shownH = mix(from.height, h)
+                    val k = shownH / h
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                    scaleX = k; scaleY = k
+                    // Unscaled, the window sits centred in the square, and the square - wider than the
+                    // screen - is itself centred across it. Put the window's left edge where it belongs.
+                    val inset = (size.width - shownW / k) / 2f
+                    val overhang = (w - size.width) / 2f
+                    translationX = mix(from.left, 0f) - inset * k - overhang
+                    translationY = mix(from.top, 0f)
+                    shape = CentredWindow(shownW / k, thumbRadius * (1f - t) / k)
+                    clip = true
+                },
+        ) {
+            coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            androidx.compose.foundation.Image(painter, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            // The sleeve's melt into the page, on the sleeve's own window of the square, fading in as it lands.
+            if (palette != null) Box(
+                Modifier.align(Alignment.Center).requiredSize(with(density) { w.toDp() }, side)
+                    .graphicsLayer { alpha = sheet.progress.value }
+                    .drawBehind { drawSleeveMelt(palette, 0.19f) },
+            )
+        }
+    }
+}
+
+/** A rounded window [width] wide and the full height, centred across whatever it clips. */
+private class CentredWindow(private val width: Float, private val radius: Float) : androidx.compose.ui.graphics.Shape {
+    override fun createOutline(size: androidx.compose.ui.geometry.Size, layoutDirection: androidx.compose.ui.unit.LayoutDirection, density: androidx.compose.ui.unit.Density) =
+        androidx.compose.ui.graphics.Outline.Rounded(
+            androidx.compose.ui.geometry.RoundRect(
+                (size.width - width) / 2f, 0f, (size.width + width) / 2f, size.height,
+                androidx.compose.ui.geometry.CornerRadius(radius),
+            ),
+        )
 }
 
 /** A title-row circle: translucent fill, light glyph, 48 dp across with a 44 dp hit region or better. */
@@ -523,17 +603,15 @@ private fun VolumeRow(vm: PlayerViewModel) {
     val system by vm.volume.collectAsStateWithLifecycle()
     var dragging by remember { mutableStateOf(false) }
     var level by remember { mutableFloatStateOf(vm.volumeFraction()) }
-    // What is drawn. A change from outside - the volume keys, another app - eases over, under the app's
-    // own motion so it still eases with Android's animations off; a drag is followed exactly.
+    // What is drawn. A change from outside - the volume keys, another app - eases over; a drag is followed exactly.
     val shown = remember { androidx.compose.animation.core.Animatable(level) }
-    val motion = appMotion()
     val plain = reduceMotion()
     val scope = rememberCoroutineScope()
     LaunchedEffect(system, dragging) {
         if (dragging) return@LaunchedEffect
         level = system
         if (plain) shown.snapTo(system)
-        else kotlinx.coroutines.withContext(motion) { shown.animateTo(system, androidx.compose.animation.core.tween(180)) }
+        else shown.animateTo(system, androidx.compose.animation.core.tween(180))
     }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 52.dp, vertical = 2.dp),
@@ -584,9 +662,10 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long): Long
     var pos by remember { mutableLongStateOf(vm.positionMs) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    LaunchedEffect(playing, resumed) {
+    val shown = LocalPlayerShown.current
+    LaunchedEffect(playing, resumed, shown) {
         pos = vm.positionMs
-        while (playing && resumed && isActive) { delay(everyMs); pos = vm.positionMs }
+        while (playing && resumed && shown && isActive) { delay(everyMs); pos = vm.positionMs }
     }
     return pos
 }

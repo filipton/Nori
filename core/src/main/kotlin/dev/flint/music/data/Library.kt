@@ -173,10 +173,12 @@ class Library(
      */
     fun lyricsFor(song: Song, useLrclib: Boolean): Flow<FoundLyrics> = flow {
         var fromServer: Lyrics? = null
-        lyrics(song.id).catch { }.collect { fromServer = it; emit(FoundLyrics(it, LyricsSource.SERVER)) }
+        // An empty answer from the server is not shown while LRCLIB may still have the song: the lyrics
+        // panel read "No lyrics" for a moment and then filled in. It goes out below if nothing follows it.
+        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) emit(FoundLyrics(it, LyricsSource.SERVER)) }
         val server = fromServer
         if (!useLrclib || song.isExternal || (server != null && server.synced && server.lines.isNotEmpty())) {
-            if (server == null) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+            if (server == null || server.lines.isEmpty()) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
             return@flow
         }
         // A hit is kept for good; a miss is asked again after a week (someone may have added it since);
@@ -194,7 +196,7 @@ class Library(
             }
         }
         if (found != null && (server == null || server.lines.isEmpty() || found.synced)) emit(FoundLyrics(found, LyricsSource.LRCLIB))
-        else if (server == null) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+        else if (server == null || server.lines.isEmpty()) emit(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
     }.flowOn(Dispatchers.IO)
 
     /** Back to LRC text for the cache; the core parses it again when read. */
