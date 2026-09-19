@@ -28,6 +28,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.datasource.DataSourceBitmapLoader
 import androidx.media3.session.CacheBitmapLoader
+import androidx.media3.session.CommandButton
 import android.net.wifi.WifiManager
 import androidx.media3.session.LibraryResult
 import androidx.media3.session.MediaLibraryService
@@ -39,6 +40,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import dev.flint.music.Flint
 import dev.flint.music.data.AlbumSort
+import dev.flint.music.data.StarKind
 import dev.flint.music.ffi.PlayQueue
 import dev.flint.music.ffi.Song
 import dev.flint.music.settings.Prefs
@@ -65,6 +67,10 @@ class PlaybackService : MediaLibraryService() {
     companion object {
         const val CMD_SLEEP = "flint.sleep"
         const val CMD_TUNING = "flint.tuning"
+        /** The notification's and lock screen's heart: favourite or unfavourite the current song. */
+        const val CMD_FAVOURITE = "flint.favourite"
+        /** The notification's and lock screen's shuffle toggle. */
+        const val CMD_SHUFFLE = "flint.shuffle"
         /** Broadcast inside the package on every track or play-state change; what a home-screen widget listens to. */
         const val ACTION_STATE = "dev.flint.music.STATE"
         const val EXTRA_TITLE = "title"
@@ -217,6 +223,9 @@ class PlaybackService : MediaLibraryService() {
             androidx.media3.session.DefaultMediaNotificationProvider.Builder(this).build()
                 .apply { setSmallIcon(dev.flint.music.core.R.drawable.ic_notification) },
         )
+        // A heart changed anywhere in the app (or by the notification itself) redraws the notification's heart.
+        // A StateFlow: it emits only on a change, so this is idle while music plays untouched.
+        scope.launch { flint.library.starMarks.collect { refreshButtons() } }
         restoreQueue()
     }
 
@@ -247,6 +256,7 @@ class PlaybackService : MediaLibraryService() {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            refreshButtons()
             if (item != null && flint.settings.value.skipExplicit && item.mediaMetadata.extras?.getString("explicit") == "explicit" && player.hasNextMediaItem()) return player.seekToNextMediaItem()
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && item != null) return scrobbler.onTrack(item.toSong(), player.isPlaying)
             scrobbler.onTrack(item?.takeUnless { it.isRadio }?.toSong(), player.isPlaying)
@@ -276,7 +286,7 @@ class PlaybackService : MediaLibraryService() {
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
         }
 
-        override fun onShuffleModeEnabledChanged(on: Boolean) = refreshUpcoming()
+        override fun onShuffleModeEnabledChanged(on: Boolean) { refreshUpcoming(); refreshButtons() }
         override fun onRepeatModeChanged(mode: Int) = refreshUpcoming()
 
         override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
@@ -311,6 +321,36 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
+
+    /** What the heart and shuffle buttons last showed, so an unrelated change does not rebuild the notification. */
+    private var buttonsShown: String? = null
+
+    private fun currentStarred(item: MediaItem): Boolean =
+        flint.library.isStarred(StarKind.SONG, item.mediaId, item.mediaMetadata.extras?.getBoolean("starred") == true)
+
+    /**
+     * Heart and shuffle beside previous / play / next, in the secondary slots the way other players put
+     * them. Called when the track, the shuffle flag or a star changes - never on a timer.
+     */
+    private fun refreshButtons() {
+        if (!::session.isInitialized) return
+        val item = player.currentMediaItem?.takeUnless { it.isRadio }
+        val starred = item?.let(::currentStarred)
+        val shuffle = player.shuffleModeEnabled
+        val key = "$starred/$shuffle"
+        if (key == buttonsShown) return
+        buttonsShown = key
+        val buttons = ArrayList<CommandButton>(2)
+        if (starred != null) buttons += CommandButton.Builder(if (starred) CommandButton.ICON_HEART_FILLED else CommandButton.ICON_HEART_UNFILLED)
+            .setDisplayName(if (starred) "Remove from favourites" else "Add to favourites")
+            .setSessionCommand(SessionCommand(CMD_FAVOURITE, Bundle.EMPTY))
+            .setSlots(CommandButton.SLOT_BACK_SECONDARY, CommandButton.SLOT_OVERFLOW).build()
+        buttons += CommandButton.Builder(if (shuffle) CommandButton.ICON_SHUFFLE_ON else CommandButton.ICON_SHUFFLE_OFF)
+            .setDisplayName(if (shuffle) "Shuffle off" else "Shuffle on")
+            .setSessionCommand(SessionCommand(CMD_SHUFFLE, Bundle.EMPTY))
+            .setSlots(CommandButton.SLOT_FORWARD_SECONDARY, CommandButton.SLOT_OVERFLOW).build()
+        session.setMediaButtonPreferences(buttons)
+    }
 
     private fun updateBurst() { burst?.enabled = !offloaded && !tuning }
 
@@ -573,7 +613,8 @@ class PlaybackService : MediaLibraryService() {
 
     private inner class Callback : MediaLibrarySession.Callback {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
-            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(SessionCommand(CMD_SLEEP, Bundle.EMPTY)).add(SessionCommand(CMD_TUNING, Bundle.EMPTY)).build()
+            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(SessionCommand(CMD_SLEEP, Bundle.EMPTY)).add(SessionCommand(CMD_TUNING, Bundle.EMPTY))
+                .add(SessionCommand(CMD_FAVOURITE, Bundle.EMPTY)).add(SessionCommand(CMD_SHUFFLE, Bundle.EMPTY)).build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session).setAvailableSessionCommands(commands).build()
         }
 
@@ -588,6 +629,16 @@ class PlaybackService : MediaLibraryService() {
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
                 if (minutes > 0) alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, 15_000L, "flint.sleep", sleepAlarm, main)
             }
+            if (command.customAction == CMD_FAVOURITE) {
+                val item = player.currentMediaItem?.takeUnless { it.isRadio }
+                if (item != null) {
+                    val on = !currentStarred(item)
+                    // The same path as the app's heart: the mark goes up at once (and redraws both hearts),
+                    // the request runs on an IO thread inside Library, and a failure puts the mark back.
+                    scope.launch { runCatching { flint.library.star(StarKind.SONG, item.mediaId, on) }.onFailure { android.util.Log.w("flint", "star from the notification failed: $it") } }
+                }
+            }
+            if (command.customAction == CMD_SHUFFLE) player.shuffleModeEnabled = !player.shuffleModeEnabled
             if (command.customAction == CMD_TUNING) {
                 val on = args.getBoolean(ARG_ON)
                 // Rebuilding the sink to swap the deep buffer for a shallow one is a stop and a prepare -

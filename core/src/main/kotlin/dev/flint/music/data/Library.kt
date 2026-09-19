@@ -70,6 +70,8 @@ class Library(
      */
     private val _starMarks = MutableStateFlow(emptyMap<String, Boolean>())
     val starMarks: StateFlow<Map<String, Boolean>> = _starMarks.asStateFlow()
+    /** Star state as it should be shown: this session's change wins over the [snapshot] a list or queue item was built with. */
+    fun isStarred(kind: StarKind, id: String, snapshot: Boolean): Boolean = _starMarks.value["${kind.param}:$id"] ?: snapshot
     /** Bumped on every star change, so one-shot reads (the favourites list) can re-query. */
     private val _starsVersion = MutableStateFlow(0)
     val starsVersion: StateFlow<Int> = _starsVersion.asStateFlow()

@@ -180,6 +180,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     // What the screen shows, mark included - not the snapshot the queue was painted with,
                     // which is what a favourite toggled this session no longer agrees with.
                     """"starred":${st.current?.let { actions.starMarks.value.effectiveStar(dev.flint.music.data.StarKind.SONG, it.id, it.starred) } ?: false},""" +
+                    """"notification":"${dev.flint.music.Flint.get(context).player.sessionButtons}",""" +
                     """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
             }
             onDispose {

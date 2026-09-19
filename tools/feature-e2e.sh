@@ -56,6 +56,29 @@ d=json.load(sys.stdin)['subsonic-response'].get('nowPlaying',{})
 print(any(e.get('id')=='$id' for e in d.get('entry',[])))")
 check "the server is told what is playing" test "$np" = "True"
 
+echo "-- the notification's heart and shuffle"
+# "notification <x>" sends the same session command the notification's button sends; "notification"
+# in the state is what the session last published to its controllers (the notification is one of them).
+buttons=$(field notification); echo "     buttons: $buttons"
+check "the notification has a heart and a shuffle button" bash -c '[[ "'"$buttons"'" == *heart* && "'"$buttons"'" == *shuffle* ]]'
+was=$(field starred)
+"$app" do "notification favourite" >/dev/null; sleep 5
+now=$(field starred); buttons=$(field notification)
+check "the notification's heart stars the song in the app ($was -> $now)" test "$now" != "$was"
+check "the notification's heart redraws ($buttons)" bash -c '[[ "'"$now"'" == True && "'"$buttons"'" == *heart_filled* ]] || [[ "'"$now"'" == False && "'"$buttons"'" != *heart_filled* ]]'
+starred=$(api getStarred2 | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['subsonic-response'].get('starred2',{})
+print(any(s['id']=='$id' for s in d.get('song',[])))")
+check "the notification's star reaches the server" test "$starred" = "$now"
+"$app" do "notification favourite" >/dev/null; sleep 4   # put it back
+check "and the second tap puts it back" test "$(field starred)" = "$was"
+shuffle=$(field notification); shuffle=${shuffle##* }
+"$app" do "notification shuffle" >/dev/null; sleep 2
+after=$(field notification); after=${after##* }
+check "the notification's shuffle toggles ($shuffle -> $after)" bash -c '[ "'"$shuffle"'" = shuffle_on -a "'"$after"'" = shuffle_off ] || [ "'"$shuffle"'" = shuffle_off -a "'"$after"'" = shuffle_on ]'
+"$app" do "notification shuffle" >/dev/null; sleep 2   # put it back
+
 echo "-- offline playback of a download"
 "$app" do "download song:$id" >/dev/null; sleep 14
 adb shell svc wifi disable; adb shell svc data disable; sleep 3
