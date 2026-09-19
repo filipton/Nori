@@ -106,11 +106,18 @@ for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[])
 import sys,json
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
 ok=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
-print('$a' if ok else '')"; done | grep -m1 .)
+print('$a' if ok else '')"; done | grep . | head -4 | tr '\n' ' ')
 if [ -n "$aid" ]; then
   before=$(field downloaded)
-  "$app" do "download album:$aid" >/dev/null; sleep 3
-  active=$(field dlActive)
+  # An album this suite has already downloaded has nothing left to fetch and would report nothing
+  # downloading at all, so ask each candidate in turn until one has work to do.
+  active=0
+  for a in $aid; do
+    aid=$a
+    "$app" do "download album:$aid" >/dev/null; sleep 3
+    active=$(field dlActive)
+    [ "${active:-0}" -ge 2 ] && break
+  done
   echo "     $active downloading at once, parallel setting $(adb shell run-as dev.flint.music cat shared_prefs/flint.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
   check "several songs download at once ($active)" test "${active:-0}" -ge 2
   adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5

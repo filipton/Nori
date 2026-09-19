@@ -12,6 +12,27 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The record change, properly.** Three faults sat on top of each other in SleeveCarousel, all from
+  the same root: a `pointerInput` keyed on `Unit` is created once and never replaced, so the gesture
+  closed over the first composition's addresses and painters - back then there was no queue at all.
+  The landing was filed under an address the sleeve could never match, so the record sat in the
+  middle at its lifted size, over the whole change, until the timeout let go of it (that is the
+  "static smaller cover covering the animation"); a painter caught that early has no picture in it,
+  so a record could land with nothing to draw and the cover being left stayed put for a few frames
+  (the blink). Everything a gesture or the button queue reads now goes through `rememberUpdatedState`.
+  The landed record also travels with the drag instead of sitting in the middle, so a swipe during a
+  change no longer has a second cover pinned over it, and a landing that is cancelled leaves the
+  offset alone if a finger has taken the record over - putting it back wiped the new drag's first
+  half, which is why a swipe straight after a swipe went nowhere.
+- **Buttons make the same move.** Next and previous lift the record, send it out one side and settle
+  the new one into the sleeve, exactly as a thumb does, with a stiffer spring (`BUTTON_STIFFNESS`)
+  and a quicker settle. Presses queue rather than interrupt (a small channel), and the record stays
+  up between them, so four quick presses are four songs and four changes. Springs animate to within a
+  pixel now, not a hundredth of one: the default threshold made a quarter-second move take half a
+  second.
+- **A suite flake.** The downloads test picked a random album and expected songs to start
+  downloading; an album an earlier run had already fetched has nothing to do and failed it. It now
+  tries up to four candidates until one has work left.
 - **The transport and the record.** A skip asked for while the music is paused starts it playing
   (`Controls.andPlay` in PlaybackService, so the notification and a headset do it too); the service's
   own skips - an explicit track, a track that will not play - go to the player underneath and leave a
