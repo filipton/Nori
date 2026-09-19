@@ -57,7 +57,18 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   into one flow per song. `Downloads.marks` changes only on a phase change, so song rows
   (`DownloadSlot`) recompose on those and one ring per downloading song recomposes on progress.
   `downloads` is a route; the notification opens it with `ACTION_OPEN_DOWNLOADS` (onNewIntent when
-  running). Not yet checked on a device: all of the drawing and motion.
+  running). Traps found the hard way:
+  - `DefaultDownloaderFactory`'s executor runs the byte copying. A small pool there caps the
+    downloads that move at the pool size while media3 still reports all of them as downloading (5
+    rings, 2 filling). It is `Runnable::run`: each download copies on media3's own task thread. The
+    stream `Dispatcher` (media3's OkHttp source enqueues on it) must also have room for 10 + playback.
+  - Nothing about a download may live only in memory. media3's `DefaultDownloadIndex` survives a
+    force stop; the manager only resumes it once something starts `DownloadWorker`. `Downloads.reconcile`
+    (at launch, and again from `ActionsViewModel`) squares the Rust index with media3's and starts the
+    service; the batch the notification counts (`DownloadBatch`) is fed only from the manager's
+    callbacks, `onInitialized` included, so it is rebuilt the same way.
+  - The notification's total is the batch's: everything queued since the queue was last empty. The
+    result goes in its own id (1002), because the service takes 1001 away when it stops.
 
 ## The page colour
 

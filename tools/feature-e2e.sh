@@ -71,6 +71,33 @@ echo "-- the download queue"
 "$app" open home >/dev/null; sleep 2
 adb shell am start -a dev.flint.music.OPEN_DOWNLOADS -n dev.flint.music/dev.flint.music.app.MainActivity >/dev/null 2>&1; sleep 3
 check "tapping the download notification opens the queue" test "$(field route)" = "downloads"
+
+echo "-- downloads run side by side and survive a force stop"
+# A library album of at least six songs, none of them provider tracks (streaming one of those makes
+# octo-fiesta fetch it), with nothing of it downloaded yet.
+aid=$(api getAlbumList2 "&type=random&size=40" | python3 -c "
+import sys,json
+for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
+    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 6: print(a['id'])" | while read -r a; do
+  api getAlbum "&id=$a" | python3 -c "
+import sys,json
+s=json.load(sys.stdin)['subsonic-response']['album']['song']
+ok=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
+print('$a' if ok else '')"; done | grep -m1 .)
+if [ -n "$aid" ]; then
+  before=$(field downloaded)
+  "$app" do "download album:$aid" >/dev/null; sleep 3
+  active=$(field dlActive)
+  echo "     $active downloading at once, parallel setting $(adb shell run-as dev.flint.music cat shared_prefs/flint.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
+  check "several songs download at once ($active)" test "${active:-0}" -ge 2
+  adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
+  left=$(field downloading); active=$(field dlActive)
+  check "after a force stop the queue picks up again ($left left, $active downloading)" bash -c "[ '${left:-1}' = 0 ] || [ '${active:-0}' -gt 0 ]"
+  for _ in $(seq 60); do [ "$(field downloading)" = 0 ] && break; sleep 3; done
+  check "the interrupted album finishes ($(field downloaded) downloaded, was $before)" test "$(field downloading)" = 0
+else
+  echo "     no library-only album of six songs found; skipped"
+fi
 echo "-- playlists, and does the server agree"
 name="flint check $RANDOM"
 "$app" do "newplaylist $name|search:creep" >/dev/null; sleep 6

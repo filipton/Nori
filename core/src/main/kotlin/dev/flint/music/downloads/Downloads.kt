@@ -1,6 +1,7 @@
 package dev.flint.music.downloads
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
@@ -8,13 +9,14 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.offline.DefaultDownloadIndex
 import androidx.media3.exoplayer.offline.DefaultDownloaderFactory
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
-import androidx.core.app.NotificationCompat
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.offline.Downloader
@@ -36,27 +38,27 @@ data class DownloadState(val done: List<Song> = emptyList(), val pending: List<S
     val pendingIds: Set<String> = pending.mapTo(HashSet()) { it.id }
 }
 
-/** media3 moves and stores the bytes; the index in Rust remembers what each file is. */
+/**
+ * media3 moves and stores the bytes; the index in Rust remembers what each file is.
+ *
+ * media3 keeps its own queue in [DefaultDownloadIndex], which outlives the process: a force stop
+ * mid-download leaves it saying "queued" for every song that had not finished. Everything this class
+ * shows - the marks, the batch the notification counts - is rebuilt from that queue and from what the
+ * manager reports, never kept only in memory, and the service is started again at launch whenever the
+ * index says something is unfinished (see [resume]).
+ */
 @UnstableApi
 class Downloads(private val context: Context, private val coreOf: () -> Core, lazySources: Lazy<MediaSources>, private val settings: Settings) {
     private val core get() = coreOf()
     private val sources by lazySources
+    /** The index's bookkeeping. Downloads never run here: see [TrackedDownloaders]. */
     private val io = Executors.newFixedThreadPool(2)
     private val main = Handler(Looper.getMainLooper())
     private val _state = MutableStateFlow(DownloadState())
-    /**
-     * What this batch asked for and how it is going. media3 only hands the notification the downloads
-     * that are still running, so counting "done" from that list always gives nought and the total
-     * shrinks as songs finish - "0 of 8", then "0 of 7". These numbers are the app's own.
-     */
-    private val batch = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-    @Volatile var batchTotal = 0
-        private set
-    @Volatile var batchDone = 0
-        private set
-    @Volatile var batchFailed = 0
-        private set
     val state: StateFlow<DownloadState> = _state
+
+    /** The run of the queue the notification counts. Main thread only, where the manager reports. */
+    private val batch = DownloadBatch()
 
     private val _marks = MutableStateFlow<Map<String, DownloadMark>>(emptyMap())
     /**
@@ -77,27 +79,34 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         // media3's own wiring (DefaultDownloadIndex, DefaultDownloaderFactory over the download cache),
         // with each downloader wrapped so its progress reaches [progress]. media3 itself only tells
         // whoever asks for the list of downloads, and asking would mean polling.
+        //
+        // Runnable::run: each download copies its bytes on the thread media3 already gave it. Handing
+        // them to a pool instead caps the downloads that actually move at the pool's size, whatever
+        // maxParallelDownloads says - a pool of two was why "5 at once" moved two songs and left three
+        // rings standing at nought.
         val upstream = CacheDataSource.Factory().setCache(sources.downloadCache).setUpstreamDataSourceFactory(sources.network)
-        DownloadManager(context, DefaultDownloadIndex(sources.database), TrackedDownloaders(DefaultDownloaderFactory(upstream, io))).apply {
+        DownloadManager(context, DefaultDownloadIndex(sources.database), TrackedDownloaders(DefaultDownloaderFactory(upstream, Runnable::run))).apply {
             // The queue runs in the order songs were asked for, this many at a time; a failure or a
             // cancel frees its slot for the next in line. DownloadWorker keeps it in step with the setting.
             maxParallelDownloads = parallel()
             addListener(object : DownloadManager.Listener {
+                // The queue as media3 restored it from its index: the downloads a force stop interrupted
+                // start again from where their bytes end, and the batch counts them from here.
+                override fun onInitialized(m: DownloadManager) {
+                    for (d in m.currentDownloads) follow(d)
+                }
+
                 override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) {
-                    if (d.request.id in batch) {
-                        if (d.state == Download.STATE_COMPLETED) batchDone++
-                        if (d.state == Download.STATE_FAILED) batchFailed++
-                    }
-                    mark(d)
+                    follow(d)
                     if (d.state == Download.STATE_COMPLETED) io.execute { core.downloadDone(d.request.id); publish() }
-                    // The service's own notification goes when the service does; the batch still owes the
-                    // user a word about how it went, in the same place the progress was.
-                    if (m.currentDownloads.isEmpty()) summarise()
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
+                    val wasOpen = batch.isOpen(d.request.id)
+                    batch.removed(d.request.id)
                     unmark(listOf(d.request.id))
                     io.execute { core.downloadRemove(d.request.id); publish() }
+                    if (wasOpen && batch.drained) summarise()
                 }
             })
         }
@@ -106,7 +115,10 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     /** How many songs download at once, from the setting. */
     fun parallel() = settings.value.parallelDownloads.coerceIn(1, 10)
 
-    init { io.execute { publish(); seedFailed() } }
+    /** Whether the queue has been handed back to media3 in this process; see [resume]. */
+    @Volatile private var resumed = false
+
+    init { io.execute { publish(); reconcile() } }
 
     private fun publish() {
         val next = DownloadState(core.downloads(true), core.downloads(false))
@@ -114,14 +126,86 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         _state.value = next
     }
 
-    /** Follows one download's phase into [marks]. Runs on the main thread, where media3 reports. */
+    /**
+     * Picks up what an earlier process left unfinished. Asked at launch (from the application, and
+     * again once there is a screen, since a process started in the background may not start services).
+     * Costs one query of media3's table when something is pending and nothing at all otherwise.
+     */
+    fun resume() {
+        if (!resumed) io.execute { if (!resumed) reconcile() }
+    }
+
+    /**
+     * Brings the Rust index and media3's queue back into agreement after the process died:
+     * - finished in media3 but not recorded here (the process went between the two): recorded now;
+     * - never reached media3 (the add was still in flight): asked for again;
+     * - failed: marked failed, so the song reads as failed rather than waiting;
+     * - queued or interrupted mid-download: the download service is started, which starts the manager,
+     *   which restores and resumes them.
+     */
+    private fun reconcile() {
+        val pending = _state.value.pending
+        if (pending.isEmpty()) { resumed = true; return }
+        val stored = runCatching {
+            DefaultDownloadIndex(sources.database).getDownloads().use { c ->
+                buildMap { while (c.moveToNext()) c.download.let { put(it.request.id, it) } }
+            }
+        }.getOrDefault(emptyMap())
+        val failed = HashMap<String, DownloadMark>()
+        val lost = ArrayList<Song>()
+        var finished = false
+        var unfinished = false
+        for (s in pending) {
+            val d = stored[s.id]
+            when (d?.state) {
+                null, Download.STATE_REMOVING -> lost += s
+                Download.STATE_COMPLETED -> { core.downloadDone(s.id); finished = true }
+                Download.STATE_FAILED -> failed[s.id] = DownloadMark(
+                    DownloadPhase.FAILED, MutableStateFlow(downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request))), 0L,
+                )
+                else -> unfinished = true
+            }
+        }
+        if (finished) publish()
+        if (failed.isNotEmpty()) _marks.update { m -> failed.filterKeys { it !in m } + m }
+        if (!unfinished && lost.isEmpty()) { resumed = true; return }
+        Log.i(TAG, "resuming: ${pending.size} pending, ${lost.size} asked for again, ${failed.size} failed")
+        main.post {
+            resumed = runCatching {
+                // The first intent brings the service - and with it the manager and its restored queue - up.
+                if (lost.isEmpty()) DownloadService.start(context, DownloadWorker::class.java)
+                for (s in lost) DownloadService.sendAddDownload(context, DownloadWorker::class.java, request(s), false)
+            }.onFailure { Log.w(TAG, "could not start the download service yet", it) }.isSuccess
+        }
+    }
+
+    /**
+     * Follows one download into [batch] and [marks]. Runs on the main thread, where media3 reports.
+     * When the last song of a batch settles, the batch says how it went.
+     */
+    private fun follow(d: Download) {
+        val id = d.request.id
+        val wasOpen = batch.isOpen(id)
+        when (d.state) {
+            Download.STATE_QUEUED, Download.STATE_DOWNLOADING, Download.STATE_RESTARTING, Download.STATE_STOPPED ->
+                if (batch.queued(id, albumOf(d.request))) cancelResult()
+            Download.STATE_COMPLETED -> batch.completed(id)
+            Download.STATE_FAILED -> batch.failed(id)
+        }
+        mark(d)
+        if (wasOpen && batch.drained) summarise()
+    }
+
     private fun mark(d: Download) {
         val id = d.request.id
         val now = SystemClock.elapsedRealtime()
         when (d.state) {
             Download.STATE_DOWNLOADING -> {
                 val flow = progressOf(d.request)
-                _marks.update { if (it[id]?.phase == DownloadPhase.DOWNLOADING) it else it + (id to DownloadMark(DownloadPhase.DOWNLOADING, flow, now)) }
+                if (_marks.value[id]?.phase != DownloadPhase.DOWNLOADING) {
+                    _marks.update { it + (id to DownloadMark(DownloadPhase.DOWNLOADING, flow, now)) }
+                    Log.d(TAG, "start $id: ${running()} downloading at once")
+                }
             }
             Download.STATE_COMPLETED -> {
                 progress.remove(id)
@@ -130,11 +214,15 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             Download.STATE_FAILED -> {
                 val last = progress.remove(id)?.value ?: -1f
                 _marks.update { it + (id to DownloadMark(DownloadPhase.FAILED, MutableStateFlow(last), now)) }
+                Log.w(TAG, "failed $id")
             }
             // Queued, stopped, restarting or on its way out: no mark, so a pending song reads as waiting.
             else -> if (id in _marks.value) _marks.update { it - id }
         }
     }
+
+    /** How many songs are downloading right now. */
+    fun running(): Int = _marks.value.values.count { it.phase == DownloadPhase.DOWNLOADING }
 
     private fun unmark(ids: Collection<String>) {
         ids.forEach { progress.remove(it) }
@@ -151,35 +239,22 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /**
-     * Downloads that failed in an earlier session are still pending in the index; without this they
-     * would read as waiting their turn. One query of media3's own table, once, off the main thread.
+     * Queues what is not downloaded yet. A song the index calls pending but the queue is not working on
+     * (failed, or lost to a process that died before media3 heard of it) is asked for again rather than
+     * skipped, so the download button always does something.
      */
-    private fun seedFailed() {
-        val pending = _state.value.pendingIds
-        if (pending.isEmpty()) return
-        val failed = runCatching {
-            DefaultDownloadIndex(sources.database).getDownloads(Download.STATE_FAILED).use { c ->
-                buildMap {
-                    while (c.moveToNext()) {
-                        val d = c.download
-                        if (d.request.id !in pending) continue
-                        val f = downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request))
-                        put(d.request.id, DownloadMark(DownloadPhase.FAILED, MutableStateFlow(f), 0L))
-                    }
-                }
-            }
-        }.getOrDefault(emptyMap())
-        if (failed.isNotEmpty()) _marks.update { m -> failed.filterKeys { it !in m } + m }
-    }
-
     fun download(songs: List<Song>) = io.execute {
-        val known = _state.value.let { it.doneIds + it.pendingIds }
-        for (s in songs) {
-            if (s.id in known) continue
-            core.downloadAdd(s)
-            enqueue(s)
+        val st = _state.value
+        val fresh = songs.filter { it.id !in st.doneIds && it.id !in st.pendingIds }.distinctBy { it.id }
+        val again = songs.filter { it.id in st.pendingIds }
+        for (s in fresh) core.downloadAdd(s)
+        if (fresh.isNotEmpty()) publish()
+        val requests = fresh.map(::request)
+        val retries = again.map(::request)
+        main.post {
+            for (r in requests) add(r)
+            for (r in retries) if (!batch.isOpen(r.id)) { unmark(listOf(r.id)); add(r) }
         }
-        publish()
     }
 
     /** Sends failed downloads round again; they rejoin the queue at its end. */
@@ -187,73 +262,29 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         if (songs.isEmpty()) return
         unmark(songs.map { it.id })
         io.execute {
-            for (s in songs) {
-                core.downloadAdd(s)
-                // A retry inside the batch it failed in is the same song, not one more.
-                if (s.id in batch && batchFailed > 0) {
-                    batchFailed--
-                    DownloadService.sendAddDownload(context, DownloadWorker::class.java, request(s), false)
-                } else enqueue(s)
-            }
+            for (s in songs) core.downloadAdd(s)
             publish()
+            val requests = songs.map(::request)
+            main.post { requests.forEach(::add) }
         }
     }
 
-    private fun enqueue(s: Song) {
-        // A batch that has finished starts the count again rather than adding to the last one. The
-        // counters answer that on their own: DownloadManager may only be asked from the main thread,
-        // and this runs on the download executor.
-        if (batchTotal > 0 && batchDone + batchFailed >= batchTotal) {
-            batch.clear(); batchTotal = 0; batchDone = 0; batchFailed = 0
-        }
-        batch += s.id
-        batchTotal++
-        DownloadService.sendAddDownload(context, DownloadWorker::class.java, request(s), false)
+    private fun add(r: DownloadRequest) {
+        runCatching { DownloadService.sendAddDownload(context, DownloadWorker::class.java, r, false) }
+            .onFailure { Log.w(TAG, "could not queue ${r.id}", it) }
     }
 
     /**
-     * The title and the expected size ride along with the request: the notification and the progress
-     * ring need both, and a transcoding server usually answers without a Content-Length, which leaves
-     * media3's own progress empty and the download looking stuck.
+     * The title, the album and the expected size ride along with the request: the notification and the
+     * progress ring need them, and a transcoding server usually answers without a Content-Length, which
+     * leaves media3's own progress empty and the download looking stuck.
      */
     private fun request(s: Song): DownloadRequest {
         val expected = expectedBytes(s.size.toLong(), s.duration.toLong(), settings.value.download.bitRate)
         return DownloadRequest.Builder(s.id, Uri.parse(sources.downloadUrl(s.id)))
             .setCustomCacheKey(sources.downloadKey(s.id))
-            .setData("$expected\n${s.title}".toByteArray())
+            .setData("$expected\n${s.title.replace('\n', ' ')}\n${s.album.replace('\n', ' ')}".toByteArray())
             .build()
-    }
-
-    /**
-     * The same notification the progress was in, turned into the result: replacing id 1001 means the
-     * bar does not sit there empty next to a second notification once the service has let go of it.
-     */
-    private fun summarise() {
-        if (batchTotal == 0) return
-        val done = batchDone
-        val failed = batchFailed
-        batch.clear(); batchTotal = 0; batchDone = 0; batchFailed = 0
-        if (done == 0 && failed == 0) return
-        val manager = context.getSystemService(android.app.NotificationManager::class.java) ?: return
-        val text = listOfNotNull(
-            "$done song${if (done == 1) "" else "s"} downloaded".takeIf { done > 0 },
-            "$failed failed".takeIf { failed > 0 },
-        ).joinToString(" · ")
-        // The service may still hold the foreground notification for a moment; replacing it after it
-        // has gone leaves exactly one, which is what a finished download should look like.
-        io.execute {
-            Thread.sleep(1200)
-            manager.notify(
-                DOWNLOAD_NOTIFICATION,
-                NotificationCompat.Builder(context, "downloads")
-                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                    .setContentTitle(text)
-                    .setContentIntent(openDownloads(context))
-                    .setAutoCancel(true)
-                    .setOngoing(false)
-                    .build(),
-            )
-        }
     }
 
     fun remove(ids: List<String>) = ids.forEach { DownloadService.sendRemoveDownload(context, DownloadWorker::class.java, it, false) }
@@ -265,7 +296,6 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      */
     fun cancel(ids: List<String>) {
         if (ids.isEmpty()) return
-        dropFromBatch(ids)
         unmark(ids)
         remove(ids)
         io.execute { ids.forEach { core.downloadRemove(it) }; publish() }
@@ -279,19 +309,84 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     fun cancelAll() {
         val ids = _state.value.pending.map { it.id }
         if (ids.isEmpty()) return
-        dropFromBatch(ids)
         unmark(ids)
         main.post { ids.forEach { manager.removeDownload(it) } }
         io.execute { ids.forEach { core.downloadRemove(it) }; publish() }
     }
 
-    /** A song stopped before it finished no longer counts towards "3 of 8" in the notification. */
-    private fun dropFromBatch(ids: Collection<String>) {
-        val marks = _marks.value
-        for (id in ids) if (batch.remove(id)) {
-            batchTotal = (batchTotal - 1).coerceAtLeast(0)
-            if (marks[id]?.phase == DownloadPhase.FAILED && batchFailed > 0) batchFailed--
+    /**
+     * The download notification while a batch runs: what it is ("Downloading 49 songs", or the album
+     * when every song is from one), where it is ("12 of 49 · the song"), and a bar over the whole batch
+     * that moves with the bytes of the songs in flight. The service asks once a second; nothing else
+     * redraws it.
+     */
+    internal fun progressNotification(context: Context, downloads: List<Download>, notMetRequirements: Int): Notification {
+        val running = downloads.filter { it.state == Download.STATE_DOWNLOADING }
+        val total = maxOf(batch.total, batch.finished + downloads.size)
+        val inFlight = running.sumOf { d -> downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request)).coerceAtLeast(0f).toDouble() }
+        val fraction = batch.fraction(inFlight)
+        val position = (batch.finished + 1).coerceAtMost(total.coerceAtLeast(1))
+        val label = batch.label()
+        val current = running.minByOrNull { it.startTimeMs }?.let { titleOf(it.request) }
+        val title = when {
+            notMetRequirements != 0 -> "Waiting for a network"
+            total == 1 -> current?.let { "Downloading “$it”" } ?: "Downloading 1 song"
+            label != null -> "Downloading “$label”"
+            else -> "Downloading $total songs"
         }
+        val text = if (total > 1) listOfNotNull("$position of $total", current).joinToString(" · ") else ""
+        return NotificationCompat.Builder(context, CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(title)
+            .setContentText(text.ifEmpty { null })
+            .setProgress(1000, (fraction * 1000).toInt(), total == 0)
+            .setContentIntent(openDownloads(context))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelIntent(context))
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .build()
+    }
+
+    /**
+     * How the batch went, once it has. Its own notification id: the service takes the progress one with
+     * it when it stops, and would take this too if it shared the id. All done: a quiet line that goes
+     * by itself. Something failed: it stays, and a tap shows which.
+     */
+    private fun summarise() {
+        val done = batch.done
+        val failed = batch.failed
+        if (done == 0 && failed == 0) return
+        val nm = context.getSystemService(NotificationManager::class.java) ?: return
+        val label = batch.label()
+        val title = when {
+            failed > 0 -> if (failed == 1) "1 song couldn’t be downloaded" else "$failed songs couldn’t be downloaded"
+            label != null && done > 1 -> "“$label” downloaded"
+            done == 1 -> "1 song downloaded"
+            else -> "$done songs downloaded"
+        }
+        val text = when {
+            failed > 0 && done > 0 -> "$done downloaded · tap to see what failed"
+            failed > 0 -> "Tap to try again"
+            else -> null
+        }
+        val b = NotificationCompat.Builder(context, CHANNEL)
+            .setSmallIcon(if (failed > 0) android.R.drawable.stat_notify_error else android.R.drawable.stat_sys_download_done)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(openDownloads(context))
+            .setAutoCancel(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+        if (failed == 0) b.setTimeoutAfter(8_000)
+        runCatching { nm.notify(DOWNLOAD_RESULT_NOTIFICATION, b.build()) }
+    }
+
+    /** A new batch starting takes the last one's result away: the progress notification replaces it. */
+    private fun cancelResult() {
+        context.getSystemService(NotificationManager::class.java)?.cancel(DOWNLOAD_RESULT_NOTIFICATION)
     }
 
     /** Hands each downloader's progress to [progress], through a [ProgressGate] so it arrives at a drawable rate. */
@@ -316,15 +411,23 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     companion object {
         /** Finished downloads the downloads screen keeps listing this session. */
         const val RECENT = 50
+        internal const val TAG = "flintdl"
     }
 }
 
-/** What a request says the song will weigh: the first line of its data (see [Downloads.request]). */
-private fun estimateOf(request: DownloadRequest): Long =
-    request.data.decodeToString().substringBefore('\n').toLongOrNull() ?: 0L
+/** What a request says the song will weigh, its title and its album: the lines of its data (see [Downloads.request]). */
+private fun dataLine(request: DownloadRequest, n: Int): String? = request.data.decodeToString().split('\n').getOrNull(n)?.takeIf(String::isNotBlank)
+private fun estimateOf(request: DownloadRequest): Long = dataLine(request, 0)?.toLongOrNull() ?: 0L
+private fun titleOf(request: DownloadRequest): String? = dataLine(request, 1)
+private fun albumOf(request: DownloadRequest): String? = dataLine(request, 2)
 
 /** Asks the app to open on its downloads screen. The activity answers it; the core only names it. */
 const val ACTION_OPEN_DOWNLOADS = "dev.flint.music.OPEN_DOWNLOADS"
+
+/** The notification's Cancel: everything not yet downloaded leaves the queue, finished songs stay. */
+private const val ACTION_CANCEL_DOWNLOADS = "dev.flint.music.CANCEL_DOWNLOADS"
+
+private const val CHANNEL = "downloads"
 
 @Volatile private var openDownloadsIntent: PendingIntent? = null
 
@@ -341,91 +444,40 @@ fun openDownloads(context: Context): PendingIntent? = openDownloadsIntent ?: run
         .also { openDownloadsIntent = it }
 }
 
-/** One id for the whole life of a download batch: progress, then the result, in the same place. */
+@UnstableApi
+private fun cancelIntent(context: Context): PendingIntent =
+    PendingIntent.getService(
+        context, 2, Intent(context, DownloadWorker::class.java).setAction(ACTION_CANCEL_DOWNLOADS),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+/** The progress of a download batch, for as long as the service runs. */
 const val DOWNLOAD_NOTIFICATION = 1001
+
+/** How the batch went, once it has: a separate id, so the service stopping does not take it away. */
+const val DOWNLOAD_RESULT_NOTIFICATION = 1002
 
 @UnstableApi
 class DownloadWorker : DownloadService(DOWNLOAD_NOTIFICATION, 1000L, CHANNEL, androidx.media3.exoplayer.R.string.exo_download_notification_channel_name, 0) {
-    companion object {
-        private const val CHANNEL = "downloads"
-        /** Last sample of total bytes and when it was taken, for a speed that means something. */
-        private var lastBytes = 0L
-        private var lastAt = 0L
-        private var speedBps = 0.0
-    }
-
     override fun getDownloadManager(): DownloadManager = Flint.get(this).downloads.manager
     override fun getScheduler(): Scheduler? = null
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_CANCEL_DOWNLOADS) {
+            Flint.get(this).downloads.cancelAll()
+            return super.onStartCommand(Intent(intent).setAction(DownloadService.ACTION_INIT), flags, startId)
+        }
+        return super.onStartCommand(intent, flags, startId)
+    }
+
     /**
-     * media3's stock notification shows a percentage it cannot compute when the server omits
-     * Content-Length, which is most of the time here: an empty bar, no names, no idea whether anything
-     * is happening. This one counts the bytes itself, sizes them against what each song should weigh,
-     * and says what is being fetched, how fast, and how much longer.
+     * Asked once a second while anything downloads (media3 throttles it to the interval above), on the
+     * main thread the manager lives on - which also makes it the place to follow a change to
+     * "Downloads at once" without a listener of its own.
      */
     override fun getForegroundNotification(downloads: MutableList<Download>, notMetRequirements: Int): Notification {
-        val downloads2 = Flint.get(this).downloads
-        // This runs once a second while anything downloads, on the main thread the manager lives on: the
-        // place to follow a change to "Downloads at once" without a listener of its own.
-        downloads2.parallel().let { if (downloads2.manager.maxParallelDownloads != it) downloads2.manager.maxParallelDownloads = it }
-        val done = downloads2.batchDone
-        val failed = downloads2.batchFailed
-        val total = downloads2.batchTotal.coerceAtLeast(downloads.size)
-        val bytes = downloads.sumOf { it.bytesDownloaded }
-        val expected = downloads.sumOf { d ->
-            val stated = d.contentLength.takeIf { it > 0 } ?: 0L
-            if (stated > 0) stated else d.request.data.decodeToString().substringBefore('\n').toLongOrNull() ?: 0L
-        }
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (lastAt > 0 && now > lastAt && bytes >= lastBytes) {
-            // Smoothed, or the figure jumps about wildly between one-second updates.
-            val sample = (bytes - lastBytes) * 1000.0 / (now - lastAt)
-            speedBps = if (speedBps == 0.0) sample else speedBps * 0.6 + sample * 0.4
-        }
-        lastBytes = bytes
-        lastAt = now
-
-        val running = downloads.filter { it.state == Download.STATE_DOWNLOADING }
-            .mapNotNull { it.request.data.decodeToString().substringAfter('\n').takeIf(String::isNotBlank) }
-        val current = when (running.size) {
-            0 -> null
-            1 -> running[0]
-            else -> "${running[0]} and ${running.size - 1} more"
-        }
-        val remaining = (expected - bytes).coerceAtLeast(0)
-        val eta = if (speedBps > 1024 && remaining > 0) remaining / speedBps else -1.0
-        fun time(seconds: Double) = when {
-            seconds < 60 -> "${seconds.toInt()} s left"
-            seconds < 3600 -> "${(seconds / 60).toInt()} min left"
-            else -> "%.1f h left".format(seconds / 3600)
-        }
-        fun mb(v: Long) = if (v >= 1_000_000_000) "%.1f GB".format(v / 1e9) else "%.0f MB".format(v / 1e6)
-
-        val headline = when {
-            notMetRequirements != 0 -> "Waiting for the network"
-            total > 1 -> "Downloading ${(done + 1).coerceAtMost(total)} of $total songs"
-            else -> "Downloading"
-        }
-        val detail = listOfNotNull(
-            current,
-            "${mb(bytes)} of ${mb(expected)}".takeIf { expected > 0 },
-            "%.1f MB/s".format(speedBps / 1_000_000).takeIf { speedBps > 1024 },
-            eta.takeIf { it >= 0 }?.let(::time),
-            "$failed failed".takeIf { failed > 0 },
-        ).joinToString(" · ")
-
-        val percent = if (expected > 0) ((bytes * 100) / expected).toInt().coerceIn(0, 100) else -1
-        return NotificationCompat.Builder(this, CHANNEL)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(headline)
-            // Collapsed, Android shows the title, the sub-text and the bar; expanded, it shows this too.
-            .setContentText(detail.ifEmpty { "Starting…" })
-            .setSubText(detail.ifEmpty { null })
-            .setStyle(NotificationCompat.BigTextStyle().bigText(detail.ifEmpty { "Starting…" }))
-            .setProgress(100, percent.coerceAtLeast(0), percent < 0)
-            .setContentIntent(openDownloads(this))
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .build()
+        val all = Flint.get(this).downloads
+        all.parallel().let { if (all.manager.maxParallelDownloads != it) all.manager.maxParallelDownloads = it }
+        return all.progressNotification(this, downloads, notMetRequirements)
     }
 }

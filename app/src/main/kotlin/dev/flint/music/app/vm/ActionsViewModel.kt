@@ -34,6 +34,9 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     val starMarks: StateFlow<Map<String, Boolean>> = flint.library.starMarks
     val downloads: StateFlow<DownloadState> = flint.downloads.state
 
+    // A process started in the background could not restart the download service; with a screen up it can.
+    init { flint.downloads.resume() }
+
     private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
         try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.message ?: "Failed") }
     }

@@ -213,9 +213,12 @@ fun SongRow(
                 Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
                 providerOf(song.id)?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
             }
-            DownloadSlot(song.id, downloaded, tint)
             if (LocalStarMarks.current.effectiveStar(dev.flint.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, "Favourite", Modifier.padding(start = 4.dp).size(15.dp), tint)
-            if (song.duration > 0u) Text(duration(song.duration.toLong()), Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = tint)
+            if (song.duration > 0u) Text(duration(song.duration.toLong()), Modifier.padding(start = 8.dp), textAlign = TextAlign.End, style = MaterialTheme.typography.bodySmall, color = tint)
+            // The download mark sits in a slot of its own width, right before the menu: every row puts
+            // the ring, the tick and the menu in the same column whatever comes before them, and a mark
+            // arriving or leaving moves nothing else on the row.
+            Box(Modifier.width(MARK_SLOT), Alignment.Center) { DownloadSlot(song.id, downloaded, tint) }
             IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(20.dp), tint) }
         }
         if (divider) Hairline(startIndent = if (number != null) Space.gutter + 40.dp else Space.gutter + 58.dp)
