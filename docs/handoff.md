@@ -207,7 +207,9 @@ look like waiting. The pieces:
   title. The page colours cross-fade with it and hold the old palette while the new one is worked out.
   `PlayerViewModel` warms the covers of the previous track and `Prefs.coversAhead` (default 3)
   upcoming ones, taking shuffle into account via `PlayerState.nextIndex` / `previousIndex`.
-- A sideways swipe on the sleeve is a carousel (`SleeveCarousel`): the neighbour's picture waits off
+- A sideways swipe on the sleeve is a carousel (`SleeveCarousel`). Each record is the cover's whole
+  square (wider than the screen, so at rest the screen crops it to the sleeve); held, it lifts - shrinks
+  to 86 % of the width, rounds, casts a shadow - so its cropped sides come into view. The neighbour's picture waits off
   the edge and follows the finger in; on commit the old record goes all the way off, and the incoming
   picture stays drawn over the sleeve until `SleeveArt.shownUrl` matches it (`snapNext` makes that
   load skip its cross-fade), so the change has no second step. A swipe back is `previousItem()`

@@ -663,6 +663,10 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
         landed = null; landedUrl = null
     }
     val plateColour = MaterialTheme.colorScheme.surfaceVariant
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
+    val widthPx = constraints.maxWidth.toFloat()
+    val heightPx = constraints.maxHeight.toFloat()
+    val sideDp = with(density) { heightPx.toDp() }
     Box(
         Modifier.fillMaxSize().pointerInput(Unit) {
             val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
@@ -675,7 +679,7 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                     o > 0f && hasBefore && (v > FLICK_PX || o > w * TURN) -> 1
                     else -> 0
                 }
-                val down = spring<Float>(dampingRatio = 0.82f, stiffness = 380f)
+                val down = spring<Float>(dampingRatio = 0.8f, stiffness = 240f)
                 scope.launch {
                     val settle = spring<Float>(dampingRatio = 1f, stiffness = 520f)
                     if (go == 0) {
@@ -686,7 +690,9 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                     val painter = if (go < 0) after else before
                     val url = if (go < 0) nextUrl else previousUrl
                     // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
-                    val span = w * (1f - LIFT * lift.targetValue) + gap
+                    // A record is the whole square, as tall as the sleeve.
+                    val side = size.height.toFloat()
+                    val span = side * liftedScale(lift.targetValue, w, side) + gap
                     if (AppMotion.reduce) offset.snapTo(go * span) else offset.animateTo(go * span, settle, initialVelocity = v)
                     // Same frame: the incoming record takes the middle, the sleeve goes back under it.
                     landed = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
@@ -702,7 +708,7 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                 onDragStart = {
                     tracker.resetTracking(); x = 0f
                     scope.launch { offset.stop() }
-                    if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 650f)) }
+                    if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 420f)) }
                 },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
@@ -719,9 +725,12 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
     ) {
         // One record, lifted by [lift] and moved by [dx]; [fade] is its brightness against the page. All
         // of it read in the draw phase: a drag moves layers and recomposes nothing.
-        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = graphicsLayer {
+        // Each record is the cover's whole square, as tall as the sleeve and so wider than the screen: at
+        // rest the screen's edges crop it to exactly the sleeve, and lifted it shrinks until all of it is
+        // on screen - the sides the sleeve hides come into view as the record is picked up.
+        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             val l = lift.value
-            val s = 1f - LIFT * l
+            val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
             val span = size.width * s + gap
             val o = offset.value
@@ -748,9 +757,16 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
         }
     }
 }
+}
 
-/** How much smaller a record gets while it is held. */
-private const val LIFT = 0.1f
+/** How much of the screen's width a held record takes. */
+private const val LIFTED_WIDTH = 0.86f
+
+/** The scale of a record [side] tall at lift [l], on a sleeve [width] wide: 1 at rest, the whole square at 86 % of the width held. */
+private fun liftedScale(l: Float, width: Float, side: Float): Float {
+    val held = if (side > 0f) (LIFTED_WIDTH * width / side).coerceAtMost(1f) else 1f
+    return 1f - (1f - held) * l
+}
 
 /** Past this share of the width a slow drag changes the record. */
 private const val TURN = 0.3f
