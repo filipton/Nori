@@ -92,6 +92,13 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
                 lastLyrics = flint.library.lyricsFor(song, flint.settings.value.thirdPartyLookups).last()
             }
             "seek" -> flint.player.seekTo(ref.toLongOrNull() ?: 0L)
+            // "dac <name>@44100/16,96000/24" pretends a USB DAC with those bit-perfect modes is attached;
+            // "dac off" hands the app back to the real audio system. See DacSource.mock.
+            "dac" -> {
+                val off = ref.isEmpty() || ref == "off"
+                flint.dac.testSource(if (off) null else dev.flint.music.playback.DacSource.mock(ref))
+                flint.outputs.testUsb(if (off) null else true)
+            }
             "download" -> download(songs)
             "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
             "pause" -> player.toggle()

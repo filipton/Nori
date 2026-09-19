@@ -74,6 +74,8 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_MINUTES = "minutes"
         const val ARG_END_OF_TRACK = "endOfTrack"
         const val ARG_SONGS = "songs"
+        /** Whether the chain is currently asking for offload; read by the test bridge, which cannot see in here. */
+        @Volatile var offloadWanted = false
     }
 
     private lateinit var flint: Flint
@@ -86,6 +88,12 @@ class PlaybackService : MediaLibraryService() {
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
+    /**
+     * The sink failed to open or to write once. Offload is the only part of the chain that can fail on a
+     * device the app cannot see into (a USB DAC, a dock, a car head unit), so it is given up for the life of
+     * the service rather than retried into a loop of silent tracks.
+     */
+    private var offloadRefused = false
     /** Items from the current one onwards, as the playback thread may ask about them (decoding runs ahead). */
     @Volatile private var upcoming: List<MediaItem> = emptyList()
     private val analysisWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "flint-analysis").apply { priority = Thread.MIN_PRIORITY } }
@@ -99,6 +107,23 @@ class PlaybackService : MediaLibraryService() {
     private var sleepAfterSongs = 0
     /** The equalizer screen is open: trade the deep buffer for immediate response. */
     private var tuning = false
+    /**
+     * The last thing that happens before the AudioTrack exists, and the only place that knows exactly what it
+     * will be: encoding, rate and whether the stream is being offloaded. Preferred mixer attributes are read
+     * by the framework when the track is built, so a DAC can only be engaged from here - setting them
+     * afterwards, as this used to, changes nothing about the track already playing.
+     */
+    private val tracks = DefaultAudioSink.AudioTrackProvider { config, attrs, sessionId, context ->
+        flint.dac.onFormat(config.sampleRate, config.encoding)
+        val track = DefaultAudioSink.AudioTrackProvider.DEFAULT.getAudioTrack(config, attrs, sessionId, context)
+        // Pin the track to the DAC as well: bit-perfect attributes apply to one device, and letting Android
+        // pick the route again afterwards is how the two end up disagreeing.
+        flint.dac.preferredDevice()?.let { runCatching { track.setPreferredDevice(it) } }
+        flint.dac.onTrack(config.sampleRate, config.encoding, config.offload)
+        android.util.Log.i("flint", "AudioTrack ${config.sampleRate} Hz enc=${config.encoding} buffer=${config.bufferSize} offload=${config.offload} usb=${flint.outputs.usb.value}")
+        track
+    }
+
     private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
     private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(BurstSink.BUFFER_US).setMaxPcmBufferDurationUs(BurstSink.BUFFER_US).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -122,7 +147,8 @@ class PlaybackService : MediaLibraryService() {
                             // Deep for bursts; shallow only while the equalizer screen is open, so that moving a band is heard at once.
                             (if (tuning) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
                         }
-                        .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams).build()
+                        .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                        .setAudioTrackProvider(tracks).build()
                 ).also { burst = it }, transitions)
         }
         hiRes = flint.settings.value.hiRes
@@ -145,15 +171,21 @@ class PlaybackService : MediaLibraryService() {
             .build()
         precacher = Precacher(flint.sources)
         player.addListener(listener)
-        player.addAnalyticsListener(formats)
         player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
             override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
         })
 
-        flint.dac.onChanged = { applyAudio(flint.settings.value); applyGain() }
+        // Fired from the audio device callback (main) and from the audio track provider (playback thread);
+        // the player may only be touched on the main looper.
+        flint.dac.onChanged = { main.post { applyAudio(flint.settings.value); applyGain() } }
         flint.dac.start()
         flint.outputs.start()
         // Plugging in headphones or a DAC swaps the whole sound chain, if a profile is bound to it.
+        scope.launch {
+            // A device arriving or leaving changes what the audio chain may do (see applyAudio), whether or
+            // not the user binds sound profiles to outputs.
+            flint.outputs.usb.collect { applyAudio(flint.settings.value) }
+        }
         scope.launch {
             flint.outputs.current.collect { output ->
                 if (!flint.settings.value.profilePerOutput) return@collect
@@ -247,6 +279,19 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            // An output that refuses the offloaded stream fails here, and skipping to the next track would fail
+            // the same way. Rebuild the chain on the CPU path instead and play the same track again.
+            val sink = generateSequence(error.cause) { it.cause }.any {
+                it is AudioSink.InitializationException || it is AudioSink.WriteException || it is AudioSink.ConfigurationException
+            }
+            if (sink && !offloadRefused) {
+                android.util.Log.w("flint", "audio sink refused the stream, giving up offload", error)
+                offloadRefused = true
+                applyAudio(flint.settings.value)
+                player.prepare()
+                player.play()
+                return
+            }
             // One unplayable or unreachable track should not end the evening; three in a row probably means the server is gone.
             if (flint.settings.value.skipOnError && player.hasNextMediaItem() && ++errorsInARow <= 3) {
                 player.seekToNextMediaItem()
@@ -260,12 +305,6 @@ class PlaybackService : MediaLibraryService() {
         }
     }
 
-    private val formats = object : AnalyticsListener {
-        override fun onAudioInputFormatChanged(t: AnalyticsListener.EventTime, format: Format, reuse: DecoderReuseEvaluation?) {
-            // The sink is opened at the source rate, as 16-bit PCM or float; the DAC has to be set to exactly that.
-            flint.dac.onFormat(format.sampleRate, if (hiRes) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT)
-        }
-    }
 
     private fun updateBurst() { burst?.enabled = !offloaded && !tuning }
 
@@ -291,16 +330,25 @@ class PlaybackService : MediaLibraryService() {
         player.skipSilenceEnabled = p.skipSilence && !untouched
         player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)
         // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
-        val offload = p.offload && !processing && p.crossfadeSec == 0 && !p.autoMix && !p.skipSilence && p.speed == 1f && p.pitch == 1f
+        // It also only reaches the phone's own outputs: the chip has no path to a USB DAC, but Android still
+        // opens the offloaded track and reports it playing, so the DAC just sits there in silence. Decode on
+        // the CPU whenever anything USB is attached, and after the sink has failed to open once (offloadRefused).
+        val usb = flint.outputs.usb.value
+        val offload = p.offload && !processing && !usb && !offloadRefused &&
+            p.crossfadeSec == 0 && !p.autoMix && !p.skipSilence && p.speed == 1f && p.pitch == 1f
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
                 .setIsGaplessSupportRequired(true).build()
         ).build()
+        // A renderer already playing keeps the path it was built with, so a DAC plugged in mid-song would
+        // stay on the offloaded - and silent - one until the next track. Rebuild now; stop() keeps the position.
+        val offloadChanged = offloadWanted != offload
+        offloadWanted = offload
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
             reconfigureSink()
-        }
+        } else if (offloadChanged && offloaded) reconfigureSink()
     }
 
     @Volatile private var transitionsOff = false

@@ -133,9 +133,13 @@ fun App() {
                     """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
                     """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
-                    """"offload":${p.offload},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
+                    """"offload":${p.offload},"offloadWanted":${dev.flint.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
                     """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten},""" +
+                    dev.flint.music.Flint.get(context).dac.state.value.let { d ->
+                        """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
+                            """"dacBlocked":"${d.blockedBy.orEmpty()}","dacTrack":"${d.track.orEmpty()}","""
+                    } +
                     (actions.lastLyrics ?: (player2.lyrics.value as? dev.flint.music.app.vm.Load.Ready)?.data)?.let { f ->
                         """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
                             """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""

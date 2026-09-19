@@ -342,7 +342,12 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
 
         }
         "audio" -> SettingsCard {
-            Toggle("Hardware offload", "Saves battery by decoding on a dedicated audio chip; turned off automatically while the equalizer is on.", p.offload) { on -> vm.update { it.copy(offload = on) } }
+            Toggle(
+                "Hardware offload",
+                if (dac.device != null) "Stands down while a USB DAC is connected: the audio chip has no path to it. Saves battery on the phone's own outputs."
+                else "Saves battery by decoding on a dedicated audio chip; turned off automatically while the equalizer is on.",
+                p.offload,
+            ) { on -> vm.update { it.copy(offload = on) } }
             Toggle(
                 "Bit-perfect USB DAC",
                 when {
@@ -354,7 +359,14 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 },
                 p.bitPerfect,
             ) { on -> vm.update { it.copy(bitPerfect = on) } }
-            if (dac.modes.isNotEmpty()) Text("This DAC offers: " + dac.modes.joinToString(", ") + (dac.playing?.let { "  ·  now playing $it" } ?: ""), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // What is actually going out, rather than what was asked for: the one line that settles "is it
+            // even reaching the DAC?" without a cable to a laptop.
+            val detail = listOfNotNull(
+                dac.modes.takeIf { it.isNotEmpty() }?.let { "Offers " + it.joinToString(", ") },
+                dac.playing?.let { "playing $it" },
+                dac.track?.let { "output $it" },
+            )
+            if (detail.isNotEmpty()) Text(detail.joinToString("  ·  "), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Toggle("Hi-res output", "Plays 24-bit files at full quality instead of 16-bit; the equalizer isn't available in this mode, and it takes effect next time you start playback.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
             Choice("ReplayGain", p.replayGain, listOf(ReplayGainMode.OFF to "Off", ReplayGainMode.TRACK to "Track", ReplayGainMode.ALBUM to "Album", ReplayGainMode.AUTO to "Automatic")) { m -> vm.update { it.copy(replayGain = m) } }
             if (p.replayGain != ReplayGainMode.OFF) {

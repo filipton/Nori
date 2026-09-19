@@ -22,14 +22,35 @@ class Outputs(context: Context) {
     private val _known = MutableStateFlow(listOf(SPEAKER))
     val known: StateFlow<List<String>> = _known
 
+    /**
+     * A USB audio device is attached. Audio offload targets the phone's own DSP: with the stream handed
+     * to the chip, a track routed to USB opens without complaint and then plays nothing, which is the
+     * "silent DAC" this flag exists to prevent. [PlaybackService] decodes on the CPU while it is true.
+     */
+    private val _usb = MutableStateFlow(false)
+    val usb: StateFlow<Boolean> = _usb
+
     private val callback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>) = refresh()
         override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>) = refresh()
     }
 
     fun start() {
+        // registerAudioDeviceCallback reports every device already attached, so this also fills the
+        // initial state: a DAC plugged in before the service started would otherwise go unnoticed.
         audio.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
     }
+
+    /**
+     * Pretend a USB device is or is not attached, so the rules that hang off this flag (offload standing
+     * down, above all) can be checked without the hardware. Null hands it back to the audio system.
+     */
+    fun testUsb(on: Boolean?) {
+        override = on
+        refresh()
+    }
+
+    private var override: Boolean? = null
 
     fun stop() = audio.unregisterAudioDeviceCallback(callback)
 
@@ -39,6 +60,8 @@ class Outputs(context: Context) {
         val active = devices.minByOrNull { rank(it.type) }?.let(::key) ?: SPEAKER
         _current.value = active
         _known.value = (_known.value + devices.map(::key) + SPEAKER).distinct().sorted()
+        _usb.value = override
+            ?: devices.any { it.type == AudioDeviceInfo.TYPE_USB_DEVICE || it.type == AudioDeviceInfo.TYPE_USB_HEADSET || it.type == AudioDeviceInfo.TYPE_USB_ACCESSORY }
     }
 
     private fun rank(type: Int) = when (type) {

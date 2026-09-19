@@ -104,5 +104,28 @@ check "a transition is planned at a track boundary ($planned)" test "${planned:-
 echo "     (analysis events seen: $analysed)"
 "$app" set crossfadeKeepAlbums true >/dev/null
 
+echo "-- a USB DAC, faked"
+# A DAC cannot be plugged into an emulator, so the app is pointed at a mock one (ActionsViewModel, "dac").
+# What is checked is the part that was wrong on real hardware: offload has no path to a USB device, so a
+# track handed to the audio chip plays nothing, and the bit-perfect mode has to match what the sink
+# actually writes rather than what the decoder was handed.
+"$app" set autoMix false >/dev/null; "$app" set crossfadeSec 0 >/dev/null
+"$app" set crossfeedDb 0 >/dev/null; "$app" set offload true >/dev/null; "$app" set eq false >/dev/null
+"$app" do "dac off" >/dev/null
+"$app" play "search:creep" >/dev/null; sleep 8
+check "offload is asked for on the phone's own output" test "$(field offloadWanted)" = "True"
+"$app" do "dac Mock DAC@44100/16,96000/24" >/dev/null; sleep 5
+check "offload stands down when a USB device appears" test "$(field offloadWanted)" = "False"
+check "the DAC is seen" test "$(field dac)" = "Mock DAC"
+bytes=$(field sinkBytes); sleep 12
+check "audio keeps flowing to the DAC ($bytes -> $(field sinkBytes))" test "$(field sinkBytes)" -gt "${bytes:-0}"
+"$app" set bitPerfect true >/dev/null; "$app" play "search:creep" >/dev/null; sleep 8
+check "bit-perfect engages on a mode the sink can write" test "$(field bitPerfect)" = "True"
+check "and says what the track was opened with" test -n "$(field dacTrack)"
+"$app" do "dac Picky DAC@44100/24" >/dev/null; sleep 5
+check "a DAC this app cannot feed says why" test -n "$(field dacBlocked)"
+check "and is not claimed to be bit-perfect" test "$(field bitPerfect)" = "False"
+"$app" do "dac off" >/dev/null; "$app" set bitPerfect false >/dev/null
+
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
