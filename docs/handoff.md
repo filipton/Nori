@@ -85,9 +85,20 @@ where a full-width square would have ended (y = 977 of a 977-wide screen) and th
 line are exactly as sharp as the ones above it, with a strip of red tape crossing it unbroken. It is
 the picture, not the blur behind it.
 
-`PlayerScreen.SLEEVE` is that ratio, 0.88 wide over tall, and `Cover` already crops. Everything else
-follows from it: no top edge because the picture starts at y = 0, and the picture's tail reaching the
-title because it ends near half the screen.
+`PlayerScreen.SLEEVE` is that ratio and `Cover` already crops. Everything else follows from it: no top
+edge because the picture starts at y = 0, and the picture's tail reaching the title because it ends
+past half the screen. It is 0.80 rather than the 0.88 measured off `w4`, because this screen is 20:9
+against the 19.5:9 that was measured; check it by sharpness rather than by the number. Row by row,
+`w4` against ours: 44 % 9.9/9.8, 46 % 9.9/10.0, 48 % 8.2/9.1, 50 % 5.2/4.4, 54 % 1.1/3.2. It costs
+about an eighth of the cover off each side, which is the price of the sleeve reaching both ends.
+
+**The wash has to be quieter than Apple's, not equal to it.** Measured across the page below the
+sleeve, Apple's colour varies *more* than ours ever did - channel spreads of 36/21/17 against our
+8/5/5 now - but all of their variation is inside one red, because that cover is one hue. A cover that
+is teal down one side and warm down the other gives the page teal and warm patches at the same
+spread, and a patch reads as a fault where a glow does not. `CoverColors.MUTE` pulls every pixel most
+of the way back to the flat page colour after the lightness clamp; that is what makes it subtle
+without making it grey.
 
 Below that, `Design.drawSleeveMelt` cross-fades the sharp sleeve into its own blur in slices, and
 `drawSleeveWash` draws that blur behind and below it at the same scale, so the two are the same

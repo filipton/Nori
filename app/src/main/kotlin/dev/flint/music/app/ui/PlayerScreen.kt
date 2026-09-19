@@ -210,7 +210,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // that here - the owner found Apple's own spacing too loose on a 20:9 screen, which is
                 // taller than the 19.5:9 those percentages were taken from - and the space that frees
                 // up goes underneath them rather than between them.
-                if (panel == Panel.ART) Spacer(Modifier.weight(0.64f))
+                if (panel == Panel.ART) Spacer(Modifier.weight(0.16f))
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
                 if (panel != Panel.LYRICS) Row(
@@ -312,7 +312,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
  * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
  * and still reach down behind the title, which no square can do.
  */
-private const val SLEEVE = 0.88f
+private const val SLEEVE = 0.80f
 
 /** Drag it down, or tap it, to put the player away. */
 @Composable
@@ -354,7 +354,7 @@ private fun Artwork(vm: PlayerViewModel, coverUrl: String?, palette: PagePalette
             // The sleeve goes soft rather than stopping: its bottom third cross-fades into the same
             // cover, blurred, which the page behind it is already drawing at the same scale.
             if (palette != null) Box(
-                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.34f) },
+                Modifier.fillMaxSize().drawBehind { drawSleeveMelt(palette, 0.28f) },
             )
         }
     }

@@ -83,6 +83,9 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
  */
 private const val WASH = 32
 
+/** How far each pixel of the wash is pulled back towards the flat page colour. */
+private const val MUTE = 0.62f
+
 /**
  * Apple's player is not painted one flat colour. Measure across their screenshot and the page varies
  * both ways: the background *is* the artwork, enormously enlarged and blurred, which is why it matches
@@ -102,7 +105,7 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
     val px = IntArray(WASH * WASH)
     small.getPixels(px, 0, WASH, 0, 0, WASH, WASH)
     if (small !== bitmap) small.recycle()
-    repeat(2) { blur(px) }
+    repeat(3) { blur(px) }
 
     val pageHsl = FloatArray(3).also { ColorUtils.colorToHSL(background.toArgb(), it) }
     val hsl = FloatArray(3)
@@ -117,7 +120,14 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
         ColorUtils.colorToHSL(px[i], hsl)
         hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
         hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(pageHsl[2] - spread, pageHsl[2] + spread)
-        px[i] = ColorUtils.HSLToColor(hsl)
+        // Then most of the way back to the flat page colour. Clamping the lightness alone was not
+        // enough on a record that is many colours at once: one that is teal down one side and warm
+        // down the other gave the page teal and warm patches, and a patch reads as a fault where a
+        // glow does not. Apple's pages look calm because their covers are mostly a single hue, not
+        // because their wash does less - measured, their colour actually varies rather more than
+        // ours did. Pulling each pixel back towards the page colour keeps the drift and takes the
+        // shouting out of it.
+        px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), MUTE)
     }
     return Bitmap.createBitmap(px, WASH, WASH, Bitmap.Config.ARGB_8888).asImageBitmap()
 }
