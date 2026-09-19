@@ -145,6 +145,7 @@ fun App() {
                     """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.flint.music.playback.Equalizer.active != null},"gainReductionDb":${dev.flint.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"offload":${p.offload},"offloadWanted":${dev.flint.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
+                    """"mixing":${dev.flint.music.playback.TransitionSink.mixing},""" +
                     """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},""" +
                     """"sinkBytes":${dev.flint.music.playback.BurstSink.bytesWritten},""" +
                     dev.flint.music.Flint.get(context).dac.state.value.let { d ->

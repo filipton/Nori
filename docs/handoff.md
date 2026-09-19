@@ -31,6 +31,11 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   and the words take the whole middle of the screen.
 - **The album page.** Sentence case under the title, as Apple writes it, and a track by the album's
   own artist no longer repeats that artist on every row.
+- **The seek row's centre label.** Apple puts a word between the elapsed and remaining times while a
+  transition is running; ours now reads "Mixing" for exactly as long as `TransitionSink` is out of
+  `Phase.PASS`. Nothing new watches it - the seek bar is the only thing that ticks while the player is
+  open, so it asks on the same beat. Note while testing this: the media session's position pins at the
+  outgoing track's duration while the mixed tail plays, which looks like a stall and is not one.
 - **Favourites, search and the mini player.** A favourite flips under the finger instead of after a
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.

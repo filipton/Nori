@@ -29,6 +29,17 @@ import java.nio.ByteOrder
 @UnstableApi
 class TransitionSink(sink: AudioSink, private val listener: Listener) : ForwardingAudioSink(sink) {
 
+    companion object {
+        /**
+         * A transition is running right now. Apple's player puts a word in the middle of the seek row
+         * while one is - theirs reads "Mixing" - and the seek row is the one thing on screen that already
+         * ticks, so it can read this without anything new having to watch it. Written on the playback
+         * thread, read on the main one; a stale answer for a fraction of a second means nothing here.
+         */
+        @Volatile var mixing = false
+            private set
+    }
+
     interface Listener {
         /** The transition out of [outgoingId], or null for gapless. Called on the playback thread; must be quick. */
         fun planFor(outgoingId: String): Plan?
@@ -65,6 +76,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var offsetUs = 0L
 
     private var phase = Phase.PASS
+        set(value) { field = value; mixing = value != Phase.PASS }
     private var plan: Plan? = null
     private var planFor: String? = null
     private var tail: ByteBuffer? = null

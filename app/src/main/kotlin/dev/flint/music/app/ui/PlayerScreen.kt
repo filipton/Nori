@@ -459,7 +459,10 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
             Text(duration((if (dragging) (drag * d).toLong() else pos) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty
             // the rest of the time, holding the space so the times never move.
+            // Apple writes a word here while a transition is running; the rest of the time the slot holds
+            // its space so the two times either side never move. `pos` above ticks this once a second.
             val centre = state.error ?: when {
+                vm.mixing -> "Mixing"
                 state.sleepAtEndOfTrack -> "Sleep · end of track"
                 state.sleepAt > 0 -> "Sleep · ${((state.sleepAt - System.currentTimeMillis()) / 60_000).coerceAtLeast(1)} min"
                 else -> ""
