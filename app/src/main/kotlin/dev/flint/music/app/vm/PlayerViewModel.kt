@@ -23,6 +23,9 @@ class PlayerViewModel(app: Application) : FlintViewModel(app) {
     /** Just the id, so a list can highlight its playing row without observing the whole player. */
     val currentId: StateFlow<String?> = state.map { it.current?.id }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** Just the play/pause flag, for the same reason: the marked row's bars move only while it sounds. */
+    val sounding: StateFlow<Boolean> = state.map { it.playing }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     /** Lyrics of whatever is playing; fetched only while a lyrics view is collecting. */
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }

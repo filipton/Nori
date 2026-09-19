@@ -35,6 +35,33 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   round trip to the server; tapping Search raises the keyboard even when the screen is already open;
   the mini player rises with the finger and hands over to the full player part-way through the drag.
 
+## The page colour
+
+Apple's player is not painted one flat colour. Sample across their screenshot and it varies both
+ways — at `y=1100`: `118,27,25  99,29,25  84,16,34  88,28,27  78,19,18`; at `y=2000` it is still
+red but darker. The background *is* the artwork, enormously enlarged and blurred, which is why it
+matches the sleeve so exactly.
+
+One average of the cover's bottom rows cannot do that. *In Rainbows* is vivid everywhere and near
+black along its bottom edge, so the page came out brown mud next to a rainbow. `CoverColors.washOf`
+now shrinks the cover to 16 px a side, smooths it once off the main thread, pulls every pixel to
+within 0.05 of the page colour's own lightness (0.035 in light mode) and holds its saturation back —
+then `Design.drawPageWash` draws that stretched over the page and lets the GPU's bilinear filter do
+the enlarging. The hues vary the way the record's do; the contrast text needs does not move.
+
+It is still static: one 1 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers
+the whole page — the seam gradient is opaque down to 42 % and gone by 68 %, so each is clipped to
+where it shows. On the emulator's software renderer that came out *faster* than the single full-page
+gradient it replaced (below).
+
+## Animation
+
+There is one, and it is the exception to "nothing animates unless the user touched it": the four bars
+where a playing track's number would be (`Components.PlayingBars`). The owner asked for it. They move
+only while the music sounds, freeze into a fixed shape when it is paused, and stop entirely when the
+screen goes off or the row leaves the composition. The phase is read in the draw phase, so a frame
+invalidates that 16 dp box and nothing else. The screen-off benchmark below is unchanged by it.
+
 ## What the audio path costs
 
 `tools/bench.sh dev.flint.music 90 off`, same album, fresh install, on an x86_64 emulator, before
@@ -49,7 +76,24 @@ this work and after it:
 
 Within the noise of a debug build on an emulator, and "quiet" stays around the 80 % the house rules
 ask for. The work added nothing per buffer or per frame: the audio track provider runs once when a
-track is opened, and `Outputs.usb` only emits when something is plugged in.
+track is opened, and `Outputs.usb` only emits when something is plugged in. With the page wash and
+the playing bars on top of it the numbers are the same again — 72 of 90 quiet seconds, 392 wakeups a
+second, and no UI thread anywhere in the busiest list, because neither runs while the screen is off.
+
+## What the page costs to scroll
+
+`tools/scroll.sh dev.flint.music 12` on an album page, music playing. The emulator renders in
+software, so the absolute numbers are dreadful and only the comparison means anything.
+
+| | 50th | 90th | janky |
+|---|---|---|---|
+| flat page colour (before) | 73 ms | 93 ms | 84 % |
+| wash, both fills full-page | 77 ms | 97 ms | 90 % |
+| wash clipped + playing bars | 65 ms | 85 ms | 80 % |
+
+Drawing two full-page fills where there had been one cost 4 ms; clipping each to the part of the page
+it actually shows on took that back and more. **Wake the device first** — `tools/scroll.sh` after
+`tools/bench.sh` measures a black screen and reports `Total frames rendered: 0`.
 
 ## Not done
 

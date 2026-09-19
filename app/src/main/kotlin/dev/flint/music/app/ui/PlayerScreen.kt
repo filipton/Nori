@@ -168,9 +168,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         SystemBarIcons(scheme.background)
         Box(
             Modifier.fillMaxSize().drawBehind {
-                // A wash of the cover's own colours starting from the artwork's bottom rows, so the
-                // full-bleed picture dissolves into the page without a seam.
-                if (palette != null) drawRect(pageBrush(palette, size.height)) else drawRect(scheme.background)
+                // The page is the cover itself, enlarged and smoothed, with the seam gradient over the
+                // top so the picture dissolves into it rather than stopping. See drawPageWash.
+                if (palette != null) drawPageWash(palette, size.height) else drawRect(scheme.background)
             },
         ) {
             Column(Modifier.fillMaxSize().navigationBarsPadding()) {

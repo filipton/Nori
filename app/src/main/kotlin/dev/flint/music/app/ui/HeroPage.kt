@@ -121,7 +121,7 @@ fun HeroPage(
                         // and reaches the page colour by the time the buttons are past.
                         Column(
                             Modifier.fillMaxWidth().drawBehind {
-                                if (palette != null) drawRect(pageBrush(palette, size.height))
+                                if (palette != null) drawPageWash(palette, size.height, fadeTail = true)
                             },
                         ) {
                         Column(

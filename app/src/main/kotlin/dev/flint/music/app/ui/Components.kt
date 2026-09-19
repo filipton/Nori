@@ -32,8 +32,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.isActive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -163,7 +167,7 @@ fun SongRow(
             // The track playing shows a waveform where its number would be - the same cue Apple uses, and
             // clearer at a glance than the title merely changing colour.
             if (number != null) Box(Modifier.width(26.dp), Alignment.Center) {
-                if (playing) Icon(Icons.Filled.GraphicEq, "Playing", Modifier.size(16.dp), tint = scheme.primary)
+                if (playing) PlayingBars(scheme.primary, Modifier.size(16.dp))
                 else Text(
                     if (number > 0) "$number" else "", textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
@@ -193,6 +197,52 @@ fun SongRow(
         if (divider) Hairline(startIndent = if (number != null) Space.gutter + 40.dp else Space.gutter + 58.dp)
     }
 }
+
+/**
+ * The bars Apple draws where a playing track's number would be. They move while the music does and
+ * stand still when it is paused, which is the cue that matters: a frozen glyph beside the marked row
+ * says "this one, but stopped" without a second icon.
+ *
+ * The phase is read in the draw phase, so a frame invalidates this 16 dp box and nothing else - no
+ * recomposition and no relayout anywhere in the list. Nothing runs at all while the music is paused,
+ * while the screen is off, or while this row is not composed, which is every case the battery cares
+ * about: a list is only on screen when someone is looking at it.
+ */
+@Composable
+fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
+    // Read here rather than threaded through every list: these bars exist on exactly one row, so this
+    // is one collector on one boolean, not one per song.
+    val player: dev.flint.music.app.vm.PlayerViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val moving by player.sounding.collectAsStateWithLifecycle()
+    val phase = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var resumed by remember { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    androidx.compose.runtime.LaunchedEffect(moving, resumed) {
+        if (!moving || !resumed) return@LaunchedEffect
+        while (coroutineContext.isActive) {
+            androidx.compose.animation.core.withInfiniteAnimationFrameMillis { phase.floatValue = it / 1000f }
+        }
+    }
+    androidx.compose.foundation.Canvas(modifier) {
+        val t = phase.floatValue
+        val bars = 4
+        val w = size.width / (bars * 2 - 1)
+        for (i in 0 until bars) {
+            // Four speeds that do not share a period, so the bars never fall into step and read as a meter.
+            val level = 0.5f + 0.5f * kotlin.math.sin(t * (5.1f + i * 1.3f) + i * 1.7f)
+            val h = size.height * (0.28f + 0.72f * if (moving) level else RESTING[i])
+            drawRoundRect(
+                tint,
+                androidx.compose.ui.geometry.Offset(i * w * 2f, size.height - h),
+                androidx.compose.ui.geometry.Size(w, h),
+                androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f),
+            )
+        }
+    }
+}
+
+/** What the bars stand at while the music is paused: a shape, not a flat line. */
+private val RESTING = floatArrayOf(0.35f, 0.8f, 0.5f, 0.65f)
 
 /** A song list wired to the configured tap, swipe and selection behaviour; every screen that lists songs uses this. */
 fun LazyListScope.songRows(
