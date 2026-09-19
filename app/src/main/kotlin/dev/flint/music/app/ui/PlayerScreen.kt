@@ -638,7 +638,13 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val offset = remember { Animatable(0f) }
-    val gap = with(androidx.compose.ui.platform.LocalDensity.current) { 14.dp.toPx() }
+    // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
+    // with a shadow - and the cover's own blur shows round it. It goes back down once the song is in.
+    val lift = remember { Animatable(0f) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val gap = with(density) { 18.dp.toPx() }
+    val radius = with(density) { 22.dp.toPx() }
+    val elevation = with(density) { 18.dp.toPx() }
     @Composable fun neighbour(url: String?) = coil3.compose.rememberAsyncImagePainter(
         remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
         filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
@@ -669,23 +675,35 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
                     o > 0f && hasBefore && (v > FLICK_PX || o > w * TURN) -> 1
                     else -> 0
                 }
+                val down = spring<Float>(dampingRatio = 0.82f, stiffness = 380f)
                 scope.launch {
                     val settle = spring<Float>(dampingRatio = 1f, stiffness = 520f)
-                    if (go == 0) { offset.animateTo(0f, settle, initialVelocity = v); return@launch }
+                    if (go == 0) {
+                        launch { lift.animateTo(0f, down) }
+                        offset.animateTo(0f, settle, initialVelocity = v); return@launch
+                    }
                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                     val painter = if (go < 0) after else before
                     val url = if (go < 0) nextUrl else previousUrl
-                    if (AppMotion.reduce) offset.snapTo(go * (w + gap)) else offset.animateTo(go * (w + gap), settle, initialVelocity = v)
+                    // Where the neighbour sits once the record is fully lifted, which is where the lift is headed.
+                    val span = w * (1f - LIFT * lift.targetValue) + gap
+                    if (AppMotion.reduce) offset.snapTo(go * span) else offset.animateTo(go * span, settle, initialVelocity = v)
                     // Same frame: the incoming record takes the middle, the sleeve goes back under it.
                     landed = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
                     landedUrl = url
                     art.snapNext = true
                     offset.snapTo(0f)
                     if (go < 0) onNext() else onPrevious()
+                    // The new record settles back into the sleeve, with the slightest give.
+                    lift.animateTo(0f, down)
                 }
             }
             detectHorizontalDragGestures(
-                onDragStart = { tracker.resetTracking(); x = 0f; scope.launch { offset.stop() } },
+                onDragStart = {
+                    tracker.resetTracking(); x = 0f
+                    scope.launch { offset.stop() }
+                    if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 650f)) }
+                },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
             ) { change, d ->
@@ -699,19 +717,40 @@ private fun SleeveCarousel(art: SleeveArt, previousUrl: String?, nextUrl: String
             }
         },
     ) {
-        Box(Modifier.fillMaxSize().graphicsLayer { translationX = offset.value }) { SleeveImage(art, Modifier.fillMaxSize()) }
-        // Each neighbour waits just off its edge and is drawn only while it is being pulled in.
-        Box(Modifier.fillMaxSize().graphicsLayer { val o = offset.value; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width + gap }.background(plateColour)) {
+        // One record, lifted by [lift] and moved by [dx]; [fade] is its brightness against the page. All
+        // of it read in the draw phase: a drag moves layers and recomposes nothing.
+        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = graphicsLayer {
+            val l = lift.value
+            val s = 1f - LIFT * l
+            scaleX = s; scaleY = s
+            val span = size.width * s + gap
+            val o = offset.value
+            translationX = dx(o, span)
+            alpha = fade((kotlin.math.abs(o) / span).coerceIn(0f, 1f))
+            if (l > 0f) {
+                shape = RoundedCornerShape(radius * l / s)
+                clip = true
+                shadowElevation = elevation * l
+            }
+        }
+        val o0 = { offset.value }
+        Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) { SleeveImage(art, Modifier.fillMaxSize()) }
+        // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
+        // from a little dimmer as it arrives.
+        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).background(plateColour)) {
             androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
-        Box(Modifier.fillMaxSize().graphicsLayer { val o = offset.value; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width - gap }.background(plateColour)) {
+        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).background(plateColour)) {
             androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
-        if (landedUrl != null) Box(Modifier.fillMaxSize().background(plateColour)) {
+        if (landedUrl != null) Box(Modifier.fillMaxSize().record({ _, _ -> 0f }, { 1f }).background(plateColour)) {
             landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
         }
     }
 }
+
+/** How much smaller a record gets while it is held. */
+private const val LIFT = 0.1f
 
 /** Past this share of the width a slow drag changes the record. */
 private const val TURN = 0.3f
