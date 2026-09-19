@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
@@ -347,9 +348,23 @@ private fun Downloads(actions: ActionsViewModel) {
     val d by actions.downloads.collectAsState()
     val menu = LocalSongMenu.current
     val vm: StarredViewModel = viewModel()
+    val marks by actions.downloadMarks.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
     LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-        if (d.pending.isNotEmpty()) item(key = "pending") { Caption("${d.pending.size} downloading…", Modifier.padding(horizontal = Space.gutter, vertical = 10.dp)) }
-        if (d.done.isEmpty() && d.pending.isEmpty()) item { EmptyNote("Nothing downloaded yet") }
+        // The way to the queue, always there: what is on its way now, or where it went.
+        item(key = "queue") {
+            val failed = marks.values.count { it.phase == dev.flint.music.downloads.DownloadPhase.FAILED }
+            val waiting = (d.pending.size - failed).coerceAtLeast(0)
+            NavRow(
+                "Download queue", nav::downloads, chevron = true,
+                subtitle = listOfNotNull(
+                    "$waiting to go".takeIf { waiting > 0 },
+                    "$failed failed".takeIf { failed > 0 },
+                ).joinToString(" · ").ifEmpty { "Nothing downloading" },
+                leading = { Icon(Icons.Filled.Downloading, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
+            )
+        }
+        if (d.done.isEmpty()) item { EmptyNote("Nothing downloaded yet") }
         songRows(d.done, actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }

@@ -4,6 +4,13 @@ import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.flint.music.data.StarKind
 import dev.flint.music.downloads.DownloadState
+import dev.flint.music.downloads.DownloadMark
+import dev.flint.music.downloads.DownloadSections
+import dev.flint.music.downloads.downloadSections
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import dev.flint.music.ffi.Album
 import dev.flint.music.ffi.Playlist
 import dev.flint.music.ffi.Song
@@ -100,6 +107,8 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
                 flint.outputs.testUsb(if (off) null else ref.substringBefore('@').ifEmpty { "Mock DAC" })
             }
             "download" -> download(songs)
+            // Everything not yet downloaded is dropped; finished downloads stay.
+            "canceldownloads" -> cancelAllDownloads()
             "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
             "pause" -> player.toggle()
             "resume" -> player.toggle()
@@ -228,6 +237,23 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     }
     fun downloadAlbum(a: Album) = attempt(null) { download(flint.library.albumSongs(a.id)) }
     fun removeDownloads(ids: List<String>) = flint.downloads.remove(ids)
+
+    /** What each download this session touched is doing; see [dev.flint.music.downloads.Downloads.marks]. */
+    val downloadMarks: StateFlow<Map<String, DownloadMark>> = flint.downloads.marks
+
+    /**
+     * The downloads screen's lists: downloading, waiting (in the order they will run), failed, and
+     * finished this session. Worked out off the main thread, since a whole library can be waiting, and
+     * only while the screen is watching. Null until the first answer, which is not the same as empty.
+     */
+    val downloadSections: StateFlow<DownloadSections<Song>?> =
+        combine(flint.downloads.state, flint.downloads.marks) { s, m -> downloadSections(s.pending, s.done, m) { it.id } }
+            .flowOn(kotlinx.coroutines.Dispatchers.Default)
+            .stateIn<DownloadSections<Song>?>(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun retryDownloads(songs: List<Song>) = flint.downloads.retry(songs)
+    fun cancelDownloads(songs: List<Song>) = flint.downloads.cancel(songs.map { it.id })
+    fun cancelAllDownloads() = flint.downloads.cancelAll()
 
     suspend fun playlists(): List<Playlist> = runCatching { flint.library.playlists().first() }.getOrDefault(emptyList())
     fun addToPlaylist(p: Playlist, songs: List<Song>) = attempt("Added to ${p.name}") { flint.library.addToPlaylist(p.id, songs.map { it.id }) }

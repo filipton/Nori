@@ -226,6 +226,7 @@ private val index = listOf(
     Entry("library", "Count a play after", ""),
     Entry("library", "Keep playing", "When the queue runs out, continue with similar songs from the library"),
     Entry("library", "Live search delay", ""),
+    Entry("library", "Downloads at once", "How many songs download at the same time; the rest wait their turn"),
     Entry("servers", "Music folder", ""),
     Entry("servers", "Max bitrate on the second address", ""),)
 
@@ -497,6 +498,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 }
                 TextButton({ vm.downloadLibrary() }, enabled = sync.indexed.songs > 0u) { Text("Download") }
             }
+            Choice("Downloads at once", p.parallelDownloads, (1..10).map { it to "$it" }) { n -> vm.update { it.copy(parallelDownloads = n) } }
 
         }
         "servers" -> SettingsCard {

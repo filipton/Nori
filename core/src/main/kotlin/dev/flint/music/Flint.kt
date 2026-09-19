@@ -49,7 +49,7 @@ class Flint private constructor(private val context: Context) {
     val http: Http by lazyHttp
     val sources: MediaSources by lazySources
     val library = Library(::core, { http }, { settings.value.server?.musicFolderId.orEmpty() }, ::chooseAddress)
-    val downloads = Downloads(context, ::core, lazySources)
+    val downloads = Downloads(context, ::core, lazySources, settings)
     val dac = BitPerfect(context)
     val outputs = Outputs(context)
     val player = PlayerConnection(context, this)
