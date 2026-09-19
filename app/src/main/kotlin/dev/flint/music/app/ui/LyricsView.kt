@@ -17,6 +17,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.gestures.animateScrollBy
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -149,14 +154,33 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         // all (a seek, the first line after opening) is still jumped to: gliding past a whole song's
         // worth of words is not a transition, it is a wait.
         val plain = reduceMotion()
+        val motion = appMotion()
+        // How far through the change from `was` to `active` the lines are: 0 is the old line lit, 1 the
+        // new one. Read in the draw phase (graphicsLayer alpha below), so a change redraws the few lines
+        // on screen and recomposes none of them.
+        val glide = remember(lyrics) { Animatable(1f) }
+        var was by remember(lyrics) { mutableIntStateOf(active) }
         LaunchedEffect(active, plain) {
             if (active < 0) return@LaunchedEffect
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
-            if (plain || here == null) { list.scrollToItem(active, -third); return@LaunchedEffect }
+            if (plain || here == null) {
+                list.scrollToItem(active, -third); was = active; glide.snapTo(1f)
+                return@LaunchedEffect
+            }
             // scrollToItem(active, -third) would leave the line at offset `third`; glide by the difference.
             val distance = (here.offset - third).toFloat()
-            if (kotlin.math.abs(distance) < 1f) return@LaunchedEffect
-            list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
+            glide.snapTo(0f)
+            // Under the app's own motion scale: with Android's animations off, Compose would otherwise
+            // finish both of these on the first frame, which is exactly the jump this is here to prevent.
+            withContext(motion) {
+                coroutineScope {
+                    launch { glide.animateTo(1f, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase)) }
+                    if (kotlin.math.abs(distance) >= 1f) {
+                        list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
+                    }
+                }
+            }
+            was = active
         }
         // The words fade out towards both ends of the panel by becoming transparent, not by having a
         // colour painted over them. The page behind is the cover's blur and varies across the width;
@@ -187,15 +211,18 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                         !lyrics.synced -> Text(line.text, style = style, color = bright)
                         i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { now }
                         else -> {
-                            // The line lights up over a moment instead of flicking between two colours,
-                            // which is the difference between "the song moved on" and "the screen blinked".
-                            val target = if (i == active) bright else if (i < active) dim.copy(alpha = 0.55f) else dim
-                            val colour by androidx.compose.animation.animateColorAsState(
-                                target,
-                                androidx.compose.animation.core.tween(if (plain) 0 else LYRIC_GLIDE_MS, easing = LyricEase),
-                                label = "lyric",
+                            // The line lights up over the same moment the list moves, instead of flicking
+                            // between two colours - "the song moved on" rather than "the screen blinked".
+                            // Every state is the same colour at a different strength, so this is one alpha,
+                            // blended in the draw phase from the old line's state to the new one's.
+                            fun strength(lit: Int) = if (i == lit) 1f else if (i < lit) 0.35f * 0.55f else 0.35f
+                            Text(
+                                line.text, style = style.copy(fontWeight = weight), color = bright,
+                                modifier = Modifier.graphicsLayer {
+                                    val from = strength(was); val to = strength(active)
+                                    alpha = from + (to - from) * glide.value
+                                },
                             )
-                            Text(line.text, style = style.copy(fontWeight = weight), color = colour)
                         }
                     }
                     if (prefs.lyricsTranslation) line.translation?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = if (i == active) bright.copy(alpha = 0.8f) else dim) }

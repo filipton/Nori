@@ -748,7 +748,23 @@ fun reduceMotion(): Boolean {
     val systemOff = androidx.compose.runtime.remember {
         android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
     }
-    return prefs.reduceMotion || systemOff
+    return prefs.reduceMotion || (systemOff && !prefs.ignoreSystemMotion)
+}
+
+/**
+ * What to run an animation's coroutine under so it plays at its real speed. Compose scales every
+ * animation by Android's animator duration scale, so with system animations off a tween of any length
+ * finishes on the first frame; putting this in the coroutine's context overrides that scale for the
+ * one animation it runs. Empty - follow the system - unless the user asked to animate regardless.
+ */
+@Composable
+fun appMotion(): kotlin.coroutines.CoroutineContext {
+    val prefs by (androidx.lifecycle.viewmodel.compose.viewModel<dev.flint.music.app.vm.SettingsViewModel>()).prefs.collectAsStateWithLifecycle()
+    return if (prefs.ignoreSystemMotion) RealSpeed else kotlin.coroutines.EmptyCoroutineContext
+}
+
+private object RealSpeed : androidx.compose.ui.MotionDurationScale {
+    override val scaleFactor: Float get() = 1f
 }
 
 

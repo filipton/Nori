@@ -180,6 +180,7 @@ private val index = listOf(
     Entry("look", "Interface size", "Automatic keeps the layout's proportions on a phone set to a large display size"),
     Entry("look", "AMOLED black", "True black in dark mode: those pixels are switched off, which also saves power on OLED screens"),
     Entry("look", "Reduce motion", "Shorter, plainer movement throughout"),
+    Entry("look", "Animate even when Android's are off", "Lyrics glide to the next line even with system animations turned off"),
     Entry("look", "Colours from the cover", "Album, artist and playlist pages and the player take their colour from the artwork, which runs edge to edge"),
     Entry("look", "Wallpaper colours", "Material You: take the colours from your wallpaper"),
     Entry("quality", "On Wi-Fi", ""),
@@ -328,6 +329,11 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 "Shorter, plainer movement throughout. Follows the system setting when animations are turned off there.",
                 p.reduceMotion,
             ) { on -> vm.update { it.copy(reduceMotion = on) } }
+            if (!p.reduceMotion) Toggle(
+                "Animate even when Android's are off",
+                "Android's animation setting is often turned off just for speed, and with it off every movement here - the lyrics gliding to the next line, above all - becomes a jump. On, this app moves anyway.",
+                p.ignoreSystemMotion,
+            ) { on -> vm.update { it.copy(ignoreSystemMotion = on) } }
             Choice(
                 "Interface size", p.uiScale,
                 listOf(0f to "Automatic", 0.9f to "Smaller", 1f to "As the system", 1.1f to "Larger"),

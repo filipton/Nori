@@ -203,6 +203,13 @@ data class Prefs(
     /** Shorter, plainer movement everywhere; also follows the system when animations are off there. */
     val reduceMotion: Boolean = false,
     /**
+     * Animate even though Android's own animations are switched off. That switch is as often a speed
+     * habit as an accessibility need, and with it off every Compose animation is scaled to nothing -
+     * the lyrics then jump from line to line whatever this app asks for. On, the app's own movement
+     * runs at its real speed regardless; Reduce motion above still turns it off.
+     */
+    val ignoreSystemMotion: Boolean = false,
+    /**
      * How big the interface is drawn. 0 is automatic: laid out as if the screen were at least as wide
      * as the one every size was measured against, so a phone set to a large display size does not
      * blow the layout up. Anything else is a fixed factor on top of the system's own size.
@@ -335,7 +342,7 @@ class Settings(context: Context) {
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
             lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1), lyricsLrclib = sp.getBoolean("lyricsLrclib", true),
             theme = ThemeMode.entries.getOrElse(sp.getInt("theme", 0)) { ThemeMode.SYSTEM }, amoled = sp.getBoolean("amoled", false),
-            dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4), coverColors = sp.getBoolean("coverColors", true), reduceMotion = sp.getBoolean("reduceMotion", false), uiScale = sp.getFloat("uiScale", 0f), playerColours = sp.getBoolean("playerColours", true),
+            dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4), coverColors = sp.getBoolean("coverColors", true), reduceMotion = sp.getBoolean("reduceMotion", false), ignoreSystemMotion = sp.getBoolean("ignoreSystemMotion", false), uiScale = sp.getFloat("uiScale", 0f), playerColours = sp.getBoolean("playerColours", true),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
             swipeRight = SwipeAction.entries.getOrElse(sp.getInt("swipeRight", d.swipeRight.ordinal)) { d.swipeRight },
             swipeLeft = SwipeAction.entries.getOrElse(sp.getInt("swipeLeft", d.swipeLeft.ordinal)) { d.swipeLeft },
@@ -370,7 +377,7 @@ class Settings(context: Context) {
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
         putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
-        putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent); putBoolean("coverColors", p.coverColors); putBoolean("reduceMotion", p.reduceMotion); putFloat("uiScale", p.uiScale); putBoolean("playerColours", p.playerColours)
+        putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent); putBoolean("coverColors", p.coverColors); putBoolean("reduceMotion", p.reduceMotion); putBoolean("ignoreSystemMotion", p.ignoreSystemMotion); putFloat("uiScale", p.uiScale); putBoolean("playerColours", p.playerColours)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt("swipeLeft", p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
         putString("pinnedPlaylists", p.pinnedPlaylists.joinToString("\n")); putString("listPrefs", JSONObject(p.listPrefs).toString())

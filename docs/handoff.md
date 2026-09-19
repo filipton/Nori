@@ -165,6 +165,21 @@ settings screen in the App Store set — they are UIKit's own defaults.
   buffer comes back at the next pause, where a rebuild is silent. Counted from the `AudioTrack` log
   line: 0 / 1 / 0 / 0 / 1 for open, first change, second change, leave, pause.
 
+## Animation and Android's animation setting
+
+Compose scales every animation by Android's animator duration scale. Plenty of people switch that off
+for speed (and GrapheneOS users often do), and at 0 every tween finishes on its first frame - the
+owner's lyrics jumped from line to line on the phone while gliding on the emulator. `reduceMotion()`
+also followed that switch. `Prefs.ignoreSystemMotion` ("Animate even when Android's are off") makes
+`reduceMotion()` ignore it, and `appMotion()` supplies a `MotionDurationScale` of 1 to put in an
+animation's coroutine context, which is the only way to override the system scale for one
+animation. The lyric glide runs under it. Measured with the system scale at 0: off, a line change is
+over in 66 ms with 60 % of the movement in one frame; on, 600-730 ms with no frame over 20 %.
+
+Measure motion with `glide3.py`-style frame differencing (share of a change in its biggest frame),
+not by matching vertical shifts: lyric lines are evenly spaced, so "moved one line" and "did not
+move" look the same to a shift search.
+
 ## Interface size
 
 Every size above was measured on a phone 411 dp wide. The owner's phone is about 358 dp wide

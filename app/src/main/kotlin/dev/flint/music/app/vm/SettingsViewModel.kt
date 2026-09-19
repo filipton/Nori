@@ -108,6 +108,8 @@ class SettingsViewModel(app: Application) : FlintViewModel(app) {
                 "offload" -> it.copy(offload = on)
                 "autoMix" -> it.copy(autoMix = on)
                 "amoled" -> it.copy(amoled = on)
+                "ignoreSystemMotion" -> it.copy(ignoreSystemMotion = on)
+                "reduceMotion" -> it.copy(reduceMotion = on)
                 "playerColours" -> it.copy(playerColours = on)
                 "coverColors" -> it.copy(coverColors = on)
                 "thirdPartyLookups" -> it.copy(thirdPartyLookups = on)
