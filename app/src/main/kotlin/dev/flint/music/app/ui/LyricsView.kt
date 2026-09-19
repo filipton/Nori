@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -157,7 +158,28 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             if (kotlin.math.abs(distance) < 1f) return@LaunchedEffect
             list.animateScrollBy(distance, androidx.compose.animation.core.tween(LYRIC_GLIDE_MS, easing = LyricEase))
         }
-        LazyColumn(state = list, contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = maxHeight / 2)) {
+        // The words fade out towards both ends of the panel by becoming transparent, not by having a
+        // colour painted over them. The page behind is the cover's blur and varies across the width;
+        // any colour laid on top to hide the words ends on one flat value, and where that flat value
+        // meets the blur below it there is a dead straight line - measured on a phone at the exact
+        // bottom edge of this panel. A mask paints nothing, so there is nothing to meet anything.
+        LazyColumn(
+            state = list,
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = maxHeight / 2),
+            modifier = Modifier
+                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    drawRect(
+                        Brush.verticalGradient(
+                            // Gone by the source label at the bottom, so the two never sit on each other.
+                            0f to Color.Transparent, 0.05f to Color.Black,
+                            0.66f to Color.Black, 0.92f to Color.Transparent,
+                        ),
+                        blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                    )
+                },
+        ) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
                 Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)) }.padding(vertical = 8.dp)) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
@@ -187,19 +209,6 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         var tuning by remember(lyrics) { mutableStateOf(false) }
         val source = found.source.takeIf { it != dev.flint.music.data.LyricsSource.SERVER }
         val open = tuning || nudgeMs != 0L
-        // The list runs on underneath, so without this the bar lands on top of a line and both are
-        // unreadable. One gradient, the same trick the bottom chrome uses, and the words fade out under it.
-        if (lyrics.synced || source != null) Box(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(if (open) 72.dp else 54.dp).drawBehind {
-                drawRect(
-                    Brush.verticalGradient(
-                        0f to Color.Transparent,
-                        0.55f to page.copy(alpha = 0.82f),
-                        1f to page,
-                    ),
-                )
-            },
-        )
         if (lyrics.synced || source != null) androidx.compose.material3.Surface(
             onClick = { if (lyrics.synced) tuning = !tuning },
             enabled = lyrics.synced,

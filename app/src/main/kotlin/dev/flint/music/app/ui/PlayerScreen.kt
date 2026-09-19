@@ -182,7 +182,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
                 // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
                 // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
-                if (palette != null) drawSleeveWash(palette, sleeveBottom, sleeveHeight, size.height) else drawRect(scheme.background)
+                if (palette != null) {
+                    // Lyrics and queue have no sleeve on screen, and a player opened straight into
+                    // one of them has never measured it: use where it would be, so those panels get
+                    // the same picture behind them rather than one stretched row from the very top.
+                    val h = if (sleeveHeight > 0f) sleeveHeight else size.width / SLEEVE
+                    val b = if (sleeveBottom > 0f) sleeveBottom else h
+                    drawSleeveWash(palette, b, h, size.height)
+                } else drawRect(scheme.background)
             },
         ) {
             Column(Modifier.fillMaxSize().navigationBarsPadding()) {

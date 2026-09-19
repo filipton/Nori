@@ -226,6 +226,25 @@ fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHe
     band(0, 1, 0, top.toInt())
     band(0, WASH_ROWS, top.toInt(), bottom.toInt())
     band(WASH_ROWS - 1, 1, bottom.toInt(), endY.toInt())
+    // The last row, carried down, is the right colour where it meets the sleeve and wrong everywhere
+    // below it: the same stripes at the same strength all the way to the bottom edge. Apple's page
+    // darkens and calms as it goes down - at y 2000 of `w4` it is still their red, but deeper and more
+    // even than under the artwork. So the stripes give way, slowly at first, to a deeper page colour,
+    // and arrive at it exactly at the bottom edge of the screen, where there is nothing to meet.
+    if (endY - bottom > 1f) {
+        val dark = palette.onBackground.luminance() > 0.5f
+        val floor = if (dark) blend(palette.background, Color.Black, 0.28f) else palette.background
+        drawRect(
+            Brush.verticalGradient(
+                0f to floor.copy(alpha = 0f),
+                0.35f to floor.copy(alpha = 0.42f),
+                1f to floor,
+                startY = bottom, endY = endY,
+            ),
+            topLeft = Offset(0f, bottom),
+            size = Size(size.width, endY - bottom),
+        )
+    }
 }
 
 /**
