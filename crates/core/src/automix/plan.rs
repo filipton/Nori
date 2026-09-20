@@ -101,12 +101,23 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
         if !s.beat_match {
             why_not = "beat matching off".into();
         } else if !grid_ok(a) || !grid_ok(b) {
-            why_not = "no reliable beat grid".into();
+            why_not = format!(
+                "no reliable beat grid (out {:.0} BPM conf {:.2} stab {:.2}, in {:.0} BPM conf {:.2} stab {:.2}; needs conf ≥ {:.1}, stab ≥ {:.1})",
+                a.bpm, a.bpm_confidence, a.stability, b.bpm, b.bpm_confidence, b.stability,
+                MIN_BPM_CONFIDENCE, MIN_STABILITY
+            );
         } else {
             match beat_matched(a, b, out_dur, in_dur, max_len, s) {
                 Ok(p) => return p,
                 Err(e) => why_not = e,
             }
+        }
+    }
+    // One grid survived (or the lock failed on two good ones): align to what exists rather than
+    // fading blind. See one_grid.
+    if s.beat_match && (a.is_some_and(grid_ok) || b.is_some_and(grid_ok)) {
+        if let Some(p) = one_grid(a, b, out_dur, in_dur, max_len, s, &why_not) {
+            return p;
         }
     }
     if a.is_some() || b.is_some() {
@@ -213,6 +224,76 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
         return Ok(p);
     }
     Err("no bar-aligned window fits".into())
+}
+
+/// One side has a usable grid and the two could not be locked (the other grid is unreliable, the
+/// tempos are too far apart, or no shared window fits): align to the grid that exists. An exit that
+/// starts on the outgoing track's downbeats, or an entrance that lands on the incoming track's,
+/// still sounds intentional where a blind fade sounds accidental. No tempo change: with only one
+/// tempo known there is nothing to match to, so this is a well-placed fade, not a mix.
+fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, why_not: &str) -> Option<TransitionPlan> {
+    let tail = if why_not.is_empty() { String::new() } else { format!(" ({why_not})") };
+    let end_a = a.map_or(out_dur, |x| music_end(x, out_dur)).max(out_dur - MAX_SKIP_MS);
+    // The outgoing grid carries the exit: 8 bars of it, then 4, starting on its downbeats.
+    if let Some(g) = a.filter(|x| grid_ok(x)) {
+        let beat = 60_000.0 / g.bpm;
+        let phase = g.downbeat_phase.rem_euclid(4) as i64;
+        let in_start = b.map_or(0, |x| x.silence_start_ms.clamp(0, MAX_SKIP_MS.min(in_dur / 3)));
+        for bars in [8i64, 4] {
+            let dur = (bars as f64 * 4.0 * beat).round() as i64;
+            if dur > max_len || dur < MIN_FADE_MS {
+                continue;
+            }
+            let mut n = ((end_a as f64 - dur as f64 - g.beat_offset_ms) / beat).floor() as i64;
+            while n.rem_euclid(4) != phase {
+                n -= 1;
+            }
+            let start = (g.beat_offset_ms + n as f64 * beat).round() as i64;
+            if start < g.silence_start_ms || out_dur - (start + dur) > MAX_SKIP_MS {
+                continue;
+            }
+            let mut p = blank(TransitionKind::MixRampFade, start, in_start, dur, String::new());
+            p.fade_curve = FadeCurve::SineSquared;
+            if s.filter_effects && dur >= 2000 {
+                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
+            }
+            p.in_gain_db = loudness_trim(a, b, s);
+            p.reason = format!("downbeat-aligned fade, {bars} bars out{tail}");
+            return Some(p);
+        }
+    }
+    // Else the incoming grid carries the entrance: its first downbeat at or after its music starts.
+    if let Some(g) = b.filter(|x| grid_ok(x)) {
+        let beat = 60_000.0 / g.bpm;
+        let phase = g.downbeat_phase.rem_euclid(4) as i64;
+        let mut nb = (((g.silence_start_ms as f64 - g.beat_offset_ms) / beat) - 0.25).ceil() as i64;
+        while nb.rem_euclid(4) != phase {
+            nb += 1;
+        }
+        let in_start = (g.beat_offset_ms + nb as f64 * beat).round().max(0.0) as i64;
+        if in_start > MAX_SKIP_MS {
+            return None;
+        }
+        for bars in [8i64, 4] {
+            let dur = (bars as f64 * 4.0 * beat).round() as i64;
+            if dur > max_len || dur < MIN_FADE_MS || dur > in_dur - in_start {
+                continue;
+            }
+            let start = end_a - dur;
+            if start < 0 || out_dur - (start + dur) > MAX_SKIP_MS {
+                continue;
+            }
+            let mut p = blank(TransitionKind::MixRampFade, start, in_start, dur, String::new());
+            p.fade_curve = FadeCurve::SineSquared;
+            if s.filter_effects && dur >= 2000 {
+                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
+            }
+            p.in_gain_db = loudness_trim(a, b, s);
+            p.reason = format!("downbeat-aligned fade, {bars} bars in{tail}");
+            return Some(p);
+        }
+    }
+    None
 }
 
 fn mixramp(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, why_not: &str) -> TransitionPlan {
@@ -377,6 +458,28 @@ mod tests {
             assert_eq!(p.kind, TransitionKind::MixRampFade, "{b:?}");
             assert!(p.reason.contains("no reliable beat grid"));
         }
+    }
+
+    #[test]
+    fn one_good_grid_aligns_the_fade_to_it() {
+        // Outgoing grid known, incoming not: the exit starts on the outgoing track's downbeats.
+        let b = TrackAnalysis { bpm_confidence: 0.2, ..track(128.0) };
+        let p = plan(Some(&track(128.0)), Some(&b), 240_000, 240_000, &AutoMixSettings::default());
+        assert_eq!(p.kind, TransitionKind::MixRampFade);
+        assert!(p.reason.contains("downbeat-aligned") && p.reason.contains("bars out"), "{}", p.reason);
+        check_skip(&p, 240_000);
+        // 8 bars of 128 BPM from a downbeat of the outgoing track.
+        let beat = 60_000.0 / 128.0;
+        assert!((p.duration_ms as f64 - 8.0 * 4.0 * beat).abs() <= 1.0, "{}", p.duration_ms);
+        let beats = (p.out_start_ms as f64 - 120.0) / beat;
+        assert!((beats - beats.round()).abs() < 0.01 && (beats.round() as i64) % 4 == 0, "{beats}");
+
+        // Incoming grid known, outgoing not: the entrance lands on the incoming track's downbeats.
+        let a = TrackAnalysis { stability: 0.3, ..track(128.0) };
+        let p = plan(Some(&a), Some(&track(128.0)), 240_000, 240_000, &AutoMixSettings::default());
+        assert!(p.reason.contains("bars in"), "{}", p.reason);
+        check_skip(&p, 240_000);
+        assert_eq!(p.in_start_ms, 120);
     }
 
     #[test]

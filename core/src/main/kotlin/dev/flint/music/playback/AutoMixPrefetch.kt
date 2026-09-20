@@ -98,7 +98,7 @@ class AutoMixPrefetch(
             }
             if (analyser != 0L) {
                 val a = coreOf().analysisFinishStream(id, analyser)
-                android.util.Log.i("flint", "analysed $id ahead: ${a?.let { "%.2f bpm (%.2f), key %s".format(it.bpm, it.bpmConfidence, dev.flint.music.ffi.automixKeyName(it.key)) } ?: "too short"}")
+                android.util.Log.i("flint", "analysed $id ahead: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s".format(it.bpm, it.bpmConfidence, it.stability, dev.flint.music.ffi.automixKeyName(it.key)) } ?: "too short"}")
             }
         } finally {
             if (analyser != 0L) AutoMixAnalyzer.destroy(analyser)
