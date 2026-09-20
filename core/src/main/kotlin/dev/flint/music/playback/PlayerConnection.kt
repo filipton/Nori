@@ -49,6 +49,12 @@ data class PlayerState(
 }
 
 /**
+ * How long a seek is watched for the player losing it. Long enough for a track to be fetched over a
+ * slow line, short enough that it cannot reach back into a song the listener has settled into.
+ */
+private const val KEEP_SEEK_MS = 15_000L
+
+/**
  * The UI's only handle on playback. It talks to [PlaybackService] through a
  * MediaController, so the UI holds no player and the service can outlive it.
  * State is pushed on change; the playhead is pulled ([positionMs]) so that a
@@ -99,6 +105,7 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     }
 
     fun disconnect() {
+        forget()
         controller?.let { it.removeListener(listener); it.release() }
         controller = null
         _state.value = _state.value.copy(connected = false)
@@ -198,37 +205,62 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
 
     /** Also prepares a queue that was restored but never loaded. */
     fun toggle() = with { Util.handlePlayPauseButtonAction(it) }
-    fun next() = with { it.seekToNextMediaItem() }
-    fun previous() = with { it.seekToPrevious() }
+    fun next() = with { forget(); it.seekToNextMediaItem() }
+    fun previous() = with { forget(); it.seekToPrevious() }
     /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
-    fun previousItem() = with { it.seekToPreviousMediaItem() }
+    fun previousItem() = with { forget(); it.seekToPreviousMediaItem() }
     /**
      * A seek, and then a second one if the player did not keep it. Asked for on a song that is still
      * being fetched, the seek lands on a source that has not been opened yet: the player accepts it,
      * loads the track and starts it from the beginning, and the position the finger asked for is gone.
-     * So it is remembered until the player is really playing that song, and asked for again if the
-     * player ended up somewhere else.
+     * So it is remembered until the song is really playing on from there, and asked for again if the
+     * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
-        wanted = ms to c.currentMediaItem?.mediaId
+        wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
         c.seekTo(ms)
+        main.removeCallbacks(watch)
+        main.postDelayed(watch, 300)
     }
 
-    /** Where a seek asked to go, and in which song; see [seekTo]. */
-    private var wanted: Pair<Long, String?>? = null
+    /** Where a seek asked to go, in which song, and how long to go on watching for it; see [seekTo]. */
+    private class Seek(val target: Long, val id: String?, val until: Long) { var tries = 0 }
+    private var wanted: Seek? = null
+    private val main by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
+
+    /**
+     * The player's own events are not enough to catch this. A controller answers from its own books
+     * the moment it is asked, so right after a seek it reports the position the finger chose whatever
+     * the session did with it; the truth arrives later, and not always as an event. So the seek is
+     * also looked at on a timer until it is clearly kept or the song has moved on.
+     */
+    private val watch = object : Runnable {
+        override fun run() {
+            controller?.let(::keepSeek)
+            if (wanted != null) main.postDelayed(this, 300)
+        }
+    }
+
+    private fun forget() { wanted = null; main.removeCallbacks(watch) }
 
     private fun keepSeek(p: Player) {
-        val (target, id) = wanted ?: return
-        // Only while it could still be lost: once the song is playing and near where it was asked to
-        // be, or the song has changed under it, there is nothing to keep.
-        if (id != p.currentMediaItem?.mediaId) { wanted = null; return }
+        val w = wanted ?: return
+        // The song changed under it, or it has been watched long enough that a source which was going
+        // to open has opened: there is nothing left to keep.
+        if (w.id != p.currentMediaItem?.mediaId || android.os.SystemClock.elapsedRealtime() > w.until) { forget(); return }
         if (p.playbackState != Player.STATE_READY) return
-        if (kotlin.math.abs(p.currentPosition - target) <= 1_500) { wanted = null; return }
+        val pos = p.currentPosition
+        // Playing on from where the finger asked: kept, and the watch can end.
+        if (pos > w.target + 400) { forget(); return }
+        // At the place it asked for but not past it yet - which, from a controller, is as true before
+        // the session has done the seek as after it. Not proof, so the watch carries on.
+        if (pos >= w.target - 1_500) return
         // Only from the very beginning: anywhere else and the player has been asked for something newer
         // - the next song, another scrub - which must not be undone.
-        if (p.currentPosition > 1_500) { wanted = null; return }
-        wanted = null
-        p.seekTo(target)
+        if (pos > 1_500) { forget(); return }
+        // A source that refuses to be started anywhere but the top would otherwise be fought forever.
+        if (w.tries++ >= 3) { forget(); return }
+        p.seekTo(w.target)
     }
     fun setShuffle(on: Boolean) = with { it.shuffleModeEnabled = on }
 

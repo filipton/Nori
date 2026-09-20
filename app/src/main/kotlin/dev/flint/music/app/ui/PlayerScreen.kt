@@ -1875,7 +1875,12 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // Not keyed on the song's length: a new song has a different one, and restarting here puts the bar
     // where the song is instead of carrying it there, which is the animation going missing on a change.
     // A scrub ending does restart it, and that one has to be a snap - see below.
-    LaunchedEffect(playing, dragging) {
+    // Nor on whether the music is playing, which is read through the loop instead. A skip to a song
+    // that still has to be fetched stops for a moment on the way there, and restarting on that put the
+    // bar straight at the new song's nought: the slide back to the beginning was there when a song
+    // ended by itself, because then nothing stops, and missing on next and previous.
+    val moving by rememberUpdatedState(playing)
+    LaunchedEffect(dragging) {
         if (dragging) return@LaunchedEffect
         // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
         // Eased from where it stood before the finger, the bar left the place it was dropped, slid off
@@ -1886,7 +1891,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
             val target = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
             // Stopped and already there: look again in a moment rather than on every frame, so a paused
             // player costs nothing.
-            if (!playing && kotlin.math.abs(target - live.floatValue) < 0.0005f) {
+            if (!moving && kotlin.math.abs(target - live.floatValue) < 0.0005f) {
                 live.floatValue = target
                 last = 0L
                 delay(200)
