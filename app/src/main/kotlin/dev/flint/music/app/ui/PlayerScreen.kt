@@ -436,7 +436,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                         // sleeve was drawn at full size while the cover in flight was drawn too, which
                         // is the two covers that show up together for an instant - one the whole square,
                         // one the square cropped to the sleeve.
-                        .graphicsLayer { alpha = if (panel != showing || flying) 0f else 1f }
+                        // The panel being left keeps its sleeve until the flight is really under way:
+                        // held back from the frame the panel changed, it went out on that frame while
+                        // the flight, which is started by an effect, had not begun - one frame with no
+                        // cover on screen at all.
+                        .graphicsLayer { alpha = if ((page == panel && panel != showing) || flying) 0f else 1f }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -1868,7 +1872,10 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // nought is a bar at the beginning of the song for the frame before its first reading arrives -
     // the blink of the playing time when the lyrics give way to the queue.
     val live = remember { androidx.compose.runtime.mutableFloatStateOf((vm.positionMs.toFloat() / durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)) }
-    LaunchedEffect(playing, d, dragging) {
+    // Not keyed on the song's length: a new song has a different one, and restarting here puts the bar
+    // where the song is instead of carrying it there, which is the animation going missing on a change.
+    // A scrub ending does restart it, and that one has to be a snap - see below.
+    LaunchedEffect(playing, dragging) {
         if (dragging) return@LaunchedEffect
         // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
         // Eased from where it stood before the finger, the bar left the place it was dropped, slid off
