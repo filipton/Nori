@@ -820,7 +820,13 @@ private fun SoftCover(modifier: Modifier = Modifier, picture: @Composable () -> 
                 .drawWithContent { drawContent(); giveWayToPage() },
         ) {
             Box(
-                Modifier.matchParentSize().blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+                // Held a little larger, and cut off at the cover's own bounds by the box above: the rows
+                // the blur has darkened at its edge fall outside the cover instead of lying along its
+                // bottom. The sleeve does the same, and if this one does not, the bottom of the cover
+                // changes the moment the flight hands over to it.
+                Modifier.matchParentSize()
+                    .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
+                    .blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
             ) { picture() }
         }
         Box(
@@ -1276,7 +1282,12 @@ private fun SleeveCarousel(
             // was still on its way means the next is already on its way too, and putting the record down
             // in between is what made a run of presses go down and up and down again instead of the
             // records simply scrolling past, small, one after another.
-            if (!keepLift()) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
+            //
+            // And the settle is let go of rather than waited for: the record is back in the sleeve as
+            // far as this change is concerned, so a press that comes in while it is still growing takes
+            // it over and lifts it again from wherever it has got to, instead of queueing behind the
+            // rest of an animation that is already finished with.
+            if (!keepLift()) scope.launch { lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f)) }
         } finally {
             if (!changed) {
                 val caught = gesture != turn
@@ -1853,9 +1864,16 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // bar used to take the same once-a-second reading the times do, so it stepped forward in jumps a
     // second apart; the player's own position carries on between those readings, and a bar that shows
     // it moves at the speed of the music instead.
-    val live = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    // Started where the song already is. A panel change builds this bar again, and one that starts at
+    // nought is a bar at the beginning of the song for the frame before its first reading arrives -
+    // the blink of the playing time when the lyrics give way to the queue.
+    val live = remember { androidx.compose.runtime.mutableFloatStateOf((vm.positionMs.toFloat() / durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)) }
     LaunchedEffect(playing, d, dragging) {
         if (dragging) return@LaunchedEffect
+        // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
+        // Eased from where it stood before the finger, the bar left the place it was dropped, slid off
+        // to where the song had been and crawled back.
+        live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
         var last = 0L
         while (isActive) {
             val target = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
