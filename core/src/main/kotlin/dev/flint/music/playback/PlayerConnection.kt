@@ -217,7 +217,12 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
      * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
-        wanted = Seek(ms, c.currentPosition, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
+        // from/until anchor on the first READY observation (see keepSeek), not here: on a player
+        // that is not ready yet the position read now is meaningless - idle reports 0 while the
+        // session restores to wherever the queue was left, and anchoring on 0 makes the watch read
+        // the restored position as "moved by someone else" and give up on a dropped seek.
+        wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
+        _pendingSeek.value = ms
         // A queue restored from the last time the app ran is deliberately left unprepared, so that
         // opening the app touches nothing. Such a player has no seekable window, the controller drops
         // every seek without a word, and the song then started from where it had been left - the finger
@@ -233,8 +238,20 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
      * Where a seek asked to go, where the player was when it was asked, in which song, and how long to
      * go on watching for it; see [seekTo].
      */
-    private class Seek(val target: Long, val from: Long, val id: String?, val until: Long) { var tries = 0 }
+    private class Seek(val target: Long, val id: String?, var until: Long) {
+        var tries = 0
+        /// Anchor and lowest position of the first READY observations; see keepSeek.
+        var from: Long? = null
+        var low: Long? = null
+    }
     private var wanted: Seek? = null
+    /**
+     * Where a seek asked to go, while the watch is still making sure it sticks. The seek bar
+     * holds this instead of its own timer, so a slow seek (prepare, then the re-ask) reads as
+     * one held place rather than a jump, a snap-back and a glide. Cleared with the watch.
+     */
+    private val _pendingSeek = MutableStateFlow<Long?>(null)
+    val pendingSeek: StateFlow<Long?> = _pendingSeek
     private val main by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
 
     /**
@@ -250,27 +267,58 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         }
     }
 
-    private fun forget() { wanted = null; main.removeCallbacks(watch) }
+    private fun forget() { wanted = null; _pendingSeek.value = null; main.removeCallbacks(watch) }
 
     private fun keepSeek(p: Player) {
         val w = wanted ?: return
-        // The song changed under it, or it has been watched long enough that a source which was going
-        // to open has opened: there is nothing left to keep.
-        if (w.id != p.currentMediaItem?.mediaId || android.os.SystemClock.elapsedRealtime() > w.until) { forget(); return }
-        if (p.playbackState != Player.STATE_READY) return
+        // The song changed under it: there is nothing left to keep.
+        if (w.id != p.currentMediaItem?.mediaId) { forget(); return }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (p.playbackState != Player.STATE_READY) {
+            // A source that never opens still ends the watch; a slow one gets its full window.
+            if (now > w.until) forget()
+            return
+        }
         val pos = p.currentPosition
-        // Playing on from where the finger asked: kept, and the watch can end.
-        if (pos > w.target + 400) { forget(); return }
-        // At the place it asked for but not past it yet - which, from a controller, is as true before
-        // the session has done the seek as after it. Not proof, so the watch carries on.
-        if (pos >= w.target - 1_500) return
-        // Still where it was when the seek was asked for - so nothing newer has moved it, and this is
-        // the seek having been dropped or undone. Anywhere else, the player has been asked for
-        // something since (another scrub, a skip) which must not be undone.
-        if (pos > w.from + 1_500) { forget(); return }
-        // A source that refuses to be started anywhere but the top would otherwise be fought forever.
-        if (w.tries++ >= 3) { forget(); return }
-        p.seekTo(w.target)
+        if (w.from == null) {
+            // First sight of a ready player: this is what "where it was" means. The original seek
+            // may have landed already (then pos is the target and the checks below keep it) or been
+            // dropped (then the loop below re-asks). Either way the watch now measures from truth.
+            w.from = pos
+            w.low = pos
+            w.until = now + KEEP_SEEK_MS
+            return
+        }
+        if (now > w.until) { forget(); return }
+        val from = w.from ?: pos
+        val target = w.target
+        val playing = p.isPlaying
+        val near = kotlin.math.abs(pos - target) <= 1_500
+        // Paused where the finger asked: landed - a paused player moves for nothing else.
+        if (near && !playing) { forget(); return }
+        w.low = minOf(w.low ?: pos, pos)
+        val cameDown = (w.low ?: pos) < from - 500
+        if (target >= from) {
+            // Forward: played past it, and the anchor is truthful, so this cannot misfire on a
+            // restored position the way ask-time anchoring did.
+            if (pos > target + 400) { forget(); return }
+            if (near) return // playing through it: wait for the proof above
+            // Still at the start: dropped or not yet applied - ask again, briefly.
+            if (pos <= from + 1_500) {
+                if (w.tries++ >= 3) { forget(); return }
+                p.seekTo(target)
+            } else forget() // playing on without it; the recovery window has passed
+            return
+        }
+        // Backward: pos > target is the starting condition, not proof of anything. Proof is having
+        // come down from the start and reached the target's neighbourhood while playing on.
+        if (playing && cameDown && pos >= target - 1_500) { forget(); return }
+        if (near) return // may be arriving; wait (paused-near already kept above)
+        // Never moved: dropped - ask again, briefly. Anything else (overshot, partial) is stale.
+        if (!cameDown && pos >= from - 1_500) {
+            if (w.tries++ >= 3) { forget(); return }
+            p.seekTo(target)
+        } else forget()
     }
     fun setShuffle(on: Boolean) = with { it.shuffleModeEnabled = on }
 
