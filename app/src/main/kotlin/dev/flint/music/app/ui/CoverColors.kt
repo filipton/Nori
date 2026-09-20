@@ -172,7 +172,10 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     val accent = readable(Color(accentSeed), background, on)
     // AMOLED black is a promise that those pixels are switched off; a wash would light them up again.
     val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark) }.getOrNull()
-    return PagePalette(edge, background, on, on.copy(alpha = 0.66f), accent, wash = wash)
+    return PagePalette(
+        edge, background, on, on.copy(alpha = 0.66f), accent,
+        wash = wash?.first, washEdge = wash?.second ?: edge,
+    )
 }
 
 /**
@@ -205,7 +208,7 @@ private const val MUTE = 0.38f
  * Every pixel is then pulled to within a hair of the page colour's own lightness and its saturation
  * held back, so the hues vary across the page but the contrast the text needs does not.
  */
-private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitmap {
+private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): Pair<ImageBitmap, Color> {
     val small = bitmap.scale(WASH, WASH)
     val px = IntArray(WASH * WASH)
     small.getPixels(px, 0, WASH, 0, 0, WASH, WASH)
@@ -239,7 +242,19 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): ImageBitma
         // shouting out of it.
         px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), MUTE)
     }
-    return Bitmap.createBitmap(smooth(px), WASH_OUT, WASH_OUT, Bitmap.Config.ARGB_8888).asImageBitmap()
+    // What the soft bottom of the sleeve averages out to, kept with the picture. The melt is drawn
+    // from these rows, so this is the one colour the band as a whole wears; it is what lets the band
+    // be recoloured to whatever the page is wearing this frame without changing how light it is.
+    // See `PagePalette.meltColour` and `drawSleeveMelt`.
+    val first = (WASH * (1f - MELT)).toInt().coerceIn(0, WASH - 1)
+    var r = 0f; var g = 0f; var b = 0f
+    for (y in first until WASH) for (x in 0 until WASH) {
+        val p = px[y * WASH + x]
+        r += (p shr 16) and 0xFF; g += (p shr 8) and 0xFF; b += p and 0xFF
+    }
+    val n = ((WASH - first) * WASH * 255).toFloat()
+    return Bitmap.createBitmap(smooth(px), WASH_OUT, WASH_OUT, Bitmap.Config.ARGB_8888).asImageBitmap() to
+        Color(r / n, g / n, b / n)
 }
 
 /**

@@ -102,6 +102,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -253,6 +254,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // The colours of the record on its way in, already worked out by the time it is asked for (the now
     // playing bar measures both neighbours ahead; see warmCoverPalette).
     val arriving = if (prefs.coverColors) rememberCoverPalette(shift.towards, dark, black) else null
+    val previousTintUrl = state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
+    val nextTintUrl = state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
     // The page's colours change with the song by cross-fading, not in one frame, and they hold the last
     // song's colours while the new cover's are worked out - going to the plain page and then to the new
     // colours was two changes where there should be one. A song that really has none (no artwork) gets
@@ -278,6 +281,19 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         // As long as the record takes to slide across, so the page and the sleeve arrive together.
         if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(420)) }
         fadingFrom = null
+    }
+
+    // A record that has arrived hands its colours over there and then. The page is already drawing them
+    // - they came across with the record - so nothing changes on screen; what it prevents is the page
+    // ever having to go back to the record before while the song catches up.
+    val landedColours by androidx.compose.runtime.rememberUpdatedState(arriving)
+    LaunchedEffect(shift) {
+        androidx.compose.runtime.snapshotFlow { shift.arrived }.collect { url ->
+            if (url == null) return@collect
+            val p = landedColours ?: return@collect
+            if (p != palette) { fadingFrom = null; palette = p }
+            shift.adopted = url
+        }
     }
 
     TintedTheme(palette) {
@@ -307,6 +323,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 } else drawRect(scheme.background)
             }
             // While the colours change, the old page stays underneath and the new one fades in over it.
+            // The page does not travel with the record: it is where the record is going, not a second
+            // thing sliding about behind it.
             Box(Modifier.matchParentSize().drawBehind { wash(fadingFrom ?: palette) })
             if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.drawBehind { wash(palette) })
             // The arriving record's page, brought up as the record itself crosses. Only while there is
@@ -383,11 +401,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // the moment the sheet arrives, in exactly the same place.
                     Box(Modifier.graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f }) {
                         Artwork(
-                            vm, sleeveArt, palette, coverUrl,
+                            vm, sleeveArt, coverUrl,
                             state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
                             state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
-                            state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) },
-                            state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) },
+                            previousTintUrl, nextTintUrl,
                             slide, shift,
                         )
                     }
@@ -620,7 +637,7 @@ private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
  */
 @Composable
 private fun Artwork(
-    vm: PlayerViewModel, art: SleeveArt, palette: PagePalette?, currentUrl: String?,
+    vm: PlayerViewModel, art: SleeveArt, currentUrl: String?,
     previousUrl: String?, nextUrl: String?,
     /** The same two records at the size the colours are worked out from; see PageShift. */
     previousTint: String?, nextTint: String?,
@@ -634,33 +651,21 @@ private fun Artwork(
             // behind the title; a full-width square can only do one or the other. Cover crops already.
             Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
-            SleeveCarousel(art, currentUrl, previousUrl, nextUrl, previousTint, nextTint, onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift)
+            SleeveCarousel(
+                art, currentUrl, previousUrl, nextUrl, previousTint, nextTint,
+                onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift,
+            )
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
                 Modifier.fillMaxWidth().fillMaxHeight(0.16f)
                     .background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent)),
             )
-            // The sleeve goes soft rather than stopping: its bottom third cross-fades into the same
-            // cover, blurred, which the page behind it is already drawing at the same scale.
-            // With the cover's colours off there is no wash to melt into, but the sleeve still must not
-            // stop dead: it goes soft into the plain page instead - black, on an AMOLED phone.
-            val page = MaterialTheme.colorScheme.background
-            Box(
-                // Gone by the time the record is properly up: a card that has shrunk away from it has
-                // its own rounded edge, and the soft bottom left behind sat across the page under it.
-                // Tied to how big the record actually is rather than to the lift's own number: fully
-                // there exactly when the record is full size, and coming back as it grows rather than
-                // switching on near the end of the settle.
-                Modifier.fillMaxSize().graphicsLayer {
-                    val k = liftedScale(shift.lifted, size.width, size.height)
-                    val held = liftedScale(1f, size.width, size.height)
-                    val t = ((k - held) / (1f - held)).coerceIn(0f, 1f)
-                    alpha = t * t * (3f - 2f * t)
-                }.drawBehind {
-                    if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
-                },
-            )
+            // Nothing is drawn here to soften the sleeve's bottom, and nothing is drawn on the records
+            // either. There is one blurred copy of the cover on this screen - the page's - and it sits
+            // still behind everything at the sleeve's own size. A record simply stops being there over
+            // its last rows (see `record`), so the page's blur shows through where the picture fades
+            // out: the same picture, the same place, the same scale, with nothing to keep in step.
         }
     }
 }
@@ -764,7 +769,7 @@ private fun PanelFlight(
                     val near = (1f - t / 0.45f).coerceIn(0f, 1f)
                     alpha = near * near * (3f - 2f * near)
                 }.drawBehind {
-                    if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
+                    if (palette != null) drawSleeveMelt(palette, MELT) else drawSleeveFade(page, MELT)
                     drawRect(
                         Brush.verticalGradient(
                             0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent,
@@ -859,7 +864,7 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
                     val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
                     alpha = e * e * (3f - 2f * e)
                 }
-                .drawBehind { if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f) },
+                .drawBehind { if (palette != null) drawSleeveMelt(palette, MELT) else drawSleeveFade(page, MELT) },
         )
     }
 }
@@ -938,6 +943,18 @@ private fun SleeveCarousel(
     // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
     // with a shadow - and the cover's own blur shows round it. It goes back down once the song is in.
     val lift = remember { Animatable(0f) }
+    // How much of the sleeve's soft bottom there is. A record lying on the page melts into it; picked up
+    // it is a card, with an edge of its own, and the page's blur under a record that is no longer its
+    // size showed as a smudge along the bottom of the small covers. So it goes while the record is up
+    // and comes back when it is down - but on its own time, not the spring's: tied to the lift it
+    // arrived in the last frames of the settle, which is something appearing rather than fading in.
+    val melt = remember { Animatable(1f) }
+    LaunchedEffect(lift, melt) {
+        androidx.compose.runtime.snapshotFlow { lift.value > 0.002f }.collect { up ->
+            if (up) melt.animateTo(0f, androidx.compose.animation.core.tween(200))
+            else melt.animateTo(1f, androidx.compose.animation.core.tween(420))
+        }
+    }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 18.dp.toPx() }
     val radius = with(density) { 22.dp.toPx() }
@@ -1002,7 +1019,9 @@ private fun SleeveCarousel(
             if (committedTint != null && (waiting != showing || taken != committedTint)) {
                 shift.towards = committedTint
                 shift.amount = 1f
+                shift.arrived = committedTint
             } else {
+                shift.arrived = null
                 val at = o as? Float ?: 0f
                 shift.towards = if (at < 0f) nextTintNow else if (at > 0f) previousTintNow else null
                 shift.amount = (kotlin.math.abs(at) / travel).coerceIn(0f, 1f)
@@ -1013,7 +1032,7 @@ private fun SleeveCarousel(
         androidx.compose.runtime.snapshotFlow { lift.value }.collect { shift.lifted = it }
     }
     androidx.compose.runtime.DisposableEffect(shift) {
-        onDispose { shift.towards = null; shift.amount = 0f; shift.lifted = 0f }
+        onDispose { shift.towards = null; shift.amount = 0f; shift.arrived = null; shift.lifted = 0f }
     }
 
     /**
@@ -1213,7 +1232,42 @@ private fun SleeveCarousel(
         // Each record is the cover's whole square, as tall as the sleeve and so wider than the screen: at
         // rest the screen's edges crop it to exactly the sleeve, and lifted it shrinks until all of it is
         // on screen - the sides the sleeve hides come into view as the record is picked up.
+        // Where a record stops being a picture. Its last rows are rubbed out rather than painted over:
+        // the page's own blurred copy of the cover is already behind it, at the same size and in the
+        // same place, so what appears as the picture fades is that blur - one blur on the screen, sitting
+        // still, changing only when the page's colours do. Every version of this that painted something
+        // over the record instead had to be kept in step with it, and never was.
+        fun Modifier.softBottom(on: () -> Boolean = { true }) = drawWithContent {
+            drawContent()
+            // Only ever one record fades out at a time in one place. While a record that has landed is
+            // held over the sleeve, both of them are here, one on top of the other: with both fading out
+            // the top one's fade let the one underneath - still the cover before it - show through, and
+            // that is the old picture coming up through the new one's soft bottom as the record grows
+            // back. The one on top does the fading; the one underneath keeps its picture, which is
+            // covered anyway.
+            if (!on()) return@drawWithContent
+            val k = melt.value
+            if (k <= 0.002f) return@drawWithContent
+            val top = size.height * (1f - MELT)
+            fun stop(a: Float) = Color.Black.copy(alpha = a * k)
+            drawRect(
+                Brush.verticalGradient(
+                    // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
+                    // record's bottom edge.
+                    0f to Color.Transparent,
+                    0.25f to stop(0.58f),
+                    0.5f to stop(0.87f),
+                    0.75f to stop(0.98f),
+                    1f to stop(1f),
+                    startY = top, endY = size.height,
+                ),
+                topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+                blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
+            )
+        }
         fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
+            // Its own layer to rub out of: without one the erase would take the page behind it as well.
+            compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
             val l = lift.value
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
@@ -1228,7 +1282,7 @@ private fun SleeveCarousel(
             }
         }
         val o0 = { offset }
-        Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) { SleeveImage(art, Modifier.fillMaxSize()) }
+        Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).softBottom { landedUrl == null }) { SleeveImage(art, Modifier.fillMaxSize()) }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
         // from a little dimmer as it arrives. One whose picture has not arrived is still a record - the
         // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
@@ -1237,15 +1291,15 @@ private fun SleeveCarousel(
         val afterHere = after.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
         val beforeHere = before.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
         val sheen = MaterialTheme.colorScheme.onSurface
-        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!afterHere, sheen)) {
+        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).softBottom().background(plateColour).loadingSheen(!afterHere, sheen)) {
             androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
-        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!beforeHere, sheen)) {
+        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).softBottom().background(plateColour).loadingSheen(!beforeHere, sheen)) {
             androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
         }
         // It is the record that is showing, so it moves with the record: held still in the middle it
         // covered the next change from on top, which is the "cover stuck over the animation".
-        if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).background(plateColour)) {
+        if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).softBottom().background(plateColour)) {
             landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
         }
     }
@@ -1264,6 +1318,15 @@ internal class PageShift {
     var towards by mutableStateOf<String?>(null)
     /** 0 at the record showing, 1 at the one arriving. */
     var amount by mutableFloatStateOf(0f)
+
+    /**
+     * The cover of a record that has arrived and is waiting for the song to catch up, or null. The page
+     * takes its colours on as soon as this says so, rather than waiting for the song: while it waited,
+     * anything that let go of [towards] first - a second swipe, a queue that moved underneath - dropped
+     * the page back to the record before for the frames in between, which is the old colour flashing up
+     * as the animation ended.
+     */
+    var arrived by mutableStateOf<String?>(null)
 
     /**
      * The cover whose colours the page itself is now drawing. The sleeve holds a landed record's

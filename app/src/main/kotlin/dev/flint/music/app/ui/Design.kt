@@ -51,6 +51,8 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -164,7 +166,16 @@ data class PagePalette(
      * way the artwork's do instead of settling into one average. See `CoverColors.washOf`.
      */
     val wash: androidx.compose.ui.graphics.ImageBitmap? = null,
+    /**
+     * What the sleeve's soft bottom averages out to: the mean of the wash rows [drawSleeveMelt] is
+     * made of. It is the colour the band wears when it is left alone, and the reference [drawSleeveMelt]
+     * divides by when it is asked to wear another one instead. See `PagePalette.meltColour`.
+     */
+    val washEdge: Color = Color.Unspecified,
 )
+
+/** The colour the sleeve's soft bottom wears by itself; [PagePalette.edge] until a wash says better. */
+val PagePalette.meltColour: Color get() = if (washEdge.isSpecified) washEdge else edge
 
 val LocalPalette = staticCompositionLocalOf<PagePalette?> { null }
 
@@ -271,13 +282,28 @@ fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHe
  * picture onto some computed colour left that colour meeting the page along a dead straight line,
  * which is the one thing the eye always finds.
  */
-fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
+fun DrawScope.drawSleeveMelt(
+    palette: PagePalette,
+    fraction: Float,
+    tint: Color = Color.Unspecified,
+    /**
+     * How wide the wash is stretched, centred: the width the page draws it at. A record is the cover's
+     * whole square and so wider than the sleeve, and a melt stretched over the square showed the same
+     * picture at a different scale from the page's copy of it - the blur under the cover no longer
+     * lined up with the blur below it. Left out, it is this draw's own width.
+     */
+    across: Float = Float.NaN,
+    /** How much of it there is, for fading one cover's melt over another's. */
+    strength: Float = 1f,
+) {
+    if (strength <= 0f) return
     val top = size.height * (1f - fraction)
     val wash = palette.wash
+    val worn = if (tint.isSpecified) tint else palette.meltColour
     if (wash == null) {
         drawRect(
             Brush.verticalGradient(
-                0f to Color.Transparent, 1f to palette.background,
+                0f to Color.Transparent, 1f to worn.copy(alpha = strength.coerceIn(0f, 1f)),
                 startY = top, endY = size.height,
             ),
             topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
@@ -288,7 +314,10 @@ fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
     // and its own texture rows, and the melt came down the sleeve in visible steps.
     val steps = 72
     val band = (size.height - top) / steps
-    val w = size.width.toInt().coerceAtLeast(1)
+    val filter = meltFilter(palette, worn)
+    val span = if (across.isNaN() || across <= 0f) size.width else across
+    val x0 = ((size.width - span) / 2f).toInt()
+    val w = span.toInt().coerceAtLeast(1)
     val last = size.height.toInt()
     for (i in 0 until steps) {
         // Rounded edges, not a rounded height: a band of 14.2 px drawn as 14 leaves a fifth of a pixel
@@ -304,15 +333,72 @@ fun DrawScope.drawSleeveMelt(palette: PagePalette, fraction: Float) {
         drawImage(
             wash,
             srcOffset = IntOffset(0, v0), srcSize = IntSize(WASH_ROWS, v1 - v0),
-            dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
+            dstOffset = IntOffset(x0, y0), dstSize = IntSize(w, y1 - y0),
             // Quick at first and then a long tail, measured off `w4`: their cover's detail halves within
             // a percent or two of the screen and then lingers as a faint trace for several more, which
             // is what runs behind the title. An ease-in (t squared) did the opposite - sharp for most of
             // the way, then gone all at once just before the text.
-            alpha = 1f - (1f - t) * (1f - t) * (1f - t),
+            alpha = (1f - (1f - t) * (1f - t) * (1f - t)) * strength,
             filterQuality = FilterQuality.Low,
+            colorFilter = filter,
         )
+        // The strips of the record the sleeve does not show, which only come into view when it is
+        // picked up: the wash's own first and last columns carried out to the edge, the same way the
+        // page carries its last row down. Their alpha is the slice's, so the record's bottom goes soft
+        // right across it however far out it is.
+        if (x0 > 0) {
+            val a = (1f - (1f - t) * (1f - t) * (1f - t)) * strength
+            drawImage(
+                wash, srcOffset = IntOffset(0, v0), srcSize = IntSize(1, v1 - v0),
+                dstOffset = IntOffset(0, y0), dstSize = IntSize(x0, y1 - y0),
+                alpha = a, filterQuality = FilterQuality.Low, colorFilter = filter,
+            )
+            drawImage(
+                wash, srcOffset = IntOffset(WASH_ROWS - 1, v0), srcSize = IntSize(1, v1 - v0),
+                dstOffset = IntOffset(x0 + w, y0), dstSize = IntSize((size.width - x0 - w).toInt().coerceAtLeast(0), y1 - y0),
+                alpha = a, filterQuality = FilterQuality.Low, colorFilter = filter,
+            )
+        }
     }
+}
+
+/**
+ * How much of the sleeve's height goes soft at the bottom. Shared, because the colour of those rows
+ * is averaged out of the wash at the same fraction (see `CoverColors.washOf`).
+ */
+const val MELT = 0.19f
+
+/**
+ * The band is the record's own blurred bottom rows, and those rows belong to whichever record they
+ * came from - which, half way through a change, is the wrong one. So the picture is kept and only
+ * *moved* in colour: every pixel is shifted by the difference between the colour the band is wearing
+ * this frame and the colour it averages out to by itself. Nothing is scaled, so the cover's own light
+ * and shade survive exactly, and a band left alone is untouched pixel for pixel - which is what keeps
+ * its last row and the page's first row under it the same colour, with no line between them.
+ *
+ * That is the answer to the oldest bug on this screen. A band painted from a record is stale for part
+ * of every change and nothing about *when* it is painted can fix that; a band painted in one flat
+ * colour has nothing of the cover left and shows up as a slab. This is neither: the cover's shape, the
+ * page's colour, moving together.
+ *
+ * It shifts rather than scales for a second reason. Scaling means dividing by the band's own
+ * brightness, and on a record that is nearly black that is a division by nearly nothing: the few
+ * levels the texture has left were multiplied up into blocks with edges of their own.
+ */
+private fun meltFilter(palette: PagePalette, worn: Color): ColorFilter? {
+    val own = palette.meltColour
+    if (!worn.isSpecified || !own.isSpecified || worn == own) return null
+    // The translation column of a colour matrix is in 0..255, where the rest of it is a plain scale.
+    return ColorFilter.colorMatrix(
+        androidx.compose.ui.graphics.ColorMatrix(
+            floatArrayOf(
+                1f, 0f, 0f, 0f, (worn.red - own.red) * 255f,
+                0f, 1f, 0f, 0f, (worn.green - own.green) * 255f,
+                0f, 0f, 1f, 0f, (worn.blue - own.blue) * 255f,
+                0f, 0f, 0f, 1f, 0f,
+            ),
+        ),
+    )
 }
 
 fun DrawScope.drawPageWash(palette: PagePalette, endY: Float, seam: Boolean = true) {
@@ -465,6 +551,7 @@ fun mixPalette(a: PagePalette, b: PagePalette, t: Float): PagePalette = when {
         onBackground = androidx.compose.ui.graphics.lerp(a.onBackground, b.onBackground, t),
         onBackgroundVariant = androidx.compose.ui.graphics.lerp(a.onBackgroundVariant, b.onBackgroundVariant, t),
         accent = androidx.compose.ui.graphics.lerp(a.accent, b.accent, t),
+        washEdge = androidx.compose.ui.graphics.lerp(a.meltColour, b.meltColour, t),
     )
 }
 
