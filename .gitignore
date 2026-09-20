@@ -11,3 +11,4 @@
 /.claude
 *.jks
 /keystore.properties
+logcat*.log
