@@ -656,12 +656,6 @@ private val BACKDROP = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERS
 private val BACKDROP_BLUR = 30.dp
 
 /**
- * How much bigger than the sleeve that blurred copy is held, so the rows the blur has darkened at its
- * own edge fall outside it. A blur this soft is not changed by a tenth either way; its edge is.
- */
-private const val BACKDROP_OVER = 1.06f
-
-/**
  * How much of the sleeve's height runs on underneath the title block instead of above it. With the
  * sleeve at [SLEEVE] this puts the title where `w4` has it, 56.5 % of the screen, with the picture's
  * blurred tail behind it.
@@ -759,14 +753,20 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
  * last: picture, blur, page. The sleeve and the cover in flight both end this way, or the hand-over
  * between them shows as the bottom of the cover changing.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage() {
-    val top = size.height * (1f - MELT * 0.45f)
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage(scale: Float = 1f) {
+    // Where the record's own bottom edge is, which is not the sleeve's while the record is picked up.
+    // A blur has nothing to sample past that edge, so its last rows pull in the emptiness there and go
+    // dark; those rows are rubbed out here, and what is left in their place is the page's own copy of
+    // the cover. Rubbing out at the sleeve's bottom instead left the darkened edge of every record
+    // that was smaller than the sleeve on screen - a line along the bottom of a cover that is growing.
+    val bottom = size.height * (0.5f + scale / 2f)
+    val top = bottom - size.height * scale * MELT * 0.45f
     drawRect(
         Brush.verticalGradient(
             0f to Color.Transparent,
             0.55f to Color.Black.copy(alpha = 0.55f),
             1f to Color.Black,
-            startY = top, endY = size.height,
+            startY = top, endY = bottom,
         ),
         topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
         blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
@@ -782,16 +782,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage() {
  */
 @Composable
 private fun SoftCover(modifier: Modifier = Modifier, picture: @Composable () -> Unit) {
-    Box(modifier) {
+    Box(modifier.graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }) {
         if (BACKDROP) Box(
             Modifier.matchParentSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
                 .drawWithContent { drawContent(); giveWayToPage() },
         ) {
             Box(
-                Modifier.matchParentSize()
-                    .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
-                    .blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+                Modifier.matchParentSize().blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
             ) { picture() }
         }
         Box(
@@ -1429,14 +1427,17 @@ private fun SleeveCarousel(
             }
         }
 
-        // The blur underneath. A blur has nothing to sample past the edge of what it is blurring, so its
-        // last rows pull in the emptiness there and go dark - which is exactly where this one is looked
-        // at. Each blurred record is held a little larger than the record it belongs to (see `record`),
-        // which puts those rows outside it whatever size it is.
+        // The blurred copy and the sharp one are one picture, and a panel fading in or out has to fade
+        // that picture, not the two of them one at a time: faded apart, the blur comes through the
+        // record above it and the record's rubbed-out bottom lets the page through, so the cover has no
+        // soft bottom at all until the fade ends and the two snap back together. That is the blur that
+        // is missing for the whole of a panel change and then appears.
+        Box(Modifier.fillMaxSize().graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }) {
+        // The blur underneath, ending where the records themselves end.
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent { drawContent(); giveWayToPage() },
+                .drawWithContent { drawContent(); giveWayToPage(liftedScale(lift.value, widthPx, size.height)) },
         ) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
@@ -1454,6 +1455,7 @@ private fun SleeveCarousel(
             ) { records(fading = false) }
         }
         Box(Modifier.fillMaxSize()) { records(fading = true) }
+        }
     }
 }
 }
