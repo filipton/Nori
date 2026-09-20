@@ -72,6 +72,21 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     /** The progress of each download that has a task, written from that task's own thread. */
     private val progress = ConcurrentHashMap<String, MutableStateFlow<Float>>()
 
+    /** How fast the batch is moving, for the notification and the downloads screen. */
+    private val _stats = MutableStateFlow(DownloadStats())
+    val stats: StateFlow<DownloadStats> = _stats
+
+    /** How fast each running song is arriving, written from its task's own thread. */
+    private val _tempos = MutableStateFlow<Map<String, DownloadTempo>>(emptyMap())
+    val tempos: StateFlow<Map<String, DownloadTempo>> = _tempos
+
+    /** Latest byte counts per running download, for speed and ETA. Task threads only. */
+    private val bytesOf = ConcurrentHashMap<String, Long>()
+    private val totalOf = ConcurrentHashMap<String, Long>()
+    private data class SpeedSample(var bytes: Long, var at: Long, var rate: Double)
+    private val speedOf = ConcurrentHashMap<String, SpeedSample>()
+    @Volatile private var lastTemposAt = 0L
+
     private fun progressOf(request: DownloadRequest) =
         progress.getOrPut(request.id) { MutableStateFlow(if (estimateOf(request) > 0) 0f else -1f) }
 
@@ -209,10 +224,12 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             }
             Download.STATE_COMPLETED -> {
                 progress.remove(id)
+                dropTempo(id)
                 _marks.update { recentOnly(it + (id to DownloadMark(DownloadPhase.DONE, MutableStateFlow(1f), now))) }
             }
             Download.STATE_FAILED -> {
                 val last = progress.remove(id)?.value ?: -1f
+                dropTempo(id)
                 _marks.update { it + (id to DownloadMark(DownloadPhase.FAILED, MutableStateFlow(last), now)) }
                 Log.w(TAG, "failed $id")
             }
@@ -221,11 +238,42 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         }
     }
 
+    /**
+     * What a task's thread reports: bytes so far and what the song should weigh. Folds the delta
+     * into a smoothed per-song rate and, at most twice a second, publishes every running song's
+     * tempo for the downloads screen.
+     */
+    private fun noteBytes(id: String, bytes: Long, total: Long, now: Long) {
+        bytesOf[id] = bytes
+        if (total > 0) totalOf[id] = total
+        val sample = speedOf.getOrPut(id) { SpeedSample(bytes, now, 0.0) }
+        val dt = (now - sample.at) / 1000.0
+        if (dt >= 0.4 && bytes >= sample.bytes) {
+            val instant = (bytes - sample.bytes) / dt
+            sample.rate = if (sample.rate <= 0) instant else sample.rate * 0.7 + instant * 0.3
+            sample.bytes = bytes
+            sample.at = now
+        }
+        if (now - lastTemposAt >= 500) {
+            lastTemposAt = now
+            _tempos.value = bytesOf.entries.associate { (song, b) ->
+                val t = (totalOf[song] ?: 0L) - b
+                song to DownloadTempo(speedOf[song]?.rate?.toLong() ?: 0L, t.coerceAtLeast(0L))
+            }
+        }
+    }
+
+    private fun dropTempo(id: String) {
+        bytesOf.remove(id); totalOf.remove(id); speedOf.remove(id)
+        if (id in _tempos.value) _tempos.value = _tempos.value - id
+        if (speedOf.isEmpty()) _stats.value = DownloadStats()
+    }
+
     /** How many songs are downloading right now. */
     fun running(): Int = _marks.value.values.count { it.phase == DownloadPhase.DOWNLOADING }
 
     private fun unmark(ids: Collection<String>) {
-        ids.forEach { progress.remove(it) }
+        ids.forEach { progress.remove(it); dropTempo(it) }
         _marks.update { m -> if (ids.none { it in m }) m else m - ids.toSet() }
     }
 
@@ -315,31 +363,57 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /**
-     * The download notification while a batch runs: what it is ("Downloading 49 songs", or the album
-     * when every song is from one), where it is ("12 of 49 · the song"), and a bar over the whole batch
-     * that moves with the bytes of the songs in flight. The service asks once a second; nothing else
-     * redraws it.
+     * The download notification while a batch runs: where it is ("Downloading: 12 of 49"), the song
+     * in flight, how fast the bytes arrive and how long they should take, and a bar over the whole
+     * batch that moves with the bytes of the songs in flight. The service asks once a second;
+     * nothing else redraws it. The batch's aggregate speed is published for the downloads screen.
      */
     internal fun progressNotification(context: Context, downloads: List<Download>, notMetRequirements: Int): Notification {
         val running = downloads.filter { it.state == Download.STATE_DOWNLOADING }
         val total = maxOf(batch.total, batch.finished + downloads.size)
+        if (total == 0) {
+            // Nothing left: the service is on its way out, and the batch's own summary (its own id,
+            // so stopping the service does not take it) says how it went. No bar here.
+            return NotificationCompat.Builder(context, CHANNEL)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Downloads complete")
+                .setContentIntent(openDownloads(context))
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setShowWhen(false)
+                .build()
+        }
         val inFlight = running.sumOf { d -> downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request)).coerceAtLeast(0f).toDouble() }
         val fraction = batch.fraction(inFlight)
         val position = (batch.finished + 1).coerceAtMost(total.coerceAtLeast(1))
         val label = batch.label()
         val current = running.minByOrNull { it.startTimeMs }?.let { titleOf(it.request) }
+        val now = SystemClock.elapsedRealtime()
+        val speed = speedOf.values.sumOf { if (now - it.at < 3_000) it.rate else 0.0 }.toLong()
+        val expected = downloads.map { if (it.contentLength > 0) it.contentLength else estimateOf(it.request) }
+        val unlisted = (total - batch.finished - downloads.size).coerceAtLeast(0)
+        val avg = expected.filter { it > 0 }.average().takeIf { !it.isNaN() }?.toLong() ?: 8_000_000L
+        val remaining = expected.zip(downloads).sumOf { (e, d) -> (e - d.bytesDownloaded).coerceAtLeast(0L) } + unlisted * avg
+        val eta = if (speed > 0 && remaining > 0) remaining / speed else null
+        _stats.value = DownloadStats(speed, remaining, eta)
         val title = when {
             notMetRequirements != 0 -> "Waiting for a network"
             total == 1 -> current?.let { "Downloading “$it”" } ?: "Downloading 1 song"
-            label != null -> "Downloading “$label”"
-            else -> "Downloading $total songs"
+            else -> "Downloading: $position of $total"
         }
-        val text = if (total > 1) listOfNotNull("$position of $total", current).joinToString(" · ") else ""
+        val speedText = formatSpeed(speed)
+        val etaText = formatEta(eta)
+        val text = if (total == 1) {
+            listOfNotNull(current, speedText.ifEmpty { null }, etaText.ifEmpty { null }).joinToString(" · ")
+        } else {
+            listOfNotNull(current, label?.let { "“$it”" }, speedText.ifEmpty { null }, etaText.ifEmpty { null }).joinToString(" · ")
+        }
         return NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text.ifEmpty { null })
-            .setProgress(1000, (fraction * 1000).toInt(), total == 0)
+            .setProgress(1000, (fraction * 1000).toInt(), false)
             .setContentIntent(openDownloads(context))
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelIntent(context))
             .setOngoing(true)
@@ -401,6 +475,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                     listener?.onProgress(length, bytes, percent)
                     val f = downloadFraction(length, bytes, estimate)
                     if (gate.offer(f, SystemClock.elapsedRealtime())) flow.value = f
+                    noteBytes(request.id, bytes, if (length > 0) length else estimate, SystemClock.elapsedRealtime())
                 }
                 override fun cancel() = downloader.cancel()
                 override fun remove() = downloader.remove()
@@ -451,11 +526,14 @@ private fun cancelIntent(context: Context): PendingIntent =
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-/** The progress of a download batch, for as long as the service runs. */
-const val DOWNLOAD_NOTIFICATION = 1001
+/**
+ * The progress of a download batch, for as long as the service runs. Not 1001: that is media3's
+ * playback notification id, and sharing it replaced the now-playing notification while downloading.
+ */
+const val DOWNLOAD_NOTIFICATION = 2001
 
 /** How the batch went, once it has: a separate id, so the service stopping does not take it away. */
-const val DOWNLOAD_RESULT_NOTIFICATION = 1002
+const val DOWNLOAD_RESULT_NOTIFICATION = 2002
 
 @UnstableApi
 class DownloadWorker : DownloadService(DOWNLOAD_NOTIFICATION, 1000L, CHANNEL, androidx.media3.exoplayer.R.string.exo_download_notification_channel_name, 0) {

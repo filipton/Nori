@@ -233,8 +233,10 @@ class PlaybackService : MediaLibraryService() {
             .setPeriodicPositionUpdateEnabled(false)
             .apply { open?.let(::setSessionActivity) }.build()
         // The notification and the lock screen carry the app's own mark, not media3's stock play circle.
+        // Its id stays media3's default (1001): the download notification lives on 2001 so the two never replace each other.
         setMediaNotificationProvider(
-            androidx.media3.session.DefaultMediaNotificationProvider.Builder(this).build()
+            androidx.media3.session.DefaultMediaNotificationProvider.Builder(this)
+                .setNotificationId(androidx.media3.session.DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID).build()
                 .apply { setSmallIcon(dev.flint.music.core.R.drawable.ic_notification) },
         )
         // A heart changed anywhere in the app (or by the notification itself) redraws the notification's heart.

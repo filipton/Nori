@@ -237,6 +237,12 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
     /** What each download this session touched is doing; see [dev.flint.music.downloads.Downloads.marks]. */
     val downloadMarks: StateFlow<Map<String, DownloadMark>> = flint.downloads.marks
 
+    /** How fast the batch is moving and how long it should take; see [dev.flint.music.downloads.Downloads.stats]. */
+    val downloadStats: StateFlow<dev.flint.music.downloads.DownloadStats> = flint.downloads.stats
+
+    /** How fast each running song is arriving; see [dev.flint.music.downloads.Downloads.tempos]. */
+    val downloadTempos: StateFlow<Map<String, dev.flint.music.downloads.DownloadTempo>> = flint.downloads.tempos
+
     /**
      * The downloads screen's lists: downloading, waiting (in the order they will run), failed, and
      * finished this session. Worked out off the main thread, since a whole library can be waiting, and

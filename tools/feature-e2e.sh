@@ -120,6 +120,18 @@ if [ -n "$aid" ]; then
   done
   echo "     $active downloading at once, parallel setting $(adb shell run-as dev.flint.music cat shared_prefs/flint.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
   check "several songs download at once ($active)" test "${active:-0}" -ge 2
+  # The download notification carries speed and ETA, under its own id: it used to share the
+  # playback notification's id (1001) and replace the now-playing notification while downloading.
+  notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "dev.flint.music|[0-9]*" | sort -u | tr '\n' ' ')
+  echo "     notifications: $notifs"
+  check "the download notification posts under its own id" bash -c '[[ "$notifs" == *"|2001"* ]]'
+  speed=0; eta=-1
+  for _ in $(seq 10); do
+    speed=$(field dlSpeed); eta=$(field dlEta); [ "${speed:-0}" -gt 0 ] && break; sleep 2
+  done
+  echo "     $speed B/s, ETA ${eta}s"
+  check "the batch reports a download speed ($speed B/s)" test "${speed:-0}" -gt 0
+  check "the batch reports an ETA (${eta}s)" bash -c '[ "${eta:- -1}" -gt 0 ]'
   adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
   left=$(field downloading); active=$(field dlActive)
   check "after a force stop the queue picks up again ($left left, $active downloading)" bash -c "[ '${left:-1}' = 0 ] || [ '${active:-0}' -gt 0 ]"

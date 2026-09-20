@@ -52,6 +52,37 @@ fun downloadFraction(contentLength: Long, bytes: Long, estimate: Long): Float = 
 private const val ESTIMATE_CEILING = 0.97f
 
 /**
+ * How fast the batch is moving right now: bytes per second across the running downloads, what is
+ * still to come, and how long that should take. Speed zero means nothing measurable yet (or
+ * nothing running); etaSec null means it cannot be said.
+ */
+data class DownloadStats(val speedBps: Long = 0L, val remainingBytes: Long = 0L, val etaSec: Long? = null)
+
+/** How fast one song is arriving: bytes per second and what it still needs. Eta null when unknown. */
+data class DownloadTempo(val speedBps: Long = 0L, val remainingBytes: Long = 0L) {
+    val etaSec: Long? get() = if (speedBps > 0 && remainingBytes > 0) remainingBytes / speedBps else null
+}
+
+/** "850 KB/s", "3.2 MB/s" - the rate a notification or a row shows. */
+fun formatSpeed(bps: Long): String = when {
+    bps <= 0 -> ""
+    bps < 1_000 -> "$bps B/s"
+    bps < 1_000_000 -> "${"%.0f".format(bps / 1_000.0)} KB/s"
+    bps < 10_000_000 -> "${"%.1f".format(bps / 1_000_000.0)} MB/s"
+    else -> "${"%.0f".format(bps / 1_000_000.0)} MB/s"
+}
+
+/** "45 s left", "12:34 left", "2:05:00 left" - how long the bytes still to come should take. */
+fun formatEta(sec: Long?): String {
+    if (sec == null || sec < 0) return ""
+    if (sec < 60) return "$sec s left"
+    val h = sec / 3600
+    val m = (sec % 3600) / 60
+    val s = sec % 60
+    return if (h > 0) "%d:%02d:%02d left".format(h, m, s) else "%d:%02d left".format(m, s)
+}
+
+/**
  * What a song should weigh once downloaded: the file itself at the original quality, else its length at
  * the transcoded bitrate. A transcoding server rarely sends a Content-Length, so this is what gives the
  * progress ring (and the notification's bar) something to fill against.
