@@ -140,6 +140,24 @@ check "still playing after the EQ leaves" playing_audio
 check "the swap happens at the boundary" waitfor "chain swap at the boundary" 15
 check "still playing after the swap" playing_audio
 
+echo "-- tuning borrows the shallow buffer and returns it"
+# The equalizer screen trades the deep buffer for instant response; leaving it schedules the
+# deep buffer's return at the next boundary. Without that the pipeline stays half a second deep
+# and every transition bows out for want of runway.
+"$app" set eq true >/dev/null; sleep 2
+watch_from_now
+"$app" do "tuning on" >/dev/null; sleep 4
+check "still playing after tuning cuts in" playing_audio
+shallow=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
+"$app" do "tuning off" >/dev/null; sleep 2
+"$app" do "playnext $other" >/dev/null; sleep 2
+"$app" do next >/dev/null; sleep 6
+deep=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
+check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ]"
+check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
+check "the deep buffer swap happens at the boundary" waitfor "chain swap at the boundary" 15
+check "still playing after the deep swap" playing_audio
+
 echo "-- AutoMix"
 watch_from_now
 "$app" set autoMix true >/dev/null
@@ -152,6 +170,24 @@ check "the mix is planned from what was measured" waitfor "transition .*: [A-Z_]
 echo "-- skipping and seeking"
 "$app" do next >/dev/null; sleep 5; check "next track plays" playing_audio
 "$app" do previous >/dev/null; sleep 5; check "previous track plays" playing_audio
+
+echo "-- seek after a restart"
+# Pause, kill, reopen, seek while paused, play: the seek has to win over the restored position.
+# The watchdog once anchored on the idle position (0) and read the restored one as "moved by
+# someone else", so the dropped seek was never re-asked and play started from the old spot.
+"$app" play "$song" >/dev/null; sleep 4
+"$app" do "seek 10000" >/dev/null; sleep 2
+"$app" do pause >/dev/null; sleep 2
+adb shell am force-stop dev.flint.music >/dev/null 2>&1
+"$app" launch >/dev/null
+# Cold boot: wait for the queue to be back before touching it.
+for _ in $(seq 40); do t=$(field title); [ -n "$t" ] && break; sleep 2; done
+"$app" do "seek 30000" >/dev/null; sleep 4
+b=$(field positionMs)
+check "a seek while paused after a restart sticks ($b)" bash -c "[ '${b:-0}' -ge 27000 ] && [ '${b:-0}' -le 33000 ]"
+"$app" do resume >/dev/null; sleep 6
+c=$(field positionMs)
+check "play resumes from the seek ($c)" bash -c "[ '${c:-0}' -ge 29000 ]"
 
 echo "-- errors"
 errs=$(adb logcat -d | grep -c "ExoPlayerImplInternal: Playback error")
