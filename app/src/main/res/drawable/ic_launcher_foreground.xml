@@ -1,21 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  A quaver struck like a flint: the note is the app, the spark off its flag is the name. Drawn inside
-  the 72dp safe zone of the 108dp adaptive canvas, so no launcher mask can clip it.
+  A nigiri whose sides are vinyl: the rice rim, the groove arcs top and bottom, the label at the
+  middle. Redrawn from the author's sketch as clean centred vectors (the sketch sat off-centre, so
+  there is no mirrored variant to keep) inside the 72dp safe zone, so no launcher mask can clip it.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <!-- stem -->
+    <!-- rice rim -->
     <path android:fillColor="#FFFFFFFF"
-        android:pathData="M56,30 L62,28 L62,70 L56,70 Z" />
-    <!-- flag -->
+        android:pathData="M34,54 a20,31 0 1,0 40,0 a20,31 0 1,0 -40,0" />
+    <!-- nori -->
+    <path android:fillColor="#FF0C130E"
+        android:pathData="M37,54 a17,28 0 1,0 34,0 a17,28 0 1,0 -34,0" />
+    <!-- grooves -->
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M44.13,48.08 A10.5,17.3 0 0,1 63.87,48.08" />
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M42.25,46.95 A12.5,20.6 0 0,1 65.75,46.95" />
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M40.37,45.83 A14.5,23.9 0 0,1 67.63,45.83" />
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M63.87,59.92 A10.5,17.3 0 0,1 44.13,59.92" />
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M65.75,61.05 A12.5,20.6 0 0,1 42.25,61.05" />
+    <path android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
+        android:pathData="M67.63,62.17 A14.5,23.9 0 0,1 40.37,62.17" />
+    <!-- label -->
     <path android:fillColor="#FFFFFFFF"
-        android:pathData="M62,28 C72,32 80,36 80,46 C80,40 72,36 62,40 Z" />
-    <!-- note head -->
-    <path android:fillColor="#FFFFFFFF"
-        android:pathData="M56,62 m-12,8 a12,9 0 1,0 24,0 a12,9 0 1,0 -24,0" />
-    <!-- the spark -->
-    <path android:fillColor="#FFFFD79A"
-        android:pathData="M84,26 L87,34 L95,37 L87,40 L84,48 L81,40 L73,37 L81,34 Z" />
+        android:pathData="M48.5,54 a5.5,9 0 1,0 11,0 a5.5,9 0 1,0 -11,0" />
 </vector>

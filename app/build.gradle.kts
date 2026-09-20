@@ -11,8 +11,8 @@ android {
         applicationId = "dev.flint.music"
         minSdk = 26
         targetSdk = 36
-        versionName = "0.1.0"
-        versionCode = 100
+        versionName = "0.2.0"
+        versionCode = 200
         ndk { abiFilters += (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",") }
     }
 

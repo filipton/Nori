@@ -29,7 +29,7 @@ class PlayerWidget : AppWidgetProvider() {
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         if (ids.isEmpty()) return
         val views = RemoteViews(context.packageName, R.layout.widget_player).apply {
-            setTextViewText(R.id.widget_title, last.title ?: "flint music")
+            setTextViewText(R.id.widget_title, last.title ?: "Nori")
             setTextViewText(R.id.widget_artist, last.artist.orEmpty())
             setImageViewResource(R.id.widget_toggle, if (last.playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play)
             setOnClickPendingIntent(R.id.widget_previous, key(context, KeyEvent.KEYCODE_MEDIA_PREVIOUS))

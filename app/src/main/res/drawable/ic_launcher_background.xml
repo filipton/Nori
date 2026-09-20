@@ -1,15 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The plate the mark sits on: a warm ember, dark enough for a white glyph on any launcher wallpaper. -->
+<!-- The plate the mark sits on: deep nori, lit from above, dark enough for a white glyph on any launcher wallpaper. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
     <path android:pathData="M0,0h108v108h-108z">
         <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
-            <gradient android:type="linear"
-                android:startX="0" android:startY="0" android:endX="108" android:endY="108">
-                <item android:offset="0" android:color="#FF2A1C14" />
-                <item android:offset="0.55" android:color="#FF6B3410" />
-                <item android:offset="1" android:color="#FFD1741E" />
+            <gradient android:type="radial"
+                android:centerX="54" android:centerY="45" android:gradientRadius="81">
+                <item android:offset="0" android:color="#FF233829" />
+                <item android:offset="1" android:color="#FF0A120D" />
             </gradient>
         </aapt:attr>
     </path>
