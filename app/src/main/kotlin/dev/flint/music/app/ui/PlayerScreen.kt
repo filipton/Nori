@@ -312,6 +312,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             if (full) arrivingNow?.let { held = it }
         }
     }
+    // And let go of once the page is wearing them. Held on to, it went on being painted over the page
+    // for every song after it - which is a song that ends by itself leaving the page in the colours of
+    // whatever was last swiped to.
+    LaunchedEffect(palette) { if (held == palette) held = null }
 
     // A record that has arrived hands its colours over there and then. The page is already drawing them
     // - they came across with the record - so nothing changes on screen; what it prevents is the page
@@ -1180,7 +1184,7 @@ private fun SleeveCarousel(
      * and the new record settles into the sleeve. Cancelled half way - a second button press, a new
      * gesture - it still changes the song, so nothing asked for is quietly dropped.
      */
-    suspend fun land(go: Int, velocity: Float, stiffness: Float, liftDown: Float = 240f, keepLift: Boolean = false) {
+    suspend fun land(go: Int, velocity: Float, stiffness: Float, liftDown: Float = 240f, keepLift: () -> Boolean = { false }) {
         val turn = gesture
         // One change at a time. The song a record has just landed on is only the song the player is
         // playing a frame or two later, and until it is, the record waiting off the edge is still the
@@ -1201,7 +1205,11 @@ private fun SleeveCarousel(
         if (url != null && url == currentUrlNow) {
             committed = null
             if (go < 0) onNextNow() else onPreviousNow()
-            if (!keepLift) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
+            // Asked when the record has arrived, not when it was sent: a button pressed while this one
+            // was still on its way means the next is already on its way too, and putting the record down
+            // in between is what made a run of presses go down and up and down again instead of the
+            // records simply scrolling past, small, one after another.
+            if (!keepLift()) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
             return
         }
         // Where the neighbour sits once the record is lifted, which is where it will be when it arrives.
@@ -1251,7 +1259,11 @@ private fun SleeveCarousel(
             arrive(0f)
             // The new record settles back into the sleeve - unless another press is already waiting, in
             // which case it stays up and goes straight on.
-            if (!keepLift) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
+            // Asked when the record has arrived, not when it was sent: a button pressed while this one
+            // was still on its way means the next is already on its way too, and putting the record down
+            // in between is what made a run of presses go down and up and down again instead of the
+            // records simply scrolling past, small, one after another.
+            if (!keepLift()) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
         } finally {
             if (!changed) {
                 val caught = gesture != turn
@@ -1295,7 +1307,7 @@ private fun SleeveCarousel(
                 // lift that sprang past its mark pulled the arriving record past the middle and back,
                 // which is the overshoot you see when a button sends it across.
                 if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
-                land(go, 0f, BUTTON_STIFFNESS, liftDown = 600f, keepLift = queued > 0)
+                land(go, 0f, BUTTON_STIFFNESS, liftDown = 600f, keepLift = { queued > 0 })
             }
             moving = job
             job.join()
