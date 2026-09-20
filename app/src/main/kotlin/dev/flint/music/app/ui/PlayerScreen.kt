@@ -738,6 +738,33 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
             0.25f to Color.Black.copy(alpha = 0.58f),
             0.5f to Color.Black.copy(alpha = 0.87f),
             0.75f to Color.Black.copy(alpha = 0.98f),
+            // Gone before the bottom edge, not at it. A ramp that only reaches full strength on the last
+            // row leaves that row not quite rubbed out, and what is left is a sharp line of the cover
+            // along the bottom of the record - a hairline while the record is small, and plain to see the
+            // moment it grows. The old painted melt pinned its last slice to the record's bottom for
+            // exactly this reason.
+            0.92f to Color.Black,
+            1f to Color.Black,
+            startY = top, endY = size.height,
+        ),
+        topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+        blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
+    )
+}
+
+/**
+ * The last rows of a blurred copy, given way to whatever is behind it - the page's own copy of the
+ * cover. The blur is the record's colours, which are stronger than the page's; ending on it leaves the
+ * strip brighter than the page it meets. Three steps, each into something more like the page than the
+ * last: picture, blur, page. The sleeve and the cover in flight both end this way, or the hand-over
+ * between them shows as the bottom of the cover changing.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage() {
+    val top = size.height * (1f - MELT * 0.45f)
+    drawRect(
+        Brush.verticalGradient(
+            0f to Color.Transparent,
+            0.55f to Color.Black.copy(alpha = 0.55f),
             1f to Color.Black,
             startY = top, endY = size.height,
         ),
@@ -756,7 +783,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
 @Composable
 private fun SoftCover(modifier: Modifier = Modifier, picture: @Composable () -> Unit) {
     Box(modifier) {
-        if (BACKDROP) Box(Modifier.matchParentSize().clipToBounds()) {
+        if (BACKDROP) Box(
+            Modifier.matchParentSize().clipToBounds()
+                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                .drawWithContent { drawContent(); giveWayToPage() },
+        ) {
             Box(
                 Modifier.matchParentSize()
                     .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
@@ -1405,24 +1436,7 @@ private fun SleeveCarousel(
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    // And the blur itself gives way to the page's own copy of the cover over the last
-                    // rows of the sleeve. The blur is the record's colours, which are stronger than the
-                    // page's; ending on it left the strip brighter than the page it meets. Three steps,
-                    // each into something more like the page than the last: picture, blur, page.
-                    val top = size.height * (1f - MELT * 0.45f)
-                    drawRect(
-                        Brush.verticalGradient(
-                            0f to Color.Transparent,
-                            0.55f to Color.Black.copy(alpha = 0.55f),
-                            1f to Color.Black,
-                            startY = top, endY = size.height,
-                        ),
-                        topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
-                        blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
-                    )
-                },
+                .drawWithContent { drawContent(); giveWayToPage() },
         ) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
