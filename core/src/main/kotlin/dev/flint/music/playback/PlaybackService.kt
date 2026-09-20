@@ -418,6 +418,15 @@ class PlaybackService : MediaLibraryService() {
             equalizer.enabled = processing
             reconfigureSink()
         } else if ((offloadChanged && offloaded) || tempoChanged) reconfigureSink()
+        // The song playing was planned under the old settings. Turning a crossfade on and waiting for
+        // the song to end is how anyone tries this out, and without asking again that first ending was
+        // always the one that did nothing.
+        transitionSink?.replan()
+        // And AutoMix has nothing to plan from until the tracks coming up have been measured, which was
+        // only ever started by the queue moving: switched on in the middle of a song, the first mix it
+        // could have made was two boundaries away.
+        main.removeCallbacks(measure)
+        main.postDelayed(measure, 1_000)
     }
 
     @Volatile private var transitionsOff = false
@@ -425,9 +434,19 @@ class PlaybackService : MediaLibraryService() {
     /** Mirrors the player's shuffle flag for the audio thread, which may not ask the player itself. */
     @Volatile private var shuffling = false
 
+    /**
+     * The window the transition planner sees. A plan is asked for once, on the first buffer of a track,
+     * and the sink keeps the answer - so whenever this window changes the plan has to be asked for
+     * again. Without that the planner's answer was whatever the queue happened to be in the instant the
+     * track's first buffer was decoded: the audio thread runs ahead of the main one, so the first track
+     * of a fresh queue was regularly planned against a window holding nothing but itself, and then
+     * never planned again. It played to its end and stopped dead. The same went for a song queued, the
+     * queue reordered or shuffle turned on after the track had started.
+     */
     private fun refreshUpcoming() {
         shuffling = player.shuffleModeEnabled
         val t = player.currentTimeline
+        val was = upcoming
         if (t.isEmpty || player.currentMediaItemIndex == C.INDEX_UNSET) { upcoming = emptyList(); return }
         val list = ArrayList<MediaItem>(8)
         var i = player.currentMediaItemIndex
@@ -436,6 +455,7 @@ class PlaybackService : MediaLibraryService() {
             i = t.getNextWindowIndex(i, player.repeatMode, player.shuffleModeEnabled)
         }
         upcoming = list
+        if (was.size != list.size || was.indices.any { was[it].mediaId != list[it].mediaId }) transitionSink?.replan()
     }
 
     /**
@@ -445,7 +465,10 @@ class PlaybackService : MediaLibraryService() {
     private val transitions = object : TransitionSink.Listener {
         override fun planFor(outgoingId: String): TransitionSink.Plan? {
             val p = flint.settings.value
-            if (transitionsOff || (!p.autoMix && p.crossfadeSec == 0)) return null
+            if (transitionsOff || (!p.autoMix && p.crossfadeSec == 0)) {
+                android.util.Log.i("flint", "planFor: off (transitionsOff=$transitionsOff autoMix=${p.autoMix} crossfadeSec=${p.crossfadeSec})")
+                return null
+            }
             // Why a boundary passed without a transition is otherwise invisible, and every reason below
             // is a deliberate one - which is hard to tell apart from a broken feature without a word.
             val order = upcoming
@@ -454,8 +477,8 @@ class PlaybackService : MediaLibraryService() {
                 return null
             }
             val out = order[at]
-            val next = order.getOrNull(at + 1) ?: return null
-            if (out.isRadio || next.isRadio) return null
+            val next = order.getOrNull(at + 1) ?: run { android.util.Log.i("flint", "planFor: nothing after $outgoingId"); return null }
+            if (out.isRadio || next.isRadio) { android.util.Log.i("flint", "planFor: radio"); return null }
             val settings = dev.flint.music.ffi.AutoMixSettings(
                 maxTransitionS = (if (p.autoMix) p.autoMixMaxS else p.crossfadeSec).toFloat(),
                 beatMatch = p.autoMix && p.autoMixBeatMatch, maxTempoChangePct = p.autoMixMaxTempoPct,

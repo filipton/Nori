@@ -114,6 +114,10 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         }
         val enc = if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0
         val same = enc != 0 && enc == encoding && f.sampleRate == rate && f.channelCount == channels
+        // One line per decoded stream. Audio handed to the DSP whole (offload) never arrives here as
+        // samples, and then no transition is possible at all - which is worth saying out loud, because
+        // every other sign of it is a boundary that simply passes.
+        Log.i("flint", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz${if (enc == 0) " - not PCM, no transitions" else ""}")
         if (id != null && id != currentId) onNewStream(id)
         if (same || (out.isEmpty() && phase == Phase.PASS)) apply(config, enc) else {
             // A different format while audio of the old one is held: the transition cannot mix across it.
