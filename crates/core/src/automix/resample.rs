@@ -281,9 +281,68 @@ mod tests {
         assert_eq!(made, 500 * 2);
     }
 
+    /// Head-to-head on the transition that matters: 48 kHz down to 44.1 kHz. A bright three-tone
+    /// chord (440 Hz, 5 kHz, 15 kHz) goes through the cubic resampler and through rubato's sinc;
+    /// each output's DFT is measured for tone level vs everything else (aliasing and imaging).
+    /// Prints both, so the numbers not the prose decide whether the swap is worth it.
     #[test]
-    fn nonsense_is_refused() {
-        assert!(Resampler::new(0, 2, 44100, 2).is_none());
+    fn cubic_against_sinc_on_the_downsample() {
+        use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
+        use rubato::{Fft, FixedSync, Resampler as _};
+        let tones = [440.0f64, 5000.0, 15000.0];
+        let n_in = 48000usize;
+        let pcm: Vec<f32> = (0..n_in)
+            .map(|i| tones.iter().map(|f| (i as f64 * f * std::f64::consts::TAU / 48000.0).sin()).sum::<f64>() as f32 / 3.0)
+            .collect();
+        let input = pcm.iter().flat_map(|v| ((v * 20000.0) as i16).to_le_bytes()).collect::<Vec<u8>>();
+        let mut cubic = Resampler::new(48000, 1, 44100, 1).unwrap();
+        let mut out_c = vec![0u8; 200000];
+        let (_, made_c) = cubic.process(&input, PCM_16, &mut out_c, PCM_16).unwrap();
+        let cubic_f: Vec<f32> = shorts_of(&out_c[..made_c]).iter().map(|v| *v as f32 / 32768.0).collect();
+        let mut sinc = Fft::<f32>::new(48000, 44100, 1024, 1, FixedSync::Input).unwrap();
+        let adapted = SequentialSliceOfVecs::new(std::slice::from_ref(&pcm), 1, n_in).unwrap();
+        let sinc_f = sinc.process_all(&adapted, n_in, None).unwrap().take_data();
+        // DFT magnitudes at the three tones (scaled to 44.1 kHz) vs the strongest other bin.
+        // A 0.1 s window from the middle (past startup, clear of the clamped edges), whose 10 Hz
+        // bins land exactly on all three tones, so leakage cannot flatter either side.
+        fn spectrum(x: &[f32], tones: &[f64; 3]) -> (f64, f64) {
+            let n = 4410usize;
+            let x = &x[x.len() / 2 - n / 2..x.len() / 2 + n / 2];
+            let bin = |hz: f64| (hz * n as f64 / 44100.0).round() as usize;
+            let mag = |k: usize| {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for (i, v) in x.iter().take(n).enumerate() {
+                    let ph = 2.0 * std::f64::consts::PI * k as f64 * i as f64 / n as f64;
+                    re += *v as f64 * ph.cos();
+                    im -= *v as f64 * ph.sin();
+                }
+                (re * re + im * im).sqrt() / n as f64
+            };
+            let tone = tones.iter().map(|f| mag(bin(*f))).fold(0.0f64, f64::max);
+            let mut spur = 0.0f64;
+            for k in 1..n / 2 {
+                if tones.iter().all(|f| (k as i64 - bin(*f) as i64).abs() > 2) {
+                    spur = spur.max(mag(k));
+                }
+            }
+            (tone, spur)
+        }
+        let (ct, cs) = spectrum(&cubic_f, &tones);
+        let (st, ss) = spectrum(&sinc_f, &tones);
+        eprintln!("cubic: tone {ct:.4} spur {cs:.5} ({:.1} dB)", 20.0 * (cs / ct).log10());
+        eprintln!("sinc:  tone {st:.4} spur {ss:.5} ({:.1} dB)", 20.0 * (ss / st).log10());
+        assert!(ct > 0.05 && st > 0.05, "both keep the tones");
+        // The verdict, locked in: on a torture-test chord (three full-scale tones to 15 kHz) sinc
+        // images essentially not at all while the cubic's worst spur sits at -17.8 dB relative to
+        // the tones - but that is about -38 dBFS absolute, and music's own high end sits 20-40 dB
+        // under its mids, so under music the spurs land where nobody hears them. The cubic stays:
+        // no dependency, no per-buffer FFT, no extra battery.
+        assert!(20.0 * (cs / ct).log10() < -15.0, "cubic spurs audible: {cs} vs {ct}");
+        assert!(20.0 * (ss / st).log10() < 20.0 * (cs / ct).log10(), "sinc should image less");
+    }
+
+    #[test]
+    fn nonsense_is_refused() {        assert!(Resampler::new(0, 2, 44100, 2).is_none());
         assert!(Resampler::new(44100, 6, 44100, 2).is_none());
         assert!(Resampler::new(44100, 2, 44100, 6).is_none());
         let mut r = Resampler::new(44100, 2, 48000, 2).unwrap();
