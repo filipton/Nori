@@ -123,6 +123,23 @@ watch_from_now
 "$app" set crossfadeSec 0 >/dev/null
 check "with it off, the planner says so rather than going quiet" waitfor "planFor: off .*crossfadeSec=0" 10
 
+echo "-- a chain rebuild waits for the boundary"
+# Taking the equalizer out of the chain needs a sink rebuild, which used to cut the song
+# mid-track. Now it waits for the next boundary instead - and the swap itself is silent.
+# First a boundary to drain whatever the processing loop left pending, so the waits below
+# can only be satisfied by the toggles that follow.
+"$app" do "playnext $other" >/dev/null; sleep 2
+"$app" do next >/dev/null; sleep 6
+watch_from_now
+"$app" set eq true >/dev/null; sleep 3
+"$app" set eq false >/dev/null; sleep 3
+check "taking the EQ out waits for the boundary" waitfor "chain swap deferred" 10
+check "still playing after the EQ leaves" playing_audio
+"$app" do "playnext $other" >/dev/null; sleep 2
+"$app" do next >/dev/null; sleep 6
+check "the swap happens at the boundary" waitfor "chain swap at the boundary" 15
+check "still playing after the swap" playing_audio
+
 echo "-- AutoMix"
 watch_from_now
 "$app" set autoMix true >/dev/null

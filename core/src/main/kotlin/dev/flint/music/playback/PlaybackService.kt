@@ -125,6 +125,13 @@ class PlaybackService : MediaLibraryService() {
     /** Tuning has ended; rebuild with the deep buffer when the music is next paused, where it is silent. */
     private var deepAtNextPause = false
     /**
+     * A settings change needs a new sink chain but the music is playing through the old one.
+     * Rebuilding mid-track cuts the song, so it waits for the next boundary instead; see
+     * [reconfigureSink]. A silent path never waits (see there); the deep buffer's return goes
+     * at the next pause instead.
+     */
+    private var chainSwapPending = false
+    /**
      * The last thing that happens before the AudioTrack exists, and the only place that knows exactly what it
      * will be: encoding, rate and whether the stream is being offloaded. Preferred mixer attributes are read
      * by the framework when the track is built, so a DAC can only be engaged from here - setting them
@@ -265,6 +272,15 @@ class PlaybackService : MediaLibraryService() {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            // A settings change that needed a new chain waited for a boundary instead of cutting the
+            // track: this is it. Skipped on a repeat-one loop, which should restart seamlessly; the
+            // swap then waits for a real boundary. A planned crossfade into this track dies with the
+            // rebuild - the setting wins over one mix.
+            if (chainSwapPending && !(reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && player.repeatMode == Player.REPEAT_MODE_ONE)) {
+                chainSwapPending = false
+                android.util.Log.i("flint", "chain swap at the boundary")
+                if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+            }
             refreshButtons()
             if (item != null && flint.settings.value.skipExplicit && item.mediaMetadata.extras?.getString("explicit") == "explicit" && player.hasNextMediaItem()) return player.seekToNextMediaItem()
             if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && item != null) return scrobbler.onTrack(item.toSong(), player.isPlaying)
@@ -288,7 +304,8 @@ class PlaybackService : MediaLibraryService() {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (!isPlaying && !player.playWhenReady && deepAtNextPause) {
                 deepAtNextPause = false
-                reconfigureSink()
+                // Paused is silent: the deep buffer comes back at once rather than waiting a track.
+                reconfigureSink(urgent = true)
             }
             announce()
             scrobbler.onPlaying(isPlaying)
@@ -376,9 +393,24 @@ class PlaybackService : MediaLibraryService() {
             .putExtra(EXTRA_TITLE, m?.title?.toString()).putExtra(EXTRA_ARTIST, m?.artist?.toString()).putExtra(EXTRA_PLAYING, player.isPlaying))
     }
 
-    /** A processor joins or leaves the chain, and the buffer depth changes, only when the sink is configured again. */
-    private fun reconfigureSink() {
-        if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+    /**
+     * A processor joins or leaves the chain, and the buffer depth changes, only when the sink is
+     * configured again. Mid-track that rebuild cuts the song, so unless the current path is broken
+     * (an offloaded track that must come back to the CPU plays silence) or nothing is playing, it
+     * waits for the next track boundary, where the swap is inaudible.
+     */
+    private fun reconfigureSink(urgent: Boolean = false) {
+        if (player.playbackState == Player.STATE_IDLE || urgent) {
+            if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+            return
+        }
+        if (offloaded && !offloadWanted) {
+            android.util.Log.i("flint", "chain swap now: the offloaded path is ending")
+            player.stop(); player.prepare()
+            return
+        }
+        if (!chainSwapPending) android.util.Log.i("flint", "chain swap deferred to the next track")
+        chainSwapPending = true
     }
 
     /** DSP, crossfade, speed, offload and bit-perfect constrain each other; this is where that is decided. */
@@ -417,7 +449,7 @@ class PlaybackService : MediaLibraryService() {
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
             reconfigureSink()
-        } else if ((offloadChanged && offloaded) || tempoChanged) reconfigureSink()
+        } else if ((offloadChanged && offloaded) || tempoChanged) reconfigureSink(urgent = tempoChanged)
         // The song playing was planned under the old settings. Turning a crossfade on and waiting for
         // the song to end is how anyone tries this out, and without asking again that first ending was
         // always the one that did nothing.
@@ -514,7 +546,7 @@ class PlaybackService : MediaLibraryService() {
                     val heardMs = frames * 1000 / sampleRate.coerceAtLeast(1)
                     if (expectedMs <= 0 || kotlin.math.abs(heardMs - expectedMs) <= 3000) {
                         val a = flint.core.analysisFinishStream(songId, handle)
-                        android.util.Log.i("flint", "analysed $songId: ${a?.let { "%.2f bpm (%.2f), key %s, heard %d ms of %d ms, %d frames at %d Hz".format(it.bpm, it.bpmConfidence, dev.flint.music.ffi.automixKeyName(it.key), it.durationMs, expectedMs, frames, sampleRate) } ?: "too short"}")
+                        android.util.Log.i("flint", "analysed $songId: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s, heard %d ms of %d ms, %d frames at %d Hz".format(it.bpm, it.bpmConfidence, it.stability, dev.flint.music.ffi.automixKeyName(it.key), it.durationMs, expectedMs, frames, sampleRate) } ?: "too short"}")
                     }
                 } catch (e: Exception) {
                     android.util.Log.w("flint", "analysis of $songId failed: $e")
@@ -836,7 +868,8 @@ class PlaybackService : MediaLibraryService() {
                 if (on && !tuning && equalizer.enabled) {
                     tuning = true
                     updateBurst()
-                    reconfigureSink()
+                    // Live tweaking needs the shallow buffer now; the cut is the price of it.
+                    reconfigureSink(urgent = true)
                 } else if (!on && tuning) {
                     // And not straight back either: leaving the screen would cut the song a second time.
                     // The shallow buffer costs some wakeups, not sound, so it lasts until the next pause.
