@@ -414,8 +414,13 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // the title at 56.5 % and the artist at 59-61 %. A sleeve that ended above the text left
                 // the text sitting on bare page, which is what read as the cover being out of place.
                 if (page == Panel.ART) Box(
+                    // Not faded in. The panel being left is drawn over this one and fades out, which is
+                    // the dissolve; bringing the sleeve up from nothing underneath it as well means a
+                    // half-there cover over a page that is already a blurred copy of the same cover, and
+                    // a cover that is half there has no soft bottom - its last rows are rubbed out, so
+                    // what is left there is the page. That is the blur that is missing for the whole of
+                    // a change back from the queue and then arrives once the fade is over.
                     Modifier.fillMaxWidth()
-                        .graphicsLayer { alpha = panelFade() }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -1372,11 +1377,11 @@ private fun SleeveCarousel(
             if (!on()) return@drawWithContent
             rubOutBottom()
         }
-        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, offscreen: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
+        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, sharp: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             // Its own layer to rub out of, for the copy that rubs: without one the erase would take the
             // page behind it as well. The blurred copy does not rub anything out and must not ask for
             // one - a layer of its own inside the blur's layer came out black.
-            if (offscreen) compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+            if (sharp) compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
             val l = lift.value
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
@@ -1387,7 +1392,11 @@ private fun SleeveCarousel(
             if (l > 0f) {
                 shape = RoundedCornerShape(radius * l / s)
                 clip = true
-                shadowElevation = elevation * l
+                // Only the record casts a shadow, and only while it is properly up. The blurred copy is
+                // not a card and must not have one - a shadow inside the blur is a dark band under the
+                // record's soft bottom. The record's own goes with the square of the lift, so it is gone
+                // early in the settle rather than lying as a line under a bottom that is dissolving.
+                if (sharp) shadowElevation = elevation * l * l
             }
         }
         val o0 = { offset }
@@ -1411,18 +1420,18 @@ private fun SleeveCarousel(
             // appears as the record zooms in: not a colour out of step, the old picture itself, coming
             // up through the new one's soft bottom. The one on top is the whole record; this one has
             // nothing to add until it is let go of.
-            if (landedUrl == null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft()) {
+            if (landedUrl == null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, sharp = fading).maybeSoft()) {
                 SleeveImage(art, Modifier.fillMaxSize())
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }, fading).maybeSoft().background(plateColour).loadingSheen(!afterHere, sheen)) {
+            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }, sharp = fading).maybeSoft().background(plateColour).loadingSheen(!afterHere, sheen)) {
                 androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }, fading).maybeSoft().background(plateColour).loadingSheen(!beforeHere, sheen)) {
+            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }, sharp = fading).maybeSoft().background(plateColour).loadingSheen(!beforeHere, sheen)) {
                 androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
             }
             // It is the record that is showing, so it moves with the record: held still in the middle it
             // covered the next change from on top, which is the "cover stuck over the animation".
-            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft().background(plateColour)) {
+            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, sharp = fading).maybeSoft().background(plateColour)) {
                 landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
         }
