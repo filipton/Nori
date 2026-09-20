@@ -423,11 +423,12 @@ class PlaybackService : MediaLibraryService() {
         equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
         equalizer.setOutput(p.balance, p.mono, p.limiterThresholdDb, 120f, if (p.limiter) 5f else 0f)
         transitionsOff = untouched
+        // The pinned output rate stands down with everything else that touches samples.
+        transitionSink?.lockRate = !untouched
         player.skipSilenceEnabled = p.skipSilence && !untouched
-        // Speed and pitch reach the sound through the chain that is built when the sink is configured,
-        // so a chain already running keeps the pair it was built with: the new speed sat there unheard
-        // until something else - any other setting - rebuilt the sink, and then arrived as if it had
-        // just been asked for. Noted here and acted on at the end, with the rest of the rebuilds.
+        // Speed and pitch ride the player's parameters, which the sink's own stretcher hears live -
+        // no rebuild, no gap. The one exception is an offloaded track: the chip plays what it was
+        // given at 1x, so leaving offload still cuts (and the position is kept).
         val tempoChanged = appliedSpeed != p.speed || appliedPitch != p.pitch
         appliedSpeed = p.speed
         appliedPitch = p.pitch
@@ -451,7 +452,8 @@ class PlaybackService : MediaLibraryService() {
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
             reconfigureSink()
-        } else if ((offloadChanged && offloaded) || tempoChanged) reconfigureSink(urgent = tempoChanged)
+        } else if (offloadChanged && offloaded) reconfigureSink(urgent = true)
+        else if (tempoChanged && offloaded) reconfigureSink(urgent = true)
         // The song playing was planned under the old settings. Turning a crossfade on and waiting for
         // the song to end is how anyone tries this out, and without asking again that first ending was
         // always the one that did nothing.

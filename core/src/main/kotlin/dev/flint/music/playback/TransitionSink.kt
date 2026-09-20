@@ -24,6 +24,14 @@ import java.nio.ByteOrder
  * (cubic resample, mono/stereo either way) and the mix runs at the outgoing rate; the downstream format
  * switches once the mix is out. Anything else unconvertible falls back to the ending unmixed.
  *
+ * Beyond a transition the same rule holds for the whole queue: the downstream format is latched on
+ * the first PCM stream and every later stream is converted to it, so the AudioTrack below is never
+ * recreated when the next song has another rate. Recreating it is a stop and a start - about half a
+ * second of silence right where the new song plays alone - which is what a 48 -> 44.1 kHz boundary
+ * sounded like. The latch clears on reset (a stopped player latches again on whatever comes next)
+ * and never engages for non-PCM streams or while the service holds the output bit-perfect, where the
+ * native format must reach the wire untouched; see [lockRate].
+ *
  * It also hands every decoded buffer of a not-yet-analysed track to the streaming analyser, so the tempo,
  * beat grid and cue points come from audio the phone is decoding anyway.
  *
@@ -126,11 +134,21 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var inChannels = 0
     private var inEncoding = 0
     private var inFrameBytes = 0
+    /** Which stream id the converter was armed for: buffers flowing now are always in this format. */
+    private var convId: String? = null
     private var resample = 0L
     private var resampleBuf: ByteBuffer? = null
     private val converting get() = resample != 0L
-    /** Formats decoded ahead while a transition runs; applied once the mix is out. */
-    private val deferred = ArrayDeque<AudioSink.AudioSinkConfig>()
+    /** Formats decoded ahead while a transition runs; armed once their buffers flow, never downstream. */
+    private val staged = ArrayDeque<AudioSink.AudioSinkConfig>()
+    /** The id whose buffers the mix is consuming, so a further decode-ahead configure never re-arms it. */
+    private var mixSourceId: String? = null
+    /**
+     * The downstream format stays on whatever the first PCM stream brought. False only while the
+     * service holds the output bit-perfect (or hi-res): then every stream passes through native and
+     * the track below follows it, as before. The service keeps this in step with `transitionsOff`.
+     */
+    @Volatile var lockRate = true
 
     private val out = ArrayDeque<Chunk>()
     private val pool = ArrayList<ByteBuffer>()
@@ -139,52 +157,132 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     override fun configure(config: AudioSink.AudioSinkConfig) {
         val f = config.format
-        val id = config.mediaPeriodId?.let { pid ->
+        val id = idOf(config)
+        val enc = if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0
+        // One line per decoded stream. Audio handed to the DSP whole (offload) never arrives here as
+        // samples, and then no transition is possible at all - which is worth saying out loud, because
+        // every other sign of it is a boundary that simply passes.
+        Log.i("flint", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz${if (enc == 0) " - not PCM, no transitions" else ""}")
+        val forCurrent = id == null || id == currentId
+        if (id != null && id != currentId) onNewStream(id)
+        if (enc == 0) {
+            // Not samples: there is nothing to convert, so the downstream format has to follow.
+            // Anything held is played out as it is first.
+            dropConverter()
+            if (out.isEmpty() && phase == Phase.PASS) { apply(config, 0); return }
+            abandonTransition()
+            pendingConfig = config
+            return
+        }
+        if (!lockRate) {
+            // Bit-perfect or hi-res: the native format reaches the wire; the track below follows.
+            dropConverter()
+            if (f.sampleRate == rate && f.channelCount == channels && enc == encoding) return
+            abandonTransition()
+            pendingConfig = config
+            return
+        }
+        if (rate == 0) {
+            // The first PCM stream sets the downstream format for the whole queue.
+            apply(config, enc)
+            Log.i("flint", "sink pins ${f.sampleRate} Hz x${f.channelCount} for the queue")
+            return
+        }
+        if (f.sampleRate == rate && f.channelCount == channels && enc == encoding) {
+            // At the pinned format already. While its buffers flow the track below is told, as
+            // always (a same-format configure never recreates it); decode-ahead only waits.
+            if (phase == Phase.PASS && forCurrent) {
+                // The flowing stream is at the pinned format: any converter is stale.
+                dropConverter()
+                apply(config, enc)
+                return
+            }
+            staged += config
+            return
+        }
+        if (phase == Phase.PASS && forCurrent) {
+            // The stream whose buffers are flowing changed format: convert it from here on.
+            if (!armConversion(id, f.sampleRate, f.channelCount, enc)) {
+                abandonTransition()
+                pendingConfig = config
+            }
+            return
+        }
+        // Decode-ahead (or a same-format stranger): the mix is never killed for it. Armed once
+        // its buffers flow - at the discontinuity, or when the mix is out.
+        if (phase == Phase.PASS || phase == Phase.HOLD || phase == Phase.MIX) { staged += config; return }
+        abandonTransition()
+        pendingConfig = config
+    }
+
+    private fun idOf(config: AudioSink.AudioSinkConfig): String? =
+        config.mediaPeriodId?.let { pid ->
             runCatching {
                 val t = config.timeline
                 t.getWindow(t.getPeriodByUid(pid.periodUid, Timeline.Period()).windowIndex, Timeline.Window()).mediaItem.mediaId
             }.getOrNull()
         }
-        val enc = if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0
-        val same = enc != 0 && enc == encoding && f.sampleRate == rate && f.channelCount == channels
-        // One line per decoded stream. Audio handed to the DSP whole (offload) never arrives here as
-        // samples, and then no transition is possible at all - which is worth saying out loud, because
-        // every other sign of it is a boundary that simply passes.
-        Log.i("flint", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz${if (enc == 0) " - not PCM, no transitions" else ""}")
-        if (id != null && id != currentId) onNewStream(id)
-        if (same || (out.isEmpty() && phase == Phase.PASS)) { apply(config, enc); return }
-        if (phase == Phase.HOLD || phase == Phase.MIX) {
-            // Decode-ahead while a transition runs: the mix is never killed for it. The incoming
-            // stream's format is remembered for conversion; anything further back just waits.
-            if (phase == Phase.HOLD && id != null && id == plan?.incomingId && inRate == 0 && !setupConversion(config, enc)) {
-                abandonTransition()
-                pendingConfig = config
-                return
-            }
-            deferred += config
-            return
+
+    /**
+     * Converts the stream [id] (native [srcRate] x[srcCh], [srcEnc]) to the pinned format, from
+     * whose buffers everything downstream is now computed. The stretcher works in the incoming
+     * domain from here on (converted after), so the outgoing-domain one built in [prepare] is
+     * dropped. False when the pair cannot be converted.
+     */
+    private fun armConversion(id: String?, srcRate: Int, srcCh: Int, srcEnc: Int): Boolean {
+        if (srcEnc == 0) return false
+        inRate = srcRate; inChannels = srcCh; inEncoding = srcEnc
+        inFrameBytes = srcCh * (if (srcEnc == C.ENCODING_PCM_FLOAT) 4 else 2)
+        if (resample != 0L) AutoMixResample.destroy(resample)
+        resample = AutoMixResample.create(inRate, inChannels, rate, channels)
+        convId = id
+        if (resample == 0L) { inRate = 0; convId = null; return false }
+        if (pendingStretch != 0L) { AutoMixStretch.destroy(pendingStretch); pendingStretch = 0L }
+        Log.i("flint", "converting $inRate Hz x$inChannels -> $rate Hz x$channels")
+        return true
+    }
+
+    /** No conversion: buffers flow at the pinned format already. Keeps the latch. */
+    private fun dropConverter() {
+        if (resample != 0L) { AutoMixResample.destroy(resample); resample = 0L }
+        inRate = 0; inChannels = 0; inEncoding = 0; inFrameBytes = 0
+        convId = null
+    }
+
+    /** A seek: the converter keeps its formats but its stream position starts over. */
+    private fun resetConverter() {
+        if (resample != 0L && inRate != 0) {
+            AutoMixResample.destroy(resample)
+            resample = AutoMixResample.create(inRate, inChannels, rate, channels)
+            if (resample == 0L) inRate = 0
         }
-        // A different format while audio of the old one is queued but no transition runs: play what
-        // is queued out as it is, then switch.
-        abandonTransition()
-        pendingConfig = config
     }
 
     /**
-     * The incoming stream's format, and the converter to the outgoing one the mix runs at. The
-     * stretcher works in the incoming domain from here on (converted after), so the outgoing-domain
-     * one built in [prepare] is dropped. False when the pair cannot be converted.
+     * The staged format of [id] (its buffers flow now): arm it, or drop the converter when it is
+     * already at the pinned format. Anything staged for another id waits its turn.
      */
-    private fun setupConversion(config: AudioSink.AudioSinkConfig, enc: Int): Boolean {
-        val f = config.format
-        if (enc == 0) return false
-        inRate = f.sampleRate; inChannels = f.channelCount; inEncoding = enc
-        inFrameBytes = f.channelCount * (if (enc == C.ENCODING_PCM_FLOAT) 4 else 2)
-        resample = AutoMixResample.create(inRate, inChannels, rate, channels)
-        if (resample == 0L) { inRate = 0; return false }
-        if (pendingStretch != 0L) { AutoMixStretch.destroy(pendingStretch); pendingStretch = 0L }
-        Log.i("flint", "transition spans $inRate Hz x$inChannels -> $rate Hz x$channels, converting the incoming side")
-        return true
+    private fun armStagedFor(id: String?) {
+        val it = staged.iterator()
+        var cfg: AudioSink.AudioSinkConfig? = null
+        while (it.hasNext()) {
+            val c = it.next()
+            if (idOf(c) == id || (id == null && cfg == null)) { it.remove(); cfg = c }
+        }
+        val c = cfg ?: return
+        val f = c.format
+        val enc = if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0
+        if (enc == 0 || (f.sampleRate == rate && f.channelCount == channels && enc == encoding)) {
+            if (convId != null || enc == 0) dropConverter()
+            return
+        }
+        // Already converting this stream: re-arming would drop the two frames of history the
+        // interpolator carries and click.
+        if (convId == id && inRate == f.sampleRate && inChannels == f.channelCount && inEncoding == enc) return
+        if (!armConversion(id, f.sampleRate, f.channelCount, enc)) {
+            abandonTransition()
+            pendingConfig = c
+        }
     }
 
     private fun apply(config: AudioSink.AudioSinkConfig, enc: Int) {
@@ -210,45 +308,48 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             val f = config.format
             apply(config, if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0)
         }
-        // Formats decoded ahead while a transition ran: only once the mix is out and what is queued
-        // has drained, so outgoing-format audio never meets the incoming configuration.
-        while (phase == Phase.PASS && deferred.isNotEmpty()) {
-            if (!drain()) return false
-            val config = deferred.removeFirst()
-            val f = config.format
-            apply(config, if (f.sampleMimeType == MimeTypes.AUDIO_RAW && (f.pcmEncoding == C.ENCODING_PCM_16BIT || f.pcmEncoding == C.ENCODING_PCM_FLOAT)) f.pcmEncoding else 0)
-        }
         if (!pcm) return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
         if (!drain()) return false
         buffer.order(ByteOrder.nativeOrder())
+        // The analyser hears the native stream; everything below runs at the pinned format.
+        val (aRate, aCh, aEnc) = if (converting) Triple(inRate, inChannels, inEncoding) else Triple(rate, channels, encoding)
         when (phase) {
             Phase.PASS -> {
-                if (stretch != 0L) { feedAnalysis(buffer, buffer.position(), buffer.remaining()); stretchOut(buffer); drain(); return true }
+                // Converted audio lives in a shared buffer that the next call reuses: anything kept
+                // is copied, and the sink below is only ever offered copies, never the live buffer.
+                // The stretcher works in the native domain, so it always sees the native buffer.
+                if (converting || stretch != 0L) feedAnalysis(buffer, buffer.position(), buffer.remaining(), aRate, aCh, aEnc)
+                if (stretch != 0L) { stretchOut(buffer); drain(); return true }
+                val buf = if (converting) toPinned(buffer) else buffer
+                if (converting && buf == null) { drain(); return true }
                 val p = planFor(currentId)
                 val trackPos = presentationTimeUs - offsetUs
-                val frames = buffer.remaining() / frameBytes
+                val frames = buf!!.remaining() / frameBytes
                 val startFrame = if (p == null) Long.MAX_VALUE else (p.outStartUs - trackPos) * rate / 1_000_000
                 // More than a second past the planned start (a late plan, or a seek): leave this transition alone.
                 val skipTransition = startFrame < -rate
-                if (startFrame >= frames || skipTransition) return pass(buffer, presentationTimeUs)
+                if (startFrame >= frames || skipTransition) return pass(buf, presentationTimeUs, converting)
                 val before = startFrame.coerceAtLeast(0).toInt() * frameBytes
-                feedAnalysis(buffer, buffer.position(), buffer.remaining())
+                if (!converting) feedAnalysis(buf, buf.position(), buf.remaining())
                 if (before > 0) {
-                    val head = buffer.duplicate().order(ByteOrder.nativeOrder())
+                    val head = buf.duplicate().order(ByteOrder.nativeOrder())
                     head.limit(head.position() + before)
                     enqueue(copyOf(head), presentationTimeUs)
-                    buffer.position(buffer.position() + before)
+                    buf.position(buf.position() + before)
                 }
                 beginHold(p!!)
                 heldFromUs = presentationTimeUs + before.toLong() / frameBytes * 1_000_000L / rate
                 heldAt = android.os.SystemClock.elapsedRealtime()
                 Log.i("flint", "holding the ending, ${(heldFromUs - super.getCurrentPositionUs(false)) / 1000} ms of sound still in the sink")
-                hold(buffer)
+                hold(buf)
             }
-            Phase.HOLD -> { feedAnalysis(buffer, buffer.position(), buffer.remaining()); hold(buffer) }
+            Phase.HOLD -> {
+                feedAnalysis(buffer, buffer.position(), buffer.remaining(), aRate, aCh, aEnc)
+                val buf = if (converting) toPinned(buffer) else buffer
+                if (buf != null) hold(buf)
+            }
             Phase.MIX -> {
-                if (converting) feedAnalysis(buffer, buffer.position(), buffer.remaining(), inRate, inChannels, inEncoding)
-                else feedAnalysis(buffer, buffer.position(), buffer.remaining())
+                feedAnalysis(buffer, buffer.position(), buffer.remaining(), aRate, aCh, aEnc)
                 mix(buffer, presentationTimeUs)
             }
         }
@@ -259,10 +360,14 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     /**
      * Straight through. The sink below refuses buffers on purpose (see [BurstSink]) and the renderer then
      * offers the same audio again, so the analyser is only given what was actually taken.
+     *
+     * Converted audio ([copy]) lives in the shared converter buffer: it always goes through the
+     * queue as a copy, because a refused buffer offered again would be converted over itself.
      */
-    private fun pass(buffer: ByteBuffer, ptsUs: Long): Boolean {
-        if (out.isNotEmpty()) {
-            feedAnalysis(buffer, buffer.position(), buffer.remaining())
+    private fun pass(buffer: ByteBuffer, ptsUs: Long, copy: Boolean = false): Boolean {
+        if (out.isNotEmpty() || copy) {
+            // The queue path is already fed by the caller (with the native buffer); the fast path feeds here.
+            if (!copy) feedAnalysis(buffer, buffer.position(), buffer.remaining())
             enqueue(copyOf(buffer), ptsUs)
             drain()
             return true
@@ -350,7 +455,11 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     override fun handleDiscontinuity() {
         val p = plan
         if (phase == Phase.HOLD && p != null && tailLen > 0) {
-            // The next track begins: its opening is mixed into what was held.
+            // The next track begins: its opening is mixed into what was held. Its format was staged
+            // while it decoded ahead; arm it now, so the stretcher and the skip below measure the
+            // incoming track in its own domain and the mix runs at the pinned one.
+            armStagedFor(currentId)
+            mixSourceId = currentId
             // Both were built when the plan was made; either is still made here if something changed
             // under them (a format switch) since.
             if (mixer == 0L || mixerFormat != rate * 100 + channels) {
@@ -383,6 +492,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             phase = Phase.MIX
         } else {
             abandonTransition()
+            // No mix: the new track's buffers flow from here, so its staged format arms now.
+            armStagedFor(currentId)
+            mixSourceId = null
             super.handleDiscontinuity()
         }
         plan = null
@@ -426,9 +538,10 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     }
 
     /**
-     * Incoming-domain audio into the outgoing format the mix runs at. Null when nothing comes out
+     * Incoming-domain audio into the pinned format the mix runs at. Null when nothing comes out
      * yet (the converter holds lookahead); the consumed input is inside it and arrives with the next
-     * call, so nothing is lost. A conversion that cannot run falls back to the ending unmixed.
+     * call, so nothing is lost. A conversion that cannot run drops the converter and lets the ending
+     * play unmixed rather than wedging the sink on a buffer that will never convert.
      */
     private fun converted(input: ByteBuffer): ByteBuffer? {
         val wo = if (encoding == C.ENCODING_PCM_FLOAT) 4 else 2
@@ -445,6 +558,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         }
         if (r < 0) {
             Log.w("flint", "conversion ${inRate} Hz x$inChannels -> $rate Hz x$channels failed, letting the ending play")
+            dropConverter()
             abandonTransition()
             return null
         }
@@ -456,13 +570,12 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     }
 
     /**
-     * The mix is out: retire the converter and hand the deferred formats over. The next buffer
-     * drains what is queued, then switches downstream to the incoming stream's own format.
+     * The mix is out: the mixed-in track's own format stays armed (its buffers keep flowing through
+     * it), anything staged further ahead waits, and the mix stops counting as a mix.
      */
     private fun finishConversion() {
-        if (resample != 0L) { AutoMixResample.destroy(resample); resample = 0L }
-        inRate = 0; inChannels = 0; inEncoding = 0; inFrameBytes = 0
-        if (deferred.isNotEmpty()) resyncNext = true
+        mixSourceId = null
+        armStagedFor(currentId)
     }
 
     /** Timestamps while mixing and stretching are the sink's own running clock, so a stretch never reads as a jump. */
@@ -495,11 +608,20 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     }
 
     /** After a mix the incoming track keeps going through the stretcher until its tempo is back to normal. */
+    /**
+     * Native stream audio into the pinned format. Null when nothing comes out yet (the converter
+     * holds lookahead); the consumed input is inside it and arrives with the next call, so nothing
+     * is lost. Shares one buffer across calls: anything kept must be copied first.
+     */
+    private fun toPinned(input: ByteBuffer): ByteBuffer? = converted(input)
+
     private fun stretchOut(buffer: ByteBuffer) {
-        val domBytes = stretchFrameBytes.coerceAtLeast(1)
         val s = stretched(buffer) ?: return
-        enqueue(copyOf(s), syntheticPtsUs.takeIf { it != C.TIME_UNSET } ?: 0L)
-        syntheticPtsUs += (s.remaining() / domBytes) * 1_000_000L / stretchRate.coerceAtLeast(1)
+        // The stretcher runs in the incoming domain; the pinned track below needs pinned audio.
+        val o = if (converting) toPinned(s) else s
+        if (o == null) return
+        enqueue(copyOf(o), syntheticPtsUs.takeIf { it != C.TIME_UNSET } ?: 0L)
+        syntheticPtsUs += (o.remaining() / frameBytes) * 1_000_000L / rate
     }
 
     private fun finishStretch(s: ByteBuffer, produced: Int): Int {
@@ -515,10 +637,11 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     }
 
     /**
-     * The held audio goes out unmixed: the format changed, the next track never came, or the mix
-     * itself was cut short (a new stream while mixing). A cut-short mix plays only what has not gone
-     * out yet - what is already queued went out as the mix and is not repeated - so the ending is
-     * heard to its end instead of stopping where the mix did.
+     * The held audio goes out unmixed: the next track never came, or the mix itself was cut short
+     * (a new stream while mixing). A cut-short mix plays only what has not gone out yet - what is
+     * already queued went out as the mix and is not repeated - so the ending is heard to its end
+     * instead of stopping where the mix did. The converter is untouched: whatever still flows is
+     * still in the format it was armed for.
      */
     private fun abandonTransition() {
         if (tailLen > 0 && (phase == Phase.HOLD || phase == Phase.MIX)) {
@@ -539,8 +662,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         tailLen = 0
         heldFromUs = C.TIME_UNSET
         heldUs = 0L
-        if (resample != 0L) { AutoMixResample.destroy(resample); resample = 0L }
-        inRate = 0; inChannels = 0; inEncoding = 0; inFrameBytes = 0
+        mixSourceId = null
         // Given up on, not forgotten: the planned point is behind us now, and without this the next
         // buffer of the same track would start the hold over.
         plan = null
@@ -655,14 +777,16 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         mixedEndUs = C.TIME_UNSET
         heldFromUs = C.TIME_UNSET; heldUs = 0L; reported = Long.MIN_VALUE
         plan = null; planFor = null
+        mixSourceId = null
         resyncNext = false
         syntheticPtsUs = C.TIME_UNSET
         if (stretch != 0L) { AutoMixStretch.destroy(stretch); stretch = 0L }
         stretchRate = 0; stretchCh = 0; stretchEnc = 0; stretchFrameBytes = 0
         if (pendingStretch != 0L) { AutoMixStretch.destroy(pendingStretch); pendingStretch = 0L }
-        if (resample != 0L) { AutoMixResample.destroy(resample); resample = 0L }
-        inRate = 0; inChannels = 0; inEncoding = 0; inFrameBytes = 0
-        deferred.clear()
+        // A seek: the latch and the formats stand (the track below is untouched), but the
+        // converter's stream position starts over and anything staged is for another timeline.
+        resetConverter()
+        staged.clear()
         pendingConfig = null
         // A seek: the analyser has not heard this track continuously any more.
         if (analyzer != 0L) { AutoMixAnalyzer.destroy(analyzer); analyzer = 0L }
@@ -673,6 +797,12 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     override fun reset() {
         clear()
+        // Stopped: the latch goes with the track below, and the next playback pins again.
+        dropConverter()
+        staged.clear()
+        mixSourceId = null
+        convId = null
+        rate = 0; channels = 0; encoding = 0; frameBytes = 0
         if (mixer != 0L) { AutoMixMixer.destroy(mixer); mixer = 0L }
         pool.clear()
         tail = null
