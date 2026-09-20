@@ -21,8 +21,8 @@ if [ -z "$(ls -A "$music")" ]; then
     done
   done
 fi
-docker rm -f flint-navidrome >/dev/null 2>&1 || true
-docker run -d --name flint-navidrome --user "$(id -u):$(id -g)" -p 4533:4533 \
+docker rm -f nori-navidrome >/dev/null 2>&1 || true
+docker run -d --name nori-navidrome --user "$(id -u):$(id -g)" -p 4533:4533 \
   -e ND_SCANNER_SCHEDULE=@every\ 1m -e ND_LOGLEVEL=info \
   -v "$music:/music:ro" -v "$root/data:/data" deluan/navidrome:latest >/dev/null
 for _ in $(seq 30); do curl -sf localhost:4533/ping >/dev/null && break; sleep 1; done

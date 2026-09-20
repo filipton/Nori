@@ -6,7 +6,7 @@ and the APK's strings; Musly: changelog, 892 l10n keys, source at v2.0.2; Navic:
 836 commits, source). Provider-specific items that cannot apply to a Subsonic server (Plex auth,
 Jellyfin Quick Connect, ...) are left in the raw files.
 
-flint column: `yes` have it, `part` partly. Plan column: **add** = clean win, will be built;
+nori column: `yes` have it, `part` partly. Plan column: **add** = clean win, will be built;
 **ask** = costs battery/CPU, a dependency, privacy or a lot of scope, the owner decides;
 **skip** = see reason. "cost" notes say what a feature costs *while music plays with the screen off*,
 because that is the budget this app protects.
@@ -34,7 +34,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Servers and connection
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Subsonic token auth | x | x | x | yes | |
 | Legacy (plaintext/enc) auth for old servers, auto-detected | x | x | | yes | done |
@@ -58,7 +58,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Sync and offline index
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Whole library mirrored locally | x | x | x | optional "Sync all" | keep optional: live search is the point |
 | Automatic / scheduled re-sync, differential | x | 6 h | 1 h | | add: on app open when older than N hours, Wi-Fi only option; never from the background |
@@ -68,7 +68,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Library and browsing
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Albums, artists, playlists, genres, favourites, radio, downloads | x | x | x | yes | |
 | All-songs list with sorts | x | x | x | yes | done |
@@ -102,7 +102,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Search
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Live server search merged with instant offline index | | live opt. | local+server | yes | |
 | Provider (octo-fiesta) results marked, never auto-queued | | detect only | badge | yes | |
@@ -116,7 +116,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Playback
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Gapless | x | x | x | yes | |
 | Hardware offload | x | | x | yes | |
@@ -159,7 +159,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Output and DAC
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Android 14+ bit-perfect USB | x | | | yes (untested on hardware) | |
 | Hi-res float output | x | | | yes | |
@@ -174,7 +174,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## DSP
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Parametric EQ, peaking + shelves, AutoEQ/APO import, auto pre-amp | x | | | yes | |
 | More filter types: low/high pass, band pass, notch; per-channel filters | x | | | yes | done |
@@ -190,7 +190,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Queue
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Play next / add / remove / clear / jump | x | x | x | yes | |
 | Drag to reorder | x | x | x | API only | add |
@@ -207,7 +207,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Playlists
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Create, delete, add, remove song | x | x | x | yes | |
 | Rename, comment, public flag | x | | | | add |
@@ -222,7 +222,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Downloads and caches
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Download song / album / playlist / whole library | x | x | x | yes | |
 | Download all albums of an artist / all favourites | x | x | x | | add |
@@ -241,7 +241,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Lyrics
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Server synced + plain lyrics, tap to seek | x | x | x | yes | |
 | Word-by-word (karaoke) cues from OpenSubsonic enhanced lyrics | x | stub | x | yes | done: server cues, inline LRC tags, or estimated per line; swept in the draw phase at 30 fps, only while visible; switchable |
@@ -255,7 +255,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Casting and remote
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Chromecast | x | x | | | ask (needs Google Play services Cast SDK) |
 | UPnP / DLNA renderers, gapless, volume | x | x | | | ask (own SSDP+SOAP code, no dependency; discovery runs only while the picker is open) |
@@ -266,7 +266,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Car, watch, TV, widgets
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Android Auto browse tree + voice search | x | x | session only | yes | |
 | Android Auto: configurable tabs, more nodes (artists, genres, mixes) | x | x | | fixed | add |
@@ -279,7 +279,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Ratings, scrobbling, stats
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Star songs/albums/artists | x | x | x | yes | |
 | 1-5 star ratings | x | x | x | no | dropped: nobody used them, favourites cover it |
@@ -291,7 +291,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Shares, radio, misc
 
-| Feature | S | M | N | flint | Plan |
+| Feature | S | M | N | nori | Plan |
 |---|---|---|---|---|---|
 | Create share link | x | | x | yes | |
 | Share with expiry + description; list / delete shares; hide sharing | | | x | | add |

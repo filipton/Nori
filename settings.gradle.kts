@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "flintMusic"
+rootProject.name = "noriMusic"
 include(":core", ":app")

@@ -437,7 +437,7 @@ is drawn (`SLEEVE_UNDER_TEXT`), and its melt is quick-then-long (`1 - (1-t)³`) 
 the cover is still there behind the title, which is what the numbers above show on theirs.
 
 Settings and menus had two Material shapes left in them. The switch is now UISwitch's 51 × 31 pt
-track with a 27 pt white thumb (`FlintSwitch`), and `FlintSlider` is UISlider's 4 pt track with a
+track with a 27 pt white thumb (`NoriSwitch`), and `NoriSlider` is UISlider's 4 pt track with a
 28 pt white knob on a soft shadow. Neither of those was measured off a screenshot — there is no
 settings screen in the App Store set — they are UIKit's own defaults.
 
@@ -566,7 +566,7 @@ artwork's own rows is the cover's own contrast, not a fault.
 
 ## What the audio path costs
 
-`tools/bench.sh dev.flint.music 90 off`, same album, fresh install, on an x86_64 emulator, before
+`tools/bench.sh dev.nori.music 90 off`, same album, fresh install, on an x86_64 emulator, before
 this work and after it:
 
 | | `2670679` (before) | `c9c6910` (after) |
@@ -584,7 +584,7 @@ second, and no UI thread anywhere in the busiest list, because neither runs whil
 
 ## What the page costs to scroll
 
-`tools/scroll.sh dev.flint.music 12` on an album page, music playing. The emulator renders in
+`tools/scroll.sh dev.nori.music 12` on an album page, music playing. The emulator renders in
 software, so the absolute numbers are dreadful and only the comparison means anything.
 
 | | 50th | 90th |

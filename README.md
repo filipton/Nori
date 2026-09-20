@@ -1,4 +1,4 @@
-# flint music
+# nori music
 
 A native Android client for Navidrome and [octo-fiesta](https://github.com/filipton/octo-fiesta)
 (any Subsonic/OpenSubsonic server works). Kotlin + media3 for playback, a Rust core for the index
@@ -53,7 +53,7 @@ Full results, including an Android 11 versus Android 14 comparison and the packa
 [perf-results.md](perf-results.md); reproduce them with `tools/perf-suite.sh <serial> <server-url>`.
 The short version, API 34 emulator (software GPU, no audio offload, so these are worst cases):
 
-| | flint | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 |
+| | nori | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 |
 |---|---|---|---|---|
 | Screen off, CPU | **1.1-1.7 %** of a core | 2.4-3.3 % | 4.6 % | 10.5 % |
 | Screen off, seconds asleep (of 90) | **70-75** | 1 | 0 | 0 |

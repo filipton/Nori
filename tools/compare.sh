@@ -5,12 +5,12 @@
 # estimate: the phone is told it is unplugged for the window so batterystats keeps counting.
 #
 #   tools/compare.sh [seconds=300] [packages...]
-#   default packages: flint, Navic, Musly, Symfonium
+#   default packages: nori, Navic, Musly, Symfonium
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 secs=300
 [[ "${1:-}" =~ ^[0-9]+$ ]] && { secs=$1; shift; }
-pkgs=("$@"); [ ${#pkgs[@]} -eq 0 ] && pkgs=(dev.flint.music paige.navic com.devid.musly app.symfonik.music.player)
+pkgs=("$@"); [ ${#pkgs[@]} -eq 0 ] && pkgs=(dev.nori.music paige.navic com.devid.musly app.symfonik.music.player)
 out="bench-$(date +%Y%m%d-%H%M).txt"
 trap 'adb shell dumpsys battery reset >/dev/null' EXIT
 

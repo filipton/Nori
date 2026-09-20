@@ -27,7 +27,7 @@ val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")
     ?: error("NDK not found; set ANDROID_NDK_HOME")
 
 android {
-    namespace = "dev.flint.music.core"
+    namespace = "dev.nori.music.core"
     compileSdk = 37
 
     defaultConfig {
@@ -60,7 +60,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
         out.mkdirs()
         val args = mutableListOf("cargo", "ndk")
         targets.get().forEach { args += listOf("-t", it) }
-        args += listOf("-o", out.absolutePath, "build", "-p", "flintmusic")
+        args += listOf("-o", out.absolutePath, "build", "-p", "norimusic")
         if (profile.get() == "release") args += "--release"
         exec.exec {
             workingDir = workDir.get().asFile
@@ -80,13 +80,13 @@ abstract class UniffiBindgenTask @Inject constructor(private val exec: ExecOpera
         val wd = workDir.get().asFile
         exec.exec {
             workingDir = wd
-            commandLine("cargo", "build", "-q", "-p", "flintmusic")
+            commandLine("cargo", "build", "-q", "-p", "norimusic")
         }
         exec.exec {
             workingDir = wd
             commandLine(
                 "cargo", "run", "-q", "-p", "uniffi-bindgen", "--",
-                "generate", "--library", "target/debug/libflintmusic.so",
+                "generate", "--library", "target/debug/libnorimusic.so",
                 "--language", "kotlin", "--no-format",
                 "--out-dir", outputDir.get().asFile.absolutePath,
             )

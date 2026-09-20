@@ -383,7 +383,7 @@ impl Stretcher {
     }
 }
 
-// ---- JNI: dev.flint.music.playback.AutoMixStretch --------------------------------------------------------------
+// ---- JNI: dev.nori.music.playback.AutoMixStretch --------------------------------------------------------------
 
 const PCM_16: jint = 2;
 const PCM_FLOAT: jint = 4;
@@ -400,7 +400,7 @@ fn handle<'a>(h: jlong) -> Option<&'a Handle> {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, keep_pitch: jboolean) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, keep_pitch: jboolean) -> jlong {
     let ch = (channels.max(1) as usize).min(MAX_CHANNELS);
     let s = Stretcher::new(rate.max(1) as u32, ch, keep_pitch != 0);
     let stage = (vec![0f32; BLOCK * 4 * ch], vec![0f32; BLOCK * 8 * ch]);
@@ -408,7 +408,7 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_create(_: JN
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_destroy(_: JNIEnv, _: JClass, h: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_destroy(_: JNIEnv, _: JClass, h: jlong) {
     if h != 0 {
         drop(unsafe { Box::from_raw(h as *mut Handle) });
     }
@@ -416,26 +416,26 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_destroy(_: J
 
 /// `ratio` playback speed (>1 faster), held for `hold_frames` output frames, then ramped to 1 over `ramp_frames`.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_configure(_: JNIEnv, _: JClass, h: jlong, ratio: jfloat, hold_frames: jlong, ramp_frames: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_configure(_: JNIEnv, _: JClass, h: jlong, ratio: jfloat, hold_frames: jlong, ramp_frames: jlong) {
     if let Some(h) = handle(h) {
         h.s.lock().configure(ratio as f64, hold_frames.max(0) as u64, ramp_frames.max(0) as u64);
     }
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_bypassed(_: JNIEnv, _: JClass, h: jlong) -> jboolean {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_bypassed(_: JNIEnv, _: JClass, h: jlong) -> jboolean {
     handle(h).map_or(1, |h| h.s.lock().bypassed() as jboolean)
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_latencyFrames(_: JNIEnv, _: JClass, h: jlong) -> jint {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_latencyFrames(_: JNIEnv, _: JClass, h: jlong) -> jint {
     handle(h).map_or(0, |h| h.s.lock().latency_frames() as jint)
 }
 
 /// Runs `in_bytes` bytes of `input[in_pos..]` through the stretcher into `output[out_pos..]`, at most `out_cap`
 /// bytes. Returns `(consumed_bytes << 32) | produced_bytes`, or -1 when the buffers cannot be used.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_process(
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_process(
     env: JNIEnv, _: JClass, h: jlong, input: JByteBuffer, in_pos: jint, in_bytes: jint, output: JByteBuffer, out_pos: jint, out_cap: jint, encoding: jint,
 ) -> jlong {
     let (Ok(src), Ok(dst)) = (env.get_direct_buffer_address(&input), env.get_direct_buffer_address(&output)) else { return -1 };
@@ -492,7 +492,7 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_process(
 
 /// Writes what is still inside the stretcher to `output[out_pos..]` (at most `out_cap` bytes); returns bytes written.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixStretch_drain(
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_drain(
     env: JNIEnv, _: JClass, h: jlong, output: JByteBuffer, out_pos: jint, out_cap: jint, encoding: jint,
 ) -> jint {
     let Ok(dst) = env.get_direct_buffer_address(&output) else { return 0 };
@@ -704,7 +704,7 @@ mod tests {
     }
 
     /// CPU cost per second of 44.1 kHz stereo. Run with
-    /// `cargo test --release -p flintmusic stretch_cost -- --ignored --nocapture`.
+    /// `cargo test --release -p norimusic stretch_cost -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn stretch_cost() {

@@ -43,7 +43,7 @@ check() { # check <name> <command...>
 key() { adb shell input keyevent "$1"; sleep 2; }
 
 echo "== audio end to end"
-adb shell am force-stop dev.flint.music >/dev/null 2>&1
+adb shell am force-stop dev.nori.music >/dev/null 2>&1
 "$app" wake >/dev/null; "$app" launch >/dev/null
 "$app" play "$song" >/dev/null; sleep 6
 check "plays a song" moving
@@ -85,7 +85,7 @@ watcher=""
 watch_from_now() {
   [ -n "$watcher" ] && kill "$watcher" 2>/dev/null
   adb logcat -c
-  adb logcat -v time -s flint:I > "$watching" 2>/dev/null &
+  adb logcat -v time -s nori:I > "$watching" 2>/dev/null &
   watcher=$!
   sleep 0.5
 }
@@ -178,7 +178,7 @@ echo "-- seek after a restart"
 "$app" play "$song" >/dev/null; sleep 4
 "$app" do "seek 10000" >/dev/null; sleep 2
 "$app" do pause >/dev/null; sleep 2
-adb shell am force-stop dev.flint.music >/dev/null 2>&1
+adb shell am force-stop dev.nori.music >/dev/null 2>&1
 "$app" launch >/dev/null
 # Cold boot: wait for the queue to be back before touching it.
 for _ in $(seq 40); do t=$(field title); [ -n "$t" ] && break; sleep 2; done

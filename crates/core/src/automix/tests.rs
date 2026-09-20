@@ -418,7 +418,7 @@ fn analysis_is_stored_and_reported_missing() {
 fn a_v1_database_migrates_to_v2() {
     // A database from before the overlap-window columns: migrate keeps the row readable with
     // zeroed windows, and the old version still reports the track for re-analysis.
-    let dir = std::env::temp_dir().join(format!("flint-mig-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("nori-mig-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("mig.db").to_string_lossy().into_owned();
     {
@@ -476,7 +476,7 @@ fn plan_from_real_analyses() {
     assert_eq!(params[mixer::param::DURATION], p.duration_ms as f32);
 }
 
-/// `cargo test --release -p flintmusic analysis_cost -- --ignored --nocapture`
+/// `cargo test --release -p norimusic analysis_cost -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn analysis_cost() {
@@ -500,14 +500,14 @@ fn analysis_cost() {
 }
 
 /// Analyses a raw PCM file, to compare what the app measures with what the file really is:
-/// `FLINT_PCM=/path/file.s16 FLINT_RATE=44100 FLINT_CH=2 cargo test --release -p flintmusic -- --ignored --nocapture pcm_file`
+/// `NORI_PCM=/path/file.s16 NORI_RATE=44100 NORI_CH=2 cargo test --release -p norimusic -- --ignored --nocapture pcm_file`
 #[test]
 #[ignore]
 fn pcm_file() {
-    let Ok(path) = std::env::var("FLINT_PCM") else { return };
-    let rate: i32 = std::env::var("FLINT_RATE").map(|v| v.parse().unwrap()).unwrap_or(44100);
-    let ch: i32 = std::env::var("FLINT_CH").map(|v| v.parse().unwrap()).unwrap_or(2);
-    let enc: i32 = std::env::var("FLINT_ENC").map(|v| v.parse().unwrap()).unwrap_or(2);
+    let Ok(path) = std::env::var("NORI_PCM") else { return };
+    let rate: i32 = std::env::var("NORI_RATE").map(|v| v.parse().unwrap()).unwrap_or(44100);
+    let ch: i32 = std::env::var("NORI_CH").map(|v| v.parse().unwrap()).unwrap_or(2);
+    let enc: i32 = std::env::var("NORI_ENC").map(|v| v.parse().unwrap()).unwrap_or(2);
     for p in path.split(',') {
         let bytes = std::fs::read(p).expect("pcm file");
         let t = std::time::Instant::now();

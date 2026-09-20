@@ -1,4 +1,4 @@
-package dev.flint.music.net
+package dev.nori.music.net
 
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertFalse
@@ -7,7 +7,7 @@ import org.junit.Test
 
 class HostTest {
     private fun same(url: String, address: String): Boolean {
-        val m = Class.forName("dev.flint.music.net.HttpKt").getDeclaredMethod("sameHost", okhttp3.HttpUrl::class.java, String::class.java)
+        val m = Class.forName("dev.nori.music.net.HttpKt").getDeclaredMethod("sameHost", okhttp3.HttpUrl::class.java, String::class.java)
         m.isAccessible = true
         return m.invoke(null, url.toHttpUrl(), address) as Boolean
     }

@@ -338,7 +338,7 @@ impl Mixer {
     }
 }
 
-// ---- JNI: dev.flint.music.playback.AutoMixMixer ----------------------------------------------------------------
+// ---- JNI: dev.nori.music.playback.AutoMixMixer ----------------------------------------------------------------
 
 const PCM_16: jint = 2;
 const PCM_FLOAT: jint = 4;
@@ -348,12 +348,12 @@ fn mixer<'a>(h: jlong) -> Option<&'a Mutex<Mixer>> {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
     Box::into_raw(Box::new(Mutex::new(Mixer::new(rate.max(1) as u32, channels.max(1) as usize)))) as jlong
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_destroy(_: JNIEnv, _: JClass, h: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_destroy(_: JNIEnv, _: JClass, h: jlong) {
     if h != 0 {
         drop(unsafe { Box::from_raw(h as *mut Mutex<Mixer>) });
     }
@@ -361,7 +361,7 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_destroy(_: JNI
 
 /// `params` is `automix_mixer_params(plan)`. Restarts the transition clock at 0.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_configure(env: JNIEnv, _: JClass, h: jlong, params: JFloatArray) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_configure(env: JNIEnv, _: JClass, h: jlong, params: JFloatArray) {
     let Some(m) = mixer(h) else { return };
     let mut p = [0f32; param::COUNT];
     let n = (env.get_array_length(&params).unwrap_or(0).max(0) as usize).min(param::COUNT);
@@ -373,14 +373,14 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_configure(env:
 
 /// Frames mixed since `configure`.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_position(_: JNIEnv, _: JClass, h: jlong) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_position(_: JNIEnv, _: JClass, h: jlong) -> jlong {
     mixer(h).map_or(0, |m| m.lock().position() as jlong)
 }
 
 /// Mixes `frames` frames of `outgoing[out_pos..]` and `incoming[in_pos..]` into `dest[dest_pos..]` (byte positions;
 /// all direct buffers, `dest` may be either input). Returns false when the buffers cannot be used.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixMixer_process(
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_process(
     env: JNIEnv, _: JClass, h: jlong, outgoing: JByteBuffer, out_pos: jint, incoming: JByteBuffer, in_pos: jint, dest: JByteBuffer, dest_pos: jint,
     frames: jint, encoding: jint,
 ) -> bool {
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(y, b);
     }
 
-    /// Mixer cost, 44.1 kHz stereo, everything on. `cargo test --release -p flintmusic mixer_cost -- --ignored --nocapture`
+    /// Mixer cost, 44.1 kHz stereo, everything on. `cargo test --release -p norimusic mixer_cost -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn mixer_cost() {

@@ -28,7 +28,7 @@ if len(m)>=n:
 #   tools/ui.sh kb off   disables every enabled IME (remembering them)
 #   tools/ui.sh kb on    puts them back
 kb() {
-  local store=/sdcard/flint-imes
+  local store=/sdcard/nori-imes
   case "$2" in
     off) adb shell "ime list -s | tr -d '\r' > $store; for i in \$(cat $store); do ime disable \$i; done" >/dev/null 2>&1 ;;
     on)  adb shell "for i in \$(cat $store 2>/dev/null); do ime enable \$i; done; ime set \$(head -1 $store 2>/dev/null)" >/dev/null 2>&1 ;;

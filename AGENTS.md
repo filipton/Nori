@@ -1,6 +1,6 @@
 # Working in this repo
 
-flint music is an Android client for Navidrome / octo-fiesta (Subsonic API): a Kotlin app over a
+nori music is an Android client for Navidrome / octo-fiesta (Subsonic API): a Kotlin app over a
 Rust core. Priorities, in order: battery and performance, functionality, and only then looks.
 `CLAUDE.md` points here, so there is one copy of these instructions.
 
@@ -10,13 +10,13 @@ Rust core. Priorities, in order: battery and performance, functionality, and onl
 crates/core/    Rust: request signing, response parsing, SQLite/FTS5 index + caches (uniffi),
                 and the equalizer DSP (raw JNI, see dsp.rs)
 core/           Android library, no UI: net/, data/ (Library = the repository), playback/
-                (media3 service, DAC, equalizer, scrobbling), downloads/, settings/, Flint.kt (object graph)
+                (media3 service, DAC, equalizer, scrobbling), downloads/, settings/, Nori.kt (object graph)
 app/            the UI only: vm/ (ViewModels, all logic and state) and ui/ (Compose, draws state)
 tools/          dev-server.sh: a local Navidrome with generated music for testing
 ```
 
 The boundary that matters: `ui/` may be thrown away and rewritten. It must only read ViewModel
-state and call ViewModel functions; it never touches `Flint`, media3, OkHttp or the FFI. `core/`
+state and call ViewModel functions; it never touches `Nori`, media3, OkHttp or the FFI. `core/`
 must never know a UI exists.
 
 ## Build and test
@@ -33,7 +33,7 @@ Run `cargo test` and a build before committing.
 
 `tools/apk.sh` builds a release APK for a phone: arm64 by default, `tools/apk.sh x86_64` for an
 emulator, `tools/apk.sh --install` to push it straight to whatever is connected. It lands in
-`build/flint-music-<version>-<abi>.apk` and prints which ABIs are inside. The signature is the Android
+`build/nori-music-<version>-<abi>.apk` and prints which ABIs are inside. The signature is the Android
 debug key, which installs and updates on your own device but cannot be published.
 
 `tools/app.sh` drives a **debug** build over adb without touching the screen - `open <route>`,
@@ -49,7 +49,7 @@ there: a screenshot proves a screen renders, not that the feature works.
   and it runs only while the player screen is resumed.
 - One OkHttp pool for API, covers and audio. URLs are stable (derived salt) so caches hit.
 - CPU-decoded playback runs in bursts (`BurstSink` + a 10 s AudioTrack buffer). Check changes to the
-  audio path with `tools/bench.sh dev.flint.music 90 off`: "quiet" should stay around 80 %.
+  audio path with `tools/bench.sh dev.nori.music 90 off`: "quiet" should stay around 80 %.
 - Audio offload only reaches the phone's own outputs: the audio chip has no path to a USB device, and
   an offloaded track routed there plays nothing while reporting itself fine. `Outputs.usb` stands
   offload down whenever anything USB is attached, and a sink that refuses the stream gives it up for
@@ -58,7 +58,7 @@ there: a screenshot proves a screen renders, not that the feature works.
   and ReplayGain is player volume. Sample-domain features must keep working under `BurstSink` (deep
   buffer); only the equalizer screen (`CMD_TUNING`) may trade it for latency. The sink chain is
   renderer -> `CrossfadeSink` -> `BurstSink` -> `DefaultAudioSink` (with the Rust `Equalizer` processor).
-- The UI thread never waits for the core: `Flint` builds `core`, `http` and `sources` lazily and the
+- The UI thread never waits for the core: `Nori` builds `core`, `http` and `sources` lazily and the
   application warms them on a background thread. Keep FFI and OkHttp out of constructors and composition.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct
   buffers, never uniffi.

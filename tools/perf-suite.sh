@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The whole performance suite for flint on one device, hands-off:
+# The whole performance suite for nori on one device, hands-off:
 #   tools/perf-suite.sh <adb-serial> <server-url> [user=admin] [password=admin]
 # Needs the dev server (tools/dev-server.sh) with the "Bench / Long Play" album (10-minute MP3s, one FLAC,
 # "Noise 1" with synced lyrics). The device must be unlocked. Media volume is set to 0 for the run and restored.
 # Results are appended to perf-results.md as one table per device.
 set -uo pipefail
 export ANDROID_SERIAL=$1; url=$2; user=${3:-admin}; pass=${4:-admin}
-here="$(cd "$(dirname "$0")" && pwd)"; pkg=dev.flint.music; ui="$here/ui.sh"; out="$here/../perf-results.md"
+here="$(cd "$(dirname "$0")" && pwd)"; pkg=dev.nori.music; ui="$here/ui.sh"; out="$here/../perf-results.md"
 apk="$here/../app/build/outputs/apk/release/app-release.apk"
 model=$(adb shell getprop ro.product.model | tr -d '\r'); rel=$(adb shell getprop ro.build.version.release | tr -d '\r'); abi=$(adb shell getprop ro.product.cpu.abi | tr -d '\r')
 size=$(adb shell wm size | grep -oE '[0-9]+x[0-9]+' | tail -1); w=${size%x*}; h=${size#*x}
@@ -90,7 +90,7 @@ say "FLAC screen off"; play "Noise flac"; adb shell input keyevent 3; row "FLAC,
 say "DSP on"; adb logcat -c; wake; adb shell am start -n $pkg/.app.MainActivity >/dev/null 2>&1; sleep 2; "$ui" tapn Settings 1; sleep 2
 for _ in 1 2 3 4 5 6 7 8; do "$ui" has "Equalizer and crossfeed" && break; adb shell input swipe $((w/2)) $((h*7/10)) $((w/2)) $((h*3/10)) 400; sleep 1; done
 "$ui" tap "Equalizer and crossfeed"; sleep 2; tapright Equalizer 90; sleep 1; tapright 62 78; tapright 8k 35; sleep 1; adb shell input keyevent 4; sleep 1
-adb logcat -d -s flint:I | grep -q "equalizer in chain" || say "WARNING: equalizer did not join the chain"
+adb logcat -d -s nori:I | grep -q "equalizer in chain" || say "WARNING: equalizer did not join the chain"
 adb shell input keyevent 3; row "FLAC + equalizer, screen off (90 s)" "$(bench 90 off)"
 wake; adb shell am start -n $pkg/.app.MainActivity >/dev/null 2>&1; sleep 2; "$ui" has Enabled || "$ui" tap "Equalizer and crossfeed"; sleep 2; tapright Equalizer 90; "$ui" tap Reset; adb shell input keyevent 4
 say "paused"; adb shell input keyevent 127; sleep 3; adb shell input keyevent 3; row "Paused in background (30 s)" "$(bench 30 off)"

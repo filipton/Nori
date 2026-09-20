@@ -139,21 +139,21 @@ fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, f: f64) -> f32 {
     0.5 * ((2.0 * p1) + (-p0 + p2) * f + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * f * f + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * f * f * f)
 }
 
-// ---- JNI: dev.flint.music.playback.AutoMixResample ---------------------------------------------------------------
+// ---- JNI: dev.nori.music.playback.AutoMixResample ---------------------------------------------------------------
 
 fn handle(h: jlong) -> Option<&'static Mutex<Resampler>> {
     (h != 0).then(|| unsafe { &*(h as *const Mutex<Resampler>) })
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixResample_create(
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_create(
     _: JNIEnv, _: JClass, in_rate: jint, in_ch: jint, out_rate: jint, out_ch: jint,
 ) -> jlong {
     Resampler::new(in_rate, in_ch, out_rate, out_ch).map_or(0, |r| Box::into_raw(Box::new(Mutex::new(r))) as jlong)
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixResample_destroy(_: JNIEnv, _: JClass, h: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_destroy(_: JNIEnv, _: JClass, h: jlong) {
     if h != 0 {
         drop(unsafe { Box::from_raw(h as *mut Mutex<Resampler>) });
     }
@@ -162,7 +162,7 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixResample_destroy(_: 
 /// Converts `in_bytes` of `input[in_pos..]` (`in_enc`) into `output[out_pos..]` (at most `out_cap` bytes,
 /// `out_enc`). Returns `(consumed_bytes << 32) | produced_bytes`, or -1 when the buffers cannot be used.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixResample_process(
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_process(
     env: JNIEnv, _: JClass, h: jlong, input: JByteBuffer, in_pos: jint, in_bytes: jint, output: JByteBuffer, out_pos: jint, out_cap: jint,
     in_enc: jint, out_enc: jint,
 ) -> jlong {

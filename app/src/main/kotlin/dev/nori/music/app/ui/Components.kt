@@ -1,0 +1,548 @@
+package dev.nori.music.app.ui
+
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import coil3.request.crossfade
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudDownload
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.HeartBroken
+import dev.nori.music.settings.SwipeAction
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.isActive
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil3.compose.AsyncImage
+import coil3.request.CachePolicy
+import coil3.request.ImageRequest
+import dev.nori.music.app.vm.ActionsViewModel
+import dev.nori.music.app.vm.Load
+import dev.nori.music.ffi.Album
+import dev.nori.music.ffi.Song
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+
+/** A cover of an octo-fiesta provider item (external song, album, artist or playlist). */
+fun isProviderCover(url: String) = url.contains("&id=ext-") || url.contains("&id=pl-")
+
+/** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from. */
+fun providerOf(id: String): String? = id.takeIf { it.startsWith("ext-") || it.startsWith("pl-") }
+    ?.split('-')?.getOrNull(1)?.replaceFirstChar(Char::uppercase)
+    ?.let { mapOf("Squidwtf" to "SquidWTF").getOrDefault(it, it) }
+
+/**
+ * Two sizes, not four. A Subsonic server renders each requested size on demand and caches it per size,
+ * so every extra bucket is another slow first fetch for every album in the library - measured at over
+ * a second each on a real server. A list thumbnail and a grid card now share one rendition, and the
+ * full-screen artwork shares its rendition with the notification and the lock screen.
+ */
+object CoverSize { const val ROW = 320; const val CARD = 320; const val FULL = 800 }
+
+/**
+ * Artwork with the app's corner radius. The request is remembered and sized up front, so scrolling
+ * neither rebuilds it nor waits for layout to size it; the rounded clip is a plain render-node clip,
+ * which the GPU does for free and which a grid of covers needs to not look like a spreadsheet.
+ * Pass `radius = 0.dp` for the full-bleed artwork at the top of a page.
+ *
+ * Nothing about it appears in one frame. A picture that has to be fetched fades in over its plate
+ * (one from the memory cache is simply there - fading those in made every scroll shimmer); one that
+ * takes a while shows a soft sheen crossing the plate, so a slow server reads as loading rather than
+ * as a missing cover; and one that never comes settles into the plate's note glyph, faded in too.
+ *
+ * [plate] false draws nothing of its own - no plate, sheen or note - so the picture fades in over
+ * whatever is behind it (a mix tile's colour), and a missing one simply leaves that showing.
+ */
+@Composable
+fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Radius.cover, plate: Boolean = true) {
+    val context = LocalContext.current
+    val px = with(LocalDensity.current) { size.roundToPx() }
+    val request = remember(url, px) {
+        ImageRequest.Builder(context).data(url).apply {
+            if (px > 0) size(px)
+            if (!AppMotion.reduce) crossfade(260)
+            // octo-fiesta draws a "not downloaded" badge on provider covers and replaces the picture once the
+            // track is in the library, under the same id. Never store those, or the badge sticks forever.
+            if (url != null && isProviderCover(url)) { diskCachePolicy(CachePolicy.DISABLED); memoryCachePolicy(CachePolicy.READ_ONLY) }
+        }.build()
+    }
+    val shape = remember(radius) { androidx.compose.foundation.shape.RoundedCornerShape(radius) }
+    val scheme = MaterialTheme.colorScheme
+    // A flat grey square is what makes a library of half-loaded covers look broken. Underneath every
+    // cover sits a soft two-tone plate with a note on it, which is what shows while the picture loads
+    // and what stays when a track simply has no artwork. It is one gradient, drawn, and costs nothing.
+    val plateBrush = remember(scheme.surfaceVariant) {
+        Brush.linearGradient(listOf(scheme.onSurface.copy(alpha = 0.13f).over(scheme.background), scheme.onSurface.copy(alpha = 0.06f).over(scheme.background)))
+    }
+    var loading by remember(request) { mutableStateOf(url != null) }
+    var missing by remember(request) { mutableStateOf(url == null) }
+    // The sheen outlives the load by the length of the picture's fade, so it goes away underneath a
+    // picture that is already covering it instead of vanishing from on top of the plate.
+    var sheen by remember(request) { mutableStateOf(loading) }
+    androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
+    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).then(if (plate) Modifier.background(plateBrush) else Modifier)) {
+        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true, scheme.onSurface))
+        androidx.compose.animation.AnimatedVisibility(
+            missing && plate, Modifier.align(Alignment.Center),
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)), exit = androidx.compose.animation.fadeOut(),
+        ) {
+            Icon(
+                Icons.Filled.MusicNote, null,
+                Modifier.size(if (size > 0.dp) size * 0.34f else 40.dp),
+                tint = scheme.onSurface.copy(alpha = 0.22f),
+            )
+        }
+        AsyncImage(
+            model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
+            modifier = Modifier.fillMaxSize(),
+            onState = {
+                loading = it is coil3.compose.AsyncImagePainter.State.Loading
+                missing = url == null || it is coil3.compose.AsyncImagePainter.State.Error
+            },
+        )
+    }
+}
+
+fun duration(seconds: Long): String = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60) else "%d:%02d".format(seconds / 60, seconds % 60)
+
+/** What a sideways drag on a song row does: what it uncovers under the row, and what letting go past [SWIPE_ARM] does. */
+class RowSwipe(val icon: ImageVector, val label: String, val action: () -> Unit)
+
+/** One per row: the Animatable the row slides on, and whether letting go now would act. */
+@Stable
+class SwipeState {
+    val offset = Animatable(0f)
+    var armed by mutableStateOf(false)
+}
+
+/** How far across the row a drag has to go before letting go acts. */
+private const val SWIPE_ARM = 0.3f
+
+/**
+ * Sideways drag on a row. Only a direction with an action moves at all. Past [SWIPE_ARM] of the width
+ * the row goes heavier (it follows at 40%), the strip underneath takes the accent colour and the phone
+ * ticks, so the finger knows before it lifts; letting go then acts and the row springs back. The row
+ * paints [fill] under itself only while it is off its place, so the strip never shows through it.
+ */
+private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?, fill: Color): Modifier = composed {
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
+    val back = remember { spring<Float>(dampingRatio = 0.8f, stiffness = 520f) }
+    // The gesture outlives recompositions (it is keyed on which sides act, not on the actions), so it
+    // reads the actions as they are now: a favourite swiped once must offer "Remove" the second time.
+    val acts by rememberUpdatedState(right to left)
+    pointerInput(right != null, left != null) {
+        var x = 0f
+        fun settle() { s.armed = false; scope.launch { s.offset.animateTo(0f, back) } }
+        sidewaysDrag(
+            onDragStart = { x = s.offset.value; scope.launch { s.offset.stop() } },
+            onDragEnd = {
+                if (s.armed) (if (x > 0f) acts.first else acts.second)?.action?.invoke()
+                settle()
+            },
+            onDragCancel = { settle() },
+        ) { change, delta ->
+            val w = size.width.toFloat()
+            val arm = w * SWIPE_ARM
+            val heavy = kotlin.math.abs(x) > arm && (delta > 0f) == (x > 0f)
+            x = (x + if (heavy) delta * 0.4f else delta).coerceIn(if (left != null) -w * 0.6f else 0f, if (right != null) w * 0.6f else 0f)
+            change.consume()
+            val armed = kotlin.math.abs(x) > arm
+            if (armed != s.armed) { s.armed = armed; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+            scope.launch { s.offset.snapTo(x) }
+        }
+    }
+        .graphicsLayer { translationX = s.offset.value }
+        .drawBehind { if (s.offset.value != 0f) drawRect(fill) }
+}
+
+/**
+ * A drag taken only when it is plainly sideways: once the finger has gone [slop] times the touch slop,
+ * it has to have moved at least [ratio] times as far across as down. Anything steeper, or anything
+ * something else has already taken, is left alone, so a scroll that is a little off vertical scrolls
+ * instead of swiping a song, and a diagonal pull upwards opens the player instead of changing it.
+ * ([detectHorizontalDragGestures] claims a drag on the sideways distance alone, which a slanted drag
+ * easily reaches first - which is what every one of those was.)
+ *
+ * Everywhere a sideways drag shares its space with an up-and-down one uses this: the rows of a list,
+ * the now playing bar and the full-screen sleeve, so the three feel like one gesture.
+ */
+internal suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sidewaysDrag(
+    onDragStart: () -> Unit, onDragEnd: () -> Unit, onDragCancel: () -> Unit,
+    slop: Float = 1f, ratio: Float = 2f,
+    onDrag: (androidx.compose.ui.input.pointer.PointerInputChange, Float) -> Unit,
+) = awaitEachGesture {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    val decide = viewConfiguration.touchSlop * slop
+    var dx = 0f
+    var dy = 0f
+    while (true) {
+        val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+        if (!c.pressed || c.isConsumed) return@awaitEachGesture
+        val d = c.positionChange()
+        dx += d.x; dy += d.y
+        if (dx * dx + dy * dy < decide * decide) continue
+        if (kotlin.math.abs(dx) < ratio * kotlin.math.abs(dy)) return@awaitEachGesture
+        c.consume()
+        break
+    }
+    onDragStart()
+    val finished = horizontalDrag(down.id) { onDrag(it, it.positionChange().x) }
+    if (finished) onDragEnd() else onDragCancel()
+}
+
+/**
+ * The strip a swiped row uncovers: the action's icon and words at the edge the row left, fading in over
+ * the first 64 dp. Neutral until the drag is far enough to act, then the accent, with the icon giving
+ * a small pop. Composed only while the row is off its place, so a list at rest carries none of it.
+ */
+@Composable
+private fun SwipeBackdrop(s: SwipeState, right: RowSwipe?, left: RowSwipe?, modifier: Modifier) {
+    val side by remember { derivedStateOf { kotlin.math.sign(s.offset.value) } }
+    if (side == 0f) return
+    val face = (if (side > 0f) right else left) ?: return
+    val scheme = MaterialTheme.colorScheme
+    val fill by animateColorAsState(if (s.armed) scheme.primary else scheme.surfaceContainerHighest, tween(140), label = "swipe fill")
+    val ink by animateColorAsState(if (s.armed) scheme.onPrimary else scheme.onSurfaceVariant, tween(140), label = "swipe ink")
+    val pop by animateFloatAsState(if (s.armed) 1.15f else 1f, spring(dampingRatio = 0.45f, stiffness = 700f), label = "swipe pop")
+    Box(modifier.drawBehind { drawRect(fill) }) {
+        Row(
+            Modifier.align(if (side > 0f) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = Space.gutter)
+                .graphicsLayer { alpha = (kotlin.math.abs(s.offset.value) / 64.dp.toPx()).coerceIn(0f, 1f) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(face.icon, null, Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }, ink)
+            Text(face.label, Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelLarge, color = ink, maxLines = 1)
+        }
+    }
+}
+
+/**
+ * One track. Numbered rows (an album) carry no artwork; everywhere else the cover leads. The row ends
+ * in a hairline that starts where the text starts, which is what keeps a long list from reading as a
+ * stack of boxes.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun SongRow(
+    song: Song, coverUrl: String?, onClick: () -> Unit, onMenu: () -> Unit, modifier: Modifier = Modifier,
+    number: Int? = null, playing: Boolean = false, downloaded: Boolean = false,
+    selected: Boolean = false, onLongClick: (() -> Unit)? = null, swipeRight: RowSwipe? = null, swipeLeft: RowSwipe? = null,
+    divider: Boolean = true, showArtist: Boolean = true,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val swipe = if (swipeRight != null || swipeLeft != null) remember { SwipeState() } else null
+    Column(modifier.fillMaxWidth().background(if (selected) scheme.secondaryContainer else Color.Transparent)) {
+      Box(Modifier.fillMaxWidth()) {
+        if (swipe != null) SwipeBackdrop(swipe, swipeRight, swipeLeft, Modifier.matchParentSize())
+        Row(
+            Modifier.fillMaxWidth()
+                .then(if (swipe != null) Modifier.swipeable(swipe, swipeRight, swipeLeft, if (selected) scheme.secondaryContainer else scheme.background) else Modifier)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(start = Space.gutter, top = 9.dp, bottom = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // The track playing shows a waveform where its number would be - the same cue Apple uses, and
+            // clearer at a glance than the title merely changing colour.
+            if (number != null) Box(Modifier.width(26.dp), Alignment.Center) {
+                if (playing) PlayingBars(scheme.primary, Modifier.size(16.dp))
+                else Text(
+                    if (number > 0) "$number" else "", textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant,
+                )
+            } else Cover(coverUrl, 46.dp, radius = 6.dp)
+            Column(Modifier.weight(1f).padding(start = if (number != null) 14.dp else 12.dp, end = 8.dp)) {
+                Text(
+                    song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
+                    color = if (playing) scheme.primary else scheme.onSurface,
+                )
+                val second = (if (song.explicitStatus == "explicit") "🅴 " else "") + (if (showArtist) song.artist else "")
+                if (second.isNotEmpty()) Text(
+                    second, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
+                )
+            }
+            val tint = scheme.onSurfaceVariant
+            if (song.isExternal) {
+                Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
+                providerOf(song.id)?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
+            }
+            // Every row's marks sit in columns of their own, the same width on every row: the heart, then
+            // the download ring or tick, then the time, then the menu. A list of favourites then puts all
+            // its hearts one above another - placed after the title, the heart moved with the width of
+            // the time beside it, "3:44" against "12:05" - and a mark arriving or leaving moves nothing
+            // else. The time is last before the menu and in a box of one fixed width, its digits held to
+            // the right edge, so it sits against the ⋯ rather than with an empty download slot between.
+            Box(Modifier.padding(start = 4.dp).width(15.dp), Alignment.Center) {
+                if (LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, "Favourite", Modifier.size(15.dp), tint)
+            }
+            Box(Modifier.width(MARK_SLOT), Alignment.Center) { DownloadSlot(song.id, downloaded, tint) }
+            Text(
+                if (song.duration > 0u) duration(song.duration.toLong()) else "",
+                Modifier.widthIn(min = TIME_SLOT), textAlign = TextAlign.End,
+                style = MaterialTheme.typography.bodySmall, color = tint, maxLines = 1, softWrap = false,
+            )
+            IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(20.dp), tint) }
+        }
+      }
+        if (divider) Hairline(startIndent = if (number != null) Space.gutter + 40.dp else Space.gutter + 58.dp)
+    }
+}
+
+/**
+ * The bars Apple draws where a playing track's number would be. They move while the music does and
+ * stand still when it is paused, which is the cue that matters: a frozen glyph beside the marked row
+ * says "this one, but stopped" without a second icon.
+ *
+ * The phase is read in the draw phase, so a frame invalidates this 16 dp box and nothing else - no
+ * recomposition and no relayout anywhere in the list. Nothing runs at all while the music is paused,
+ * while the screen is off, or while this row is not composed, which is every case the battery cares
+ * about: a list is only on screen when someone is looking at it.
+ */
+@Composable
+fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
+    // Read here rather than threaded through every list: these bars exist on exactly one row, so this
+    // is one collector on one boolean, not one per song.
+    val player: dev.nori.music.app.vm.PlayerViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+    val moving by player.sounding.collectAsStateWithLifecycle()
+    val phase = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    var resumed by remember { androidx.compose.runtime.mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    androidx.compose.runtime.LaunchedEffect(moving, resumed) {
+        if (!moving || !resumed) return@LaunchedEffect
+        while (coroutineContext.isActive) {
+            androidx.compose.animation.core.withInfiniteAnimationFrameMillis { phase.floatValue = it / 1000f }
+        }
+    }
+    androidx.compose.foundation.Canvas(modifier) {
+        val t = phase.floatValue
+        val bars = 4
+        val w = size.width / (bars * 2 - 1)
+        for (i in 0 until bars) {
+            // Four speeds that do not share a period, so the bars never fall into step and read as a meter.
+            val level = 0.5f + 0.5f * kotlin.math.sin(t * (5.1f + i * 1.3f) + i * 1.7f)
+            val h = size.height * (0.28f + 0.72f * if (moving) level else RESTING[i])
+            drawRoundRect(
+                tint,
+                androidx.compose.ui.geometry.Offset(i * w * 2f, size.height - h),
+                androidx.compose.ui.geometry.Size(w, h),
+                androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f),
+            )
+        }
+    }
+}
+
+/** What the bars stand at while the music is paused: a shape, not a flat line. */
+private val RESTING = floatArrayOf(0.35f, 0.8f, 0.5f, 0.65f)
+
+/** A song list wired to the configured tap, swipe and selection behaviour; every screen that lists songs uses this. */
+fun LazyListScope.songRows(
+    songs: List<Song>, actions: ActionsViewModel, playingId: String?, downloaded: Set<String>, selected: Set<String>, menu: (Song) -> Unit,
+    numbered: Boolean = false, cover: (Song) -> String? = { null }, keyPrefix: String = "",
+    /** The list a tap plays from, when [songs] is only a slice of it (one disc of an album, a filtered view). */
+    context: List<Song> = songs,
+    /**
+     * The artist the page is already about. A track by that artist then shows its title alone, the way
+     * Apple's album page does - repeating "Radiohead" down ten rows of a Radiohead album says nothing.
+     */
+    pageArtist: String? = null,
+    /**
+     * Rows keyed by song alone (the ids must be unique) that fade and slide when the list changes under
+     * them - a favourite unstarred, a mix drawn again - instead of the rows below jumping up in one frame.
+     */
+    animated: Boolean = false,
+) {
+    val (onRight, onLeft) = actions.swipes
+    itemsIndexed(songs, key = { i, s -> if (animated) "$keyPrefix${s.id}" else "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
+        SongRow(
+            s, if (numbered) null else cover(s), onClick = { if (context === songs) actions.tap(songs, i) else actions.tap(context, context.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) }, onMenu = { menu(s) },
+            modifier = if (!animated) Modifier else if (AppMotion.reduce) Modifier.animateItem(null, null, null) else Modifier.animateItem(),
+            number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
+            selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, 
+            swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
+            divider = i < songs.lastIndex,
+            showArtist = pageArtist == null || !s.artist.equals(pageArtist, ignoreCase = true),
+        )
+    }
+}
+
+/** The icon and words a swipe setting uncovers under [song]'s row, and the action; null when that side does nothing. */
+@Composable
+internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? = when (action) {
+    SwipeAction.NONE -> null
+    SwipeAction.QUEUE -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, "Add to queue") { actions.enqueue(listOf(song)) }
+    SwipeAction.PLAY_NEXT -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, "Play next") { actions.playNext(listOf(song)) }
+    SwipeAction.DOWNLOAD -> RowSwipe(Icons.Filled.Download, "Download") { actions.download(listOf(song)) }
+    SwipeAction.FAVOURITE -> {
+        val on = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
+        RowSwipe(if (on) Icons.Filled.HeartBroken else Icons.Filled.Favorite, if (on) "Remove" else "Favourite") { actions.star(song, !on) }
+    }
+}
+
+/** A cover with its title under it: the tile every shelf and grid is made of. */
+/**
+ * [fill] is for a grid, where the cell decides the width and the artwork has to take all of it: given a
+ * fixed width inside a wider cell the card hugs the left edge of it and the grid looks ragged.
+ */
+@Composable
+fun CoverCard(title: String, subtitle: String, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) {
+    Column((if (fill) modifier else modifier.width(size)).clickable(onClick = onClick)) {
+        if (fill) Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().aspectRatio(1f), radius = Radius.card)
+        else Cover(coverUrl, size, radius = Radius.card)
+        Text(
+            title, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp, fontWeight = FontWeight.Medium),
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        if (subtitle.isNotEmpty()) Text(
+            subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.5f.sp), color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** A round portrait, for artists. */
+@Composable
+fun ArtistCard(name: String, subtitle: String, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier.width(size).clickable(onClick = onClick), horizontalAlignment = Alignment.CenterHorizontally) {
+        Cover(coverUrl, size, radius = size / 2)
+        Text(
+            name, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 7.dp),
+        )
+        if (subtitle.isNotEmpty()) Text(
+            subtitle, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) =
+    CoverCard(
+        album.name,
+        listOfNotNull(album.artist.ifEmpty { null }, album.year.takeIf { it > 0u }?.toString(), providerOf(album.id)?.let { "☁ $it" }).joinToString(" · "),
+        coverUrl, size, onClick, modifier, fill,
+    )
+
+@Composable
+fun SectionTitle(text: String, modifier: Modifier = Modifier) = SectionHeader(text, modifier)
+
+@Composable
+fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
+    // A page's content fades in over its loader instead of replacing it in one frame. Keyed on the kind
+    // of state only: fresh data for a page already showing just recomposes it, with no fade.
+    androidx.compose.animation.AnimatedContent(
+        load, contentKey = { it::class },
+        transitionSpec = {
+            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260, delayMillis = 60)) togetherWith
+                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+        },
+        label = "load",
+    ) { state ->
+        when (state) {
+            is Load.Ready -> content(state.data)
+            is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { LoadingDots() }
+            is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
+                Text("Could not load", style = MaterialTheme.typography.titleLarge)
+                Text(state.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+            }
+        }
+    }
+}
+
+/** Big, quiet type for an empty list: "Nothing here yet". */
+@Composable
+fun EmptyNote(text: String, modifier: Modifier = Modifier) = Text(
+    text, modifier.fillMaxWidth().padding(Space.gutter), textAlign = TextAlign.Center,
+    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium), color = MaterialTheme.colorScheme.onSurfaceVariant,
+)
+
+/**
+ * Warms artwork that is about to be needed. A server renders each thumbnail the first time it is
+ * asked for, which on a real library is the better part of a second per cover; asking for the next
+ * screenful while the current one is being read turns that wait into something already done. Requests
+ * go through the same loader and cache, so a prefetched cover is simply a cache hit when it appears.
+ */
+@Composable
+fun PrefetchCovers(urls: List<String?>) {
+    val context = LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(urls) {
+        val loader = coil3.SingletonImageLoader.get(context)
+        urls.filterNotNull().filterNot(::isProviderCover).forEach { url ->
+            loader.enqueue(ImageRequest.Builder(context).data(url).size(CoverSize.CARD).build())
+        }
+    }
+}
+
+/**
+ * The time's column: wide enough for "59:59" in the row's small type, so every ordinary track's time
+ * ends in the same place. A track over an hour is wider and pushes left, which is rare enough to allow.
+ */
+private val TIME_SLOT = 36.dp

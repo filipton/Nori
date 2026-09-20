@@ -483,13 +483,13 @@ struct Handle {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
     let eq = Mutex::new(Equalizer::new(rate.max(1) as u32, channels.max(1) as usize));
     Box::into_raw(Box::new(Handle { eq, reduction_db: AtomicU32::new(0) })) as jlong
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_destroy(_: JNIEnv, _: JClass, handle: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_destroy(_: JNIEnv, _: JClass, handle: jlong) {
     if handle != 0 {
         drop(unsafe { Box::from_raw(handle as *mut Handle) });
     }
@@ -497,7 +497,7 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_destroy(_: JNIEnv, _: J
 
 /// `bands` is flat: kind, frequency, gain dB, Q (slope S for the slope shelves), channel for each band.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_configure(env: JNIEnv, _: JClass, handle: jlong, bands: JFloatArray, preamp_db: jfloat, crossfeed_db: jfloat) {
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_configure(env: JNIEnv, _: JClass, handle: jlong, bands: JFloatArray, preamp_db: jfloat, crossfeed_db: jfloat) {
     if handle == 0 {
         return;
     }
@@ -513,7 +513,7 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_configure(env: JNIEnv, 
 
 /// `balance` is -1 (hard left) to 1 (hard right); `lookahead_ms` at or below 0 turns the limiter off.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_configureOutput(
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_configureOutput(
     _: JNIEnv, _: JClass, handle: jlong, balance: jfloat, mono: jboolean, threshold_db: jfloat, release_ms: jfloat, lookahead_ms: jfloat,
 ) {
     if handle != 0 {
@@ -523,7 +523,7 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_configureOutput(
 
 /// The limiter meter: peak gain reduction in dB in the last buffer, 0 when it is off or idle. Lock-free, poll freely.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_gainReductionDb(_: JNIEnv, _: JClass, handle: jlong) -> jfloat {
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_gainReductionDb(_: JNIEnv, _: JClass, handle: jlong) -> jfloat {
     if handle == 0 {
         return 0.0;
     }
@@ -531,7 +531,7 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_gainReductionDb(_: JNIE
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_reset(_: JNIEnv, _: JClass, handle: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_reset(_: JNIEnv, _: JClass, handle: jlong) {
     if handle != 0 {
         unsafe { &*(handle as *const Handle) }.eq.lock().reset();
     }
@@ -540,7 +540,7 @@ pub extern "system" fn Java_dev_flint_music_playback_Dsp_reset(_: JNIEnv, _: JCl
 /// Filters `bytes` bytes from `input[in_pos..]` into `output[out_pos..]`; both are direct buffers.
 /// Returns false when the buffers cannot be reached, so the caller copies instead.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_Dsp_process(
+pub extern "system" fn Java_dev_nori_music_playback_Dsp_process(
     env: JNIEnv, _: JClass, handle: jlong, input: JByteBuffer, in_pos: jint, output: JByteBuffer, out_pos: jint, bytes: jint, encoding: jint,
 ) -> bool {
     let (Ok(src), Ok(dst)) = (env.get_direct_buffer_address(&input), env.get_direct_buffer_address(&output)) else { return false };

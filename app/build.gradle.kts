@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.flint.music.app"
+    namespace = "dev.nori.music.app"
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "dev.flint.music"
+        applicationId = "dev.nori.music"
         minSdk = 26
         targetSdk = 36
         versionName = "0.2.0"

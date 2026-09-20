@@ -1,4 +1,4 @@
-package dev.flint.music.downloads
+package dev.nori.music.downloads
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals

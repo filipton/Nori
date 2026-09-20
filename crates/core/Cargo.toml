@@ -1,11 +1,11 @@
 [package]
-name = "flintmusic"
+name = "norimusic"
 version.workspace = true
 edition.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "flintmusic"
+name = "norimusic"
 
 [dependencies]
 uniffi.workspace = true

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
-        android:name=".FlintApp"
+        android:name=".NoriApp"
         android:label="Nori"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -18,7 +18,7 @@
         <receiver android:name=".PlayerWidget" android:exported="false">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
-                <action android:name="dev.flint.music.STATE" />
+                <action android:name="dev.nori.music.STATE" />
             </intent-filter>
             <meta-data android:name="android.appwidget.provider" android:resource="@xml/widget_player_info" />
         </receiver>

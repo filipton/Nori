@@ -10,14 +10,14 @@ pass=0; fail=0
 check() { local name="$1"; shift; if "$@"; then echo "  PASS  $name"; pass=$((pass+1)); else echo "  FAIL  $name"; fail=$((fail+1)); fi; }
 field() { "$app" state | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
 # Subsonic wants token auth: t=md5(password+salt).
-api() { local m="$1"; shift; local s=flint$RANDOM; local t
+api() { local m="$1"; shift; local s=nori$RANDOM; local t
   t=$(printf '%s%s' "$PASS" "$s" | md5sum | cut -d' ' -f1)
-  curl -s "$URL/rest/$m?u=$USER&t=$t&s=$s&v=1.16.1&c=flint&f=json$*"
+  curl -s "$URL/rest/$m?u=$USER&t=$t&s=$s&v=1.16.1&c=nori&f=json$*"
 }
 json() { python3 -c "import sys,json;d=json.load(sys.stdin)['subsonic-response'];print(eval('d$1',{'d':d}))" 2>/dev/null; }
 
 echo "== features end to end against $URL"
-"$app" wake >/dev/null; adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null
+"$app" wake >/dev/null; adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null
 
 echo "-- lyrics"
 "$app" set thirdPartyLookups true >/dev/null
@@ -82,7 +82,7 @@ check "the notification's shuffle toggles ($shuffle -> $after)" bash -c '[ "'"$s
 echo "-- offline playback of a download"
 "$app" do "download song:$id" >/dev/null; sleep 14
 adb shell svc wifi disable; adb shell svc data disable; sleep 3
-adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 4
+adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 4
 # From the device's own list: looking the song up by id would need the network and prove nothing.
 "$app" play "downloaded:0" >/dev/null; sleep 12
 state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/[0-9]+ state:[a-z]+" | grep -oE "state:[a-z]+" | head -1)
@@ -92,7 +92,7 @@ adb shell svc wifi enable; adb shell svc data enable; sleep 6
 echo "-- the download queue"
 # The notification's tap is this intent; the app is already running, so it arrives as a new intent.
 "$app" open home >/dev/null; sleep 2
-adb shell am start -a dev.flint.music.OPEN_DOWNLOADS -n dev.flint.music/dev.flint.music.app.MainActivity >/dev/null 2>&1; sleep 3
+adb shell am start -a dev.nori.music.OPEN_DOWNLOADS -n dev.nori.music/dev.nori.music.app.MainActivity >/dev/null 2>&1; sleep 3
 check "tapping the download notification opens the queue" test "$(field route)" = "downloads"
 
 echo "-- downloads run side by side and survive a force stop"
@@ -118,11 +118,11 @@ if [ -n "$aid" ]; then
     active=$(field dlActive)
     [ "${active:-0}" -ge 2 ] && break
   done
-  echo "     $active downloading at once, parallel setting $(adb shell run-as dev.flint.music cat shared_prefs/flint.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
+  echo "     $active downloading at once, parallel setting $(adb shell run-as dev.nori.music cat shared_prefs/nori.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
   check "several songs download at once ($active)" test "${active:-0}" -ge 2
   # The download notification carries speed and ETA, under its own id: it used to share the
   # playback notification's id (1001) and replace the now-playing notification while downloading.
-  notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "dev.flint.music|[0-9]*" | sort -u | tr '\n' ' ')
+  notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "dev.nori.music|[0-9]*" | sort -u | tr '\n' ' ')
   echo "     notifications: $notifs"
   check "the download notification posts under its own id" bash -c '[[ "$notifs" == *"|2001"* ]]'
   speed=0; eta=-1
@@ -132,7 +132,7 @@ if [ -n "$aid" ]; then
   echo "     $speed B/s, ETA ${eta}s"
   check "the batch reports a download speed ($speed B/s)" test "${speed:-0}" -gt 0
   check "the batch reports an ETA (${eta}s)" bash -c '[ "${eta:- -1}" -gt 0 ]'
-  adb shell am force-stop dev.flint.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
+  adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
   left=$(field downloading); active=$(field dlActive)
   check "after a force stop the queue picks up again ($left left, $active downloading)" bash -c "[ '${left:-1}' = 0 ] || [ '${active:-0}' -gt 0 ]"
   for _ in $(seq 60); do [ "$(field downloading)" = 0 ] && break; sleep 3; done
@@ -141,7 +141,7 @@ else
   echo "     no library-only album of six songs found; skipped"
 fi
 echo "-- playlists, and does the server agree"
-name="flint check $RANDOM"
+name="nori check $RANDOM"
 "$app" do "newplaylist $name|search:creep" >/dev/null; sleep 6
 pid=$(api getPlaylists | python3 -c "
 import sys,json
@@ -174,8 +174,8 @@ echo "-- for you: favourites and mixes open as pages"
 # What a mix page shows, read from the screen: "<count>|<title>@<x>,<y>|..." for the song count in its
 # caption and every fully visible row title (rows sit below the Play pill and above the mini player).
 page() {
-  adb shell uiautomator dump /sdcard/flint-ui.xml >/dev/null 2>&1
-  adb shell cat /sdcard/flint-ui.xml | python3 -c "
+  adb shell uiautomator dump /sdcard/nori-ui.xml >/dev/null 2>&1
+  adb shell cat /sdcard/nori-ui.xml | python3 -c "
 import sys,re
 nodes=[(t,d,*map(int,b)) for t,d,b in ((m.group(1),m.group(2),re.findall(r'\d+',m.group(3))) for m in re.finditer(r'text=\"([^\"]*)\"[^>]*content-desc=\"([^\"]*)\"[^>]*bounds=\"([^\"]*)\"',sys.stdin.read()))]
 count=next((int(m.group(1)) for t,*_ in nodes for m in [re.match(r'(\d+) songs? ',t)] if m),0)
@@ -224,9 +224,9 @@ adb logcat -c
 "$app" play "album:6Lt5zppPoP7FGBYqInxzZB" >/dev/null; sleep 10
 # Jump to just before the end so the next track starts decoding and a transition has to be planned.
 dur=$(field durationMs); "$app" do "seek $(( ${dur:-240000} - 14000 ))" >/dev/null; sleep 18
-planned=$(adb logcat -d -s flint:I | grep -cE "transition .* -> ")
-analysed=$(adb logcat -d -s flint:I | grep -c "analysed")
-ahead=$(adb logcat -d -s flint:I | grep -c "analysed .* ahead")
+planned=$(adb logcat -d -s nori:I | grep -cE "transition .* -> ")
+analysed=$(adb logcat -d -s nori:I | grep -c "analysed")
+ahead=$(adb logcat -d -s nori:I | grep -c "analysed .* ahead")
 check "a transition is planned at a track boundary ($planned)" test "${planned:-0}" -ge 1
 # The tracks are measured before they are played, so the first meeting of two songs is a real mix
 # rather than a fade; the measurement only runs on audio already on the device, so this is a report
@@ -276,23 +276,23 @@ check "and is not claimed to be bit-perfect" test "$(field bitPerfect)" = "False
 echo "-- a sound per output device"
 # The service switches the sound when the output changes, with no screen involved. A fake DAC stands in
 # for the device; "eq" in the state is the equalizer switch, which each device's sound sets.
-dev="USB: Flint Check DAC"; hp="USB: Sennheiser HD 600"
+dev="USB: Nori Check DAC"; hp="USB: Sennheiser HD 600"
 clean() {
   "$app" do "dac off" >/dev/null; sleep 2; "$app" set autoEqAuto false >/dev/null
-  for p in "flint check" "Flat" "Sennheiser HD 600"; do "$app" set deleteProfile "$p" >/dev/null; done
+  for p in "nori check" "Flat" "Sennheiser HD 600"; do "$app" set deleteProfile "$p" >/dev/null; done
   "$app" set forgetDevice "$dev" >/dev/null; "$app" set forgetDevice "$hp" >/dev/null
 }
 clean   # a run that stopped half-way must not decide this one
 "$app" set autoEqAuto false >/dev/null; "$app" do "dac off" >/dev/null; "$app" set eq false >/dev/null
 "$app" play "search:creep" >/dev/null; sleep 6
-"$app" set eq true >/dev/null; "$app" set saveProfile "flint check" >/dev/null; sleep 2; "$app" set eq false >/dev/null
-"$app" set deviceSound "$dev=profile:flint check" >/dev/null; sleep 2
-"$app" do "dac Flint Check DAC@44100/16" >/dev/null; sleep 3
+"$app" set eq true >/dev/null; "$app" set saveProfile "nori check" >/dev/null; sleep 2; "$app" set eq false >/dev/null
+"$app" set deviceSound "$dev=profile:nori check" >/dev/null; sleep 2
+"$app" do "dac Nori Check DAC@44100/16" >/dev/null; sleep 3
 check "a device with a profile gets it on connect" test "$(field output)/$(field eq)" = "$dev/True"
 "$app" do "dac off" >/dev/null; sleep 3
 check "and the sound from before comes back without it" test "$(field eq)" = "False"
 "$app" set eq true >/dev/null; "$app" set deviceSound "$dev=flat" >/dev/null; sleep 2
-"$app" do "dac Flint Check DAC@44100/16" >/dev/null; sleep 3
+"$app" do "dac Nori Check DAC@44100/16" >/dev/null; sleep 3
 check "a device set to flat turns the equalizer off" test "$(field eq)" = "False"
 "$app" do "dac off" >/dev/null; sleep 3
 check "and it is on again on the speaker" test "$(field eq)" = "True"
@@ -300,7 +300,7 @@ check "and it is on again on the speaker" test "$(field eq)" = "True"
 # AutoEQ: the index is one download from github.com; without it there is nothing to match against.
 "$app" set autoEqIndex 1 >/dev/null; sleep 12
 adb logcat -c; "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 4
-if adb logcat -d -s flint:I | grep -q "device sound: $hp -> nothing chosen"; then
+if adb logcat -d -s nori:I | grep -q "device sound: $hp -> nothing chosen"; then
   check "asking first leaves the sound alone" test "$(field eq)" = "False"
   "$app" set eqNotice apply >/dev/null; sleep 4
   check "saying yes applies the headphones' curve" test "$(field eq)" = "True"

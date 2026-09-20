@@ -10,7 +10,7 @@
 
     <application>
         <service
-            android:name="dev.flint.music.playback.PlaybackService"
+            android:name="dev.nori.music.playback.PlaybackService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
@@ -19,7 +19,7 @@
             </intent-filter>
         </service>
         <service
-            android:name="dev.flint.music.downloads.DownloadWorker"
+            android:name="dev.nori.music.downloads.DownloadWorker"
             android:exported="false"
             android:foregroundServiceType="dataSync">
             <intent-filter>

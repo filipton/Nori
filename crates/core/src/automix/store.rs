@@ -190,20 +190,20 @@ pub fn test_destroy(h: jlong) {
     drop(unsafe { Box::from_raw(h as *mut Stream) });
 }
 
-// ---- JNI: dev.flint.music.playback.AutoMixAnalyzer --------------------------------------------------------------
+// ---- JNI: dev.nori.music.playback.AutoMixAnalyzer --------------------------------------------------------------
 
 const PCM_16: jint = 2;
 const PCM_FLOAT: jint = 4;
 
 /// `expected_ms` (0 if unknown) sizes the buffers so feeding never reallocates.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, expected_ms: jlong) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, expected_ms: jlong) -> jlong {
     let a = Analyzer::new(rate.max(1) as u32, expected_ms.max(0) as u64);
     Box::into_raw(Box::new(Stream { a: Mutex::new(a), channels: channels.clamp(1, 8) as usize })) as jlong
 }
 
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_destroy(_: JNIEnv, _: JClass, h: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_destroy(_: JNIEnv, _: JClass, h: jlong) {
     if h != 0 {
         drop(unsafe { Box::from_raw(h as *mut Stream) });
     }
@@ -211,7 +211,7 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_destroy(_: 
 
 /// Forget everything fed so far (a seek, a new track).
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_reset(_: JNIEnv, _: JClass, h: jlong) {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_reset(_: JNIEnv, _: JClass, h: jlong) {
     if let Some(s) = stream(h) {
         s.a.lock().reset();
     }
@@ -219,13 +219,13 @@ pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_reset(_: JN
 
 /// Frames fed since create/reset.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_frames(_: JNIEnv, _: JClass, h: jlong) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_frames(_: JNIEnv, _: JClass, h: jlong) -> jlong {
     stream(h).map_or(0, |s| s.a.lock().samples() as jlong)
 }
 
 /// Feeds `bytes` bytes of interleaved PCM from `buffer[pos..]` (a direct buffer; read only). False when it cannot.
 #[no_mangle]
-pub extern "system" fn Java_dev_flint_music_playback_AutoMixAnalyzer_feed(env: JNIEnv, _: JClass, h: jlong, buffer: JByteBuffer, pos: jint, bytes: jint, encoding: jint) -> bool {
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_feed(env: JNIEnv, _: JClass, h: jlong, buffer: JByteBuffer, pos: jint, bytes: jint, encoding: jint) -> bool {
     let Ok(src) = env.get_direct_buffer_address(&buffer) else { return false };
     let Some(s) = stream(h) else { return false };
     if src.is_null() || pos < 0 || bytes <= 0 {

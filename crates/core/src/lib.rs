@@ -1,4 +1,4 @@
-//! flint music core: Subsonic request signing, response parsing and the local
+//! nori music core: Subsonic request signing, response parsing and the local
 //! SQLite index. No sockets and no threads of its own; every call is coarse
 //! (one response, one page) so the FFI crossing stays off the hot path.
 

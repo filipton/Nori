@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Drives a debug build of flint directly, instead of tapping screen coordinates:
+# Drives a debug build of nori directly, instead of tapping screen coordinates:
 #   tools/app.sh open settings/sound      navigate to a route
 #   tools/app.sh play "search:noise 1"    play a song by id, album, or first search hit
 #   tools/app.sh set limiter true         flip one setting
 #   tools/app.sh state                    one JSON line: route, playback, key settings
-# Needs the app running (tools/app.sh launch). Answers come back from logcat, tag flinttest.
+# Needs the app running (tools/app.sh launch). Answers come back from logcat, tag noritest.
 set -uo pipefail
-pkg=dev.flint.music
+pkg=dev.nori.music
 send() {
   adb logcat -c
   # Quote for the shell ON THE DEVICE: adb hands it a command line, so an unquoted | or space there
   # becomes a pipe or an argument break and the extra arrives mangled (or not at all).
-  local cmdline="am broadcast -n dev.flint.music/dev.flint.music.app.TestBridge -a dev.flint.music.TEST --es cmd '$1'"
+  local cmdline="am broadcast -n dev.nori.music/dev.nori.music.app.TestBridge -a dev.nori.music.TEST --es cmd '$1'"
   [ -n "${2:-}" ] && cmdline="$cmdline --es arg '$2'"
   [ -n "${3:-}" ] && cmdline="$cmdline --es value '$3'"
   adb shell "$cmdline" >/dev/null 2>&1
   for _ in $(seq 20); do
-    local line; line=$(adb logcat -d -s flinttest:I | tail -1 | sed -E 's/^.*flinttest: //')
+    local line; line=$(adb logcat -d -s noritest:I | tail -1 | sed -E 's/^.*noritest: //')
     [ -n "$line" ] && { echo "$line"; return 0; }
     sleep 0.25
   done

@@ -1,4 +1,4 @@
-package dev.flint.music.downloads
+package dev.nori.music.downloads
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

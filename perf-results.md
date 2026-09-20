@@ -118,7 +118,7 @@ Same APK, same file, same host, same emulator settings:
 | `ExoPlayer:Playb` (our scheduling) | ~0.5 s / 90 s | ~1.1 s / 90 s |
 | Live codec instances in the process | 1 | 3 |
 
-The difference is entirely in the platform's software decoder callbacks, not in flint's own threads:
+The difference is entirely in the platform's software decoder callbacks, not in nori's own threads:
 both images decode with `codec2::software`, but the Android 11 image keeps three codec instances alive
 and spends 27x more time in the in-process callback loop. Burst playback still works there - 63 to 75
 of 90 seconds asleep - it simply has more work to wake up for. Worth re-checking on a real Android 11
@@ -126,7 +126,7 @@ device before treating it as a platform fact rather than an image quirk.
 
 ### Package
 
-- Release APK 10.0 MB (universal: arm64-v8a + x86_64), `libflintmusic.so` 3.1 MB per ABI.
+- Release APK 10.0 MB (universal: arm64-v8a + x86_64), `libnorimusic.so` 3.1 MB per ABI.
 - All native libraries are 16 KB page aligned (`llvm-objdump -p` reports `2**14`), and `zipalign -c -P 16`
   passes, which is what Android 15+ and Play require.
 

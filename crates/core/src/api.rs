@@ -3,7 +3,7 @@
 
 use md5::{Digest, Md5};
 
-pub const CLIENT: &str = "flint";
+pub const CLIENT: &str = "nori";
 pub const API_VERSION: &str = "1.16.1";
 
 #[derive(Debug, Clone, Default)]
@@ -69,7 +69,7 @@ impl Server {
         let mut q = String::new();
         match auth {
             Auth::Token { user, password } => {
-                let salt = &hex(&Md5::digest(format!("flint:{base}:{user}").as_bytes()))[..12];
+                let salt = &hex(&Md5::digest(format!("nori:{base}:{user}").as_bytes()))[..12];
                 let token = hex(&Md5::digest(format!("{password}{salt}").as_bytes()));
                 q.push_str("u=");
                 encode(&mut q, user);

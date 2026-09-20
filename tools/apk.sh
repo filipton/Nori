@@ -20,7 +20,7 @@ for arg in "$@"; do
   esac
 done
 version=$(grep -oE 'versionName = "[^"]+"' "$root/app/build.gradle.kts" | head -1 | cut -d'"' -f2)
-out="$root/build/flint-music-$version-${abis//,/+}.apk"
+out="$root/build/nori-music-$version-${abis//,/+}.apk"
 
 echo "building $version for $abis …"
 (cd "$root" && ./gradlew :app:assembleRelease -PrustTargets="$abis" -q)

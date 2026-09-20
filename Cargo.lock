@@ -487,23 +487,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
-name = "flintmusic"
-version = "0.1.0"
-dependencies = [
- "jni",
- "md-5",
- "parking_lot",
- "rubato",
- "rusqlite",
- "rustfft",
- "serde",
- "serde_json",
- "signalsmith-stretch",
- "thiserror 2.0.20",
- "uniffi",
-]
-
-[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -747,6 +730,23 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "norimusic"
+version = "0.2.0"
+dependencies = [
+ "jni",
+ "md-5",
+ "parking_lot",
+ "rubato",
+ "rusqlite",
+ "rustfft",
+ "serde",
+ "serde_json",
+ "signalsmith-stretch",
+ "thiserror 2.0.20",
+ "uniffi",
 ]
 
 [[package]]
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "uniffi",
 ]
