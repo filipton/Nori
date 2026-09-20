@@ -723,27 +723,42 @@ private fun Artwork(
 }
 
 /**
+ * How much of a record's soft bottom there is at the size it is now: all of it when the record is
+ * lying on the page, none of it while it is held up. A record that has been picked up is a card - it
+ * has an edge of its own, and a shadow - and it is also smaller than the sleeve, which is what the
+ * page's blurred copy of the cover is drawn at: a record dissolving at *its* bottom ends in a part of
+ * that copy which belongs further up the cover, and the two do not meet. They meet exactly when the
+ * record is full size, and this comes in as it gets there, so the difference is never on screen.
+ */
+private fun meltStrength(scale: Float, held: Float): Float {
+    val t = ((scale - held) / (1f - held)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
+
+/**
  * A record's last rows rubbed out. What shows through is whatever is drawn behind it, which wherever
  * this is used is a blur of the same picture at the same size - so the record goes soft instead of
  * stopping, and there is no second picture to keep in step with it.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom(strength: Float = 1f) {
+    if (strength <= 0.002f) return
+    fun stop(a: Float) = Color.Black.copy(alpha = a * strength)
     val top = size.height * (1f - MELT)
     drawRect(
         Brush.verticalGradient(
             // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
             // record's bottom edge.
             0f to Color.Transparent,
-            0.25f to Color.Black.copy(alpha = 0.58f),
-            0.5f to Color.Black.copy(alpha = 0.87f),
-            0.75f to Color.Black.copy(alpha = 0.98f),
+            0.25f to stop(0.58f),
+            0.5f to stop(0.87f),
+            0.75f to stop(0.98f),
             // Gone before the bottom edge, not at it. A ramp that only reaches full strength on the last
             // row leaves that row not quite rubbed out, and what is left is a sharp line of the cover
             // along the bottom of the record - a hairline while the record is small, and plain to see the
             // moment it grows. The old painted melt pinned its last slice to the record's bottom for
             // exactly this reason.
-            0.92f to Color.Black,
-            1f to Color.Black,
+            0.92f to stop(1f),
+            1f to stop(1f),
             startY = top, endY = size.height,
         ),
         topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
@@ -758,7 +773,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
  * last: picture, blur, page. The sleeve and the cover in flight both end this way, or the hand-over
  * between them shows as the bottom of the cover changing.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage(scale: Float = 1f) {
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage(scale: Float = 1f, strength: Float = 1f) {
+    if (strength <= 0.002f) return
     // Where the record's own bottom edge is, which is not the sleeve's while the record is picked up.
     // A blur has nothing to sample past that edge, so its last rows pull in the emptiness there and go
     // dark; those rows are rubbed out here, and what is left in their place is the page's own copy of
@@ -769,8 +785,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.giveWayToPage(scale
     drawRect(
         Brush.verticalGradient(
             0f to Color.Transparent,
-            0.55f to Color.Black.copy(alpha = 0.55f),
-            1f to Color.Black,
+            0.55f to Color.Black.copy(alpha = 0.55f * strength),
+            1f to Color.Black.copy(alpha = strength),
             startY = top, endY = bottom,
         ),
         topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
@@ -1375,7 +1391,8 @@ private fun SleeveCarousel(
             // back. The one on top does the fading; the one underneath keeps its picture, which is
             // covered anyway.
             if (!on()) return@drawWithContent
-            rubOutBottom()
+            val s = liftedScale(lift.value, widthPx, size.height)
+            rubOutBottom(meltStrength(s, liftedScale(1f, widthPx, size.height)))
         }
         fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, sharp: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             // Its own layer to rub out of, for the copy that rubs: without one the erase would take the
@@ -1446,7 +1463,11 @@ private fun SleeveCarousel(
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent { drawContent(); giveWayToPage(liftedScale(lift.value, widthPx, size.height)) },
+                .drawWithContent {
+                    drawContent()
+                    val s = liftedScale(lift.value, widthPx, size.height)
+                    giveWayToPage(s, meltStrength(s, liftedScale(1f, widthPx, size.height)))
+                },
         ) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
