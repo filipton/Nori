@@ -1845,19 +1845,11 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val state by vm.state.collectAsStateWithLifecycle()
-    // Where a seek has been asked to go, until the player is really there. Without it the bar went back
-    // to where the song still was for the moment between the finger leaving and the player answering,
-    // which reads as the scrub having been thrown away.
-    var pending by remember { mutableStateOf<Long?>(null) }
+    // Where a seek has been asked to go, until the player is really there. Held from the watch
+    // itself rather than a timer, so a slow seek (prepare, then the re-ask) reads as one held place
+    // instead of a jump, a snap-back past the timeout and a glide when it finally lands.
+    val pending by vm.pendingSeek.collectAsStateWithLifecycle()
     val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, pending))
-    LaunchedEffect(pending) {
-        val target = pending ?: return@LaunchedEffect
-        // A second and a half is longer than any seek the player answers; past that, believe the player.
-        kotlinx.coroutines.withTimeoutOrNull(1_500) {
-            while (isActive && kotlin.math.abs(vm.positionMs - target) > 500) delay(32)
-        }
-        pending = null
-    }
     // Duration is read through the gesture rather than keying it: a track that learns its real length
     // mid-scrub would restart the detector and the finger would lift on a dead pointer.
     val d by rememberUpdatedState(durationMs.coerceAtLeast(1))
@@ -1880,6 +1872,21 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // bar straight at the new song's nought: the slide back to the beginning was there when a song
     // ended by itself, because then nothing stops, and missing on next and previous.
     val moving by rememberUpdatedState(playing)
+    // The held place is over - landed or given up. Meet the player where it is instead of gliding
+    // there: the glide was the animation after the jump on slow seeks. When the player is nearly at
+    // the held place, show that: the position read can lag a landing by a tick, and snapping to the
+    // stale reading is the split-second flash back to where the finger started from.
+    var lastHeld by remember { mutableStateOf<Long?>(null) }
+    LaunchedEffect(pending) {
+        if (pending != null) lastHeld = pending
+        else {
+            val p = vm.positionMs
+            val h = lastHeld
+            live.floatValue = if (h != null && kotlin.math.abs(p - h) <= 1_500) (h.toFloat() / d).coerceIn(0f, 1f)
+            else (p.toFloat() / d).coerceIn(0f, 1f)
+            lastHeld = null
+        }
+    }
     LaunchedEffect(dragging) {
         if (dragging) return@LaunchedEffect
         // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
@@ -1950,11 +1957,10 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                             if (!change.pressed) break
                         }
                         // Apple seeks on release, not while the finger moves: one seek, at the end,
-                        // and the sound carries on undisturbed until then.
+                        // and the sound carries on undisturbed until then. The bar holds the place
+                        // through `pending` (the watch clears it when the player is really there).
                         if (seek) {
-                            val target = (drag * d).toLong()
-                            vm.seekTo(target)
-                            pending = target
+                            vm.seekTo((drag * d).toLong())
                         }
                         dragging = false
                     }

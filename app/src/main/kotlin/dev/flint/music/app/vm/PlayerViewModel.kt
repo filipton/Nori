@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.onStart
 class PlayerViewModel(app: Application) : FlintViewModel(app) {
     private val player = flint.player
     val state: StateFlow<PlayerState> = player.state
+    /** Where a seek asked to go, while it is still being watched into place; the seek bar holds this. */
+    val pendingSeek: StateFlow<Long?> = player.pendingSeek
 
     /** Just the id, so a list can highlight its playing row without observing the whole player. */
     val currentId: StateFlow<String?> = state.map { it.current?.id }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
