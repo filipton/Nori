@@ -326,6 +326,15 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
         // Everything that happens while a song plays or when one ends. The two ways of joining songs
         // together lead, because they are what someone comes here to find.
         "playing" -> SettingsCard {
+            // Bit-perfect output means exactly the file's samples reach the DAC, so nothing may be mixed
+            // into them - every transition here is off while it is on. That was silent: the crossfade
+            // was set, the setting stayed set, and songs simply followed each other.
+            val dac by vm.dac.collectAsStateWithLifecycle()
+            if (p.hiRes || dac.bitPerfect) Text(
+                "Off right now: bit-perfect output is playing the file's own samples, which cannot be mixed into.",
+                Modifier.padding(horizontal = Space.gutter, vertical = 4.dp),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (!p.autoMix) Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s")) { v -> vm.update { it.copy(crossfadeSec = v) } }
             Toggle("AutoMix", "Mixes the next song in like a DJ. Matches the beat and swaps the bass over.", p.autoMix) { on -> vm.update { it.copy(autoMix = on) } }
             if (p.autoMix) {

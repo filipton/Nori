@@ -217,14 +217,23 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
      * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
-        wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
+        wanted = Seek(ms, c.currentPosition, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
+        // A queue restored from the last time the app ran is deliberately left unprepared, so that
+        // opening the app touches nothing. Such a player has no seekable window, the controller drops
+        // every seek without a word, and the song then started from where it had been left - the finger
+        // ignored. Asking for a place in a song is asking for the song, so prepare it; the seek itself
+        // lands through the watch below, once there is something to seek in.
+        if (!c.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) c.prepare()
         c.seekTo(ms)
         main.removeCallbacks(watch)
         main.postDelayed(watch, 300)
     }
 
-    /** Where a seek asked to go, in which song, and how long to go on watching for it; see [seekTo]. */
-    private class Seek(val target: Long, val id: String?, val until: Long) { var tries = 0 }
+    /**
+     * Where a seek asked to go, where the player was when it was asked, in which song, and how long to
+     * go on watching for it; see [seekTo].
+     */
+    private class Seek(val target: Long, val from: Long, val id: String?, val until: Long) { var tries = 0 }
     private var wanted: Seek? = null
     private val main by lazy { android.os.Handler(android.os.Looper.getMainLooper()) }
 
@@ -255,9 +264,10 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         // At the place it asked for but not past it yet - which, from a controller, is as true before
         // the session has done the seek as after it. Not proof, so the watch carries on.
         if (pos >= w.target - 1_500) return
-        // Only from the very beginning: anywhere else and the player has been asked for something newer
-        // - the next song, another scrub - which must not be undone.
-        if (pos > 1_500) { forget(); return }
+        // Still where it was when the seek was asked for - so nothing newer has moved it, and this is
+        // the seek having been dropped or undone. Anywhere else, the player has been asked for
+        // something since (another scrub, a skip) which must not be undone.
+        if (pos > w.from + 1_500) { forget(); return }
         // A source that refuses to be started anywhere but the top would otherwise be fought forever.
         if (w.tries++ >= 3) { forget(); return }
         p.seekTo(w.target)
