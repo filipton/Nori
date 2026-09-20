@@ -299,6 +299,20 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         fadingFrom = null
     }
 
+    // The colours of a record that has fully arrived, kept until the page itself is wearing them. The
+    // page used to stop drawing them the moment the sleeve let go of the record, which is one or two
+    // frames before it took them on: for those frames the page went back to the record before, and the
+    // record growing back into place swept its own soft bottom down over that - the frame of the
+    // previous cover that shows as the sleeve zooms in. Latched on a boolean, so it cannot be missed
+    // when two changes land in the same frame.
+    var held by remember { mutableStateOf<PagePalette?>(null) }
+    val arrivingNow by androidx.compose.runtime.rememberUpdatedState(arriving)
+    LaunchedEffect(shift) {
+        androidx.compose.runtime.snapshotFlow { shift.amount >= 0.999f }.collect { full ->
+            if (full) arrivingNow?.let { held = it }
+        }
+    }
+
     // A record that has arrived hands its colours over there and then. The page is already drawing them
     // - they came across with the record - so nothing changes on screen; what it prevents is the page
     // ever having to go back to the record before while the song catches up.
@@ -346,7 +360,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             // The arriving record's page, brought up as the record itself crosses. Only while there is
             // something to bring up: with no colours worked out yet this would be the plain page sliding
             // in, which is worse than the page simply waiting.
-            if (arriving != null && arriving != palette) Box(
+            val over = held?.takeIf { it != palette }
+            if (over != null) Box(Modifier.matchParentSize().drawBehind { wash(over) })
+            else if (arriving != null && arriving != palette) Box(
                 Modifier.matchParentSize().graphicsLayer { alpha = shift.amount }.drawBehind { wash(arriving) },
             )
             if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, palette, sleeveHeight > 0f)
@@ -1324,7 +1340,13 @@ private fun SleeveCarousel(
         @Composable
         fun androidx.compose.foundation.layout.BoxScope.records(fading: Boolean) {
             fun Modifier.maybeSoft(on: () -> Boolean = { true }) = if (fading) softBottom(on) else this
-            Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft { landedUrl == null }) {
+            // Not while a record that has landed is held over it. The two sit in the same place, and the
+            // one on top fades out at its bottom - onto this one, which is still showing the cover
+            // before it until the picture catches up. That is the frame of the previous cover that
+            // appears as the record zooms in: not a colour out of step, the old picture itself, coming
+            // up through the new one's soft bottom. The one on top is the whole record; this one has
+            // nothing to add until it is let go of.
+            if (landedUrl == null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft()) {
                 SleeveImage(art, Modifier.fillMaxSize())
             }
             Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }, fading).maybeSoft().background(plateColour).loadingSheen(!afterHere, sheen)) {
@@ -1463,7 +1485,6 @@ private fun rememberSleeveArt(url: String?): SleeveArt {
         when (val st = state) {
             is coil3.compose.AsyncImagePainter.State.Success -> if (st.painter !== art.current) {
                 art.loading = false
-                art.shownUrl = url
                 val swiped = art.snapNext.also { art.snapNext = false }
                 val instant = swiped || art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
                 // The picture on screen stays underneath at full strength while the new one covers it; one
@@ -1473,6 +1494,11 @@ private fun rememberSleeveArt(url: String?): SleeveArt {
                 if (instant || AppMotion.reduce) art.fade.snapTo(1f)
                 else { art.fade.snapTo(0f); art.fade.animateTo(1f, androidx.compose.animation.core.tween(if (art.previous == null) 320 else 480)) }
                 art.previous = null
+                // Last, once the picture is really the one on screen. Said before the swap - and there
+                // is a suspension between the two - this let the record held over the sleeve be taken
+                // away while the sleeve underneath was still showing the cover before it, which is the
+                // frame of the previous cover that appeared as the record grew back.
+                art.shownUrl = url
             }
             is coil3.compose.AsyncImagePainter.State.Loading -> {
                 if (art.current == null) art.loading = true
