@@ -1108,7 +1108,6 @@ private fun SleeveCarousel(
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 18.dp.toPx() }
     val radius = with(density) { 22.dp.toPx() }
-    val elevation = with(density) { 18.dp.toPx() }
     @Composable fun neighbour(url: String?) = coil3.compose.rememberAsyncImagePainter(
         remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
         filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
@@ -1433,11 +1432,13 @@ private fun SleeveCarousel(
             if (l > 0f) {
                 shape = RoundedCornerShape(radius * l / s)
                 clip = true
-                // Only the record casts a shadow, and only while it is properly up. The blurred copy is
-                // not a card and must not have one - a shadow inside the blur is a dark band under the
-                // record's soft bottom. The record's own goes with the square of the lift, so it is gone
-                // early in the settle rather than lying as a line under a bottom that is dissolving.
-                if (sharp) shadowElevation = elevation * l * l
+                // No shadow. A shadow is drawn from the layer's outline, which is the whole record -
+                // including the last rows, which are rubbed out so that the record can dissolve into
+                // its own blur. So the shadow showed straight through that transparency: a dark band
+                // sitting at the record's bottom, travelling with it while it was lifted and gone the
+                // moment it settled, which is the line that runs ahead of a cover as it grows and is
+                // nowhere to be found once it has. A record that is picked up is already smaller and
+                // rounded; it does not need one.
             }
         }
         val o0 = { offset }
