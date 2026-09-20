@@ -243,6 +243,8 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         /// Anchor and lowest position of the first READY observations; see keepSeek.
         var from: Long? = null
         var low: Long? = null
+        /// Last position seen, to tell a session still converging on the target from a stuck one.
+        var last: Long? = null
     }
     private var wanted: Seek? = null
     /**
@@ -297,6 +299,15 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
         // Paused where the finger asked: landed - a paused player moves for nothing else.
         if (near && !playing) { forget(); return }
         w.low = minOf(w.low ?: pos, pos)
+        // Still converging on the target (a transcode lands seeks in stages, seconds apart): give it
+        // its window rather than giving up, so the bar keeps holding the asked place throughout.
+        val converging = w.last?.let { last ->
+            val was = kotlin.math.abs(last - target)
+            val isClose = kotlin.math.abs(pos - target)
+            isClose + 250 < was
+        } == true
+        w.last = pos
+        if (converging) { w.until = now + KEEP_SEEK_MS; return }
         val cameDown = (w.low ?: pos) < from - 500
         if (target >= from) {
             // Forward: played past it, and the anchor is truthful, so this cannot misfire on a
