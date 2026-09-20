@@ -516,7 +516,7 @@ class PlaybackService : MediaLibraryService() {
             val settings = dev.flint.music.ffi.AutoMixSettings(
                 maxTransitionS = (if (p.autoMix) p.autoMixMaxS else p.crossfadeSec).toFloat(),
                 beatMatch = p.autoMix && p.autoMixBeatMatch, maxTempoChangePct = p.autoMixMaxTempoPct,
-                bassSwap = p.autoMix && p.autoMixBassSwap, filterEffects = p.autoMix && p.autoMixFilters,
+                bassSwap = p.autoMix && p.autoMixBassSwap, filterEffects = p.autoMix && p.autoMixFilters, echoOut = p.autoMix && p.autoMixEchoOut,
                 keepPitch = p.autoMixKeepPitch, sameAlbumInOrder = p.crossfadeKeepAlbums && followsOnAlbum(out, next),
                 matchLoudness = false,
             )
@@ -537,7 +537,9 @@ class PlaybackService : MediaLibraryService() {
 
         override fun wantsAnalysis(songId: String): Boolean {
             if (!flint.settings.value.autoMix || songId.startsWith(RADIO_PREFIX) || songId.startsWith("ext-")) return false
-            return runCatching { flint.core.analysisGet(songId) == null }.getOrDefault(false)
+            // Missing *or* measured by an older analyser: without the overlap windows the pair
+            // gates read zeros and never fire, so old rows are measured again, not kept.
+            return runCatching { flint.core.analysisMissing(listOf(songId)).isNotEmpty() }.getOrDefault(false)
         }
 
         override fun analysed(songId: String, handle: Long, frames: Long, sampleRate: Int) {

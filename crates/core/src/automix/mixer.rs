@@ -41,7 +41,12 @@ pub mod param {
     pub const LP_END: usize = 12;
     pub const LP_FROM_HZ: usize = 13;
     pub const LP_TO_HZ: usize = 14;
-    pub const COUNT: usize = 15;
+    /// Beat-synced echo on the outgoing deck: delay ms (one outgoing beat), feedback 0..1, wet dB.
+    /// Delay -1 means off. Appended after the original 15; short arrays leave the echo off.
+    pub const ECHO_DELAY: usize = 15;
+    pub const ECHO_FB: usize = 16;
+    pub const ECHO_WET: usize = 17;
+    pub const COUNT: usize = 18;
 }
 
 /// The plan as the flat array the mixer takes.
@@ -62,6 +67,9 @@ pub fn params(plan: &TransitionPlan) -> Vec<f32> {
     p[param::LP_END] = plan.filter_end_ms as f32;
     p[param::LP_FROM_HZ] = plan.filter_from_hz;
     p[param::LP_TO_HZ] = plan.filter_to_hz;
+    p[param::ECHO_DELAY] = plan.echo_delay_ms as f32;
+    p[param::ECHO_FB] = plan.echo_feedback;
+    p[param::ECHO_WET] = plan.echo_wet_db;
     p
 }
 
@@ -142,6 +150,10 @@ pub struct Mixer {
     lp_coef: Coef,
     lp_state: [[[f64; 2]; MAX_CHANNELS]; 2],
     lp_entry: u64,
+    /// Beat-synced echo on the outgoing deck: delay frames, feedback, wet gain, and the ring per channel.
+    echo: Option<(usize, f64, f64)>,
+    echo_buf: Vec<f64>,
+    echo_pos: usize,
 }
 
 impl Mixer {
@@ -164,6 +176,9 @@ impl Mixer {
             lp_coef: Coef::default(),
             lp_state: [[[0.0; 2]; MAX_CHANNELS]; 2],
             lp_entry: 0,
+            echo: None,
+            echo_buf: Vec::new(),
+            echo_pos: 0,
         };
         m.configure(&[0.0; param::COUNT]);
         m
@@ -200,6 +215,20 @@ impl Mixer {
         let (ls, le, lf, lt) = (get(param::LP_START), get(param::LP_END), get(param::LP_FROM_HZ), get(param::LP_TO_HZ));
         self.lp = (ls >= 0.0 && le >= ls && lf > 0.0 && lt > 0.0).then(|| (span(ls, le, self.len), lf.min(self.rate * 0.45), lt.min(self.rate * 0.45)));
         self.lp_entry = frames(LP_ENTRY_MS).max(1);
+        // One outgoing beat of delay, capped at a second (about 1.5 MB float at 48 kHz stereo, reused across transitions).
+        let (ed, ef, ew) = (get(param::ECHO_DELAY), p.get(param::ECHO_FB).copied().unwrap_or(0.5), p.get(param::ECHO_WET).copied().unwrap_or(-6.0));
+        self.echo = (ed >= 1.0).then(|| {
+            let d = (frames(ed).max(1).min(self.rate as u64) as usize).max(1);
+            (d, (ef as f64).clamp(0.0, 0.9), 10f64.powf((ew as f64).clamp(-24.0, 0.0) / 20.0))
+        });
+        if let Some((d, _, _)) = self.echo {
+            let need = d * self.ch;
+            if self.echo_buf.len() < need {
+                self.echo_buf.resize(need, 0.0);
+            }
+            self.echo_buf[..need].fill(0.0);
+            self.echo_pos = 0;
+        }
         self.hp_state = [[[[0.0; 2]; MAX_CHANNELS]; 2]; 2];
         self.lp_state = [[[0.0; 2]; MAX_CHANNELS]; 2];
     }
@@ -270,6 +299,18 @@ impl Mixer {
                     let l = self.lp_coef.run(&mut self.lp_state[0][c], o);
                     let l = self.lp_coef.run(&mut self.lp_state[1][c], l);
                     o = o * (1.0 - lp_wet) + l * lp_wet;
+                }
+                if let Some((d, fb, wet)) = self.echo {
+                    // Post-fader send: the dry deck fades, the repeats decay on their own inside the overlap.
+                    let idx = self.echo_pos * ch + c;
+                    let rep = self.echo_buf[idx];
+                    self.echo_buf[idx] = o + rep * fb;
+                    if c + 1 == ch {
+                        self.echo_pos = (self.echo_pos + 1) % d;
+                    }
+                    o = o * g_out + rep * wet;
+                    *dst.add(f * ch + c) = store(o + xi[c] * g_in);
+                    continue;
                 }
                 let mut i = xi[c];
                 if self.swap.is_some() {
@@ -413,6 +454,9 @@ mod tests {
             filter_end_ms: -1,
             filter_from_hz: 0.0,
             filter_to_hz: 0.0,
+            echo_delay_ms: -1,
+            echo_feedback: 0.5,
+            echo_wet_db: -6.0,
             reason: String::new(),
         }
     }
@@ -509,6 +553,27 @@ mod tests {
         m.configure(&params(&p));
         m.process_f32(&zeros, &hi, &mut y);
         assert!((rms(&y[2400..24000]) / rms(&hi) - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn the_echo_repeats_the_outgoing_deck_on_the_beat() {
+        let mut p = plan();
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (0, 480, 480, 960);
+        (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (240, 0.5, 0.0);
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        // One click, then silence: the repeats land one delay apart, halving each time.
+        let mut click = vec![0f32; 48000];
+        click[0] = 1.0;
+        let zeros = vec![0f32; 48000];
+        let mut y = vec![0f32; 48000];
+        m.process_f32(&click, &zeros, &mut y);
+        let d = (0.24 * RATE) as usize;
+        let at = |n: usize| y[n * d..n * d + 24].iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!((at(0) - 1.0).abs() < 0.01, "dry click: {}", at(0));
+        assert!((at(1) - 1.0).abs() < 0.1, "first repeat at full wet: {}", at(1));
+        assert!((at(2) - 0.5).abs() < 0.1, "second repeat halved: {}", at(2));
+        assert!((at(3) - 0.25).abs() < 0.1, "third repeat quartered: {}", at(3));
     }
 
     #[test]

@@ -484,6 +484,13 @@ pub struct TrackAnalysis {
     /// one). `intro_end_ms == silence_start_ms` means the track starts at full energy.
     pub intro_end_ms: i64,
     pub outro_start_ms: i64,
+    /// What the overlap windows sound like, for the pair gates: mean share of frame power in the voice
+    /// band (0..1) and mean spectral centroid (Hz) over the outro (`outro_start_ms` to the music's end)
+    /// and the intro (the music's start to `intro_end_ms`). 0 when unknown (silence, or a v1 row).
+    pub outro_vocal: f32,
+    pub intro_vocal: f32,
+    pub outro_centroid: f32,
+    pub intro_centroid: f32,
     /// Wall-clock time of the analysis, ms since the epoch.
     pub analysed_ms: i64,
 }
@@ -498,6 +505,8 @@ pub struct AutoMixSettings {
     pub max_tempo_change_pct: f32,
     pub bass_swap: bool,
     pub filter_effects: bool,
+    /// Beat-synced echo-out for clashing pairs (two vocals, far keys); a plain fade when off.
+    pub echo_out: bool,
     /// Time-stretch (true) or varispeed, which also moves the pitch and is therefore held to 2 %.
     pub keep_pitch: bool,
     /// The two tracks are consecutive on one album played in order: no transition at all.
@@ -514,6 +523,7 @@ impl Default for AutoMixSettings {
             max_tempo_change_pct: 6.0,
             bass_swap: true,
             filter_effects: true,
+            echo_out: true,
             keep_pitch: true,
             same_album_in_order: false,
             match_loudness: false,
@@ -531,6 +541,8 @@ pub enum TransitionKind {
     MixRampFade,
     /// Tempo-locked, bar-aligned mix, optionally with a bass swap.
     BeatMatched,
+    /// The outgoing track exits into a beat-synced echo while the incoming track fades in over its tail.
+    EchoOut,
 }
 
 /// The order is the wire format of `automix_mixer_params`; only append.
@@ -582,6 +594,11 @@ pub struct TransitionPlan {
     pub filter_end_ms: i64,
     pub filter_from_hz: f32,
     pub filter_to_hz: f32,
+    /// Beat-synced echo on the outgoing deck, `-1` when off. `echo_delay_ms` is one outgoing beat;
+    /// `echo_feedback` 0..1 is what each repeat keeps; `echo_wet_db` is the repeats' level.
+    pub echo_delay_ms: i64,
+    pub echo_feedback: f32,
+    pub echo_wet_db: f32,
     /// Why this plan, for logs.
     pub reason: String,
 }

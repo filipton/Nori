@@ -250,8 +250,7 @@ fn noise_is_reported_as_unreliable() {
 }
 
 #[test]
-fn silence_and_trims() {
-    let t = analyse("s", &vec![0f32; 44100 * 20], 44100).track;
+fn silence_and_trims() {    let t = analyse("s", &vec![0f32; 44100 * 20], 44100).track;
     assert_eq!((t.bpm, t.bpm_confidence, t.lufs, t.key), (0.0, 0.0, -70.0, 0));
     assert_eq!((t.silence_start_ms, t.silence_end_ms), (0, 0));
     assert_eq!(t.duration_ms, 20_000);
@@ -264,6 +263,24 @@ fn silence_and_trims() {
     assert!(t.mixramp_end_ms <= t.silence_end_ms && t.mixramp_end_ms > t.silence_end_ms - 1000, "{t:?}");
     assert!(t.lufs > -30.0 && t.lufs < -5.0, "lufs {}", t.lufs);
     assert!((t.bpm - 120.0).abs() < 0.1);
+}
+
+#[test]
+fn overlap_windows_describe_vocals_and_brightness() {
+    // Sustained chords put pitched energy in the voice band; drums alone are clicks and hats.
+    let sung = analyse("t", &Synth { chords: vec![(0, false), (5, false)], ..Synth::new(128.0) }.render(), 44100).track;
+    let drums = analyse("t", &Synth::new(128.0).render(), 44100).track;
+    assert!(sung.outro_vocal > drums.outro_vocal, "{} vs {}", sung.outro_vocal, drums.outro_vocal);
+    assert!(sung.intro_vocal > drums.intro_vocal, "{} vs {}", sung.intro_vocal, drums.intro_vocal);
+    // The kick carries drums-only power (low centroid); chords pull it up into the voice band.
+    // Either way the windows disagree by well over half an octave - the mismatch signal is real.
+    assert!((sung.outro_centroid / drums.outro_centroid).log2().abs() > 0.5, "{} vs {}", sung.outro_centroid, drums.outro_centroid);
+    for t in [&sung, &drums] {
+        assert!((0.0..=1.0).contains(&t.outro_vocal) && (0.0..=1.0).contains(&t.intro_vocal));
+        assert!(t.outro_centroid > 0.0 && t.intro_centroid > 0.0);
+    }
+    let silent = analyse("s", &vec![0f32; 44100 * 20], 44100).track;
+    assert_eq!((silent.outro_vocal, silent.intro_vocal, silent.outro_centroid, silent.intro_centroid), (0.0, 0.0, 0.0, 0.0));
 }
 
 #[test]
@@ -395,6 +412,25 @@ fn analysis_is_stored_and_reported_missing() {
     assert_eq!(core.analysis_missing(vec!["a".into(), "b".into()]).unwrap(), vec!["b".to_string()], "old versions are redone");
     core.analysis_store(TrackAnalysis { bpm: 99.5, ..t.clone() }).unwrap();
     assert_eq!(core.analysis_get("a".into()).unwrap().unwrap().bpm, 99.5, "store replaces");
+}
+
+#[test]
+fn a_v1_database_migrates_to_v2() {
+    // A database from before the overlap-window columns: migrate keeps the row readable with
+    // zeroed windows, and the old version still reports the track for re-analysis.
+    let dir = std::env::temp_dir().join(format!("flint-mig-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mig.db").to_string_lossy().into_owned();
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE track_analysis(song_id TEXT PRIMARY KEY, analysis_version INTEGER NOT NULL, duration_ms INTEGER NOT NULL, bpm REAL NOT NULL, bpm_confidence REAL NOT NULL, beat_offset_ms REAL NOT NULL, stability REAL NOT NULL, downbeat_phase INTEGER NOT NULL, downbeat_confidence REAL NOT NULL, lufs REAL NOT NULL, key INTEGER NOT NULL, key_confidence REAL NOT NULL, silence_start_ms INTEGER NOT NULL, silence_end_ms INTEGER NOT NULL, mixramp_start_ms INTEGER NOT NULL, mixramp_end_ms INTEGER NOT NULL, intro_end_ms INTEGER NOT NULL, outro_start_ms INTEGER NOT NULL, analysed_ms INTEGER NOT NULL) WITHOUT ROWID").unwrap();
+        c.execute("INSERT INTO track_analysis VALUES('v1', 1, 240000, 128.0, 0.9, 120.0, 0.9, 0, 0.8, -9.0, 8, 0.8, 100, 238500, 400, 236000, 15000, 220000, 0)", []).unwrap();
+    }
+    let core = Core::new(path.clone()).unwrap();
+    let a = core.analysis_get("v1".into()).unwrap().unwrap();
+    assert_eq!((a.bpm, a.outro_vocal, a.intro_centroid), (128.0, 0.0, 0.0));
+    assert_eq!(core.analysis_missing(vec!["v1".into()]).unwrap(), vec!["v1".to_string()]);
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

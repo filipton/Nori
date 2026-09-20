@@ -188,6 +188,7 @@ data class Prefs(
     val autoMixMaxTempoPct: Float = 6f,
     val autoMixBassSwap: Boolean = true,
     val autoMixFilters: Boolean = true,
+    val autoMixEchoOut: Boolean = true,
     /** Off: tempo is matched by changing speed and pitch together (cheaper, and within 2 % inaudible). */
     val autoMixKeepPitch: Boolean = true,
     val speed: Float = 1f,
@@ -373,7 +374,7 @@ class Settings(context: Context) {
             crossfadeSec = sp.getInt("crossfadeSec", 0),
             autoMix = sp.getBoolean("autoMix", false), autoMixMaxS = sp.getInt("autoMixMaxS", 12), autoMixBeatMatch = sp.getBoolean("autoMixBeatMatch", true),
             autoMixMaxTempoPct = sp.getFloat("autoMixMaxTempoPct", 6f), autoMixBassSwap = sp.getBoolean("autoMixBassSwap", true),
-            autoMixFilters = sp.getBoolean("autoMixFilters", true), autoMixKeepPitch = sp.getBoolean("autoMixKeepPitch", true),
+            autoMixFilters = sp.getBoolean("autoMixFilters", true), autoMixEchoOut = sp.getBoolean("autoMixEchoOut", true), autoMixKeepPitch = sp.getBoolean("autoMixKeepPitch", true),
             speed = sp.getFloat("speed", 1f),
             skipSilence = sp.getBoolean("skipSilence", false),
             scrobblePercent = sp.getInt("scrobblePercent", 50),
@@ -413,7 +414,7 @@ class Settings(context: Context) {
         run { }; putInt("crossfadeSec", p.crossfadeSec)
         putBoolean("autoMix", p.autoMix); putInt("autoMixMaxS", p.autoMixMaxS); putBoolean("autoMixBeatMatch", p.autoMixBeatMatch)
         putFloat("autoMixMaxTempoPct", p.autoMixMaxTempoPct); putBoolean("autoMixBassSwap", p.autoMixBassSwap)
-        putBoolean("autoMixFilters", p.autoMixFilters); putBoolean("autoMixKeepPitch", p.autoMixKeepPitch)
+        putBoolean("autoMixFilters", p.autoMixFilters); putBoolean("autoMixEchoOut", p.autoMixEchoOut); putBoolean("autoMixKeepPitch", p.autoMixKeepPitch)
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("autoEqAuto", p.autoEqAuto); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)

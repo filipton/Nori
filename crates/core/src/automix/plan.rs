@@ -1,10 +1,14 @@
 //! Transition planning: a pure function from what is known about two tracks to a `TransitionPlan`.
 //! The fallback ladder from the research, most to least informed:
 //!
-//! 1. both grids confident and stable, tempos within reach: beat-matched, bar-aligned, with bass swap;
-//! 2. something analysed, no usable grid: overlap from the MixRamp points and trimmed silence, with a filter sweep;
-//! 3. nothing known: a fixed equal-power crossfade;
-//! 4. same album in order: gapless, no mixing.
+//! 1. clashing pairs (two vocals, far-apart keys): an echo-out, timed by the outgoing grid;
+//! 2. both grids confident and stable, tempos within reach: beat-matched, bar-aligned, with bass swap;
+//! 3. something analysed, no usable grid: overlap from the MixRamp points and trimmed silence, with a filter sweep;
+//! 4. nothing known: a fixed equal-power crossfade;
+//! 5. same album in order: gapless, no mixing.
+//!
+//! A loudness gap or a timbre mismatch shortens whatever the ladder picks. Every gate only demotes:
+//! a clash shortens or reroutes a transition, never upgrades one.
 //!
 //! Hard rule for every plan: at most `MAX_SKIP_MS` of either track goes unplayed (Apple's AutoMix is criticised for
 //! skipping up to a minute to line tempos up).
@@ -52,6 +56,9 @@ fn blank(kind: TransitionKind, out_start: i64, in_start: i64, duration: i64, rea
         filter_end_ms: -1,
         filter_from_hz: 0.0,
         filter_to_hz: 0.0,
+        echo_delay_ms: -1,
+        echo_feedback: 0.5,
+        echo_wet_db: -6.0,
         reason,
     }
 }
@@ -80,6 +87,91 @@ fn loudness_trim(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, s: &AutoM
     }
 }
 
+/// What the two tracks sound like next to each other, from the stored overlap windows.
+#[derive(Clone, Copy)]
+struct Verdict {
+    /// Two vocals, or two confident keys a tritone or more apart: do not blend.
+    clash: bool,
+    cause: &'static str,
+    /// A large loudness gap or far-apart brightness: keep any overlap short.
+    shorten: bool,
+    short_cause: &'static str,
+}
+
+/// Confident keys this far apart on the Camelot wheel do not blend.
+const KEY_FAR: i32 = 4;
+/// Mean voice-band share that counts as "sung" in an overlap window.
+const VOCAL_MIN: f32 = 0.45;
+/// Loudness gap that shortens an overlap, dB.
+const LOUD_GAP_DB: f32 = 6.0;
+/// Brightness ratio (octaves of centroid) that counts as a timbre mismatch.
+const TIMBRE_OCTAVES: f64 = 1.0;
+
+fn pair_gate(a: &TrackAnalysis, b: &TrackAnalysis) -> Verdict {
+    let mut v = Verdict { clash: false, cause: "", shorten: false, short_cause: "" };
+    let keys_known = a.key_confidence >= 0.4 && b.key_confidence >= 0.4;
+    if keys_known && key_distance(a.key, b.key) >= KEY_FAR {
+        v.clash = true;
+        v.cause = "keys far apart";
+    } else if a.outro_vocal >= VOCAL_MIN && b.intro_vocal >= VOCAL_MIN {
+        // A v1 row reads back as 0 and can never trip this; only a measured window can.
+        v.clash = true;
+        v.cause = "vocals overlap";
+    }
+    if a.lufs > -60.0 && b.lufs > -60.0 && (a.lufs - b.lufs).abs() > LOUD_GAP_DB {
+        v.shorten = true;
+        v.short_cause = "loudness gap";
+    } else if a.outro_centroid > 0.0
+        && b.intro_centroid > 0.0
+        && (a.outro_centroid as f64 / b.intro_centroid as f64).log2().abs() > TIMBRE_OCTAVES
+    {
+        v.shorten = true;
+        v.short_cause = "timbre mismatch";
+    }
+    v
+}
+
+/// A clashing pair does not blend: the outgoing track exits into a beat-synced echo while the
+/// incoming track fades in over its tail. Four outgoing beats, confined to the overlap the mixer
+/// renders (the repeats decay inside it), starting on a downbeat. No tempo change, no bass swap:
+/// the echo is the effect.
+fn echo_out(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, cause: &str) -> Option<TransitionPlan> {
+    let beat = 60_000.0 / a.bpm;
+    if !beat.is_finite() || beat <= 0.0 {
+        return None;
+    }
+    // Slow tempos get a clamped delay rather than a cavern (the mixer caps at one second).
+    let delay = beat.clamp(250.0, 1000.0).round() as i64;
+    let beats = 4i64;
+    let dur = (beats as f64 * beat).round() as i64;
+    if dur > max_len || dur < MIN_FADE_MS {
+        return None;
+    }
+    let end_a = music_end(a, out_dur).max(out_dur - MAX_SKIP_MS);
+    let phase = a.downbeat_phase.rem_euclid(4) as i64;
+    let mut n = ((end_a as f64 - dur as f64 - a.beat_offset_ms) / beat).floor() as i64;
+    while n.rem_euclid(4) != phase {
+        n -= 1;
+    }
+    let start = (a.beat_offset_ms + n as f64 * beat).round() as i64;
+    if start < a.silence_start_ms || out_dur - (start + dur) > MAX_SKIP_MS {
+        return None;
+    }
+    let in_start = b.silence_start_ms.clamp(0, MAX_SKIP_MS.min(in_dur / 3));
+    if dur > in_dur - in_start {
+        return None;
+    }
+    let beat_ms = beat.round() as i64;
+    let mut p = blank(TransitionKind::EchoOut, start, in_start, dur, String::new());
+    p.fade_curve = FadeCurve::SineSquared;
+    (p.out_fade_start_ms, p.out_fade_end_ms) = (0, (2 * beat_ms).min(dur));
+    (p.in_fade_start_ms, p.in_fade_end_ms) = ((dur - 2 * beat_ms).max(0), dur);
+    (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (delay, 0.5, -6.0);
+    p.in_gain_db = loudness_trim(Some(a), Some(b), s);
+    p.reason = format!("echo-out over {beats} beats, {cause}");
+    Some(p)
+}
+
 pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_duration_ms: i64, in_duration_ms: i64, s: &AutoMixSettings) -> TransitionPlan {
     let out_dur = if out_duration_ms > 0 { out_duration_ms } else { out.map_or(0, |a| a.duration_ms) };
     let in_dur = if in_duration_ms > 0 { in_duration_ms } else { inc.map_or(0, |a| a.duration_ms) };
@@ -97,6 +189,12 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
     }
     let (a, b) = (usable(out, out_dur), usable(inc, in_dur));
     let mut why_not = String::new();
+    // The gates only demote: a clash reroutes to an echo-out (or shortens when the echo cannot
+    // run), a loudness gap or timbre mismatch caps an overlap at 8 bars. Never an upgrade.
+    let verdict = a.zip(b).map(|(a, b)| pair_gate(a, b));
+    // Why this pair is shortened, for the reason line; empty when it is not.
+    let short_cause = verdict.map(|v| if v.clash { "clash" } else { v.short_cause }).unwrap_or("");
+    let short = !short_cause.is_empty();
     if let (Some(a), Some(b)) = (a, b) {
         if !s.beat_match {
             why_not = "beat matching off".into();
@@ -106,8 +204,19 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
                 a.bpm, a.bpm_confidence, a.stability, b.bpm, b.bpm_confidence, b.stability,
                 MIN_BPM_CONFIDENCE, MIN_STABILITY
             );
+        } else if let Some(v) = verdict {
+            if v.clash && s.echo_out {
+                if let Some(p) = echo_out(a, b, out_dur, in_dur, max_len, s, v.cause) {
+                    return p;
+                }
+                why_not = format!("echo-out would not fit ({})", v.cause);
+            }
+            match beat_matched(a, b, out_dur, in_dur, max_len, s, short_cause) {
+                Ok(p) => return p,
+                Err(e) => why_not = e,
+            }
         } else {
-            match beat_matched(a, b, out_dur, in_dur, max_len, s) {
+            match beat_matched(a, b, out_dur, in_dur, max_len, s, "") {
                 Ok(p) => return p,
                 Err(e) => why_not = e,
             }
@@ -116,7 +225,7 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
     // One grid survived (or the lock failed on two good ones): align to what exists rather than
     // fading blind. See one_grid.
     if s.beat_match && (a.is_some_and(grid_ok) || b.is_some_and(grid_ok)) {
-        if let Some(p) = one_grid(a, b, out_dur, in_dur, max_len, s, &why_not) {
+        if let Some(p) = one_grid(a, b, out_dur, in_dur, max_len, s, short, &why_not) {
             return p;
         }
     }
@@ -127,7 +236,7 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
     blank(TransitionKind::EqualPowerFade, out_dur - dur, 0, dur, "not analysed: equal-power fade".into())
 }
 
-fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings) -> Result<TransitionPlan, String> {
+fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, short_cause: &str) -> Result<TransitionPlan, String> {
     let mut ratio = match_ratio(a.bpm, b.bpm);
     let pct = (ratio - 1.0).abs() * 100.0;
     let mut max_pct = (s.max_tempo_change_pct as f64).clamp(0.0, 12.0);
@@ -146,7 +255,8 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
     let beat_b = 60_000.0 / b_bpm;
     let keys_known = a.key_confidence >= 0.4 && b.key_confidence >= 0.4;
     let clash = keys_known && key_distance(a.key, b.key) > 2;
-    let max_bars = if clash { 8 } else { 16 };
+    // The gates only shorten: 8 bars when the pair clashes mildly or mismatches in loudness/timbre.
+    let max_bars = if clash || !short_cause.is_empty() { 8 } else { 16 };
 
     // The incoming track starts on its first downbeat, at or just before the music.
     let phase_b = b.downbeat_phase.rem_euclid(4) as i64;
@@ -219,7 +329,13 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
             a.bpm,
             (ratio - 1.0) * 100.0,
             if phrase.is_some() && start == phrase.unwrap_or(-1.0) { ", on the outro phrase" } else { "" },
-            if clash { ", keys clash: short" } else { "" }
+            if clash {
+                ", keys clash: short".to_string()
+            } else if !short_cause.is_empty() {
+                format!(", short ({short_cause})")
+            } else {
+                String::new()
+            }
         );
         return Ok(p);
     }
@@ -231,16 +347,17 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
 /// starts on the outgoing track's downbeats, or an entrance that lands on the incoming track's,
 /// still sounds intentional where a blind fade sounds accidental. No tempo change: with only one
 /// tempo known there is nothing to match to, so this is a well-placed fade, not a mix.
-fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, why_not: &str) -> Option<TransitionPlan> {
+fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, short: bool, why_not: &str) -> Option<TransitionPlan> {
     let tail = if why_not.is_empty() { String::new() } else { format!(" ({why_not})") };
     let end_a = a.map_or(out_dur, |x| music_end(x, out_dur)).max(out_dur - MAX_SKIP_MS);
-    // The outgoing grid carries the exit: 8 bars of it, then 4, starting on its downbeats.
+    // The outgoing grid carries the exit: 8 bars of it, then 4 (4 only when the gates shortened it).
+    let out_bars: &[i64] = if short { &[4] } else { &[8, 4] };
     if let Some(g) = a.filter(|x| grid_ok(x)) {
         let beat = 60_000.0 / g.bpm;
         let phase = g.downbeat_phase.rem_euclid(4) as i64;
         let in_start = b.map_or(0, |x| x.silence_start_ms.clamp(0, MAX_SKIP_MS.min(in_dur / 3)));
-        for bars in [8i64, 4] {
-            let dur = (bars as f64 * 4.0 * beat).round() as i64;
+        for bars in out_bars {
+            let dur = (*bars as f64 * 4.0 * beat).round() as i64;
             if dur > max_len || dur < MIN_FADE_MS {
                 continue;
             }
@@ -274,8 +391,8 @@ fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, 
         if in_start > MAX_SKIP_MS {
             return None;
         }
-        for bars in [8i64, 4] {
-            let dur = (bars as f64 * 4.0 * beat).round() as i64;
+        for bars in out_bars {
+            let dur = (*bars as f64 * 4.0 * beat).round() as i64;
             if dur > max_len || dur < MIN_FADE_MS || dur > in_dur - in_start {
                 continue;
             }
@@ -346,6 +463,10 @@ mod tests {
             mixramp_end_ms: 236_000,
             intro_end_ms: (120.0 + 32.0 * beat) as i64,
             outro_start_ms: (120.0 + beat * 4.0 * (((238_500.0 - 120.0) / (4.0 * beat)).floor() - 16.0)) as i64,
+            outro_vocal: 0.1,
+            intro_vocal: 0.1,
+            outro_centroid: 1200.0,
+            intro_centroid: 1200.0,
             analysed_ms: 0,
         }
     }
@@ -522,13 +643,40 @@ mod tests {
     }
 
     #[test]
-    fn clashing_keys_get_a_short_mix() {
+    fn clashing_keys_echo_out() {
         let a = track(128.0);
         let b = TrackAnalysis { key: camelot(6, false), ..track(128.0) };
         let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::EchoOut, "{}", p.reason);
+        assert!(p.reason.contains("keys far apart"), "{}", p.reason);
+        assert_eq!(p.echo_delay_ms, (60_000.0_f64 / 128.0).round() as i64);
+        assert_eq!((p.echo_feedback, p.echo_wet_db), (0.5, -6.0));
+        assert_eq!(p.bass_swap_ms, -1, "no bass swap on an echo-out");
+        assert!((p.tempo_ratio - 1.0).abs() < 1e-9);
+        check_skip(&p, 240_000);
+        // With the echo off a clashing pair gets a short beat-matched mix instead.
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, echo_out: false, ..Default::default() });
         assert_eq!(p.kind, TransitionKind::BeatMatched);
         assert!((p.duration_ms as f64 - 8.0 * 4.0 * 60_000.0 / 128.0).abs() <= 1.0, "{}", p.reason);
         assert!(p.reason.contains("clash"));
+    }
+
+    #[test]
+    fn overlapping_vocals_echo_out_and_gaps_shorten() {
+        let sung = |t: TrackAnalysis| TrackAnalysis { outro_vocal: 0.7, intro_vocal: 0.7, ..t };
+        let p = plan(Some(&sung(track(128.0))), Some(&sung(track(128.0))), 240_000, 240_000, &AutoMixSettings::default());
+        assert_eq!(p.kind, TransitionKind::EchoOut, "{}", p.reason);
+        assert!(p.reason.contains("vocals overlap"), "{}", p.reason);
+        // Quiet outro into a far louder intro: still beat-matched, but short.
+        let b = TrackAnalysis { lufs: -2.0, ..track(128.0) };
+        let p = plan(Some(&track(128.0)), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::BeatMatched);
+        assert!((p.duration_ms as f64 - 8.0 * 4.0 * 60_000.0 / 128.0).abs() <= 1.0, "{}", p.reason);
+        // Same for a timbre mismatch: a dark outro into a bright intro.
+        let b = TrackAnalysis { intro_centroid: 5000.0, ..track(128.0) };
+        let p = plan(Some(&track(128.0)), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::BeatMatched);
+        assert!((p.duration_ms as f64 - 8.0 * 4.0 * 60_000.0 / 128.0).abs() <= 1.0, "{}", p.reason);
     }
 
     #[test]

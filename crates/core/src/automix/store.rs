@@ -13,11 +13,11 @@ use crate::{Core, Result, TrackAnalysis};
 
 const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confidence, beat_offset_ms, stability, downbeat_phase, \
      downbeat_confidence, lufs, key, key_confidence, silence_start_ms, silence_end_ms, mixramp_start_ms, mixramp_end_ms, \
-     intro_end_ms, outro_start_ms, analysed_ms";
+     intro_end_ms, outro_start_ms, outro_vocal, intro_vocal, outro_centroid, intro_centroid, analysed_ms";
 
 pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
     c.prepare_cached(&format!(
-        "INSERT OR REPLACE INTO track_analysis({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)"
+        "INSERT OR REPLACE INTO track_analysis({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
     ))?
     .execute(params![
         a.song_id,
@@ -38,6 +38,10 @@ pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
         a.mixramp_end_ms,
         a.intro_end_ms,
         a.outro_start_ms,
+        a.outro_vocal,
+        a.intro_vocal,
+        a.outro_centroid,
+        a.intro_centroid,
         a.analysed_ms
     ])
     .map(|_| ())
@@ -65,7 +69,11 @@ pub fn get(c: &Connection, song_id: &str) -> rusqlite::Result<Option<TrackAnalys
                 mixramp_end_ms: r.get(15)?,
                 intro_end_ms: r.get(16)?,
                 outro_start_ms: r.get(17)?,
-                analysed_ms: r.get(18)?,
+                outro_vocal: r.get(18).unwrap_or(0.0),
+                intro_vocal: r.get(19).unwrap_or(0.0),
+                outro_centroid: r.get(20).unwrap_or(0.0),
+                intro_centroid: r.get(21).unwrap_or(0.0),
+                analysed_ms: r.get(22)?,
             })
         })
         .optional()
@@ -84,7 +92,25 @@ pub fn missing(c: &Connection, ids: &[String]) -> rusqlite::Result<Vec<String>> 
     Ok(out)
 }
 
-/// The streaming analyser behind a JNI handle.
+/// Brings a v1 database up to the v2 schema: the four overlap-window columns. Old rows keep their
+/// version and are redone by `analysis_missing`; the defaults only keep them readable until then.
+pub fn migrate(c: &Connection) -> rusqlite::Result<()> {
+    let cols: Vec<String> = c
+        .prepare("PRAGMA table_info(track_analysis)")?
+        .query_map([], |r| r.get(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (col, typ) in [
+        ("outro_vocal", "REAL"),
+        ("intro_vocal", "REAL"),
+        ("outro_centroid", "REAL"),
+        ("intro_centroid", "REAL"),
+    ] {
+        if !cols.iter().any(|c| c == col) {
+            c.execute_batch(&format!("ALTER TABLE track_analysis ADD COLUMN {col} {typ} NOT NULL DEFAULT 0"))?;
+        }
+    }
+    Ok(())
+}
 struct Stream {
     a: Mutex<Analyzer>,
     channels: usize,

@@ -267,7 +267,9 @@ impl Core {
     /// `db_path` empty opens an in-memory index.
     #[uniffi::constructor]
     pub fn new(db_path: String) -> Result<Arc<Self>> {
-        Ok(Arc::new(Core { db: Mutex::new(db::open(&db_path)?), server: RwLock::new(api::Server::default()) }))
+        let db = db::open(&db_path)?;
+        automix::store::migrate(&db)?;
+        Ok(Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) }))
     }
 
     /// Returns the normalised base url. Each server profile has its own database file, so the

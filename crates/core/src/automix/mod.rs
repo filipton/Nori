@@ -25,10 +25,27 @@ use crate::{AutoMixSettings, TrackAnalysis, TransitionPlan};
 use analysis::{Analyzer, Features};
 
 /// Bump when the analysis changes enough that stored rows should be redone.
-pub const ANALYSIS_VERSION: i32 = 1;
+pub const ANALYSIS_VERSION: i32 = 2;
 /// Below these the grid is not used for cue placement either (cues fall back to the energy envelope).
 const CUE_MIN_CONFIDENCE: f32 = 0.4;
 const CUE_MIN_STABILITY: f32 = 0.5;
+
+/// Mean of a per-frame `curve` over `[from_s, to_s)`. Too short a window to say anything (under a
+/// second of frames) falls back to the whole track rather than to noise.
+fn window_mean(curve: &[f32], fps: f64, t0: f64, from_s: f64, to_s: f64) -> f32 {
+    if curve.is_empty() || !fps.is_finite() || fps <= 0.0 {
+        return 0.0;
+    }
+    let idx = |t: f64| ((t - t0) * fps).round().max(0.0) as usize;
+    let (mut a, mut b) = (idx(from_s).min(curve.len()), idx(to_s).min(curve.len()));
+    if b.saturating_sub(a) < fps as usize {
+        (a, b) = (0, curve.len());
+    }
+    if b <= a {
+        return 0.0;
+    }
+    curve[a..b].iter().sum::<f32>() / (b - a) as f32
+}
 
 /// A `TrackAnalysis` plus the working data behind it, for tests and diagnostics.
 pub struct Analysis {
@@ -51,6 +68,18 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
     let grid_ok = t.bpm > 0.0 && t.confidence >= CUE_MIN_CONFIDENCE && t.stability >= CUE_MIN_STABILITY;
     let (intro, outro) = if silent { (0.0, 0.0) } else { structure::cues(&t, &db, f, music, grid_ok) };
     let (key, key_confidence) = if silent { (0, 0.0) } else { structure::key(&f.chroma) };
+    // What the overlap windows sound like: vocal share and brightness of the outgoing outro and the
+    // incoming intro, for the pair gates in `plan`. Silence has neither.
+    let (outro_vocal, outro_centroid, intro_vocal, intro_centroid) = if silent {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (
+            window_mean(&f.vocal, f.fps, f.t0, outro, music.1),
+            window_mean(&f.centroid, f.fps, f.t0, outro, music.1),
+            window_mean(&f.vocal, f.fps, f.t0, music.0, intro),
+            window_mean(&f.centroid, f.fps, f.t0, music.0, intro),
+        )
+    };
 
     let track = TrackAnalysis {
         song_id: song_id.to_string(),
@@ -71,6 +100,10 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
         mixramp_end_ms: mr1,
         intro_end_ms: (intro * 1000.0).round() as i64,
         outro_start_ms: (outro * 1000.0).round() as i64,
+        outro_vocal,
+        intro_vocal,
+        outro_centroid,
+        intro_centroid,
         analysed_ms: crate::db::now_ms(),
     };
     Analysis { track, tempo: t }

@@ -354,6 +354,7 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 }
                 Toggle("Swap the bass", "The new song's bass comes in as the old song's drops out.", p.autoMixBassSwap, enabled = live) { on -> vm.update { it.copy(autoMixBassSwap = on) } }
                 Toggle("Muffle the ending", "The old song gets muffled as it fades out.", p.autoMixFilters, enabled = live) { on -> vm.update { it.copy(autoMixFilters = on) } }
+                Toggle("Echo out clashes", "Songs that would sing over each other get an echo ending instead.", p.autoMixEchoOut, enabled = live) { on -> vm.update { it.copy(autoMixEchoOut = on) } }
                 val analysed by vm.analysed.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) { vm.refreshAnalysed() }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {

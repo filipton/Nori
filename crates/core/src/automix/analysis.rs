@@ -26,6 +26,9 @@ const FLUX_LO_HZ: f64 = 30.0;
 const FLUX_HI_HZ: f64 = 11000.0;
 /// The "kick" band for downbeat voting and bass energy.
 pub const LOW_HZ: f64 = 150.0;
+/// The "voice" band for vocal-activity estimation: most speech and sung energy sits here.
+pub const VOCAL_LO_HZ: f64 = 300.0;
+pub const VOCAL_HI_HZ: f64 = 3400.0;
 /// Log compression: linear below -60 dB, logarithmic above, so dither does not become onsets.
 const GAMMA: f32 = 1000.0;
 /// One chroma frame per this many onset frames (about 93 ms), from a 4x longer FFT.
@@ -49,6 +52,10 @@ pub struct Features {
     /// Mean square of the frame, and of its part below `LOW_HZ`.
     pub power: Vec<f32>,
     pub low_power: Vec<f32>,
+    /// Share of the frame's power in the voice band (`VOCAL_LO_HZ..VOCAL_HI_HZ`), 0..1.
+    pub vocal: Vec<f32>,
+    /// Spectral centroid of the frame in Hz: the track's brightness over time.
+    pub centroid: Vec<f32>,
     /// Pitch-class magnitudes, one frame per `CHROMA_EVERY` onset frames; chroma frame `j` is at `chroma_t0 + j * chroma_step`.
     pub chroma: Vec<[f32; 12]>,
     pub chroma_t0: f64,
@@ -191,6 +198,8 @@ impl Analyzer {
                 low_onset: Vec::with_capacity(frames),
                 power: Vec::with_capacity(frames),
                 low_power: Vec::with_capacity(frames),
+                vocal: Vec::with_capacity(frames),
+                centroid: Vec::with_capacity(frames),
                 chroma: Vec::with_capacity(frames / CHROMA_EVERY + 2),
                 chroma_t0: 0.0,
                 chroma_step: (hop * CHROMA_EVERY) as f64 / sr,
@@ -266,11 +275,19 @@ impl Analyzer {
 
         let mut total = 0f32;
         let mut low = 0f32;
+        let mut vocal = 0f32;
+        let mut fsum = 0f64;
         let mut flux_low = 0f32;
+        let bin_hz = self.sr / self.n as f64;
         for (i, c) in self.buf[1..self.n / 2].iter().enumerate() {
             let p = c.norm_sqr();
             total += p;
             let bin = i + 1;
+            let f = bin as f64 * bin_hz;
+            fsum += f * p as f64;
+            if f >= VOCAL_LO_HZ && f <= VOCAL_HI_HZ {
+                vocal += p;
+            }
             if bin < self.low_bins {
                 low += p;
                 let l = (1.0 + GAMMA * p.sqrt() * self.amp_norm).ln();
@@ -293,6 +310,8 @@ impl Analyzer {
         self.f.low_onset.push(flux_low);
         self.f.power.push(total * self.pow_norm);
         self.f.low_power.push(low * self.pow_norm);
+        self.f.vocal.push(vocal / (total + 1e-12));
+        self.f.centroid.push((fsum / (total as f64 + 1e-9)) as f32);
 
         if self.hops % CHROMA_EVERY == 0 {
             if self.hops == 0 {
@@ -322,6 +341,8 @@ impl Analyzer {
                 low_onset: Vec::new(),
                 power: Vec::new(),
                 low_power: Vec::new(),
+                vocal: Vec::new(),
+                centroid: Vec::new(),
                 chroma: Vec::new(),
                 chroma_t0: 0.0,
                 chroma_step,
@@ -342,7 +363,7 @@ impl Analyzer {
         (self.written, self.since_hop, self.hops, self.samples, self.acc, self.acc_n) = (0, 0, 0, 0, 0.0, 0);
         (self.prev, self.prev_low) = ([0.0; BANDS], [0.0; 8]);
         self.meter = Meter::new(self.rate, 0);
-        for v in [&mut self.f.onset, &mut self.f.low_onset, &mut self.f.power, &mut self.f.low_power] {
+        for v in [&mut self.f.onset, &mut self.f.low_onset, &mut self.f.power, &mut self.f.low_power, &mut self.f.vocal, &mut self.f.centroid] {
             v.clear();
         }
         self.f.chroma.clear();
