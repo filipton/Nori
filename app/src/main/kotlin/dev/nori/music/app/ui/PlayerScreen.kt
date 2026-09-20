@@ -1870,12 +1870,11 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // the blink of the playing time when the lyrics give way to the queue.
     val live = remember { androidx.compose.runtime.mutableFloatStateOf((vm.positionMs.toFloat() / durationMs.coerceAtLeast(1)).coerceIn(0f, 1f)) }
     // Not keyed on the song's length: a new song has a different one, and restarting here puts the bar
-    // where the song is instead of carrying it there, which is the animation going missing on a change.
-    // A scrub ending does restart it, and that one has to be a snap - see below.
+    // where the song is instead of leaving it where the old song was.
     // Nor on whether the music is playing, which is read through the loop instead. A skip to a song
     // that still has to be fetched stops for a moment on the way there, and restarting on that put the
-    // bar straight at the new song's nought: the slide back to the beginning was there when a song
-    // ended by itself, because then nothing stops, and missing on next and previous.
+    // bar straight at the new song's nought while a song ending by itself never stops: the slide back
+    // to the beginning was there then, and missing on next and previous.
     val moving by rememberUpdatedState(playing)
     // The held place is over - landed or given up. Meet the player where it is instead of gliding
     // there: the glide was the animation after the jump on slow seeks. When the player is nearly at
@@ -1894,30 +1893,17 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     }
     LaunchedEffect(dragging) {
         if (dragging) return@LaunchedEffect
-        // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
-        // Eased from where it stood before the finger, the bar left the place it was dropped, slid off
-        // to where the song had been and crawled back. Skipped when a seek went out with the release:
-        // live was seeded with it above, and snapping here is what flashed the old place for a frame.
-        if (pending == null) live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
-        var last = 0L
+        // Teleport, never glide: the bar is put where the song is. The easing this replaces slid
+        // the bar back towards the stale reading after a scrub and swept it across the screen on
+        // every skip. While a seek is held the bar shows the held place (see fraction below), so
+        // the loop has nothing to track until the watch clears it.
         while (isActive) {
-            val target = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
-            // Stopped and already there: look again in a moment rather than on every frame, so a paused
-            // player costs nothing.
-            if (!moving && kotlin.math.abs(target - live.floatValue) < 0.0005f) {
-                live.floatValue = target
-                last = 0L
-                delay(200)
-                continue
-            }
-            val now = androidx.compose.runtime.withFrameMillis { it }
-            val step = if (last == 0L) 16L else (now - last).coerceIn(1L, 64L)
-            last = now
-            // Carried towards where the song really is rather than put there. Playing, the two are a
-            // fraction of a pixel apart and the bar simply moves; when the song changes or a skip takes
-            // it back to the beginning, the same rule slides it there over about a third of a second
-            // instead of the bar being somewhere else the next frame.
-            live.floatValue += (target - live.floatValue) * (1f - kotlin.math.exp(-step / 110f))
+            if (pending == null) live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+            // Settled or holding: look again in a moment rather than on every frame, so a paused
+            // player costs nothing. Playing, every frame keeps the bar moving at the speed of the
+            // music between the once-a-second readings the times show.
+            if (!moving || pending != null) delay(200)
+            else androidx.compose.runtime.withFrameMillis { }
         }
     }
     val held = pending

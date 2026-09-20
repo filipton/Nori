@@ -228,11 +228,17 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
-        // from/until anchor on the first READY observation (see keepSeek), not here: on a player
-        // that is not ready yet the position read now is meaningless - idle reports 0 while the
-        // session restores to wherever the queue was left, and anchoring on 0 makes the watch read
-        // the restored position as "moved by someone else" and give up on a dropped seek.
-        wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS)
+        // Where it was is read here, when it means something - a ready player - and the watch only
+        // falls back to anchoring on its first READY observation while the player is still opening
+        // (see keepSeek). Anchoring unconditionally after the fact puts the anchor next to the
+        // target once the controller has applied the seek, and the direction test then reads a
+        // forward seek as a backward one and fires it again, up to three times: the song jumping
+        // back to the tapped place with a gap each time. On a player that is not ready yet the
+        // position read now is meaningless - idle reports 0 while the session restores to wherever
+        // the queue was left, and anchoring on 0 makes the watch read the restored position as
+        // "moved by someone else" and give up on a dropped seek.
+        val atAsk = if (c.playbackState == Player.STATE_READY) c.currentPosition else null
+        wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS, atAsk)
         _pendingSeek.value = ms
         // A queue restored from the last time the app ran is deliberately left unprepared, so that
         // opening the app touches nothing. Such a player has no seekable window, the controller drops
@@ -249,11 +255,12 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * Where a seek asked to go, where the player was when it was asked, in which song, and how long to
      * go on watching for it; see [seekTo].
      */
-    private class Seek(val target: Long, val id: String?, var until: Long) {
+    private class Seek(val target: Long, val id: String?, var until: Long, from: Long?) {
         var tries = 0
-        /// Anchor and lowest position of the first READY observations; see keepSeek.
-        var from: Long? = null
-        var low: Long? = null
+        /// Anchor and lowest position: taken when the seek was asked on a ready player, otherwise
+        /// on the first READY observation; see keepSeek.
+        var from: Long? = from
+        var low: Long? = from
         /// Last position seen, to tell a session still converging on the target from a stuck one.
         var last: Long? = null
     }
@@ -294,9 +301,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         }
         val pos = p.currentPosition
         if (w.from == null) {
-            // First sight of a ready player: this is what "where it was" means. The original seek
-            // may have landed already (then pos is the target and the checks below keep it) or been
-            // dropped (then the loop below re-asks). Either way the watch now measures from truth.
+            // Asked on a player that was still opening, so there was nothing truthful to anchor on
+            // then: this first sight of a ready player is what "where it was" means. The original
+            // seek may have landed already (then pos is the target and the checks below keep it)
+            // or been dropped (then the loop below re-asks). Either way the watch now measures
+            // from truth.
             w.from = pos
             w.low = pos
             w.until = now + KEEP_SEEK_MS
