@@ -667,6 +667,13 @@ private val BACKDROP = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERS
 private val BACKDROP_BLUR = 30.dp
 
 /**
+ * How much larger than its record the blurred twin is drawn, so the rows the blur has darkened at its
+ * own edge fall below that record's bottom, where they are rubbed out. A blur this soft is not changed
+ * by a tenth either way; its edge is.
+ */
+private const val BACKDROP_OVER = 1.15f
+
+/**
  * How much of the sleeve's height runs on underneath the title block instead of above it. With the
  * sleeve at [SLEEVE] this puts the title where `w4` has it, 56.5 % of the screen, with the picture's
  * blurred tail behind it.
@@ -1392,9 +1399,16 @@ private fun SleeveCarousel(
             // one - a layer of its own inside the blur's layer came out black.
             if (sharp) compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
             val l = lift.value
-            val s = liftedScale(l, widthPx, size.height)
+            val base = liftedScale(l, widthPx, size.height)
+            // The blurred twin is drawn a little larger than the record it belongs to. A blur has
+            // nothing to sample past the edge of what it is blurring, so its last rows pull in the
+            // emptiness there and go dark; drawn larger, those rows land below the record's own bottom,
+            // where `giveWayToPage` has rubbed everything out. Measured through a zoom, that dark band
+            // is what the eye catches as a line under a cover that is growing.
+            val s = base * if (sharp) 1f else BACKDROP_OVER
             scaleX = s; scaleY = s
-            val span = size.width * s + gap
+            // From the record's own size, not the twin's, so the two sit in the same place.
+            val span = size.width * base + gap
             val o = offset
             translationX = dx(o, span)
             alpha = fade((kotlin.math.abs(o) / span).coerceIn(0f, 1f))
