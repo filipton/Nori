@@ -723,6 +723,54 @@ private fun Artwork(
     }
 }
 
+/**
+ * A record's last rows rubbed out. What shows through is whatever is drawn behind it, which wherever
+ * this is used is a blur of the same picture at the same size - so the record goes soft instead of
+ * stopping, and there is no second picture to keep in step with it.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom() {
+    val top = size.height * (1f - MELT)
+    drawRect(
+        Brush.verticalGradient(
+            // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
+            // record's bottom edge.
+            0f to Color.Transparent,
+            0.25f to Color.Black.copy(alpha = 0.58f),
+            0.5f to Color.Black.copy(alpha = 0.87f),
+            0.75f to Color.Black.copy(alpha = 0.98f),
+            1f to Color.Black,
+            startY = top, endY = size.height,
+        ),
+        topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+        blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
+    )
+}
+
+/**
+ * One cover with a soft bottom, the way the sleeve has one: the picture blurred underneath, the
+ * picture sharp on top with its last rows rubbed out. The cover in flight needs this as much as the
+ * sleeve does - it is the same record - and painting a copy of the artwork there instead meant a
+ * picture that could be the last song's, and one that had to be faded in near the end of the flight
+ * because it did not belong to the cover it sat under.
+ */
+@Composable
+private fun SoftCover(modifier: Modifier = Modifier, picture: @Composable () -> Unit) {
+    Box(modifier) {
+        if (BACKDROP) Box(Modifier.matchParentSize().clipToBounds()) {
+            Box(
+                Modifier.matchParentSize()
+                    .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
+                    .blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+            ) { picture() }
+        }
+        Box(
+            Modifier.matchParentSize()
+                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                .drawWithContent { drawContent(); if (BACKDROP) rubOutBottom() },
+        ) { picture() }
+    }
+}
+
 /** The sleeve's bottom going soft into a flat page, for when there are no cover colours to melt into. */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSleeveFade(page: Color, fraction: Float) {
     val top = size.height * (1f - fraction)
@@ -811,18 +859,19 @@ private fun PanelFlight(
                     clip = true
                 },
         ) {
-            SleeveImage(art, Modifier.fillMaxSize())
-            // The sleeve's bottom is soft, and the record flying into its place has to be soft by the
-            // time it gets there: without this the flight landed with a hard edge and the softness only
-            // appeared once the real sleeve took over, a frame or two later. The shade the status bar's
-            // icons need on a pale cover belongs to the sleeve too, and was in the same boat.
+            // The record flying into the sleeve's place is soft at its bottom the whole way, the same way
+            // the sleeve is: itself, blurred. It used to be a copy of the artwork painted underneath and
+            // faded in near the end, which is a picture that can belong to another record.
+            SoftCover(Modifier.fillMaxSize()) { SleeveImage(art, Modifier.fillMaxSize()) }
+            // The shade the status bar's icons need on a pale cover belongs to the sleeve, so it arrives
+            // with it rather than being there from the thumbnail on.
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
                     val t = progress().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
                     val near = (1f - t / 0.45f).coerceIn(0f, 1f)
                     alpha = near * near * (3f - 2f * near)
                 }.drawBehind {
-                    if (palette != null) drawSleeveMelt(palette, MELT) else drawSleeveFade(page, MELT)
+                    if (!BACKDROP) { if (palette != null) drawSleeveMelt(palette, MELT) else drawSleeveFade(page, MELT) }
                     drawRect(
                         Brush.verticalGradient(
                             0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent,
@@ -902,16 +951,16 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, pal
                     clip = true
                 },
         ) {
-            if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-            SleeveImage(art, Modifier.fillMaxSize())
+            SoftCover(Modifier.fillMaxSize()) {
+                if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                SleeveImage(art, Modifier.fillMaxSize())
+            }
         }
-        // Where the sleeve melts into the page - drawn where the sleeve will be and not on the record
-        // that is still on its way there, so it stays put while the picture comes to it. Riding along
-        // inside the square, it travelled and grew with it, and near the end there were two of them in
-        // two different places: this one and the page's own, which is drawn to the sleeve's geometry.
-        // It fades in over the last stretch, once the square is nearly the size of the sleeve.
+        // The cover carries its own soft bottom now (above), so nothing waits at the sleeve's place to
+        // be faded in at the end of the flight. Where there is no blur to be had, that copy of the
+        // artwork is still the best there is.
         val page = MaterialTheme.colorScheme.background
-        Box(
+        if (!BACKDROP) Box(
             Modifier.align(Alignment.TopStart).requiredSize(with(density) { w.toDp() }, side)
                 .graphicsLayer {
                     val e = ((sheet.progress.value - 0.75f) / 0.25f).coerceIn(0f, 1f)
@@ -1292,21 +1341,7 @@ private fun SleeveCarousel(
             // back. The one on top does the fading; the one underneath keeps its picture, which is
             // covered anyway.
             if (!on()) return@drawWithContent
-            val top = size.height * (1f - MELT)
-            drawRect(
-                Brush.verticalGradient(
-                    // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
-                    // record's bottom edge.
-                    0f to Color.Transparent,
-                    0.25f to Color.Black.copy(alpha = 0.58f),
-                    0.5f to Color.Black.copy(alpha = 0.87f),
-                    0.75f to Color.Black.copy(alpha = 0.98f),
-                    1f to Color.Black,
-                    startY = top, endY = size.height,
-                ),
-                topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
-                blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
-            )
+            rubOutBottom()
         }
         fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, offscreen: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             // Its own layer to rub out of, for the copy that rubs: without one the erase would take the
