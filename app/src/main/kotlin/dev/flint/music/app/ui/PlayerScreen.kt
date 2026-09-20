@@ -1362,6 +1362,7 @@ private fun SleeveCarousel(
             }
         }
         val o0 = { offset }
+        val blurPx = with(density) { BACKDROP_BLUR.toPx() }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
         // from a little dimmer as it arrives. One whose picture has not arrived is still a record - the
         // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
@@ -1397,11 +1398,10 @@ private fun SleeveCarousel(
             }
         }
 
-        // The blur underneath, held a little larger than the sleeve. A blur has nothing to sample past
-        // the edge of what it is blurring, so its last rows pull in the emptiness there and go dark -
-        // which is exactly where this one is looked at. Blurring at the sleeve's own size and then
-        // holding the result a touch bigger puts those rows below the sleeve, where the page clips them
-        // away, and leaves the strip looking at the middle of the blur instead of at its edge.
+        // The blur underneath. A blur has nothing to sample past the edge of what it is blurring, so its
+        // last rows pull in the emptiness there and go dark - which is exactly where this one is looked
+        // at. Each blurred record is held a little larger than the record it belongs to (see `record`),
+        // which puts those rows outside it whatever size it is.
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
@@ -1425,9 +1425,18 @@ private fun SleeveCarousel(
                 },
         ) {
             Box(
-                Modifier.fillMaxSize()
-                    .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
-                    .blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+                Modifier.fillMaxSize().graphicsLayer {
+                    // As soft as the record is big. A blur of a fixed number of pixels is a different
+                    // amount of softness on a record half the size, so while one grew back into place
+                    // the softness under it kept changing - which is the edge that seems to firm up for
+                    // a moment as the cover expands.
+                    val r = blurPx * liftedScale(lift.value, widthPx, size.height)
+                    renderEffect = androidx.compose.ui.graphics.BlurEffect(
+                        r, r,
+                        // Holds its own edges rather than pulling in the nothing outside them.
+                        androidx.compose.ui.graphics.TileMode.Clamp,
+                    )
+                },
             ) { records(fading = false) }
         }
         Box(Modifier.fillMaxSize()) { records(fading = true) }
