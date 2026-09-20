@@ -93,6 +93,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.BlendMode
@@ -256,6 +258,17 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val arriving = if (prefs.coverColors) rememberCoverPalette(shift.towards, dark, black) else null
     val previousTintUrl = state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
     val nextTintUrl = state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
+    // Both neighbours' colours are worked out while nothing is happening, so that a record swiped to has
+    // them the moment it starts moving. The now playing bar does this too, but the bar is not on screen
+    // while the player is, and without it the page had nothing to cross-fade to: it wore the last
+    // record's colours for the whole swipe and changed to the new one in a single frame at the end,
+    // which is the old colour sitting under a cover that had already changed.
+    val warmContext = LocalContext.current
+    LaunchedEffect(previousTintUrl, nextTintUrl, dark, black) {
+        if (!prefs.coverColors) return@LaunchedEffect
+        warmCoverPalette(warmContext, nextTintUrl, dark, black)
+        warmCoverPalette(warmContext, previousTintUrl, dark, black)
+    }
     // The page's colours change with the song by cross-fading, not in one frame, and they hold the last
     // song's colours while the new cover's are worked out - going to the plain page and then to the new
     // colours was two changes where there should be one. A song that really has none (no artwork) gets
@@ -272,7 +285,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         // A record that carried its colours in with it has them on screen already, so the page takes
         // them over underneath rather than fading to them a second time; anything else - a song tapped
         // in the queue, the notification, the queue running on by itself - cross-fades.
-        val carried = shift.amount > 0.9f && shift.towards == rowUrl
+        // Or the page has this record's colours already, because the record handed them over when it
+        // landed (see PageShift.arrived). Fading from the record before it then would be the page going
+        // back to the old colour and coming forward again, which is the blink at the end of a change.
+        val carried = shift.adopted == rowUrl || shift.amount > 0.9f && shift.towards == rowUrl
         fadingFrom = if (carried) null else palette
         palette = found
         // In the same breath as the colours themselves, so the sleeve lets go of them on a frame where
@@ -609,6 +625,27 @@ private const val PANEL_MS = 360
 private const val SLEEVE = 0.74f
 
 /**
+ * Whether the records are drawn twice, the copy underneath blurred, so that a record fading out at its
+ * bottom shows a blur of itself. `Modifier.blur` does nothing before Android 12, where a second copy
+ * would only be a sharp one, so those phones fade into the page's own blurred copy of the cover
+ * instead - the page draws it at the sleeve's size and place, which is right as long as the record is
+ * lying on the page.
+ */
+private val BACKDROP = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+
+/**
+ * How soft that copy is. Near enough the page's own blur that the sleeve's bottom and the page below
+ * it read as one picture going soft.
+ */
+private val BACKDROP_BLUR = 30.dp
+
+/**
+ * How much bigger than the sleeve that blurred copy is held, so the rows the blur has darkened at its
+ * own edge fall outside it. A blur this soft is not changed by a tenth either way; its edge is.
+ */
+private const val BACKDROP_OVER = 1.06f
+
+/**
  * How much of the sleeve's height runs on underneath the title block instead of above it. With the
  * sleeve at [SLEEVE] this puts the title where `w4` has it, 56.5 % of the screen, with the picture's
  * blurred tail behind it.
@@ -943,18 +980,6 @@ private fun SleeveCarousel(
     // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
     // with a shadow - and the cover's own blur shows round it. It goes back down once the song is in.
     val lift = remember { Animatable(0f) }
-    // How much of the sleeve's soft bottom there is. A record lying on the page melts into it; picked up
-    // it is a card, with an edge of its own, and the page's blur under a record that is no longer its
-    // size showed as a smudge along the bottom of the small covers. So it goes while the record is up
-    // and comes back when it is down - but on its own time, not the spring's: tied to the lift it
-    // arrived in the last frames of the settle, which is something appearing rather than fading in.
-    val melt = remember { Animatable(1f) }
-    LaunchedEffect(lift, melt) {
-        androidx.compose.runtime.snapshotFlow { lift.value > 0.002f }.collect { up ->
-            if (up) melt.animateTo(0f, androidx.compose.animation.core.tween(200))
-            else melt.animateTo(1f, androidx.compose.animation.core.tween(420))
-        }
-    }
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 18.dp.toPx() }
     val radius = with(density) { 22.dp.toPx() }
@@ -1237,6 +1262,11 @@ private fun SleeveCarousel(
         // same place, so what appears as the picture fades is that blur - one blur on the screen, sitting
         // still, changing only when the page's colours do. Every version of this that painted something
         // over the record instead had to be kept in step with it, and never was.
+        // What the sleeve's soft bottom is made of. The records are drawn twice: once blurred, as a
+        // backdrop, and once sharp on top of it with their last rows rubbed out. So what shows where a
+        // record fades out is that record, blurred - the same picture, at the same place, at the same
+        // size, whatever it is doing. There is nothing to keep in step with it, nothing to tint and
+        // nothing to hide: a record sliding past carries its own blur with it because the blur is it.
         fun Modifier.softBottom(on: () -> Boolean = { true }) = drawWithContent {
             drawContent()
             // Only ever one record fades out at a time in one place. While a record that has landed is
@@ -1246,28 +1276,27 @@ private fun SleeveCarousel(
             // back. The one on top does the fading; the one underneath keeps its picture, which is
             // covered anyway.
             if (!on()) return@drawWithContent
-            val k = melt.value
-            if (k <= 0.002f) return@drawWithContent
             val top = size.height * (1f - MELT)
-            fun stop(a: Float) = Color.Black.copy(alpha = a * k)
             drawRect(
                 Brush.verticalGradient(
                     // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
                     // record's bottom edge.
                     0f to Color.Transparent,
-                    0.25f to stop(0.58f),
-                    0.5f to stop(0.87f),
-                    0.75f to stop(0.98f),
-                    1f to stop(1f),
+                    0.25f to Color.Black.copy(alpha = 0.58f),
+                    0.5f to Color.Black.copy(alpha = 0.87f),
+                    0.75f to Color.Black.copy(alpha = 0.98f),
+                    1f to Color.Black,
                     startY = top, endY = size.height,
                 ),
                 topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
                 blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
             )
         }
-        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
-            // Its own layer to rub out of: without one the erase would take the page behind it as well.
-            compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, offscreen: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
+            // Its own layer to rub out of, for the copy that rubs: without one the erase would take the
+            // page behind it as well. The blurred copy does not rub anything out and must not ask for
+            // one - a layer of its own inside the blur's layer came out black.
+            if (offscreen) compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
             val l = lift.value
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
@@ -1282,7 +1311,6 @@ private fun SleeveCarousel(
             }
         }
         val o0 = { offset }
-        Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).softBottom { landedUrl == null }) { SleeveImage(art, Modifier.fillMaxSize()) }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
         // from a little dimmer as it arrives. One whose picture has not arrived is still a record - the
         // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
@@ -1291,17 +1319,61 @@ private fun SleeveCarousel(
         val afterHere = after.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
         val beforeHere = before.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
         val sheen = MaterialTheme.colorScheme.onSurface
-        Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).softBottom().background(plateColour).loadingSheen(!afterHere, sheen)) {
-            androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+
+        /** The records themselves. [fading] is the copy on top, whose last rows are rubbed out. */
+        @Composable
+        fun androidx.compose.foundation.layout.BoxScope.records(fading: Boolean) {
+            fun Modifier.maybeSoft(on: () -> Boolean = { true }) = if (fading) softBottom(on) else this
+            Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft { landedUrl == null }) {
+                SleeveImage(art, Modifier.fillMaxSize())
+            }
+            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }, fading).maybeSoft().background(plateColour).loadingSheen(!afterHere, sheen)) {
+                androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            }
+            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }, fading).maybeSoft().background(plateColour).loadingSheen(!beforeHere, sheen)) {
+                androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            }
+            // It is the record that is showing, so it moves with the record: held still in the middle it
+            // covered the next change from on top, which is the "cover stuck over the animation".
+            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }, fading).maybeSoft().background(plateColour)) {
+                landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+            }
         }
-        Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).softBottom().background(plateColour).loadingSheen(!beforeHere, sheen)) {
-            androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+
+        // The blur underneath, held a little larger than the sleeve. A blur has nothing to sample past
+        // the edge of what it is blurring, so its last rows pull in the emptiness there and go dark -
+        // which is exactly where this one is looked at. Blurring at the sleeve's own size and then
+        // holding the result a touch bigger puts those rows below the sleeve, where the page clips them
+        // away, and leaves the strip looking at the middle of the blur instead of at its edge.
+        if (BACKDROP) Box(
+            Modifier.fillMaxSize().clipToBounds()
+                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                .drawWithContent {
+                    drawContent()
+                    // And the blur itself gives way to the page's own copy of the cover over the last
+                    // rows of the sleeve. The blur is the record's colours, which are stronger than the
+                    // page's; ending on it left the strip brighter than the page it meets. Three steps,
+                    // each into something more like the page than the last: picture, blur, page.
+                    val top = size.height * (1f - MELT * 0.45f)
+                    drawRect(
+                        Brush.verticalGradient(
+                            0f to Color.Transparent,
+                            0.55f to Color.Black.copy(alpha = 0.55f),
+                            1f to Color.Black,
+                            startY = top, endY = size.height,
+                        ),
+                        topLeft = Offset(0f, top), size = Size(size.width, size.height - top),
+                        blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
+                    )
+                },
+        ) {
+            Box(
+                Modifier.fillMaxSize()
+                    .graphicsLayer { scaleX = BACKDROP_OVER; scaleY = BACKDROP_OVER }
+                    .blur(BACKDROP_BLUR, androidx.compose.ui.draw.BlurredEdgeTreatment.Rectangle),
+            ) { records(fading = false) }
         }
-        // It is the record that is showing, so it moves with the record: held still in the middle it
-        // covered the next change from on top, which is the "cover stuck over the animation".
-        if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).softBottom().background(plateColour)) {
-            landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
-        }
+        Box(Modifier.fillMaxSize()) { records(fading = true) }
     }
 }
 }
