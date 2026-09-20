@@ -1,38 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  A nigiri whose sides are vinyl: the rice rim, the groove arcs top and bottom, the label at the
-  middle. Redrawn from the author's sketch as clean centred vectors (the sketch sat off-centre, so
-  there is no mirrored variant to keep) inside the 72dp safe zone, so no launcher mask can clip it.
+  A maki roll lying on its side, its cut face a vinyl record: the nori body, the rim, the groove
+  arcs top and bottom, the label at the middle. Redrawn from the author's sketch as clean centred
+  vectors (the sketch sat off-centre and leaned on embedded raster brushwork, so there is no
+  mirrored variant to keep) inside the 72dp safe zone, so no launcher mask can clip it.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <!-- rice rim -->
-    <path android:fillColor="#FFFFFFFF"
-        android:pathData="M34,54 a20,31 0 1,0 40,0 a20,31 0 1,0 -40,0" />
-    <!-- nori -->
-    <path android:fillColor="#FF0C130E"
-        android:pathData="M37,54 a17,28 0 1,0 34,0 a17,28 0 1,0 -34,0" />
-    <!-- grooves -->
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M44.13,48.08 A10.5,17.3 0 0,1 63.87,48.08" />
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M42.25,46.95 A12.5,20.6 0 0,1 65.75,46.95" />
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M40.37,45.83 A14.5,23.9 0 0,1 67.63,45.83" />
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M63.87,59.92 A10.5,17.3 0 0,1 44.13,59.92" />
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M65.75,61.05 A12.5,20.6 0 0,1 42.25,61.05" />
-    <path android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF" android:strokeWidth="1.5" android:strokeLineCap="round"
-        android:pathData="M67.63,62.17 A14.5,23.9 0 0,1 40.37,62.17" />
+    <!-- nori body, tucked under the face's rim on the right -->
+    <path android:fillColor="#FF0B0B0C"
+        android:pathData="M61.98,22.58 L33.72,25.91 C24.58,25.91 22.00,37.96 22.00,53.92 C22.00,69.88 24.58,81.93 33.72,81.93 L61.98,85.25 Z" />
+    <!-- face rim -->
+    <path android:fillColor="#FFEDEDED"
+        android:pathData="M45.85,54.00 a20.20,33.25 0 1,0 40.39,0 a20.20,33.25 0 1,0 -40.39,0" />
+    <!-- the record -->
+    <path android:fillColor="#FF0B0B0C"
+        android:pathData="M46.94,54.00 a19.12,32.17 0 1,0 38.23,0 a19.12,32.17 0 1,0 -38.23,0" />
+    <!-- grooves, leaning the way the sketch's do -->
+    <group android:pivotX="66.04" android:pivotY="53.99" android:rotation="-12">
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M56.54,44.00 A11.22,18.87 0 0,1 75.57,44.00" />
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M55.41,42.81 A12.55,21.11 0 0,1 76.70,42.81" />
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M54.28,41.62 A13.88,23.36 0 0,1 77.82,41.62" />
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M75.57,64.00 A11.22,18.87 0 0,1 56.54,64.00" />
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M76.70,65.19 A12.55,21.11 0 0,1 55.41,65.19" />
+        <path android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF" android:strokeWidth="0.9" android:strokeLineCap="round"
+            android:pathData="M77.82,66.38 A13.88,23.36 0 0,1 54.28,66.38" />
+    </group>
     <!-- label -->
     <path android:fillColor="#FFFFFFFF"
-        android:pathData="M48.5,54 a5.5,9 0 1,0 11,0 a5.5,9 0 1,0 -11,0" />
+        android:pathData="M61.31,54.00 a4.74,7.48 0 1,0 9.48,0 a4.74,7.48 0 1,0 -9.48,0" />
 </vector>
