@@ -280,6 +280,9 @@ class PlaybackService : MediaLibraryService() {
             // rebuild - the setting wins over one mix.
             if (chainSwapPending && !(reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && player.repeatMode == Player.REPEAT_MODE_ONE)) {
                 chainSwapPending = false
+                // The rebuild below reconfigures with the current flags, so whatever else was
+                // waiting (the deep buffer's return included) comes back with it.
+                deepAtNextPause = false
                 android.util.Log.i("flint", "chain swap at the boundary")
                 if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
             }
@@ -306,7 +309,9 @@ class PlaybackService : MediaLibraryService() {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (!isPlaying && !player.playWhenReady && deepAtNextPause) {
                 deepAtNextPause = false
-                // Paused is silent: the deep buffer comes back at once rather than waiting a track.
+                // Paused is silent: the deep buffer comes back at once rather than waiting a track,
+                // and the rebuild carries any other pending swap with it.
+                chainSwapPending = false
                 reconfigureSink(urgent = true)
             }
             announce()
@@ -878,9 +883,14 @@ class PlaybackService : MediaLibraryService() {
                     reconfigureSink(urgent = true)
                 } else if (!on && tuning) {
                     // And not straight back either: leaving the screen would cut the song a second time.
-                    // The shallow buffer costs some wakeups, not sound, so it lasts until the next pause.
+                    // The shallow buffer costs some wakeups, not sound - but it also starves transitions
+                    // of runway (decode cannot pull ahead of a half-second pipeline), so the deep buffer
+                    // comes back at the next boundary while playing, at once while paused, and the next
+                    // pause stays as the fallback.
                     tuning = false
                     updateBurst()
+                    if (player.playbackState != Player.STATE_IDLE && player.playWhenReady) chainSwapPending = true
+                    else if (player.playbackState != Player.STATE_IDLE) reconfigureSink(urgent = true)
                     deepAtNextPause = true
                 }
             }

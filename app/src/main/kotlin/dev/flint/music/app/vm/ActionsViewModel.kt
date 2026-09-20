@@ -110,6 +110,9 @@ class ActionsViewModel(app: Application) : FlintViewModel(app) {
             "resume" -> player.toggle()
             "next" -> player.next()
             "previous" -> player.previous()
+            // What the equalizer screen sends while it is open: the shallow buffer for live
+            // tweaking, then back. For the checks that the deep buffer returns afterwards.
+            "tuning" -> flint.player.setTuning(ref == "on")
             "enqueue" -> enqueue(songs)
             "playnext" -> playNext(songs)
             "shuffle" -> player.toggleShuffle()
