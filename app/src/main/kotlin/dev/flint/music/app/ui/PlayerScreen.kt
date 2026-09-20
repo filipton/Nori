@@ -1848,7 +1848,12 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // Where a seek has been asked to go, until the player is really there. Held from the watch
     // itself rather than a timer, so a slow seek (prepare, then the re-ask) reads as one held place
     // instead of a jump, a snap-back past the timeout and a glide when it finally lands.
-    val pending by vm.pendingSeek.collectAsStateWithLifecycle()
+    // Two sources: the local one is set on release in the same frame as the drag ends (a collected
+    // flow always lags by a frame, which read as one frame back at the old place), the watched one
+    // owns the lifecycle and clears it when the player is really there or the seek is given up.
+    var pending by remember { mutableStateOf<Long?>(null) }
+    val watched by vm.pendingSeek.collectAsStateWithLifecycle()
+    LaunchedEffect(watched) { if (watched == null) pending = null }
     val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, pending))
     // Duration is read through the gesture rather than keying it: a track that learns its real length
     // mid-scrub would restart the detector and the finger would lift on a dead pointer.
@@ -1891,8 +1896,9 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
         if (dragging) return@LaunchedEffect
         // Straight to where the song is whenever this starts again - which is the frame a scrub ends.
         // Eased from where it stood before the finger, the bar left the place it was dropped, slid off
-        // to where the song had been and crawled back.
-        live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+        // to where the song had been and crawled back. Skipped when a seek went out with the release:
+        // live was seeded with it above, and snapping here is what flashed the old place for a frame.
+        if (pending == null) live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
         var last = 0L
         while (isActive) {
             val target = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
@@ -1958,9 +1964,16 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                         }
                         // Apple seeks on release, not while the finger moves: one seek, at the end,
                         // and the sound carries on undisturbed until then. The bar holds the place
-                        // through `pending` (the watch clears it when the player is really there).
+                        // through `pending`, in the same frame the drag ends; the watch clears it
+                        // when the player is really there.
                         if (seek) {
-                            vm.seekTo((drag * d).toLong())
+                            val target = (drag * d).toLong()
+                            vm.seekTo(target)
+                            // Both now, in this frame: the flow always lags by one, which read as
+                            // one frame back at the old place, and the loop below restarts on the
+                            // drag ending - seeded here, there is nothing stale for it to snap to.
+                            live.floatValue = drag.coerceIn(0f, 1f)
+                            pending = target
                         }
                         dragging = false
                     }
