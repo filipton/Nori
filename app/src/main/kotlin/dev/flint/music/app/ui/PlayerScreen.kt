@@ -96,6 +96,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
@@ -430,7 +431,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // flight starts, and at full strength that frame is the whole sleeve appearing for an
                     // instant before it flies.
                     Modifier.fillMaxWidth()
-                        .graphicsLayer { alpha = if (panel != showing) 0f else 1f }
+                        // Away for the whole of a flight as well. `sheet.panelFlight` is written by an
+                        // effect, which runs after the frame that started the flight: on that frame the
+                        // sleeve was drawn at full size while the cover in flight was drawn too, which
+                        // is the two covers that show up together for an instant - one the whole square,
+                        // one the square cropped to the sleeve.
+                        .graphicsLayer { alpha = if (panel != showing || flying) 0f else 1f }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -1481,7 +1487,16 @@ private fun SleeveCarousel(
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent { drawContent(); giveWayToPage(liftedScale(lift.value, widthPx, size.height)) },
+                .drawWithContent {
+                    val k = liftedScale(lift.value, widthPx, size.height)
+                    // Cut off at the record's own bottom. The twin is drawn larger than its record so the
+                    // rows the blur has darkened fall below it - and this is what makes sure they are not
+                    // drawn at all. Left in, that darkened edge sits under the record and moves faster
+                    // than it does, being further from the middle everything scales about: a dark line
+                    // running ahead of the cover as it grows.
+                    clipRect(bottom = size.height * (0.5f + k / 2f)) { this@drawWithContent.drawContent() }
+                    giveWayToPage(k)
+                },
         ) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
@@ -1821,7 +1836,27 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     var dragging by remember { mutableStateOf(false) }
     var drag by remember { mutableFloatStateOf(0f) }
     val shown = if (dragging) (drag * d).toLong() else pending ?: pos
-    val fraction = (if (dragging) drag else shown.toFloat() / d).coerceIn(0f, 1f)
+    // Where the bar is, read on every frame from the player itself and kept out of composition. The
+    // bar used to take the same once-a-second reading the times do, so it stepped forward in jumps a
+    // second apart; the player's own position carries on between those readings, and a bar that shows
+    // it moves at the speed of the music instead.
+    val live = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    LaunchedEffect(playing, d, dragging, pending, state.current?.id) {
+        live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+        if (!playing || dragging) return@LaunchedEffect
+        while (isActive) {
+            androidx.compose.runtime.withFrameMillis { }
+            live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+        }
+    }
+    val held = pending
+    val fraction: () -> Float = {
+        when {
+            dragging -> drag.coerceIn(0f, 1f)
+            held != null -> (held.toFloat() / d).coerceIn(0f, 1f)
+            else -> live.floatValue
+        }
+    }
     val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
     val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
     // Held, the bar thickens and the dot grows, the way Apple's does, so the scrub is felt as well as
@@ -1871,8 +1906,9 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
-                    drawRoundRect(filled, Offset(0f, y), Size(size.width * fraction, h), r)
-                    if (knob > 0.01f) drawCircle(filled, h * knob, Offset(size.width * fraction, size.height / 2f))
+                    val f = fraction()
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * f, h), r)
+                    if (knob > 0.01f) drawCircle(filled, h * knob, Offset(size.width * f, size.height / 2f))
                 },
         )
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
