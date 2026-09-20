@@ -59,6 +59,43 @@ The last one is the direction to finish: a colourless blur of whatever is behind
 place, with the page's current tint taking over the last rows. It cannot hold a record's colours
 because it has none.
 
+## What the band's fade with the lift is actually for
+
+The band is faded out as the record is picked up and back in as it settles. That fade is not
+decoration: **it is the only reason the band is bearable during a swipe.** While a record travels the
+band is hidden, so its colours - which belong to the record going out - are not on screen next to the
+record coming in. Take the fade away and the stale band is back at full strength for the whole swipe,
+which is worse than anything else tried here.
+
+But the same fade is why the band *arrives* at the end of a change: it is switched on as the lift
+returns, so it appears once the cover has finished growing. That is the "it darkens for a split
+second after the animation ends". Tying its strength to the record's own scale rather than to the
+lift's raw number (with a smoothstep) makes it come back with the growth instead of near the end of
+it, which is as far as a painted band can be pushed.
+
+Two more things that must agree or the band reads as far too dark:
+
+- The page's blur and the band must be drawn at the same size. The page's blur used to shrink with the
+  record as it was picked up while the band did not, so the two showed different parts of the cover.
+  Both are pinned to the sleeve's own size now.
+- Whatever hides the band during travel must not also change its colour, or the change is visible
+  twice.
+
+## The way out, if someone wants to finish it
+
+A band made of colours always belongs to some record, and whichever record it belongs to is the wrong
+one at some point in every change. The owner's own suggestion is the way out: make it a *colourless
+blur of whatever is behind it*, fixed in place, so it has nothing of its own to be stale and never has
+to be switched on or off.
+
+`GraphicsLayer` (Compose 1.7+) records the carousel's content once and draws it twice - sharp, then
+again through `BlurEffect` (Android 12+), masked with a vertical ramp over the last fifth. That much
+works. The part still unsolved is the bottom edge: the blur has nothing below the sleeve to sample, so
+its last rows pull in emptiness and go dark. Painting the page's own current tint over those rows
+covers it, but then the very bottom of the band is a flat colour again, and the seam between that and
+the page has to be checked on a light cover. An attempt at this was made and reverted because it left
+a hard edge when it was only half applied; the code shape is in this file's history.
+
 ## Things worth knowing whatever is done next
 
 - `PageShift` carries how far the record has travelled and which cover it is heading to. Write it in

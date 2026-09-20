@@ -301,8 +301,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // With the record picked up, the blurred copy shrinks about the same middle, so the
                     // two are still the same picture at the same size and the card's edge still meets
                     // its own blur rather than a band of it left behind at the resting scale.
-                    val h = resting * liftedScale(shift.lifted, size.width, resting)
-                    val b = bottom - resting / 2f + h / 2f
+                    val h = resting
+                    val b = bottom
                     drawSleeveWash(p, b, h, size.height)
                 } else drawRect(scheme.background)
             }
@@ -649,7 +649,15 @@ private fun Artwork(
             Box(
                 // Gone by the time the record is properly up: a card that has shrunk away from it has
                 // its own rounded edge, and the soft bottom left behind sat across the page under it.
-                Modifier.fillMaxSize().graphicsLayer { alpha = (1f - shift.lifted * 1.6f).coerceIn(0f, 1f) }.drawBehind {
+                // Tied to how big the record actually is rather than to the lift's own number: fully
+                // there exactly when the record is full size, and coming back as it grows rather than
+                // switching on near the end of the settle.
+                Modifier.fillMaxSize().graphicsLayer {
+                    val k = liftedScale(shift.lifted, size.width, size.height)
+                    val held = liftedScale(1f, size.width, size.height)
+                    val t = ((k - held) / (1f - held)).coerceIn(0f, 1f)
+                    alpha = t * t * (3f - 2f * t)
+                }.drawBehind {
                     if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
                 },
             )
