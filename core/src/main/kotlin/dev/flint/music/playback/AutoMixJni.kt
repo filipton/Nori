@@ -24,6 +24,15 @@ internal object AutoMixMixer {
     @JvmStatic external fun destroy(h: Long)
 }
 
+/** Converts between sample rates (and mono/stereo): crates/core/src/automix/resample.rs. Every buffer argument is a direct ByteBuffer; sizes are in bytes. */
+internal object AutoMixResample {
+    init { System.loadLibrary("flintmusic") }
+    @JvmStatic external fun create(inRate: Int, inChannels: Int, outRate: Int, outChannels: Int): Long
+    /** Returns (consumed shl 32) or produced, both in bytes; -1 when the buffers cannot be used. */
+    @JvmStatic external fun process(h: Long, input: ByteBuffer, inPos: Int, inBytes: Int, output: ByteBuffer, outPos: Int, outCap: Int, inEnc: Int, outEnc: Int): Long
+    @JvmStatic external fun destroy(h: Long)
+}
+
 internal object AutoMixStretch {
     init { System.loadLibrary("flintmusic") }
     @JvmStatic external fun create(sampleRate: Int, channels: Int, keepPitch: Boolean): Long

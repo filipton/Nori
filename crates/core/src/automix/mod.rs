@@ -12,6 +12,7 @@ pub mod analysis;
 pub mod loudness;
 pub mod mixer;
 pub mod plan;
+pub mod resample;
 pub mod store;
 pub mod stretch;
 pub mod structure;
