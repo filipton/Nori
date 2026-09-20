@@ -162,7 +162,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         // One line per decoded stream. Audio handed to the DSP whole (offload) never arrives here as
         // samples, and then no transition is possible at all - which is worth saying out loud, because
         // every other sign of it is a boundary that simply passes.
-        Log.i("flint", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz${if (enc == 0) " - not PCM, no transitions" else ""}")
+        Log.i("flint", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz x${f.channelCount} enc=$enc${if (enc == 0) " - not PCM, no transitions" else ""}")
         val forCurrent = id == null || id == currentId
         if (id != null && id != currentId) onNewStream(id)
         if (enc == 0) {
@@ -189,12 +189,13 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             return
         }
         if (f.sampleRate == rate && f.channelCount == channels && enc == encoding) {
-            // At the pinned format already. While its buffers flow the track below is told, as
-            // always (a same-format configure never recreates it); decode-ahead only waits.
+            // At the pinned format already. The track below was opened for exactly this and stays
+            // open: forwarding the configure would rebuild it on every track change (the renderer
+            // configures once per stream, and the formats differ in per-track metadata even when
+            // the audio is identical). Decode-ahead for another stream only waits its turn.
             if (phase == Phase.PASS && forCurrent) {
                 // The flowing stream is at the pinned format: any converter is stale.
                 dropConverter()
-                apply(config, enc)
                 return
             }
             staged += config
@@ -340,7 +341,17 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                 beginHold(p!!)
                 heldFromUs = presentationTimeUs + before.toLong() / frameBytes * 1_000_000L / rate
                 heldAt = android.os.SystemClock.elapsedRealtime()
-                Log.i("flint", "holding the ending, ${(heldFromUs - super.getCurrentPositionUs(false)) / 1000} ms of sound still in the sink")
+                val at = super.getCurrentPositionUs(false)
+                val runwayUs = if (at == AudioSink.CURRENT_POSITION_NOT_SET) Long.MAX_VALUE else heldFromUs - at
+                Log.i("flint", "holding the ending, ${runwayUs / 1000} ms of sound still in the sink")
+                if (runwayUs < DRY_US) {
+                    // Decode never pulled ahead - a seek just before the boundary, or the next track
+                    // still fetching. The dry guard below would let go within milliseconds, so do not
+                    // hold at all: the ending plays out exactly as it would have, without the detour.
+                    Log.i("flint", "transition: no runway (${runwayUs / 1000} ms), letting the ending play")
+                    abandonTransition()
+                    return pass(buf, presentationTimeUs, converting)
+                }
                 hold(buf)
             }
             Phase.HOLD -> {
