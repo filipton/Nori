@@ -206,7 +206,18 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     /** Also prepares a queue that was restored but never loaded. */
     fun toggle() = with { Util.handlePlayPauseButtonAction(it) }
     fun next() = with { forget(); it.seekToNextMediaItem() }
-    fun previous() = with { forget(); it.seekToPrevious() }
+    /**
+     * A rewind is a seek to the top, not a skip: on a queue restored but never prepared the
+     * controller drops a bare seekToPrevious without a word, and the song then starts from where
+     * it had been left - the first press seemingly doing nothing, the second working now that the
+     * source is open. So it goes through the seek path, which prepares and watches the seek into
+     * place. The rule for which one it is mirrors the service's (media3 rewinds past three seconds).
+     */
+    fun previous() = with { c ->
+        val skips = flint.settings.value.previousAlwaysSkips && c.hasPreviousMediaItem()
+        if (!skips && c.currentPosition > 3_000) { seekTo(0); if (!c.playWhenReady) c.play() }
+        else { forget(); c.seekToPrevious() }
+    }
     /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
     fun previousItem() = with { forget(); it.seekToPreviousMediaItem() }
     /**
