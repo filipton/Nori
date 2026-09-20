@@ -38,6 +38,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
          */
         @Volatile var mixing = false
             private set
+
+        /** How little sound may be left in the sink before a held ending is let go rather than mixed. */
+        private const val DRY_US = 1_500_000L
     }
 
     interface Listener {
@@ -80,6 +83,13 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var plan: Plan? = null
     private var planFor: String? = null
     private var tail: ByteBuffer? = null
+    /** The output timestamp holding began at: everything from here on is inside this sink, unheard. */
+    private var heldFromUs = C.TIME_UNSET
+    private var heldAt = 0L
+    /** How much of the outgoing track has been swallowed into the hold, in microseconds. */
+    private var heldUs = 0L
+    /** The last position given to the player, which may never go backwards. */
+    private var reported = Long.MIN_VALUE
     private var tailLen = 0
     private var tailRead = 0
     private var skipLeft = 0L
@@ -172,6 +182,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                     buffer.position(buffer.position() + before)
                 }
                 beginHold(p!!)
+                heldFromUs = presentationTimeUs + before.toLong() / frameBytes * 1_000_000L / rate
+                heldAt = android.os.SystemClock.elapsedRealtime()
+                Log.i("flint", "holding the ending, ${(heldFromUs - super.getCurrentPositionUs(false)) / 1000} ms of sound still in the sink")
                 hold(buffer)
             }
             Phase.HOLD -> { feedAnalysis(buffer, buffer.position(), buffer.remaining()); hold(buffer) }
@@ -259,6 +272,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     /** Outgoing audio from the start of the transition; whatever does not fit is audio the plan skips. */
     private fun hold(buffer: ByteBuffer) {
+        heldUs += buffer.remaining().toLong() / frameBytes * 1_000_000L / rate
         val t = tail!!
         val n = minOf(buffer.remaining(), t.limit() - tailLen)
         if (n > 0) {
@@ -288,6 +302,10 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                 else AutoMixStretch.create(rate, channels, p.keepPitch)
                 AutoMixStretch.configure(stretch, p.tempoRatio, p.durationUs * rate / 1_000_000, p.rampUs * rate / 1_000_000)
             }
+            Log.i("flint", "mixing: the next track arrived ${android.os.SystemClock.elapsedRealtime() - heldAt} ms into the hold with ${(heldFromUs - super.getCurrentPositionUs(false)) / 1000} ms of sound left")
+            // The held audio is about to go out as the mix, so it stops counting as played-but-unheard.
+            // What was already reported stands until the sound really catches up with it.
+            heldUs = 0L
             skipLeft = p.inSkipUs * rate / 1_000_000 * frameBytes
             tailRead = 0
             resyncNext = true
@@ -367,16 +385,24 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         return produced + more.coerceAtLeast(0)
     }
 
-    /** The held audio goes out unmixed: the format changed, or no next track came. */
+    /** The held audio goes out unmixed: the format changed, or no next track came in time. */
     private fun abandonTransition() {
         if (phase == Phase.HOLD && tailLen > 0) {
             val t = tail!!.duplicate().order(ByteOrder.nativeOrder())
             t.position(0).limit(tailLen)
-            enqueue(copyOf(t), 0)
+            // At the timestamp it was held at, not at nought: this audio is the ending of the track,
+            // in the track's own timeline, and the sink downstream reads these to keep the clock.
+            enqueue(copyOf(t), heldFromUs.takeIf { it != C.TIME_UNSET } ?: 0L)
         }
         if (phase != Phase.PASS) Log.i("flint", "transition abandoned in $phase")
         phase = Phase.PASS
         tailLen = 0
+        heldFromUs = C.TIME_UNSET
+        heldUs = 0L
+        // Given up on, not forgotten: the planned point is behind us now, and without this the next
+        // buffer of the same track would start the hold over.
+        plan = null
+        planFor = currentId
     }
 
     // ---- analysis tap ----
@@ -437,6 +463,37 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         }
     }
 
+    /**
+     * The renderer asks for the playhead every few milliseconds whether or not it has audio to give,
+     * which makes this the one place that can notice the sound running out. While a track's ending is
+     * held nothing goes downstream, and the held audio is only released when the next track's first
+     * buffer arrives to be mixed into it. If that buffer is late - the next track still being fetched,
+     * the outgoing one not decoded to its end yet - what is already in the sink plays out and the
+     * listener gets a hole where the end of the song should be, as long as the crossfade itself.
+     *
+     * So the ending is let go unmixed before that can happen. No crossfade is a disappointment; silence
+     * for the last twelve seconds of a song is a fault.
+     */
+    override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
+        val at = super.getCurrentPositionUs(sourceEnded)
+        if (at == AudioSink.CURRENT_POSITION_NOT_SET) return at
+        if (phase == Phase.HOLD && heldFromUs != C.TIME_UNSET && heldFromUs - at < DRY_US) {
+            Log.i("flint", "transition: nothing to mix in yet with ${(heldFromUs - at) / 1000} ms of sound left, letting the ending play")
+            abandonTransition()
+            drain()
+        }
+        // Held audio has left the output but has not been heard, and this is the only thing the player
+        // asks about how far the track has got - so it is counted as played. The player starts the next
+        // track only once everything of this one has been, and the samples to mix into what is held are
+        // the next track's: without this they arrived after the sink had run dry, and the crossfade
+        // played after a hole as long as itself. That was "the last twelve seconds go silent".
+        //
+        // It is worth exactly the audio in hand, and it is given back: once the mix begins, what is
+        // reported stands still until what is really being heard has caught up with it.
+        reported = maxOf(reported, at + heldUs)
+        return reported
+    }
+
     override fun playToEndOfStream() {
         abandonTransition()
         finishAnalysis()
@@ -450,6 +507,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         out.clear()
         phase = Phase.PASS
         tailLen = 0; tailRead = 0; skipLeft = 0
+        heldFromUs = C.TIME_UNSET; heldUs = 0L; reported = Long.MIN_VALUE
         plan = null; planFor = null
         resyncNext = false
         syntheticPtsUs = C.TIME_UNSET

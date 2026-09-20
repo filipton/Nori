@@ -78,13 +78,26 @@ echo "-- transitions between tracks"
 # audio. This section exists because all of it was broken while the checks above passed: a plan was
 # asked for once, on a track's first decoded buffer, when the queue the planner reads was often still
 # empty, and never asked for again - so crossfade and AutoMix did nothing at all for whole queues.
-logged() { adb logcat -d -s flint:I | grep -qE "$1"; }
+# Read from a running capture rather than from `adb logcat -d`: every call to app.sh clears the log
+# buffer (it has to, to read its own answer back), so a line printed a second ago is often already gone.
+watching=$(mktemp)
+watcher=""
+watch_from_now() {
+  [ -n "$watcher" ] && kill "$watcher" 2>/dev/null
+  adb logcat -c
+  adb logcat -v time -s flint:I > "$watching" 2>/dev/null &
+  watcher=$!
+  sleep 0.5
+}
+trap '[ -n "$watcher" ] && kill $watcher 2>/dev/null; rm -f "$watching"' EXIT
+logged() { grep -qE "$1" "$watching"; }
+never() { ! logged "$1"; }
 waitfor() { local n=$2; for _ in $(seq "$n"); do logged "$1" && return 0; sleep 1; done; return 1; }
 mixing() { [ "$(field mixing)" = "True" ]; }
 
+watch_from_now
 "$app" set autoMix false >/dev/null
 "$app" set crossfadeSec 12 >/dev/null
-adb logcat -c
 # Two songs off different albums: "keep albums gapless" deliberately runs an album straight on, so an
 # album pair proves nothing either way.
 "$app" play "$song" >/dev/null; sleep 4
@@ -98,15 +111,20 @@ if [ "${dur:-0}" -gt 40000 ]; then
   leaving=$(field title)
   "$app" do "seek $((dur - 24000))" >/dev/null
   check "the sink reaches the mix" waitfor_mix
+  # The whole point, and the thing that was broken: the next track's samples have to arrive while there
+  # is still sound in the sink to mix them into. When they were late the crossfade played after a hole
+  # as long as itself - the last twelve seconds of the song, silent.
+  check "the next track arrives in time to be mixed" waitfor "mixing: the next track arrived" 60
+  check "the ending is not let go for want of it" never "letting the ending play"
   check "the next track plays out of the mix" next_track_plays "$leaving"
 fi
 
-adb logcat -c
+watch_from_now
 "$app" set crossfadeSec 0 >/dev/null
 check "with it off, the planner says so rather than going quiet" waitfor "planFor: off .*crossfadeSec=0" 10
 
 echo "-- AutoMix"
-adb logcat -c
+watch_from_now
 "$app" set autoMix true >/dev/null
 check "measuring starts when AutoMix is switched on" waitfor "measuring ahead:" 20
 # A track can only be measured from bytes already on the device; the log says when that is why.

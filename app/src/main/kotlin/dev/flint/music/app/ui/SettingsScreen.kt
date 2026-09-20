@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.CompositionLocalProvider
@@ -104,7 +105,7 @@ fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = tru
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f).padding(end = 14.dp)) {
+        Column(Modifier.weight(1f).padding(end = 14.dp).alpha(if (enabled) 1f else DIMMED)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -114,13 +115,17 @@ fun Toggle(title: String, detail: String, value: Boolean, enabled: Boolean = tru
     }
 }
 
+/** What a setting the app is going to ignore looks like: still there, still readable, plainly not live. */
+private const val DIMMED = 0.38f
+
 @Composable
-private fun <T> Choice(title: String, value: T, options: List<Pair<T, String>>, onChange: (T) -> Unit) {
+private fun <T> Choice(title: String, value: T, options: List<Pair<T, String>>, enabled: Boolean = true, onChange: (T) -> Unit) {
     var open by remember { mutableStateOf(false) }
+    val dim = if (enabled) 1f else DIMMED
     Column {
-    Row(Modifier.fillMaxWidth().spotlight(title).clickable { open = true }.padding(horizontal = 16.dp, vertical = 15.dp)) {
-        Text(title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-        Text(options.firstOrNull { it.first == value }?.second ?: "$value", color = MaterialTheme.colorScheme.primary)
+    Row(Modifier.fillMaxWidth().spotlight(title).clickable(enabled) { open = true }.padding(horizontal = 16.dp, vertical = 15.dp)) {
+        Text(title, Modifier.weight(1f).alpha(dim), style = MaterialTheme.typography.bodyLarge)
+        Text(options.firstOrNull { it.first == value }?.second ?: "$value", Modifier.alpha(dim), color = MaterialTheme.colorScheme.primary)
         DropdownMenu(open, { open = false }) { options.forEach { (v, label) -> DropdownMenuItem({ Text(label) }, { onChange(v); open = false }) } }
     }
     Hairline(startIndent = 16.dp)
@@ -326,26 +331,29 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
         // Everything that happens while a song plays or when one ends. The two ways of joining songs
         // together lead, because they are what someone comes here to find.
         "playing" -> SettingsCard {
-            // Bit-perfect output means exactly the file's samples reach the DAC, so nothing may be mixed
-            // into them - every transition here is off while it is on. That was silent: the crossfade
-            // was set, the setting stayed set, and songs simply followed each other.
-            val dac by vm.dac.collectAsStateWithLifecycle()
-            if (p.hiRes || dac.bitPerfect) Text(
-                "Off right now: bit-perfect output is playing the file's own samples, which cannot be mixed into.",
-                Modifier.padding(horizontal = Space.gutter, vertical = 4.dp),
+            // Bit-perfect output and high quality output both mean exactly the file's samples reach the
+            // DAC, so nothing may be mixed into them: every transition here, and skipping silence, is
+            // off while either is on. That used to be silent - the crossfade was set, the setting
+            // stayed set, and songs simply followed each other.
+            val untouched = p.hiRes || dac.bitPerfect
+            if (untouched) Text(
+                if (dac.bitPerfect) "Off while the USB DAC is playing the file's own samples: nothing may be mixed into them."
+                else "Off while high quality output is on: it plays the file's own samples, which nothing may be mixed into.",
+                Modifier.padding(horizontal = Space.gutter, vertical = 8.dp),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (!p.autoMix) Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s")) { v -> vm.update { it.copy(crossfadeSec = v) } }
-            Toggle("AutoMix", "Mixes the next song in like a DJ. Matches the beat and swaps the bass over.", p.autoMix) { on -> vm.update { it.copy(autoMix = on) } }
+            val live = !untouched
+            if (!p.autoMix) Choice("Crossfade", p.crossfadeSec, listOf(0 to "Off", 2 to "2 s", 4 to "4 s", 6 to "6 s", 8 to "8 s", 12 to "12 s"), enabled = live) { v -> vm.update { it.copy(crossfadeSec = v) } }
+            Toggle("AutoMix", "Mixes the next song in like a DJ. Matches the beat and swaps the bass over.", p.autoMix, enabled = live) { on -> vm.update { it.copy(autoMix = on) } }
             if (p.autoMix) {
-                Choice("Longest mix", p.autoMixMaxS, listOf(6 to "6 s", 8 to "8 s", 12 to "12 s", 16 to "16 s", 24 to "24 s")) { v -> vm.update { it.copy(autoMixMaxS = v) } }
-                Toggle("Match the beat", "Speeds the next song up or down a little so the beats line up.", p.autoMixBeatMatch) { on -> vm.update { it.copy(autoMixBeatMatch = on) } }
+                Choice("Longest mix", p.autoMixMaxS, listOf(6 to "6 s", 8 to "8 s", 12 to "12 s", 16 to "16 s", 24 to "24 s"), enabled = live) { v -> vm.update { it.copy(autoMixMaxS = v) } }
+                Toggle("Match the beat", "Speeds the next song up or down a little so the beats line up.", p.autoMixBeatMatch, enabled = live) { on -> vm.update { it.copy(autoMixBeatMatch = on) } }
                 if (p.autoMixBeatMatch) {
-                    Choice("Biggest speed change", p.autoMixMaxTempoPct, listOf(2f to "2 %", 4f to "4 %", 6f to "6 %", 8f to "8 %")) { v -> vm.update { it.copy(autoMixMaxTempoPct = v) } }
-                    Toggle("Keep the pitch", "Off speeds the song up like a record player, and stays under 2 %.", p.autoMixKeepPitch) { on -> vm.update { it.copy(autoMixKeepPitch = on) } }
+                    Choice("Biggest speed change", p.autoMixMaxTempoPct, listOf(2f to "2 %", 4f to "4 %", 6f to "6 %", 8f to "8 %"), enabled = live) { v -> vm.update { it.copy(autoMixMaxTempoPct = v) } }
+                    Toggle("Keep the pitch", "Off speeds the song up like a record player, and stays under 2 %.", p.autoMixKeepPitch, enabled = live) { on -> vm.update { it.copy(autoMixKeepPitch = on) } }
                 }
-                Toggle("Swap the bass", "The new song's bass comes in as the old song's drops out.", p.autoMixBassSwap) { on -> vm.update { it.copy(autoMixBassSwap = on) } }
-                Toggle("Muffle the ending", "The old song gets muffled as it fades out.", p.autoMixFilters) { on -> vm.update { it.copy(autoMixFilters = on) } }
+                Toggle("Swap the bass", "The new song's bass comes in as the old song's drops out.", p.autoMixBassSwap, enabled = live) { on -> vm.update { it.copy(autoMixBassSwap = on) } }
+                Toggle("Muffle the ending", "The old song gets muffled as it fades out.", p.autoMixFilters, enabled = live) { on -> vm.update { it.copy(autoMixFilters = on) } }
                 val analysed by vm.analysed.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) { vm.refreshAnalysed() }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -357,11 +365,11 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 }
                 Hairline(startIndent = 16.dp)
             }
-            Toggle("Keep albums gapless", "Songs that follow each other on an album run straight on, with no mix between them.", p.crossfadeKeepAlbums) { on -> vm.update { it.copy(crossfadeKeepAlbums = on) } }
+            Toggle("Keep albums gapless", "Songs that follow each other on an album run straight on, with no mix between them.", p.crossfadeKeepAlbums, enabled = live) { on -> vm.update { it.copy(crossfadeKeepAlbums = on) } }
             Choice("Fade in and out", p.fadeMs, listOf(0 to "Off", 150 to "150 ms", 300 to "300 ms", 500 to "500 ms", 1000 to "1 s")) { v -> vm.update { it.copy(fadeMs = v) } }
             Choice("Speed", p.speed, listOf(0.75f to "0.75×", 1f to "Normal", 1.25f to "1.25×", 1.5f to "1.5×", 2f to "2×")) { v -> vm.update { it.copy(speed = v) } }
             Choice("Pitch", p.pitch, listOf(0.9f to "−10 %", 0.95f to "−5 %", 1f to "Normal", 1.05f to "+5 %", 1.1f to "+10 %")) { v -> vm.update { it.copy(pitch = v) } }
-            Toggle("Skip silence", "Cuts quiet gaps inside and between songs.", p.skipSilence) { on -> vm.update { it.copy(skipSilence = on) } }
+            Toggle("Skip silence", "Cuts quiet gaps inside and between songs.", p.skipSilence, enabled = live) { on -> vm.update { it.copy(skipSilence = on) } }
             Toggle("Previous goes back a song", "Instead of starting the song you are on again.", p.previousAlwaysSkips) { on -> vm.update { it.copy(previousAlwaysSkips = on) } }
             Toggle("Skip songs that will not play", "Up to three in a row, then it stops.", p.skipOnError) { on -> vm.update { it.copy(skipOnError = on) } }
             Toggle("Skip explicit songs", "Songs your server marks explicit.", p.skipExplicit) { on -> vm.update { it.copy(skipExplicit = on) } }
@@ -375,9 +383,12 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
         }
         // How it sounds, from the equalizer down to what the phone hands the speaker.
         "sound" -> SettingsCard {
+            // The chain is taken out of the path by the same rule the transitions are, so say so here
+            // rather than leaving the row reading "On" over sound it is not touching.
+            val bypassed = p.hiRes || dac.bitPerfect
             Row(Modifier.fillMaxWidth().clickable(onClick = nav::equalizer).padding(horizontal = 16.dp, vertical = 15.dp)) {
-                Text("Equalizer and crossfeed", Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
-                Text(if (p.dsp) "On" else "Off", color = MaterialTheme.colorScheme.primary)
+                Text("Equalizer and crossfeed", Modifier.weight(1f).alpha(if (bypassed) DIMMED else 1f), style = MaterialTheme.typography.bodyLarge)
+                Text(if (bypassed) "Off now" else if (p.dsp) "On" else "Off", Modifier.alpha(if (bypassed) DIMMED else 1f), color = MaterialTheme.colorScheme.primary)
             }
             Hairline(startIndent = 16.dp)
             Toggle("Use AutoEQ for headphones", "Headphones with a known curve get it as soon as they connect. Pick a curve for one device under Equalizer, then Devices.", p.autoEqAuto) { on -> vm.update { it.copy(autoEqAuto = on) } }

@@ -671,10 +671,19 @@ class PlaybackService : MediaLibraryService() {
     private fun precacheAhead() {
         val p = flint.settings.value
         val count = if (flint.http.metered) p.precacheMobile else p.precacheWifi
-        // The player itself already buffers the very next track; this covers the ones after it.
-        val from = player.currentMediaItemIndex + 2
-        if (count <= 1 || player.shuffleModeEnabled) return precacher.cancel()
-        precacher.update((from until minOf(from + count - 1, player.mediaItemCount)).map(player::getMediaItemAt))
+        // The player itself already buffers the very next track, which is why this normally covers the
+        // ones after it - except with a transition on. A mix needs that next track decodable a whole
+        // crossfade before the player would otherwise want it, and audio that arrives too late to be
+        // mixed into leaves a hole where the end of the song should be (see TransitionSink), so then it
+        // is fetched here too. Nothing extra is fetched, only earlier: these are the same bytes the
+        // player would ask for a minute later.
+        val mixing = !transitionsOff && (p.crossfadeSec > 0 || p.autoMix)
+        val first = if (mixing) 1 else 2
+        // Shuffle moves the goalposts, so nothing is fetched deep into a queue about to be reordered -
+        // but the next track is the next track whatever the order.
+        val last = maxOf(if (player.shuffleModeEnabled) 0 else count, if (mixing) 1 else 0)
+        if (last < first) return precacher.cancel()
+        precacher.update(upcoming.drop(first).take(last - first + 1))
     }
 
     /**
