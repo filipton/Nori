@@ -1165,6 +1165,14 @@ private fun SleeveCarousel(
         androidx.compose.runtime.snapshotFlow { listOf(offset, committed, currentUrlNow, shift.adopted) }.collect { (o, waiting, showing, taken) ->
             // Held from the moment a record is sent until the page is drawing its colours, and taken
             // from the record's own position the rest of the time.
+            // Let go of the record a swipe sent the moment the player is on it and the page is wearing
+            // its colours. Kept, it made every later change look like that record arriving again: a song
+            // that ends by itself moves the player off what was committed, which read as a record still
+            // on its way in, and the page went back to its colours and stayed there.
+            if (committedTint != null && waiting == showing && taken == committedTint) {
+                committed = null
+                committedTint = null
+            }
             if (committedTint != null && (waiting != showing || taken != committedTint)) {
                 shift.towards = committedTint
                 shift.amount = 1f
@@ -1312,7 +1320,11 @@ private fun SleeveCarousel(
                 // lift that sprang past its mark pulled the arriving record past the middle and back,
                 // which is the overshoot you see when a button sends it across.
                 if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
-                land(go, 0f, BUTTON_STIFFNESS, liftDown = 600f, keepLift = { queued > 0 })
+                // Quicker the more presses are waiting. A run of them should feel like scrolling the
+                // records past, and at one speed the fifth press still had four full slides to sit
+                // through; each one waiting shortens the next, up to about three times as quick.
+                val hurry = BUTTON_STIFFNESS * (1f + 0.75f * queued.coerceAtMost(3))
+                land(go, 0f, hurry, liftDown = 600f, keepLift = { queued > 0 })
             }
             moving = job
             job.join()
@@ -1842,12 +1854,27 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // second apart; the player's own position carries on between those readings, and a bar that shows
     // it moves at the speed of the music instead.
     val live = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
-    LaunchedEffect(playing, d, dragging, pending, state.current?.id) {
-        live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
-        if (!playing || dragging) return@LaunchedEffect
+    LaunchedEffect(playing, d, dragging) {
+        if (dragging) return@LaunchedEffect
+        var last = 0L
         while (isActive) {
-            androidx.compose.runtime.withFrameMillis { }
-            live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+            val target = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+            // Stopped and already there: look again in a moment rather than on every frame, so a paused
+            // player costs nothing.
+            if (!playing && kotlin.math.abs(target - live.floatValue) < 0.0005f) {
+                live.floatValue = target
+                last = 0L
+                delay(200)
+                continue
+            }
+            val now = androidx.compose.runtime.withFrameMillis { it }
+            val step = if (last == 0L) 16L else (now - last).coerceIn(1L, 64L)
+            last = now
+            // Carried towards where the song really is rather than put there. Playing, the two are a
+            // fraction of a pixel apart and the bar simply moves; when the song changes or a skip takes
+            // it back to the beginning, the same rule slides it there over about a third of a second
+            // instead of the bar being somewhere else the next frame.
+            live.floatValue += (target - live.floatValue) * (1f - kotlin.math.exp(-step / 110f))
         }
     }
     val held = pending

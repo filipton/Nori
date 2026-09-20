@@ -98,6 +98,9 @@ class PlaybackService : MediaLibraryService() {
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "flint:loading").apply { setReferenceCounted(false) } }
     private var offloaded = false
+    /** The speed and pitch the sound is being made with; see applyAudio. */
+    private var appliedSpeed = 1f
+    private var appliedPitch = 1f
     /**
      * The sink failed to open or to write once. Offload is the only part of the chain that can fail on a
      * device the app cannot see into (a USB DAC, a dock, a car head unit), so it is given up for the life of
@@ -387,6 +390,13 @@ class PlaybackService : MediaLibraryService() {
         equalizer.setOutput(p.balance, p.mono, p.limiterThresholdDb, 120f, if (p.limiter) 5f else 0f)
         transitionsOff = untouched
         player.skipSilenceEnabled = p.skipSilence && !untouched
+        // Speed and pitch reach the sound through the chain that is built when the sink is configured,
+        // so a chain already running keeps the pair it was built with: the new speed sat there unheard
+        // until something else - any other setting - rebuilt the sink, and then arrived as if it had
+        // just been asked for. Noted here and acted on at the end, with the rest of the rebuilds.
+        val tempoChanged = appliedSpeed != p.speed || appliedPitch != p.pitch
+        appliedSpeed = p.speed
+        appliedPitch = p.pitch
         player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)
         // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
         // It also only reaches the phone's own outputs: the chip has no path to a USB DAC, but Android still
@@ -407,7 +417,7 @@ class PlaybackService : MediaLibraryService() {
         if (equalizer.enabled != processing) {
             equalizer.enabled = processing
             reconfigureSink()
-        } else if (offloadChanged && offloaded) reconfigureSink()
+        } else if ((offloadChanged && offloaded) || tempoChanged) reconfigureSink()
     }
 
     @Volatile private var transitionsOff = false

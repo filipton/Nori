@@ -120,6 +120,7 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
 
     private val listener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
+            keepSeek(player)
             publish(player, events.contains(Player.EVENT_TIMELINE_CHANGED))
         }
 
@@ -201,7 +202,34 @@ class PlayerConnection(private val context: Context, private val flint: Flint) {
     fun previous() = with { it.seekToPrevious() }
     /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
     fun previousItem() = with { it.seekToPreviousMediaItem() }
-    fun seekTo(ms: Long) = with { it.seekTo(ms) }
+    /**
+     * A seek, and then a second one if the player did not keep it. Asked for on a song that is still
+     * being fetched, the seek lands on a source that has not been opened yet: the player accepts it,
+     * loads the track and starts it from the beginning, and the position the finger asked for is gone.
+     * So it is remembered until the player is really playing that song, and asked for again if the
+     * player ended up somewhere else.
+     */
+    fun seekTo(ms: Long) = with { c ->
+        wanted = ms to c.currentMediaItem?.mediaId
+        c.seekTo(ms)
+    }
+
+    /** Where a seek asked to go, and in which song; see [seekTo]. */
+    private var wanted: Pair<Long, String?>? = null
+
+    private fun keepSeek(p: Player) {
+        val (target, id) = wanted ?: return
+        // Only while it could still be lost: once the song is playing and near where it was asked to
+        // be, or the song has changed under it, there is nothing to keep.
+        if (id != p.currentMediaItem?.mediaId) { wanted = null; return }
+        if (p.playbackState != Player.STATE_READY) return
+        if (kotlin.math.abs(p.currentPosition - target) <= 1_500) { wanted = null; return }
+        // Only from the very beginning: anywhere else and the player has been asked for something newer
+        // - the next song, another scrub - which must not be undone.
+        if (p.currentPosition > 1_500) { wanted = null; return }
+        wanted = null
+        p.seekTo(target)
+    }
     fun setShuffle(on: Boolean) = with { it.shuffleModeEnabled = on }
 
     fun cycleRepeat() = with {
