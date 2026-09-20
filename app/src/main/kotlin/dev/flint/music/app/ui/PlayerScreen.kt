@@ -344,11 +344,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // the same picture behind them rather than one stretched row from the very top.
                     val resting = if (sleeveHeight > 0f) sleeveHeight else size.width / SLEEVE
                     val bottom = if (sleeveBottom > 0f) sleeveBottom else resting
-                    // With the record picked up, the blurred copy shrinks about the same middle, so the
-                    // two are still the same picture at the same size and the card's edge still meets
-                    // its own blur rather than a band of it left behind at the resting scale.
-                    val h = resting
-                    val b = bottom
+                    // With the record picked up, the page's copy shrinks about the same middle. It has
+                    // to: a record's last rows dissolve into whatever is behind them, and behind them is
+                    // this. Drawn at the sleeve's size while the record is smaller than that, the record
+                    // ends in a part of the cover that belongs further up it - darker rows meeting
+                    // brighter ones, which is a line along the bottom of a record that is growing.
+                    val k = liftedScale(shift.lifted, size.width, resting)
+                    val h = resting * k
+                    val b = bottom - resting * (1f - k) / 2f
                     drawSleeveWash(p, b, h, size.height)
                 } else drawRect(scheme.background)
             }
@@ -414,13 +417,16 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // the title at 56.5 % and the artist at 59-61 %. A sleeve that ended above the text left
                 // the text sitting on bare page, which is what read as the cover being out of place.
                 if (page == Panel.ART) Box(
-                    // Not faded in. The panel being left is drawn over this one and fades out, which is
-                    // the dissolve; bringing the sleeve up from nothing underneath it as well means a
-                    // half-there cover over a page that is already a blurred copy of the same cover, and
-                    // a cover that is half there has no soft bottom - its last rows are rubbed out, so
-                    // what is left there is the page. That is the blur that is missing for the whole of
-                    // a change back from the queue and then arrives once the fade is over.
+                    // There or not there, never half there. The panel being left is drawn over this one
+                    // and fades out, which is the dissolve; bringing the sleeve up from nothing
+                    // underneath it as well means a half-there cover over a page that is already a
+                    // blurred copy of the same cover, and a cover that is half there has no soft bottom -
+                    // its last rows are rubbed out, so what is left there is the page. But it must stay
+                    // away until the change has actually begun: the panel is composed a frame before the
+                    // flight starts, and at full strength that frame is the whole sleeve appearing for an
+                    // instant before it flies.
                     Modifier.fillMaxWidth()
+                        .graphicsLayer { alpha = if (panel != showing) 0f else 1f }
                         .layout { measurable, constraints ->
                             val placeable = measurable.measure(constraints)
                             val takes = (placeable.height * (1f - SLEEVE_UNDER_TEXT)).toInt()
@@ -720,19 +726,6 @@ private fun Artwork(
             // out: the same picture, the same place, the same scale, with nothing to keep in step.
         }
     }
-}
-
-/**
- * How much of a record's soft bottom there is at the size it is now: all of it when the record is
- * lying on the page, none of it while it is held up. A record that has been picked up is a card - it
- * has an edge of its own, and a shadow - and it is also smaller than the sleeve, which is what the
- * page's blurred copy of the cover is drawn at: a record dissolving at *its* bottom ends in a part of
- * that copy which belongs further up the cover, and the two do not meet. They meet exactly when the
- * record is full size, and this comes in as it gets there, so the difference is never on screen.
- */
-private fun meltStrength(scale: Float, held: Float): Float {
-    val t = ((scale - held) / (1f - held)).coerceIn(0f, 1f)
-    return t * t * (3f - 2f * t)
 }
 
 /**
@@ -1391,8 +1384,7 @@ private fun SleeveCarousel(
             // back. The one on top does the fading; the one underneath keeps its picture, which is
             // covered anyway.
             if (!on()) return@drawWithContent
-            val s = liftedScale(lift.value, widthPx, size.height)
-            rubOutBottom(meltStrength(s, liftedScale(1f, widthPx, size.height)))
+            rubOutBottom()
         }
         fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float, sharp: Boolean = true) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             // Its own layer to rub out of, for the copy that rubs: without one the erase would take the
@@ -1463,11 +1455,7 @@ private fun SleeveCarousel(
         if (BACKDROP) Box(
             Modifier.fillMaxSize().clipToBounds()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent {
-                    drawContent()
-                    val s = liftedScale(lift.value, widthPx, size.height)
-                    giveWayToPage(s, meltStrength(s, liftedScale(1f, widthPx, size.height)))
-                },
+                .drawWithContent { drawContent(); giveWayToPage(liftedScale(lift.value, widthPx, size.height)) },
         ) {
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
