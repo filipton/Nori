@@ -87,7 +87,14 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
             itemsIndexed(r.songs, key = { _, s -> s.id }, contentType = { _, _ -> "song" }) { _, s ->
                 // One tap plays one song: a search result list is not an album, and with octo-fiesta
                 // queueing the rest would make the server download every provider track in it.
-                SongRow(s, vm.cover(s.coverArt, CoverSize.ROW), onClick = { vm.remember(); actions.play(listOf(s)) }, onMenu = { menu(s) }, downloaded = s.id in downloads.doneIds)
+                // The same two swipes every other list of songs has: a result is a song like any other,
+                // and reaching for the menu to queue one was the odd thing out here.
+                val (onRight, onLeft) = actions.swipes
+                SongRow(
+                    s, vm.cover(s.coverArt, CoverSize.ROW), onClick = { vm.remember(); actions.play(listOf(s)) }, onMenu = { menu(s) },
+                    downloaded = s.id in downloads.doneIds,
+                    swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
+                )
             }
             if (ui.fromServer && r.songs.isEmpty() && r.albums.isEmpty() && r.artists.isEmpty()) item { EmptyNote("Nothing found") }
         }

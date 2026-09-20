@@ -103,6 +103,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -208,10 +209,18 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     LaunchedEffect(panel) {
         if (panel == showing) return@LaunchedEffect
         leaving = showing
-        showing = panel
-        if (AppMotion.reduce) arrival.snapTo(1f)
-        else { arrival.snapTo(0f); arrival.animateTo(1f, androidx.compose.animation.core.tween(PANEL_MS)) }
+        // The panel that has just been asked for is composed before this runs, and an arrival still
+        // sitting at 1 from the last change drew it once at full strength before it started fading up:
+        // the panel blinked, whole, and then eased in from nothing.
+        if (AppMotion.reduce) { arrival.snapTo(1f); showing = panel } else {
+            arrival.snapTo(0f)
+            showing = panel
+            arrival.animateTo(1f, androidx.compose.animation.core.tween(PANEL_MS))
+        }
     }
+    // Read in the draw phase: nothing until the change above has begun, so the frame a panel first
+    // appears on is the first frame of its fade rather than one at full strength.
+    val arrived = { if (panel != showing) 0f else arrival.value }
     // The lyrics keep a small copy of the cover in their header, so between the artwork and the lyrics
     // there is one cover and it travels, the way it does between the now playing bar and the sleeve.
     // Dissolving the sleeve into the blurred page instead is what read as a block of blur appearing at
@@ -311,7 +320,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             // in the now playing bar. Without it the lyrics simply went down behind the bar and a cover
             // appeared there out of nothing.
             else if (panel == Panel.LYRICS) FlyingThumb(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW))
-            if (flying) PanelFlight(sleeveArt, thumb, sleeveBottom, sleeveHeight, toThumb = panel == Panel.LYRICS) { arrival.value }
+            if (flying) PanelFlight(
+                sleeveArt, thumb, sleeveBottom, sleeveHeight, toThumb = panel == Panel.LYRICS,
+                palette = palette, page = scheme.background,
+            ) { arrival.value }
             // Artwork, lyrics and queue dissolve into each other rather than cutting. The fade is on the
             // panel itself and not on the whole screen: the transport is the same in all three and is
             // shared across the change, and fading the content it sits in dimmed it half-way. Fading only
@@ -331,7 +343,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             ) { page ->
             // 1 for the panel that is leaving - it has the transition's own fade on top of it - and the
             // arrival for the one coming in, read in the draw phase so a dissolve recomposes nothing.
-            val panelFade: () -> Float = { if (page == panel) arrival.value else 1f }
+            val panelFade: () -> Float = { if (page == panel) arrived() else 1f }
             // The seek bar, the transport, the volume and the icons are in every panel but not at the same
             // height. Shared, only one copy of each is drawn during the dissolve, and it moves from where it
             // was to where it goes; dissolved like the rest, both copies showed and the controls doubled.
@@ -701,7 +713,12 @@ private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
  * while it travels. [progress] is the panel change's own 0..1, read in the draw phase.
  */
 @Composable
-private fun PanelFlight(art: SleeveArt, thumb: Rect, sleeveBottom: Float, sleeveHeight: Float, toThumb: Boolean, progress: () -> Float) {
+private fun PanelFlight(
+    art: SleeveArt, thumb: Rect, sleeveBottom: Float, sleeveHeight: Float, toThumb: Boolean,
+    /** The page's colours, so the record arrives with the same soft bottom the sleeve has. */
+    palette: PagePalette?, page: Color,
+    progress: () -> Float,
+) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val side = with(density) { sleeveHeight.toDp() }
     val thumbRadius = with(density) { 9.dp.toPx() }
@@ -727,7 +744,29 @@ private fun PanelFlight(art: SleeveArt, thumb: Rect, sleeveBottom: Float, sleeve
                     shape = RoundedCornerShape(mix(sleeveRadius, thumbRadius) / k)
                     clip = true
                 },
-        ) { SleeveImage(art, Modifier.fillMaxSize()) }
+        ) {
+            SleeveImage(art, Modifier.fillMaxSize())
+            // The sleeve's bottom is soft, and the record flying into its place has to be soft by the
+            // time it gets there: without this the flight landed with a hard edge and the softness only
+            // appeared once the real sleeve took over, a frame or two later. The shade the status bar's
+            // icons need on a pale cover belongs to the sleeve too, and was in the same boat.
+            Box(
+                Modifier.fillMaxSize().graphicsLayer {
+                    val t = progress().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
+                    val near = (1f - t / 0.45f).coerceIn(0f, 1f)
+                    alpha = near * near * (3f - 2f * near)
+                }.drawBehind {
+                    if (palette != null) drawSleeveMelt(palette, 0.19f) else drawSleeveFade(page, 0.19f)
+                    drawRect(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent,
+                            startY = 0f, endY = size.height * 0.16f,
+                        ),
+                        size = androidx.compose.ui.geometry.Size(size.width, size.height * 0.16f),
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -1316,9 +1355,14 @@ private fun SleeveImage(art: SleeveArt, modifier: Modifier) {
 @Composable
 internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
     val scheme = MaterialTheme.colorScheme
+    // These two sit on the sleeve's own melting bottom, not on the page: whatever the page colour is,
+    // what is behind them is a piece of the record, and it can be any brightness at all. A disc tinted
+    // from the page came out lighter than the page on a bright record and carried a white glyph on top
+    // of it - on The Bends, a pale orange disc with a white heart. The disc brings its own contrast.
+    val onDark = scheme.onSurface.luminance() > 0.5f
     Surface(
         onClick = onClick, shape = CircleShape,
-        color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background),
+        color = if (onDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.72f),
         contentColor = if (selected) scheme.primary else scheme.onSurface,
         modifier = Modifier.size(42.dp),
     ) {

@@ -434,7 +434,7 @@ fun LazyListScope.songRows(
 
 /** The icon and words a swipe setting uncovers under [song]'s row, and the action; null when that side does nothing. */
 @Composable
-private fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? = when (action) {
+internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? = when (action) {
     SwipeAction.NONE -> null
     SwipeAction.QUEUE -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, "Add to queue") { actions.enqueue(listOf(song)) }
     SwipeAction.PLAY_NEXT -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, "Play next") { actions.playNext(listOf(song)) }

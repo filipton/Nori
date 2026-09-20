@@ -4,6 +4,10 @@ import android.graphics.Bitmap
 import android.util.LruCache
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
@@ -85,19 +89,56 @@ data class CoverTint(val url: String?, val palette: PagePalette?)
 fun rememberCoverTint(url: String?, dark: Boolean, amoled: Boolean): CoverTint {
     val context = LocalContext.current
     val key = url?.let { paletteKey(it, dark, amoled) }
-    val tint by produceState(CoverTint(url, key?.let(CoverPalette.cache::get)), key) {
-        // Drop the previous cover's colours the moment the track changes: holding them while the new
-        // artwork loads leaves the mini player wearing the last song's tint for a second.
-        value = CoverTint(url, key?.let(CoverPalette.cache::get))
-        if (url == null || value.palette != null) return@produceState
-        value = CoverTint(url, paletteOf(context, url, dark, amoled))
+    // Straight out of the cache, here in composition. It used to come from `produceState`, whose block
+    // is a coroutine that runs *after* the frame the cover changed on: a cover measured long ago still
+    // arrived a frame or two late, and until it did, everything drawn from it - the page, the soft
+    // bottom under the sleeve, the text - was still the last record's. That is the lag that showed as
+    // the old colours sitting under a cover that had already changed, most obviously when the record
+    // coming in was black.
+    val ready = key?.let(CoverPalette.cache::get)
+    // Only for a cover nobody has measured yet; reset with the key, so the last song's colours are
+    // never handed out for this one.
+    var measured by remember(key) { mutableStateOf<PagePalette?>(null) }
+    LaunchedEffect(key) {
+        if (url == null || ready != null) return@LaunchedEffect
+        measured = paletteOf(context, url, dark, amoled)
     }
-    return tint
+    return CoverTint(url, ready ?: measured)
 }
 
 @Composable
 fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePalette? =
     rememberCoverTint(url, dark, amoled).palette
+
+
+/**
+ * The dark page for a record's dominant colour. It used to be that colour's hue and saturation at a
+ * flat lightness of 0.20 whatever the record was, which is why a sleeve that is a field of bright red
+ * came out as a dark maroon: the page was always as dark as the darkest record's would have to be.
+ *
+ * What actually limits it is the writing on it, and different colours reach that limit at very
+ * different lightnesses - a blue at 0.34 is dimmer to the eye than a yellow at 0.20. So the page keeps
+ * the record's own lightness, and is only taken down as far as the text needs: white has at least
+ * eight to one on it, which leaves the album line, the faintest thing on the page at 45 % white, with
+ * about three. A record that is darker than that stays darker, so nothing is ever brightened to meet
+ * a floor - the Black Album's page is still black.
+ */
+private const val PAGE_LIGHTEST = 0.34f
+private const val PAGE_MAX_LUMA = 0.081f
+
+private fun darkPage(hsl: FloatArray): Color {
+    val sat = (hsl[1] * 0.95f).coerceAtMost(0.62f)
+    var lo = 0.04f
+    var hi = hsl[2].coerceIn(0.04f, PAGE_LIGHTEST)
+    fun at(l: Float) = Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], sat, l)))
+    if (at(hi).luminance() <= PAGE_MAX_LUMA) return at(hi)
+    // Twelve halvings put it within a thousandth of the brightest this colour may be.
+    repeat(12) {
+        val mid = (lo + hi) / 2f
+        if (at(mid).luminance() <= PAGE_MAX_LUMA) lo = mid else hi = mid
+    }
+    return at(lo)
+}
 
 /**
  * The seam is the whole trick. A page tinted with the cover's *dominant* colour still shows a line
@@ -123,7 +164,7 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
         // viewer would name - a dusty pink arrived as a neutral brown. There was room to spare: white
         // text has about 14:1 on that pink at 0.20, and better than 8:1 on the worst case the band
         // allows (a yellow at the top of it), which still holds after the wash's own +0.05 of lightness.
-        dark -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceAtMost(0.20f))))
+        dark -> darkPage(hsl)
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
@@ -347,14 +388,29 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
         }
         y += rowStep
     }
+    // One colour to the eye is several buckets here: a record that is red from crimson through to
+    // orange lands in three of them, and each one on its own can lose to the black around it - which is
+    // how the Amnesiac sleeve, which is half a field of red, ended up with a black page. A hue is
+    // therefore worth what its whole family covers: itself and the twenty degrees either side, at full
+    // weight, so what is compared is simply how much of the record each colour takes up. Black and the
+    // pale greys stand alone - they are not a hue with a spread, and lending them their neighbours
+    // would hand every dark record a black page. A sleeve that really is black still gets one: the
+    // Black Album is 98 % black and nothing else comes close.
+    val score = FloatArray(HUES + 2)
+    for (i in 0 until HUES) {
+        score[i] = weight[i] + weight[(i + HUES - 1) % HUES] + weight[(i + 1) % HUES]
+    }
+    score[NEUTRAL] = weight[NEUTRAL]
+    score[DARK] = weight[DARK]
     var best = 0
-    for (i in weight.indices) if (weight[i] > weight[best]) best = i
-    val n = weight[best]
+    for (i in score.indices) if (score[i] > score[best]) best = i
+    val run = if (best < HUES) intArrayOf((best + HUES - 1) % HUES, best, (best + 1) % HUES) else intArrayOf(best)
+    val n = run.sumOf { weight[it].toDouble() }.toFloat()
     if (n <= 0f) return fallback
     return (0xFF shl 24) or
-        ((sumR[best] / n).toInt().coerceIn(0, 255) shl 16) or
-        ((sumG[best] / n).toInt().coerceIn(0, 255) shl 8) or
-        (sumB[best] / n).toInt().coerceIn(0, 255)
+        ((run.sumOf { sumR[it].toDouble() } / n).toInt().coerceIn(0, 255) shl 16) or
+        ((run.sumOf { sumG[it].toDouble() } / n).toInt().coerceIn(0, 255) shl 8) or
+        (run.sumOf { sumB[it].toDouble() } / n).toInt().coerceIn(0, 255)
 }
 
 /** The colour of the cover's last rows: what the page has to start from for the picture to melt into it. */

@@ -240,8 +240,12 @@ fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHe
     // even than under the artwork. So the stripes give way, slowly at first, to a deeper page colour,
     // and arrive at it exactly at the bottom edge of the screen, where there is nothing to meet.
     if (endY - bottom > 1f) {
-        val dark = palette.onBackground.luminance() > 0.5f
-        val floor = if (dark) blend(palette.background, Color.Black, 0.28f) else palette.background
+        // The page ends on its own colour, not on a darkened version of it. Taking a third of the way
+        // to black off the bottom was barely visible while every page was dark; now that a bright
+        // record gets a bright page it split the screen in two - the record's colour across the top
+        // and something close to black under the controls. The gradient below still calms the stripes;
+        // it no longer changes how light the page is.
+        val floor = palette.background
         drawRect(
             Brush.verticalGradient(
                 // The colours stay through the controls and settle into one only towards the bottom:
@@ -446,6 +450,23 @@ fun PillButton(
     }
 }
 
+
+/**
+ * The same colours part way from [a] to [b]. Everything a page takes from the record - the text, the
+ * accent, the plates behind the controls - travels with the wash rather than switching over when the
+ * song does, so the whole screen changes as one thing.
+ */
+fun mixPalette(a: PagePalette, b: PagePalette, t: Float): PagePalette = when {
+    t <= 0f -> a
+    t >= 1f -> b
+    else -> a.copy(
+        edge = androidx.compose.ui.graphics.lerp(a.edge, b.edge, t),
+        background = androidx.compose.ui.graphics.lerp(a.background, b.background, t),
+        onBackground = androidx.compose.ui.graphics.lerp(a.onBackground, b.onBackground, t),
+        onBackgroundVariant = androidx.compose.ui.graphics.lerp(a.onBackgroundVariant, b.onBackgroundVariant, t),
+        accent = androidx.compose.ui.graphics.lerp(a.accent, b.accent, t),
+    )
+}
 
 /**
  * Dresses everything inside in the colours of one cover: the page colour becomes the surface, the

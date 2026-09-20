@@ -77,9 +77,9 @@ because it has none.
   Sampling boxes drawn on a lifted card overlap the card, not the page. Almost every wrong conclusion
   in this round came from trusting those numbers.
 
-## Fixes from the same night that are worth keeping
+## Fixes from the same night that were kept
 
-These were in the commits scrapped with the band work, and were each approved on sight:
+The band attempts were scrapped; these were brought back, each approved on sight:
 
 - The page colour takes the hue family that covers most of the sleeve (Amnesiac comes out red, not
   black; the Black Album still black).

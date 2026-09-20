@@ -172,7 +172,14 @@ private fun chromeColours(): ChromeColours {
     val slab = content.copy(alpha = lift).over(tint?.let { blend(page, it.edge, 0.30f) } ?: page)
     // The faint line Apple's floating bars carry along their top edge. It does most of the work in the
     // light theme, where a shadow on a white page is barely there.
-    return ChromeColours(slab, content, page, content.copy(alpha = if (dark) 0.14f else 0.07f))
+    // The bar wears the record's colours too, so it has to change when the page does rather than
+    // switching over in the frame the song changes. The same span the player's own colours travel in.
+    val ease = androidx.compose.animation.core.tween<Color>(420)
+    val slabNow by androidx.compose.animation.animateColorAsState(slab, ease, label = "slab")
+    val contentNow by androidx.compose.animation.animateColorAsState(content, ease, label = "content")
+    val pageNow by androidx.compose.animation.animateColorAsState(page, ease, label = "page")
+    val edgeNow by androidx.compose.animation.animateColorAsState(content.copy(alpha = if (dark) 0.14f else 0.07f), ease, label = "edge")
+    return ChromeColours(slabNow, contentNow, pageNow, edgeNow)
 }
 
 /** The slab's colour, what is written on it, the page it fades into, and the hairline round its edge. */
