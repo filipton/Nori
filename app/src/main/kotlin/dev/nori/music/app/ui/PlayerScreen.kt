@@ -1891,19 +1891,22 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
             lastHeld = null
         }
     }
-    LaunchedEffect(dragging) {
+    // Paused, the song isn't moving, so one reading is the truth until play resumes, a seek is
+    // held, or the song changes (all of which restart this). The delay(200) loop this replaces
+    // was a 5 Hz metronome that re-read the position over binder and recomposed twice a tick,
+    // forever, screen off and paused: 0/300 quiet seconds for a bar that could not move.
+    LaunchedEffect(dragging, moving, pending, state.current?.id, durationMs) {
         if (dragging) return@LaunchedEffect
         // Teleport, never glide: the bar is put where the song is. The easing this replaces slid
         // the bar back towards the stale reading after a scrub and swept it across the screen on
         // every skip. While a seek is held the bar shows the held place (see fraction below), so
         // the loop has nothing to track until the watch clears it.
-        while (isActive) {
-            if (pending == null) live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
-            // Settled or holding: look again in a moment rather than on every frame, so a paused
-            // player costs nothing. Playing, every frame keeps the bar moving at the speed of the
-            // music between the once-a-second readings the times show.
-            if (!moving || pending != null) delay(200)
-            else androidx.compose.runtime.withFrameMillis { }
+        live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+        // Playing and unheld: every frame keeps the bar moving at the speed of the music between
+        // the once-a-second readings the times show. Anything else ends here with no timer armed.
+        while (moving && pending == null) {
+            live.floatValue = (vm.positionMs.toFloat() / d).coerceIn(0f, 1f)
+            androidx.compose.runtime.withFrameMillis { }
         }
     }
     val held = pending
