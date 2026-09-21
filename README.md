@@ -49,25 +49,18 @@ output (media3's sink emits 16-bit or float only; needs a custom `AudioOutputPro
 
 ## Measured
 
-Full results, including an Android 11 versus Android 14 comparison and the package checks, are in
-[perf-results.md](perf-results.md); reproduce them with `tools/perf-suite.sh <serial> <server-url>`.
-The short version, API 34 emulator (software GPU, no audio offload, so these are worst cases):
+Full results are in [BENCHMARKS.md](BENCHMARKS.md) (four-app shootout) and
+[perf-results.md](perf-results.md) (suite history); reproduce them with
+`tools/perf-suite.sh <serial> <server-url>`. The short version, same emulator,
+same server, same tracks, screen off — Nori release against Play releases:
 
-| | nori | Navic alpha55 | Musly 2.0.2 | Symfonium 15.0.1 |
+| | nori | Symfonium 15.0.1 | musly 2.0.2 | Navic alpha55 |
 |---|---|---|---|---|
-| Screen off, CPU | **1.1-1.7 %** of a core | 2.4-3.3 % | 4.6 % | 10.5 % |
-| Screen off, seconds asleep (of 90) | **70-75** | 1 | 0 | 0 |
-| Player visible, CPU | **3.2 %** | 90 % | 146 % | 185 % |
-| Cold start | **0.74-1.0 s** | ~1.9 s | - | - |
-| Memory | 72-121 MB | 120-137 MB | 132-148 MB | 119-136 MB |
-
-Equalizer, crossfeed and crossfade cost nothing extra with the screen off (1.7 % with all three on),
-because the DSP runs inside the same bursts. The word-by-word lyric sweep is the one exception at
-44 % while that tab is open on this emulator, which is why it has a switch (2.9 % off).
-
-Musly refuses to start on an emulator, so it was built from its v2.0.2 tag with the check removed;
-Symfonium is the official universal APK in trial mode. Both were measured on the same emulator and
-track as the rows above.
+| Screen off, CPU (MP3 / FLAC / EQ on) | **1.18 / 1.24 / 1.33 %** | 6.66 / 7.41 / 6.73 % | 2.78 / 3.76 / no EQ | 2.78 / 4.44 / 2.81 % |
+| Screen off, seconds asleep (of 90) | **76 / 75 / 73** | 1 / 0 / 1 | 0 / 0 / 0 | 1 / 0 / 0 |
+| Paused, seconds asleep | **89 of 90** | 29 of 30 | 0 of 30, holds a wakelock | 29 of 30 |
+| Cold start | **~280 ms** | ~390 ms | ~760 ms | ~570 ms |
+| Memory playing / paused | **108 / 97 MB** | 117 / 105 MB | 152 / 150 MB | 140 / 127 MB |
 
 ## Build
 
