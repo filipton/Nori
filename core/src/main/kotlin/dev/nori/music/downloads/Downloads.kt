@@ -113,7 +113,12 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
 
                 override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) {
                     follow(d)
-                    if (d.state == Download.STATE_COMPLETED) io.execute { core.downloadDone(d.request.id); publish() }
+                    if (d.state == Download.STATE_COMPLETED) io.execute {
+                        // The download is the permanent copy now; the streamed one is the same bytes
+                        // twice, so it goes. (A song streamed before it was downloaded lives in both.)
+                        sources.dropStreamCopies(d.request.id)
+                        core.downloadDone(d.request.id); publish()
+                    }
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
@@ -174,7 +179,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             val d = stored[s.id]
             when (d?.state) {
                 null, Download.STATE_REMOVING -> lost += s
-                Download.STATE_COMPLETED -> { core.downloadDone(s.id); finished = true }
+                Download.STATE_COMPLETED -> { core.downloadDone(s.id); finished = true; sources.dropStreamCopies(s.id) }
                 Download.STATE_FAILED -> failed[s.id] = DownloadMark(
                     DownloadPhase.FAILED, MutableStateFlow(downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request))), 0L,
                 )

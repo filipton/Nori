@@ -234,7 +234,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Storage location incl. SD card; export to Music/Downloads | x | x | | app-external | add |
 | Rolling stream cache with size cap | x | x | | yes | |
 | Promote played cache to permanent | x | | | | add |
-| Storage screen: sizes, clear image cache / stream cache / downloads / index / pending | x | x | x | | add |
+| Storage screen: sizes, clear image cache / stream cache / downloads / index / pending | x | x | x | sizes, clears stream + covers | clear downloads and the index from here |
 | Image cache: Wi-Fi-only, size, cover quality setting | x | x | x | fixed | add |
 | Offline mode: auto / forced / "metered counts as offline"; hide unavailable | x | x | x | implicit | add |
 | Offline write queue (stars, ratings, plays, playlist edits) | x | scrobbles | x | yes | |

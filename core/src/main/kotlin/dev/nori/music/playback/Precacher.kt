@@ -19,9 +19,11 @@ class Precacher(private val sources: MediaSources) {
     private var running: Future<*>? = null
     @Volatile private var writer: CacheWriter? = null
 
-    fun update(upcoming: List<MediaItem>) {
+    fun update(upcoming: List<MediaItem>, skip: (String) -> Boolean = { false }) {
         cancel()
-        val ids = upcoming.filter { !it.isRadio && !it.mediaId.startsWith("ext-") && it.mediaMetadata.extras?.getBoolean("external") != true }.map { it.mediaId }
+        // A song the download queue is already fetching arrives permanently; pulling it into the
+        // rolling cache too keeps it twice.
+        val ids = upcoming.filter { !it.isRadio && !it.mediaId.startsWith("ext-") && it.mediaMetadata.extras?.getBoolean("external") != true }.map { it.mediaId }.filterNot(skip)
         if (ids.isEmpty()) return
         running = worker.submit {
             for (id in ids) {

@@ -45,6 +45,16 @@ data class EqNotice(val message: String, val action: String, val source: DeviceS
 
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
+/** What lives on the phone: streamed music, covers, finished downloads and the library index. */
+data class StorageUi(
+    val streamBytes: Long = 0L,
+    val coverBytes: Long = 0L,
+    val downloadBytes: Long = 0L,
+    val downloadSongs: Int = 0,
+    val indexBytes: Long = 0L,
+    val busy: Boolean = false,
+)
+
 class SettingsViewModel(app: Application) : NoriViewModel(app) {
     val prefs: StateFlow<Prefs> = nori.settings.prefs
     val dac: StateFlow<DacState> = nori.dac.state
@@ -57,6 +67,47 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     init { viewModelScope.launch { runCatching { nori.library.indexSize() }.onSuccess { n -> _sync.update { it.copy(indexed = n) } } } }
 
     fun update(change: (Prefs) -> Prefs) = nori.settings.update(change)
+
+    /** Applies "Space for streamed music" at once instead of at the next track. */
+    fun applyCacheLimit() = viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() }
+
+    // ---- storage ----
+
+    private val _storage = MutableStateFlow(StorageUi())
+    val storage: StateFlow<StorageUi> = _storage
+
+    /** Measures what is on the phone; the caches answer from their index, the rest is weighed. */
+    fun refreshStorage() = viewModelScope.launch(Dispatchers.IO) {
+        val app = getApplication<Application>()
+        _storage.value = StorageUi(
+            streamBytes = nori.sources.streamBytes(),
+            coverBytes = dirBytes(java.io.File(app.cacheDir, "covers")),
+            downloadBytes = nori.sources.downloadBytes(),
+            downloadSongs = nori.downloads.state.value.done.size,
+            indexBytes = app.filesDir.listFiles()
+                ?.filter { it.name.startsWith("nori") && (it.name.endsWith(".db") || it.name.endsWith("-wal") || it.name.endsWith("-shm")) }
+                ?.sumOf { dirBytes(it) } ?: 0L,
+        )
+    }
+
+    /** Empties the streamed-music cache; downloads, covers and the index stay. */
+    fun clearStreamCache() = viewModelScope.launch(Dispatchers.IO) {
+        _storage.update { it.copy(busy = true) }
+        nori.sources.clearStream()
+        refreshStorage()
+    }
+
+    /** Empties the cover cache; pictures are fetched again as they are shown. */
+    fun clearCovers() = viewModelScope.launch(Dispatchers.IO) {
+        _storage.update { it.copy(busy = true) }
+        runCatching { coil3.SingletonImageLoader.get(getApplication()).diskCache?.clear() }
+        refreshStorage()
+    }
+
+    private fun dirBytes(f: java.io.File): Long {
+        if (f.isFile) return f.length()
+        return f.listFiles()?.sumOf(::dirBytes) ?: 0L
+    }
 
     /** A blank profile for the "add server" form. */
     fun newProfile() = ServerProfile(id = java.util.UUID.randomUUID().toString().take(8))
@@ -135,6 +186,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 "lyricsSweep" -> it.copy(lyricsSweep = on)
                 "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
                 "coversAhead" -> it.copy(coversAhead = value.toIntOrNull()?.coerceIn(0, 10) ?: it.coversAhead)
+                "cacheMb" -> it.copy(cacheMb = value.toIntOrNull()?.coerceIn(256, 16384) ?: it.cacheMb).also { viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() } }
                 "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)

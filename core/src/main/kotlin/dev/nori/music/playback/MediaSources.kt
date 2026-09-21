@@ -7,8 +7,10 @@ import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.TransferListener
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.CacheEvictor
+import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -19,6 +21,47 @@ import dev.nori.music.settings.Quality
 import java.io.File
 
 /**
+ * Least-recently-used eviction with a limit that follows the setting. media3's own evictor takes its
+ * maximum once, in the constructor, so changing "Space for streamed music" would otherwise wait for a
+ * restart to mean anything. Trimming mirrors what that evictor does - the stalest whole resources go
+ * until the cache fits - from the write callbacks (which is where media3 calls it) and on demand.
+ */
+class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
+    private val order = LinkedHashMap<String, Unit>(16, 0.75f, true)
+
+    override fun onCacheInitialized() {}
+    override fun onStartFile(cache: Cache, key: String, position: Long, length: Long) = touch(cache, key)
+    override fun onSpanAdded(cache: Cache, span: CacheSpan) = touch(cache, span.key!!)
+    override fun onSpanRemoved(cache: Cache, span: CacheSpan) {}
+    override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) = touch(cache, newSpan.key!!)
+    override fun requiresCacheSpanTouches() = true
+
+    private fun touch(cache: Cache, key: String) = synchronized(this) {
+        order[key] = Unit
+        trimLocked(cache)
+    }
+
+    /** Throws out the stalest whole resources until the cache fits. Runs wherever the caller is. */
+    fun trim(cache: Cache) = synchronized(this) { trimLocked(cache) }
+
+    private fun trimLocked(cache: Cache) {
+        if (cache.cacheSpace <= maxBytes) return
+        val dropping = order.keys.toList()
+        for (key in dropping) {
+            if (cache.cacheSpace <= maxBytes) return
+            order.remove(key)
+            if (key in cache.keys) runCatching { cache.removeResource(key) }
+        }
+        // Keys an earlier process wrote and this one never touched are not in the order above;
+        // untouched since the restart is the stalest there is, so they go first.
+        for (key in cache.keys) {
+            if (cache.cacheSpace <= maxBytes) return
+            if (key !in order) runCatching { cache.removeResource(key) }
+        }
+    }
+}
+
+/**
  * Where audio bytes come from, in order: a finished download, the rolling
  * stream cache, the network. Both caches are keyed by song id and quality, never
  * by URL, so a replayed track costs no radio time at all.
@@ -27,7 +70,8 @@ import java.io.File
 class MediaSources(context: Context, private val coreOf: () -> Core, private val http: Http, private val settings: Settings, private val onSecondAddress: () -> Boolean = { false }) {
     private val core get() = coreOf()
     val database = StandaloneDatabaseProvider(context)
-    val streamCache = SimpleCache(File(context.cacheDir, "stream"), LeastRecentlyUsedCacheEvictor(settings.value.cacheMb * 1024L * 1024L), database)
+    val streamEvictor = ResizableEvictor(settings.value.cacheMb * 1024L * 1024L)
+    val streamCache = SimpleCache(File(context.cacheDir, "stream"), streamEvictor, database)
     val downloadCache = SimpleCache(File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads"), NoOpCacheEvictor(), database)
 
     /** Ids whose download is complete; kept by [dev.nori.music.downloads.Downloads]. */
@@ -51,6 +95,7 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
      * follows the network the phone is on right then.
      */
     fun resolve(dataSpec: DataSpec): DataSpec {
+        applyStreamLimit()
         val id = dataSpec.uri.lastPathSegment!!
         if (id in downloaded) return dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
         var q = if (http.metered) settings.value.mobile else settings.value.wifi
@@ -63,6 +108,41 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
     fun downloadKey(id: String) = "dl:$id"
 
     fun downloadUrl(id: String): String = settings.value.download.let { core.streamUrl(id, it.bitRate.toUInt(), it.format) }
+
+    /**
+     * The limit follows the setting without a restart; checked whenever a track is opened, so the
+     * player picks a change up at the next song at the latest. A settings change applies it at once
+     * through [setStreamLimitMb].
+     */
+    private fun applyStreamLimit() {
+        val want = settings.value.cacheMb * 1024L * 1024L
+        if (streamEvictor.maxBytes != want) setStreamLimitMb(settings.value.cacheMb)
+    }
+
+    /** Sets the streamed-music limit now; call off the main thread, it touches the disk. */
+    fun setStreamLimitMb(mb: Int) {
+        streamEvictor.maxBytes = mb * 1024L * 1024L
+        streamEvictor.trim(streamCache)
+    }
+
+    fun streamBytes(): Long = runCatching { streamCache.cacheSpace }.getOrDefault(0L)
+    fun downloadBytes(): Long = runCatching { downloadCache.cacheSpace }.getOrDefault(0L)
+
+    /**
+     * Forgets every streamed copy of [id], whatever quality it was fetched at. A finished download is
+     * the permanent copy; the streamed one is the same bytes twice. Call off the main thread.
+     */
+    fun dropStreamCopies(id: String) {
+        for (key in runCatching { streamCache.keys }.getOrDefault(emptySet())) {
+            // Keys are "$id:<quality>" and the quality never holds a colon, so this is exact.
+            if (key.substringBeforeLast(':') == id) runCatching { streamCache.removeResource(key) }
+        }
+    }
+
+    /** Empties the streamed-music cache; downloads, covers and the index stay. Call off the main thread. */
+    fun clearStream() {
+        for (key in runCatching { streamCache.keys }.getOrDefault(emptySet())) runCatching { streamCache.removeResource(key) }
+    }
 
     /**
      * Songs are resolved when they are opened, not when they are queued, so the

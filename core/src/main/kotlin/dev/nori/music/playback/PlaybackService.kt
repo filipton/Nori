@@ -726,7 +726,8 @@ class PlaybackService : MediaLibraryService() {
         // but the next track is the next track whatever the order.
         val last = maxOf(if (player.shuffleModeEnabled) 0 else count, if (mixing) 1 else 0)
         if (last < first) return precacher.cancel()
-        precacher.update(upcoming.drop(first).take(last - first + 1))
+        val fetching = nori.downloads.state.value.pendingIds
+        precacher.update(upcoming.drop(first).take(last - first + 1)) { it in fetching }
     }
 
     /**

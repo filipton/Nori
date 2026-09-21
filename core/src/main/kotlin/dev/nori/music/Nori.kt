@@ -48,6 +48,15 @@ class Nori private constructor(private val context: Context) {
 
     val http: Http by lazyHttp
     val sources: MediaSources by lazySources
+
+    /**
+     * Applies "Space for streamed music" now; the player otherwise picks it up at the next track.
+     * Off the main thread: shrinking the cache touches the disk. Never builds the graph itself.
+     */
+    fun applyCacheLimit() {
+        if (lazySources.isInitialized()) sources.setStreamLimitMb(settings.value.cacheMb)
+    }
+
     val library = Library(::core, { http }, { settings.value.server?.musicFolderId.orEmpty() }, ::chooseAddress)
     val downloads = Downloads(context, ::core, lazySources, settings)
     val dac = BitPerfect(context)

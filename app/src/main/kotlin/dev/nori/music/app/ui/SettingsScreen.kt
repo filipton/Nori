@@ -55,6 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
+import dev.nori.music.downloads.formatBytes
 import dev.nori.music.playback.Equalizer
 import dev.nori.music.settings.Quality
 import dev.nori.music.settings.ThemeMode
@@ -209,6 +210,9 @@ private val index = listOf(
     Entry("data", "Quality on mobile data", ""),
     Entry("data", "Quality for downloads", ""),
     Entry("data", "Space for streamed music", "How much music to keep on the phone as you listen"),
+    Entry("data", "Stored on this phone", "Streamed music, covers, downloads and the library"),
+    Entry("data", "Clear streamed music", "Frees the space without touching downloads"),
+    Entry("data", "Clear covers", "Pictures are fetched again as they are shown"),
     Entry("data", "Downloads at once", "How many songs download at the same time"),
     Entry("data", "Download the whole library", ""),
     Entry("data", "Load ahead on Wi-Fi", "Songs fetched before you get to them"),
@@ -241,6 +245,52 @@ private val index = listOf(
     Entry("servers", "Bitrate limit on the second address", ""),
 )
 
+
+/**
+ * What lives on the phone, and a way to throw the throwaway parts out. Downloads are the permanent
+ * copy and are removed where they are listed; the streamed music and the covers rebuild themselves.
+ */
+@Composable
+private fun StorageRows(vm: SettingsViewModel) {
+    val storage by vm.storage.collectAsStateWithLifecycle()
+    val nav = LocalNav.current
+    LaunchedEffect(Unit) { vm.refreshStorage() }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Stored on this phone")
+            Text(
+                "${formatBytes(storage.streamBytes)} streamed · ${formatBytes(storage.coverBytes)} covers · " +
+                    "${formatBytes(storage.downloadBytes)} in ${storage.downloadSongs} downloads · ${formatBytes(storage.indexBytes)} library",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Hairline(startIndent = 16.dp)
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Streamed music")
+            Text("Kept as you listen, oldest goes first. Downloads stay.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        TextButton(vm::clearStreamCache, enabled = !storage.busy && storage.streamBytes > 0) { Text(if (storage.busy) "Clearing…" else "Clear") }
+    }
+    Hairline(startIndent = 16.dp)
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Covers")
+            Text("Fetched again as they are shown.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        TextButton(vm::clearCovers, enabled = !storage.busy && storage.coverBytes > 0) { Text(if (storage.busy) "Clearing…" else "Clear") }
+    }
+    Hairline(startIndent = 16.dp)
+    Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Downloads")
+            Text("Removed from their lists, or everything waiting under Downloads.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        TextButton(nav::downloads) { Text("Show") }
+    }
+    Hairline(startIndent = 16.dp)
+}
 
 @Composable
 fun SettingsScreen(vm: SettingsViewModel) {
@@ -438,7 +488,8 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Choice("Quality on Wi-Fi", p.wifi, qualities) { q -> vm.update { it.copy(wifi = q) } }
             Choice("Quality on mobile data", p.mobile, qualities) { q -> vm.update { it.copy(mobile = q) } }
             Choice("Quality for downloads", p.download, qualities) { q -> vm.update { it.copy(download = q) } }
-            Choice("Space for streamed music", p.cacheMb, listOf(256 to "256 MB", 1024 to "1 GB", 4096 to "4 GB", 16384 to "16 GB")) { mb -> vm.update { it.copy(cacheMb = mb) } }
+            Choice("Space for streamed music", p.cacheMb, listOf(256 to "256 MB", 1024 to "1 GB", 4096 to "4 GB", 16384 to "16 GB")) { mb -> vm.update { it.copy(cacheMb = mb) }; vm.applyCacheLimit() }
+            StorageRows(vm)
             Choice("Downloads at once", p.parallelDownloads, (1..10).map { it to "$it" }) { n -> vm.update { it.copy(parallelDownloads = n) } }
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

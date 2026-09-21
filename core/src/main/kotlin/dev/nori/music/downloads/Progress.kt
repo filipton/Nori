@@ -90,6 +90,14 @@ fun formatEta(sec: Long?): String {
 fun expectedBytes(sizeBytes: Long, durationS: Long, bitRateKbps: Int): Long =
     if (bitRateKbps > 0 && durationS > 0) durationS * bitRateKbps * 125L else sizeBytes
 
+/** "850 B", "38 MB", "2.1 GB" - a size a storage row shows. */
+fun formatBytes(bytes: Long): String = when {
+    bytes < 1024 -> "$bytes B"
+    bytes < 1_048_576 -> "${"%.0f".format(bytes / 1024.0)} KB"
+    bytes < 1_073_741_824 -> if (bytes < 10_485_760) "${"%.1f".format(bytes / 1_048_576.0)} MB" else "${"%.0f".format(bytes / 1_048_576.0)} MB"
+    else -> "${"%.1f".format(bytes / 1_073_741_824.0)} GB"
+}
+
 /** The downloads screen's lists, in the order the queue will run them. */
 data class DownloadSections<T>(val active: List<T>, val queued: List<T>, val failed: List<T>, val finished: List<T>)
 
