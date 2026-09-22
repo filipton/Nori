@@ -93,7 +93,19 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   it stops when the presses stop. A press on a record at rest is the same full slide as now.
 - Check: on the player, tap next five times in about a second. Five songs later, and the records
   stop moving within about a third of a second of the last tap. `tools/app.sh state` shows the index.
-- Status: **todo**
+- Done as: the channel and `queued` are gone. `slide.run` cancels the slide in flight
+  (`moving.cancelAndJoin`) and starts a new `land`; `land`'s cancel path sees `presses` has moved on
+  and commits the change with the record left where it is (`arrive(offset - go * span)`), and the new
+  slide starts from that offset with the speed the record had (`speed`, written by the animate
+  callback) at 1.5x the button stiffness. The wait for the player to catch up before a slide
+  (`stale`) is 250 ms, down from 500. `PlayPauseGlyph` shows pause while buffering with play-when-ready
+  (it flashed the play arrow after every skip). Checked with adb: 5 taps 180 ms apart → 5 songs, last
+  slide over ~400 ms after the last tap; swipe, tap-then-swipe, prev-then-next all count once each.
+- Known: between two records with different covers the slide waits for the player to answer the
+  change before it (the neighbour's cover is read from `state.index`); on the debug emulator that is
+  100-250 ms of the record sitting lifted, on a phone much less. Removing it means the carousel
+  looking further down the queue than one song.
+- Status: **done**
 
 ### 5. Player sheet open / close — `PlayerSheet.kt`, `App.kt` `PlayerLayer`, `FlyingCover`
 

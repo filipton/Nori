@@ -1009,6 +1009,13 @@ private fun SleeveCarousel(
     // the song, but it must not put the record back in the middle if a new drag is already moving it -
     // doing that wiped the new drag's first half, and the swipe that followed a swipe went nowhere.
     var gesture by remember { mutableIntStateOf(0) }
+    // Bumped by every press on the transport's buttons, so a slide can tell whether it was cut short
+    // by the next press (then its change still happens, and the record stays where it is for the next
+    // slide to carry on) or by something else. See land.
+    var presses by remember { mutableIntStateOf(0) }
+    // How fast the record was moving, in pixels a second, the last time a slide moved it: the slide
+    // that interrupts one starts from this rather than from rest.
+    var speed by remember { mutableFloatStateOf(0f) }
     /** A finger is on the record. While it is, the record stays lifted whatever else finishes. */
     var holding by remember { mutableStateOf(false) }
     // 0 at rest, 1 while a finger holds the record: it lifts off the page - a little smaller, rounded,
@@ -1103,14 +1110,19 @@ private fun SleeveCarousel(
      * and the new record settles into the sleeve. Cancelled half way - a second button press, a new
      * gesture - it still changes the song, so nothing asked for is quietly dropped.
      */
-    suspend fun land(go: Int, velocity: Float, stiffness: Float, liftDown: Float = 240f, keepLift: () -> Boolean = { false }) {
+    suspend fun land(go: Int, velocity: Float, stiffness: Float, liftDown: Float = 240f) {
         val turn = gesture
+        val press = presses
         // One change at a time. The song a record has just landed on is only the song the player is
         // playing a frame or two later, and until it is, the record waiting off the edge is still the
         // one that is showing: starting now would slide in a copy of the cover already in the middle,
         // which is the press that seems to change the cover first and then animate from it to itself.
+        //
+        // A quarter of a second is long enough for a player that is going to answer at all, and short
+        // enough that a run of presses (each of which waits here for the change before it) does not
+        // read as the records pausing between slides.
         val waitingFor = committed
-        val stale = waitingFor != null && currentUrlNow != waitingFor && kotlinx.coroutines.withTimeoutOrNull(500) {
+        val stale = waitingFor != null && currentUrlNow != waitingFor && kotlinx.coroutines.withTimeoutOrNull(250) {
             androidx.compose.runtime.snapshotFlow { currentUrlNow }.first { it == waitingFor }
         } == null
         val painter = if (go < 0) afterNow else beforeNow
@@ -1128,11 +1140,7 @@ private fun SleeveCarousel(
         if (stale) {
             committed = null
             if (go < 0) onNextNow() else onPreviousNow()
-            // Asked when the record has arrived, not when it was sent: a button pressed while this one
-            // was still on its way means the next is already on its way too, and putting the record down
-            // in between is what made a run of presses go down and up and down again instead of the
-            // records simply scrolling past, small, one after another.
-            if (!keepLift()) lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
+            lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
             return
         }
         // Where the neighbour sits once the record is lifted, which is where it will be when it arrives.
@@ -1178,26 +1186,25 @@ private fun SleeveCarousel(
             // second to do a quarter of a second's work.
             val settle = spring(dampingRatio = 1f, stiffness = stiffness, visibilityThreshold = 1f)
             if (AppMotion.reduce) offset = go * span
-            else androidx.compose.animation.core.animate(offset, go * span, velocity, settle) { v, _ -> offset = v }
+            else androidx.compose.animation.core.animate(offset, go * span, velocity, settle) { v, vel -> offset = v; speed = vel }
+            speed = 0f
             changed = true
             // Same frame: the incoming record takes the middle, the sleeve goes back under it.
             arrive(0f)
-            // The new record settles back into the sleeve - unless another press is already waiting, in
-            // which case it stays up and goes straight on.
-            // Asked when the record has arrived, not when it was sent: a button pressed while this one
-            // was still on its way means the next is already on its way too, and putting the record down
-            // in between is what made a run of presses go down and up and down again instead of the
-            // records simply scrolling past, small, one after another.
-            //
-            // And the settle is let go of rather than waited for: the record is back in the sleeve as
-            // far as this change is concerned, so a press that comes in while it is still growing takes
-            // it over and lifts it again from wherever it has got to, instead of queueing behind the
-            // rest of an animation that is already finished with.
-            if (!keepLift()) scope.launch { lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f)) }
+            // The new record settles back into the sleeve. The settle is let go of rather than waited
+            // for: the record is back in the sleeve as far as this change is concerned, so a press that
+            // comes in while it is still growing takes it over and lifts it again from wherever it has
+            // got to, instead of queueing behind the rest of an animation that is already finished with.
+            scope.launch { lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f)) }
         } finally {
             if (!changed) {
                 val caught = gesture != turn
                 when {
+                    // Another press on the buttons. The change happens now, however far the record has
+                    // got, and the record that was coming in keeps the place it is in: the press that
+                    // cancelled this one slides on from there, so a run of presses is one continuous
+                    // scroll of records rather than a queue of full slides (see the transport below).
+                    presses != press -> arrive(offset - go * span)
                     // Cancelled by something that is not a finger - the screen going away. Honour it.
                     !caught -> arrive(0f)
                     // A finger caught the record after it had all but gone: the change has happened as
@@ -1220,44 +1227,36 @@ private fun SleeveCarousel(
     // follow. A previous press that only rewinds the song never gets here: there is no other record to
     // show. See the buttons in PlayerScreen.
     //
-    // They queue rather than interrupt: pressed again while a record is still going, the second press
-    // waits its turn, so four quick presses are four songs and four changes, not four cancelled ones.
-    // Four presses in hand is plenty; a fifth is refused rather than dropped from the middle, so the
-    // count of what is still waiting cannot drift - and it is that count which decides whether the
-    // record stays up between presses.
-    val asks = remember { kotlinx.coroutines.channels.Channel<Int>(4) }
-    var queued by remember { mutableIntStateOf(0) }
-    LaunchedEffect(asks) {
-        for (go in asks) {
-            queued--
-            if ((go < 0 && !hasAfter) || (go > 0 && !hasBefore)) continue
-            val job = launch {
-                // No bounce in the lift, and quicker than the slide. A record that is still being
-                // picked up is still shrinking, and the gap the next one waits in shrinks with it; a
-                // lift that sprang past its mark pulled the arriving record past the middle and back,
-                // which is the overshoot you see when a button sends it across.
-                if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
-                // Quicker the more presses are waiting. A run of them should feel like scrolling the
-                // records past, and at one speed the fifth press still had four full slides to sit
-                // through; each one waiting shortens the next, up to about three times as quick.
-                val hurry = BUTTON_STIFFNESS * (1f + 0.75f * queued.coerceAtMost(3))
-                land(go, 0f, hurry, liftDown = 600f, keepLift = { queued > 0 })
-            }
-            moving = job
-            job.join()
-        }
-    }
-    // Whatever happened - a move that turned out to have nothing to move to, a landing cancelled by a
-    // finger that then went nowhere - a record with nobody holding it and nothing to do belongs flat in
-    // its sleeve. This is the one place that is guaranteed to run after every move.
+    // One slide in flight, never a queue. A press while a record is still on its way commits that
+    // change at once (the song moves on now, see land's cancel path) and the record that was coming
+    // in carries straight on from wherever it is to become the one going out - so five quick presses
+    // are five songs and one continuous scroll of records, and the motion stops within a slide of the
+    // last press. They used to queue, four deep, each waiting for the slide before it: the records
+    // went on scrolling for a second after the thumb had stopped, which read as the player lagging.
+    // The interrupting slide starts with the speed the record already had, so nothing jolts.
     LaunchedEffect(moving, holding) {
+        // Whatever happened - a move that turned out to have nothing to move to, a landing cancelled
+        // by a finger that then went nowhere - a record with nobody holding it and nothing to do
+        // belongs flat in its sleeve. This is the one place that is guaranteed to run after every move.
         moving?.join()
         if (!holding && lift.value != 0f) lift.animateTo(0f, down)
     }
     androidx.compose.runtime.DisposableEffect(slide) {
         val run: (Int) -> Boolean = { go ->
             if ((go < 0 && hasAfter) || (go > 0 && hasBefore)) {
-                if (asks.trySend(go).isSuccess) queued++
+                val running = moving?.takeIf { it.isActive }
+                presses++
+                moving = scope.launch {
+                    running?.cancelAndJoin()
+                    // No bounce in the lift, and quicker than the slide. A record that is still being
+                    // picked up is still shrinking, and the gap the next one waits in shrinks with it;
+                    // a lift that sprang past its mark pulled the arriving record past the middle and
+                    // back, which is the overshoot you see when a button sends it across.
+                    if (!AppMotion.reduce) launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
+                    // A press on top of a slide has further to go (the record it moves is part way in)
+                    // and a thumb that is in a hurry: half again as stiff.
+                    land(go, speed, if (running != null) BUTTON_STIFFNESS * 1.5f else BUTTON_STIFFNESS, liftDown = 600f)
+                }
                 true
             } else false
         }
@@ -1293,10 +1292,9 @@ private fun SleeveCarousel(
                 onDragStart = {
                     tracker.resetTracking(); x = 0f
                     holding = true
-                    // A finger beats the buttons: whatever they had queued is dropped, and a record
-                    // still on its way is cancelled - it changes the song on its way out (see land).
+                    // A finger beats the buttons: a record still on its way is cancelled - it changes
+                    // the song on its way out if it had all but arrived (see land).
                     gesture++
-                    while (asks.tryReceive().isSuccess) queued--
                     moving?.cancel()
                     if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 420f, visibilityThreshold = 0.001f)) }
                 },

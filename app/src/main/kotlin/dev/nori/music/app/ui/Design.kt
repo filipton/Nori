@@ -893,6 +893,11 @@ fun Modifier.loadingSheen(active: Boolean, color: Color): Modifier = if (!active
  * in one frame. The spinner only comes in when the wait is long enough to notice - past 300 ms - since
  * most skips start playing within that, and a spinner flicking in and out of the pause button for a
  * frame was one of the things that made skipping feel rough.
+ *
+ * While it waits for that, the wait is "playing": the player is not playing yet, but it is going to
+ * (that is what [buffering] means - waiting *with* play-when-ready), and showing the play arrow in the
+ * meantime said "paused" for a fraction of a second after every skip. A run of quick skips flashed it
+ * on and off with every press.
  */
 @Composable
 fun PlayPauseGlyph(playing: Boolean, buffering: Boolean, size: androidx.compose.ui.unit.Dp, spinner: androidx.compose.ui.unit.Dp) {
@@ -901,7 +906,7 @@ fun PlayPauseGlyph(playing: Boolean, buffering: Boolean, size: androidx.compose.
         if (buffering) kotlinx.coroutines.delay(300)
         busy = buffering
     }
-    val glyph = when { busy -> 2; playing -> 1; else -> 0 }
+    val glyph = when { busy -> 2; playing || buffering -> 1; else -> 0 }
     androidx.compose.animation.AnimatedContent(
         glyph,
         transitionSpec = {
