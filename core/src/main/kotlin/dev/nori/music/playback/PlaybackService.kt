@@ -114,6 +114,7 @@ class PlaybackService : MediaLibraryService() {
     private var offloadRefused = false
     /** Items from the current one onwards, as the playback thread may ask about them (decoding runs ahead). */
     @Volatile private var upcoming: List<MediaItem> = emptyList()
+    @Volatile private var previous: MediaItem? = null
     private val analysisWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "nori-analysis").apply { priority = Thread.MIN_PRIORITY } }
     private lateinit var precacher: Precacher
     private lateinit var analyser: AutoMixPrefetch
@@ -539,6 +540,10 @@ class PlaybackService : MediaLibraryService() {
         val was = upcoming
         if (t.isEmpty || player.currentMediaItemIndex == C.INDEX_UNSET) { upcoming = emptyList(); return }
         val list = ArrayList<MediaItem>(8)
+        // The song before this one is kept aside for the planner (see planFor), not put in the window:
+        // everything else reads the window's first entry as the song playing.
+        val before = t.getPreviousWindowIndex(player.currentMediaItemIndex, player.repeatMode, player.shuffleModeEnabled)
+        previous = if (before != C.INDEX_UNSET) player.getMediaItemAt(before) else null
         var i = player.currentMediaItemIndex
         while (i != C.INDEX_UNSET && list.size < 8) {
             list += player.getMediaItemAt(i)
@@ -561,7 +566,12 @@ class PlaybackService : MediaLibraryService() {
             }
             // Why a boundary passed without a transition is otherwise invisible, and every reason below
             // is a deliberate one - which is hard to tell apart from a broken feature without a word.
-            val order = upcoming
+            // The song before the current one leads the order here. Its ending can still be the audio
+            // flowing through the sink after the player has moved on (decoding runs seconds ahead of the
+            // ear), and asked then for the mix out of it the planner answered "not in the upcoming
+            // window": no plan, no hold, the ending played out unmixed and the fallback planned the
+            // song after it instead.
+            val order = listOfNotNull(previous) + upcoming
             val at = order.indexOfFirst { it.mediaId == outgoingId }.takeIf { it >= 0 } ?: run {
                 android.util.Log.i("nori", "planFor: $outgoingId not in the upcoming window")
                 return null

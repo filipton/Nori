@@ -87,7 +87,7 @@ class AutoMixPrefetch(
             val format = extractor.getTrackFormat(track)
             extractor.selectTrack(track)
             val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
-            try {
+            val decodedUs = try {
                 codec.configure(format, null, null, 0)
                 codec.start()
                 // Handed over as it is created, so a decode that throws half way still has its handle freed.
@@ -95,6 +95,16 @@ class AutoMixPrefetch(
             } finally {
                 runCatching { codec.stop() }
                 codec.release()
+            }
+            // Only a whole song is an analysis of it. A measurement cut short - the queue moved, the app
+            // closed, a read failed half way and looked like the end of the file - used to be stored as
+            // if it were the song: a third of your library was "analysed" over its first minute or two,
+            // the planner refused every one of them for not matching the file's length ("not analysed"),
+            // and the outro grid was measured somewhere in the middle.
+            val expectedUs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
+            if (decodedUs < 0 || (expectedUs > 0 && kotlin.math.abs(decodedUs - expectedUs) > 3_000_000L)) {
+                android.util.Log.i("nori", "measuring $id ahead stopped at ${decodedUs.coerceAtLeast(0) / 1000} of ${expectedUs / 1000} ms: not stored")
+                return
             }
             if (analyser != 0L) {
                 val a = coreOf().analysisFinishStream(id, analyser)
@@ -107,11 +117,17 @@ class AutoMixPrefetch(
         }
     }
 
-    /** The plain synchronous decode loop; every output buffer goes into the analyser and is released again. */
-    private fun decode(codec: MediaCodec, extractor: MediaExtractor, created: (Long) -> Unit) {
+    /**
+     * The plain synchronous decode loop; every output buffer goes into the analyser and is released again.
+     * How much audio came out, in µs, once the decoder has reached the end of the stream; -1 when it was
+     * interrupted first.
+     */
+    private fun decode(codec: MediaCodec, extractor: MediaExtractor, created: (Long) -> Unit): Long {
         val info = MediaCodec.BufferInfo()
         var analyser = 0L
         var fed = false
+        var frames = 0L
+        var rateSeen = 0
         while (!Thread.currentThread().isInterrupted) {
             if (!fed) {
                 val index = codec.dequeueInputBuffer(TIMEOUT_US)
@@ -142,12 +158,14 @@ class AutoMixPrefetch(
                         val buffer = codec.getOutputBuffer(index)
                         // 16-bit is what a decoder hands out unless it is asked for float, which this never does.
                         if (analyser != 0L && buffer != null) AutoMixAnalyzer.feed(analyser, buffer, info.offset, info.size, PCM_16)
+                        if (rate > 0 && channels > 0) { frames += info.size / (channels * 2); rateSeen = rate }
                     }
                     codec.releaseOutputBuffer(index, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return if (rateSeen > 0) frames * 1_000_000L / rateSeen else 0L
                 }
             }
         }
+        return -1L
     }
 
     /**

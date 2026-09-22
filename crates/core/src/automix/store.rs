@@ -13,11 +13,13 @@ use crate::{Core, Result, TrackAnalysis};
 
 const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confidence, beat_offset_ms, stability, downbeat_phase, \
      downbeat_confidence, lufs, key, key_confidence, silence_start_ms, silence_end_ms, mixramp_start_ms, mixramp_end_ms, \
-     intro_end_ms, outro_start_ms, outro_vocal, intro_vocal, outro_centroid, intro_centroid, analysed_ms";
+     intro_end_ms, outro_start_ms, outro_vocal, intro_vocal, outro_centroid, intro_centroid, analysed_ms, \
+     outro_bpm, outro_bpm_confidence, outro_beat_offset_ms, outro_stability, outro_downbeat_phase, \
+     intro_bpm, intro_bpm_confidence, intro_beat_offset_ms, intro_stability, intro_downbeat_phase";
 
 pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
     c.prepare_cached(&format!(
-        "INSERT OR REPLACE INTO track_analysis({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
+        "INSERT OR REPLACE INTO track_analysis({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)"
     ))?
     .execute(params![
         a.song_id,
@@ -42,7 +44,17 @@ pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
         a.intro_vocal,
         a.outro_centroid,
         a.intro_centroid,
-        a.analysed_ms
+        a.analysed_ms,
+        a.outro_bpm,
+        a.outro_bpm_confidence,
+        a.outro_beat_offset_ms,
+        a.outro_stability,
+        a.outro_downbeat_phase,
+        a.intro_bpm,
+        a.intro_bpm_confidence,
+        a.intro_beat_offset_ms,
+        a.intro_stability,
+        a.intro_downbeat_phase
     ])
     .map(|_| ())
 }
@@ -74,6 +86,16 @@ pub fn get(c: &Connection, song_id: &str) -> rusqlite::Result<Option<TrackAnalys
                 outro_centroid: r.get(20).unwrap_or(0.0),
                 intro_centroid: r.get(21).unwrap_or(0.0),
                 analysed_ms: r.get(22)?,
+                outro_bpm: r.get(23).unwrap_or(0.0),
+                outro_bpm_confidence: r.get(24).unwrap_or(0.0),
+                outro_beat_offset_ms: r.get(25).unwrap_or(0.0),
+                outro_stability: r.get(26).unwrap_or(0.0),
+                outro_downbeat_phase: r.get(27).unwrap_or(0),
+                intro_bpm: r.get(28).unwrap_or(0.0),
+                intro_bpm_confidence: r.get(29).unwrap_or(0.0),
+                intro_beat_offset_ms: r.get(30).unwrap_or(0.0),
+                intro_stability: r.get(31).unwrap_or(0.0),
+                intro_downbeat_phase: r.get(32).unwrap_or(0),
             })
         })
         .optional()
@@ -92,7 +114,8 @@ pub fn missing(c: &Connection, ids: &[String]) -> rusqlite::Result<Vec<String>> 
     Ok(out)
 }
 
-/// Brings a v1 database up to the v2 schema: the four overlap-window columns. Old rows keep their
+/// Brings an older database up to the current schema: the overlap-window columns (v2) and the
+/// intro and outro beat grids (v3; v4 only redoes the rows a cut-short measurement stored as whole). Old rows keep their
 /// version and are redone by `analysis_missing`; the defaults only keep them readable until then.
 pub fn migrate(c: &Connection) -> rusqlite::Result<()> {
     let cols: Vec<String> = c
@@ -104,6 +127,16 @@ pub fn migrate(c: &Connection) -> rusqlite::Result<()> {
         ("intro_vocal", "REAL"),
         ("outro_centroid", "REAL"),
         ("intro_centroid", "REAL"),
+        ("outro_bpm", "REAL"),
+        ("outro_bpm_confidence", "REAL"),
+        ("outro_beat_offset_ms", "REAL"),
+        ("outro_stability", "REAL"),
+        ("outro_downbeat_phase", "INTEGER"),
+        ("intro_bpm", "REAL"),
+        ("intro_bpm_confidence", "REAL"),
+        ("intro_beat_offset_ms", "REAL"),
+        ("intro_stability", "REAL"),
+        ("intro_downbeat_phase", "INTEGER"),
     ] {
         if !cols.iter().any(|c| c == col) {
             c.execute_batch(&format!("ALTER TABLE track_analysis ADD COLUMN {col} {typ} NOT NULL DEFAULT 0"))?;

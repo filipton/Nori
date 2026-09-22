@@ -28,6 +28,10 @@ pub const VARISPEED_MAX_PCT: f64 = 2.0;
 const MAX_BLIND_FADE_MS: i64 = 12_000;
 /// Shortest overlap that is still a fade rather than a click guard.
 const MIN_FADE_MS: i64 = 300;
+/// Shortest MixRamp overlap. MixRamp lays the songs together where the outgoing one has already gone
+/// quiet, which on a song that fades out is its last nearly silent second or two - heard as no mix
+/// at all ("MIX_RAMP_FADE 300 ms"). This much of the ending is always shared, fading as it goes.
+const MIN_MIXRAMP_MS: i64 = 5_000;
 const BASS_CUT_HZ: f32 = 180.0;
 const SWEEP_FROM_HZ: f32 = 18_000.0;
 /// Where the outgoing low-pass ends: beat-matched (lows already swapped out) and plain fades.
@@ -80,6 +84,27 @@ fn usable(a: Option<&TrackAnalysis>, duration_ms: i64) -> Option<&TrackAnalysis>
 
 fn grid_ok(a: &TrackAnalysis) -> bool {
     a.bpm > 0.0 && a.bpm.is_finite() && a.bpm_confidence >= MIN_BPM_CONFIDENCE && a.stability >= MIN_STABILITY
+}
+
+/// The song as the mix sees it at one end: its grid replaced by the one measured over that end alone.
+/// A whole-song grid asks one tempo to fit four minutes, which a band without a click track never
+/// does - every one of them scored no stability, so nothing was ever beat-matched - and a song that
+/// changes tempo half way has the wrong answer at its end. The window's grid is used whenever it
+/// holds; the whole song's only when it holds and the window's does not (too little music at that end).
+fn with_grid(a: &TrackAnalysis, bpm: f64, confidence: f32, offset_ms: f64, stability: f32, phase: i32) -> TrackAnalysis {
+    let w = TrackAnalysis { bpm, bpm_confidence: confidence, beat_offset_ms: offset_ms, stability, downbeat_phase: phase, ..a.clone() };
+    let measured = bpm > 0.0 && bpm.is_finite();
+    if measured && (grid_ok(&w) || !grid_ok(a)) { w } else { a.clone() }
+}
+
+/// The outgoing song, gridded over its last seconds.
+fn at_end(a: &TrackAnalysis) -> TrackAnalysis {
+    with_grid(a, a.outro_bpm, a.outro_bpm_confidence, a.outro_beat_offset_ms, a.outro_stability, a.outro_downbeat_phase)
+}
+
+/// The incoming song, gridded over its first seconds.
+fn at_start(b: &TrackAnalysis) -> TrackAnalysis {
+    with_grid(b, b.intro_bpm, b.intro_bpm_confidence, b.intro_beat_offset_ms, b.intro_stability, b.intro_downbeat_phase)
 }
 
 /// Prefer the analysis BPM folded toward a server/tag prior when that settles a half/double error.
@@ -251,7 +276,8 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
     if max_len < MIN_FADE_MS {
         return blank(TransitionKind::Gapless, out_dur, 0, 0, "tracks too short: gapless".into());
     }
-    let (a, b) = (usable(out, out_dur), usable(inc, in_dur));
+    let (a, b) = (usable(out, out_dur).map(at_end), usable(inc, in_dur).map(at_start));
+    let (a, b) = (a.as_ref(), b.as_ref());
     let mut why_not = String::new();
     // The gates only demote: a clash reroutes to an echo-out (or shortens when the echo cannot
     // run), a loudness gap or timbre mismatch caps an overlap at 8 bars. Never an upgrade.
@@ -588,7 +614,7 @@ fn mixramp(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, i
         // One side is unknown: give it an ordinary fade.
         dur = dur.max(max_len.min(4000));
     }
-    let dur = dur.clamp(MIN_FADE_MS.min(max_len), max_len);
+    let dur = dur.max(MIN_MIXRAMP_MS).clamp(MIN_FADE_MS.min(max_len), max_len);
     let mut p = blank(TransitionKind::MixRampFade, end_a - dur, in_start, dur, String::new());
     // A loud start comes in at once rather than being faded up; a quiet one rides its own ramp.
     p.in_fade_end_ms = head.map_or(dur, |h| h.clamp(MIN_FADE_MS.min(dur), dur));
@@ -630,6 +656,16 @@ mod tests {
             outro_centroid: 1200.0,
             intro_centroid: 1200.0,
             analysed_ms: 0,
+            outro_bpm: bpm,
+            outro_bpm_confidence: 0.9,
+            outro_beat_offset_ms: 120.0,
+            outro_stability: 0.9,
+            outro_downbeat_phase: 0,
+            intro_bpm: bpm,
+            intro_bpm_confidence: 0.9,
+            intro_beat_offset_ms: 120.0,
+            intro_stability: 0.9,
+            intro_downbeat_phase: 0,
         }
     }
 
@@ -792,12 +828,33 @@ mod tests {
     }
 
     #[test]
+    fn a_band_that_drifts_is_matched_on_its_steady_ends() {
+        // Played without a click: one grid over the whole song misses its last beats (no stability),
+        // but its last and first forty seconds each hold a steady beat. That is a beat-matched mix.
+        let a = TrackAnalysis { stability: 0.0, ..track(128.0) };
+        let b = TrackAnalysis { stability: 0.0, ..track(126.0) };
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings::default());
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        check_skip(&p, 240_000);
+    }
+
+    #[test]
+    fn a_song_that_changes_tempo_is_mixed_at_the_tempo_it_ends_on() {
+        // 100 BPM for most of the song, 128 at the end: what the next song has to meet is 128.
+        let a = TrackAnalysis { bpm: 100.0, ..track(128.0) };
+        let p = plan(Some(&a), Some(&track(128.0)), 240_000, 240_000, &AutoMixSettings::default());
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        assert_eq!(p.tempo_ratio, 1.0, "the ends already agree: {}", p.reason);
+    }
+
+    #[test]
     fn unreliable_grids_are_not_beat_matched() {
         let a = track(128.0);
+        // Unreliable over the whole song and over its intro alike.
         for b in [
-            TrackAnalysis { bpm_confidence: 0.2, ..track(128.0) },
-            TrackAnalysis { stability: 0.3, ..track(128.0) },
-            TrackAnalysis { bpm: 0.0, ..track(128.0) },
+            TrackAnalysis { bpm_confidence: 0.2, intro_bpm_confidence: 0.2, ..track(128.0) },
+            TrackAnalysis { stability: 0.3, intro_stability: 0.3, ..track(128.0) },
+            TrackAnalysis { bpm: 0.0, intro_bpm: 0.0, ..track(128.0) },
         ] {
             let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings::default());
             assert_eq!(p.kind, TransitionKind::MixRampFade, "{b:?}");
@@ -808,7 +865,7 @@ mod tests {
     #[test]
     fn one_good_grid_aligns_the_fade_to_it() {
         // Outgoing grid known, incoming not: the exit starts on the outgoing track's downbeats.
-        let b = TrackAnalysis { bpm_confidence: 0.2, ..track(128.0) };
+        let b = TrackAnalysis { bpm_confidence: 0.2, intro_bpm_confidence: 0.2, ..track(128.0) };
         let p = plan(Some(&track(128.0)), Some(&b), 240_000, 240_000, &AutoMixSettings::default());
         assert_eq!(p.kind, TransitionKind::MixRampFade);
         assert!(p.reason.contains("downbeat-aligned") && p.reason.contains("bars out"), "{}", p.reason);
@@ -820,7 +877,7 @@ mod tests {
         assert!((beats - beats.round()).abs() < 0.01 && (beats.round() as i64) % 4 == 0, "{beats}");
 
         // Incoming grid known, outgoing not: the entrance lands on the incoming track's downbeats.
-        let a = TrackAnalysis { stability: 0.3, ..track(128.0) };
+        let a = TrackAnalysis { stability: 0.3, outro_stability: 0.3, ..track(128.0) };
         let p = plan(Some(&a), Some(&track(128.0)), 240_000, 240_000, &AutoMixSettings::default());
         assert!(p.reason.contains("bars in"), "{}", p.reason);
         check_skip(&p, 240_000);
@@ -830,8 +887,8 @@ mod tests {
     #[test]
     fn mixramp_overlaps_the_quiet_ends() {
         let s = AutoMixSettings { max_transition_s: 12.0, match_loudness: true, ..Default::default() };
-        let a = TrackAnalysis { bpm: 0.0, silence_end_ms: 230_000, mixramp_end_ms: 226_000, lufs: -8.0, ..track(128.0) };
-        let b = TrackAnalysis { bpm: 0.0, silence_start_ms: 1_000, mixramp_start_ms: 3_000, lufs: -14.0, ..track(128.0) };
+        let a = TrackAnalysis { bpm: 0.0, outro_bpm: 0.0, silence_end_ms: 230_000, mixramp_end_ms: 226_000, lufs: -8.0, ..track(128.0) };
+        let b = TrackAnalysis { bpm: 0.0, intro_bpm: 0.0, silence_start_ms: 1_000, mixramp_start_ms: 3_000, lufs: -14.0, ..track(128.0) };
         let p = plan(Some(&a), Some(&b), 240_000, 240_000, &s);
         assert_eq!(p.kind, TransitionKind::MixRampFade);
         // 4 s of quiet tail plus 2 s of quiet head.
@@ -842,17 +899,18 @@ mod tests {
         assert_eq!(p.in_gain_db, 6.0, "incoming 6 dB quieter gets 6 dB");
         check_skip(&p, 240_000);
 
-        // An abrupt end into a loud start: a short click guard, the incoming track at full level almost at once.
-        let a = TrackAnalysis { bpm: 0.0, silence_end_ms: 240_000, mixramp_end_ms: 240_000, ..track(128.0) };
-        let b = TrackAnalysis { bpm: 0.0, silence_start_ms: 0, mixramp_start_ms: 0, ..track(128.0) };
+        // An abrupt end into a loud start: still a mix you can hear - the last five seconds shared, the
+        // outgoing song fading under the incoming one, which is at full level almost at once. It used to
+        // be a 0.3 s click guard, which sounds like no mix at all.
+        let a = TrackAnalysis { bpm: 0.0, outro_bpm: 0.0, silence_end_ms: 240_000, mixramp_end_ms: 240_000, ..track(128.0) };
+        let b = TrackAnalysis { bpm: 0.0, intro_bpm: 0.0, silence_start_ms: 0, mixramp_start_ms: 0, ..track(128.0) };
         let p = plan(Some(&a), Some(&b), 240_000, 240_000, &s);
-        assert_eq!((p.duration_ms, p.in_fade_end_ms, p.out_start_ms), (MIN_FADE_MS, MIN_FADE_MS, 240_000 - MIN_FADE_MS));
-        assert_eq!(p.filter_start_ms, -1, "too short for a sweep");
+        assert_eq!((p.duration_ms, p.in_fade_end_ms, p.out_start_ms), (MIN_MIXRAMP_MS, MIN_FADE_MS, 240_000 - MIN_MIXRAMP_MS));
 
-        // Only one side analysed: its points, and an ordinary fade length.
+        // Only one side analysed: its points, and an ordinary fade length - no shorter than any MixRamp.
         let p = plan(Some(&a), None, 240_000, 240_000, &s);
         assert_eq!(p.kind, TransitionKind::MixRampFade);
-        assert_eq!(p.duration_ms, 4_000);
+        assert_eq!(p.duration_ms, MIN_MIXRAMP_MS);
         assert_eq!(p.in_start_ms, 0);
     }
 

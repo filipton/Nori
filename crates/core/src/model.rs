@@ -464,7 +464,8 @@ pub struct TrackAnalysis {
     pub bpm_confidence: f32,
     /// The first beat of the grid, 0 <= offset < one beat.
     pub beat_offset_ms: f64,
-    /// 0..1: how well one constant grid fits every beat. Live recordings and tempo changes score low.
+    /// 0..1: whether one constant grid can stand for the beats - the lower of how tightly they sit on it
+    /// (median spread, 14 ms or less to pass) and how little the tempo moves between halves (1.2 %).
     pub stability: f32,
     /// 0..3: which grid beats start a bar (assumes 4/4).
     pub downbeat_phase: i32,
@@ -491,6 +492,22 @@ pub struct TrackAnalysis {
     pub intro_vocal: f32,
     pub outro_centroid: f32,
     pub intro_centroid: f32,
+    /// The beat grid of the music's last and first `automix::GRID_WINDOW_S` seconds alone: tempo,
+    /// confidence, first beat, stability and downbeat, as the whole-track fields but measured where the
+    /// mix happens. Songs played by people drift a few per cent over four minutes - enough for one grid
+    /// across the whole song to miss its last beats and score no stability at all - while any half
+    /// minute of them is steady; and a song that changes tempo half way has two answers, of which only
+    /// the one at the end matters for mixing out of it. 0 when unknown (a v2 row, or too little music).
+    pub outro_bpm: f64,
+    pub outro_bpm_confidence: f32,
+    pub outro_beat_offset_ms: f64,
+    pub outro_stability: f32,
+    pub outro_downbeat_phase: i32,
+    pub intro_bpm: f64,
+    pub intro_bpm_confidence: f32,
+    pub intro_beat_offset_ms: f64,
+    pub intro_stability: f32,
+    pub intro_downbeat_phase: i32,
     /// Wall-clock time of the analysis, ms since the epoch.
     pub analysed_ms: i64,
 }

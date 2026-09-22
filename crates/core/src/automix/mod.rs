@@ -25,7 +25,11 @@ use crate::{AutoMixSettings, TrackAnalysis, TransitionPlan};
 use analysis::{Analyzer, Features};
 
 /// Bump when the analysis changes enough that stored rows should be redone.
-pub const ANALYSIS_VERSION: i32 = 2;
+pub const ANALYSIS_VERSION: i32 = 4;
+/// How much music at each end the intro and outro grids are measured over: long enough for a steady
+/// tempo estimate (dozens of beats at any tempo), short enough that a live band's drift inside it is
+/// a fraction of a beat.
+pub const GRID_WINDOW_S: f64 = 40.0;
 /// Below these the grid is not used for cue placement either (cues fall back to the energy envelope).
 const CUE_MIN_CONFIDENCE: f32 = 0.4;
 const CUE_MIN_STABILITY: f32 = 0.5;
@@ -45,6 +49,36 @@ fn window_mean(curve: &[f32], fps: f64, t0: f64, from_s: f64, to_s: f64) -> f32 
         return 0.0;
     }
     curve[a..b].iter().sum::<f32>() / (b - a) as f32
+}
+
+/// One stretch of music's beat grid; all zeros when it could not be measured.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Grid {
+    pub bpm: f64,
+    pub confidence: f32,
+    pub offset_ms: f64,
+    pub stability: f32,
+    pub downbeat_phase: i32,
+}
+
+/// The beat grid of `[from_s, to_s)` alone: the same tempo estimate and downbeat search as the whole
+/// track, on that stretch of the onset envelope. The first beat is given in track time, so the grid
+/// `offset + n * period` lands on the same beats as it does inside the window.
+pub fn window_grid(f: &Features, from_s: f64, to_s: f64) -> Grid {
+    if !(f.fps > 0.0) || to_s - from_s < GRID_WINDOW_S / 2.0 {
+        return Grid::default();
+    }
+    let a = (((from_s - f.t0) * f.fps).round().max(0.0) as usize).min(f.onset.len());
+    let b = (((to_s - f.t0) * f.fps).round().max(0.0) as usize).min(f.onset.len());
+    if b <= a {
+        return Grid::default();
+    }
+    let t = tempo::estimate(&f.onset[a..b], f.fps, f.t0 + a as f64 / f.fps);
+    if !(t.bpm > 0.0 && t.bpm.is_finite()) {
+        return Grid::default();
+    }
+    let db = structure::downbeat(&t, f, (from_s, to_s));
+    Grid { bpm: t.bpm, confidence: t.confidence, offset_ms: t.offset_s * 1000.0, stability: t.stability, downbeat_phase: db.phase }
 }
 
 /// A `TrackAnalysis` plus the working data behind it, for tests and diagnostics.
@@ -81,6 +115,15 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
         )
     };
 
+    let (outro_grid, intro_grid) = if silent {
+        (Grid::default(), Grid::default())
+    } else {
+        (
+            window_grid(f, (music.1 - GRID_WINDOW_S).max(music.0), music.1),
+            window_grid(f, music.0, (music.0 + GRID_WINDOW_S).min(music.1)),
+        )
+    };
+
     let track = TrackAnalysis {
         song_id: song_id.to_string(),
         analysis_version: ANALYSIS_VERSION,
@@ -105,6 +148,16 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
         outro_centroid,
         intro_centroid,
         analysed_ms: crate::db::now_ms(),
+        outro_bpm: outro_grid.bpm,
+        outro_bpm_confidence: outro_grid.confidence,
+        outro_beat_offset_ms: outro_grid.offset_ms,
+        outro_stability: outro_grid.stability,
+        outro_downbeat_phase: outro_grid.downbeat_phase,
+        intro_bpm: intro_grid.bpm,
+        intro_bpm_confidence: intro_grid.confidence,
+        intro_beat_offset_ms: intro_grid.offset_ms,
+        intro_stability: intro_grid.stability,
+        intro_downbeat_phase: intro_grid.downbeat_phase,
     };
     Analysis { track, tempo: t }
 }

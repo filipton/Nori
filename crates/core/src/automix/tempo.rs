@@ -175,7 +175,7 @@ pub fn estimate(onset: &[f32], fps: f64, t0: f64) -> Tempo {
     t.period_s = period;
     t.bpm = 60.0 / period;
     t.offset_s = a.rem_euclid(period);
-    t.stability = (1.0 - rms / (0.05 * period)).clamp(0.0, 1.0) as f32;
+    t.stability = stability(&beats, period, rms);
 
     // Confidence: how periodic the envelope is, and how much stronger it is on the beats than overall.
     let music: Vec<f32> = local.iter().copied().filter(|v| *v > 0.05).collect();
@@ -269,6 +269,32 @@ fn track(local: &[f32], period: f64) -> Vec<usize> {
 /// Least-squares line `t = a + b k` through the beats, where `k` counts periods (a dropped or doubled beat moves
 /// `k` by the right amount instead of bending the line). One pass of outlier rejection. Returns (a, b, residual
 /// spread in seconds).
+/// Per-beat timing spread (median, ms) that still scores zero; 14 ms or less passes the planner's 0.6.
+const JITTER_ZERO_MS: f64 = 35.0;
+/// Tempo change between a stretch's first and second half that scores zero; 1.2 % or less passes.
+const DRIFT_ZERO_PCT: f64 = 3.0;
+
+/// Whether one grid can stand for these beats: the lower of how tightly they sit on it and how little
+/// the tempo moves between the first half and the second.
+///
+/// It used to be the spread alone, against 5 % of a beat. Measured on real records that was wrong both
+/// ways: a band played to within 6-14 ms scored nothing (and half of that at a doubled tempo, because
+/// the allowance shrank with the beat), while what really spoils a beat-matched mix - the tempo moving
+/// under it - was never looked at. Milliseconds are what the ear hears, so the spread is judged in them;
+/// the drift is judged by fitting each half on its own.
+fn stability(beats: &[f64], period: f64, rms: f64) -> f32 {
+    let jitter = 1.0 - (rms / 1.4826 * 1000.0) / JITTER_ZERO_MS;
+    let half = beats.len() / 2;
+    let drift = if half >= 8 {
+        let (_, p1, _) = fit_grid(&beats[..half], period);
+        let (_, p2, _) = fit_grid(&beats[half..], period);
+        if p1 > 0.0 && p2 > 0.0 { 1.0 - ((p2 / p1 - 1.0).abs() * 100.0) / DRIFT_ZERO_PCT } else { 0.0 }
+    } else {
+        1.0
+    };
+    jitter.min(drift).clamp(0.0, 1.0) as f32
+}
+
 pub fn fit_grid(beats: &[f64], period: f64) -> (f64, f64, f64) {
     let mut d: Vec<f64> = beats.windows(2).map(|w| w[1] - w[0]).collect();
     let p = {

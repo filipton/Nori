@@ -516,5 +516,10 @@ fn pcm_file() {
             "{p}: {:.2} bpm (conf {:.2}, stab {:.2}) offset {:.1} ms, downbeat {} ({:.2}), key {}, {:.1} LUFS, {} ms audio, took {:?}",
             a.bpm, a.bpm_confidence, a.stability, a.beat_offset_ms, a.downbeat_phase, a.downbeat_confidence, a.key, a.lufs, a.duration_ms, t.elapsed(),
         );
+        println!(
+            "    intro {:.2} bpm (conf {:.2}, stab {:.2})   outro {:.2} bpm (conf {:.2}, stab {:.2})",
+            a.intro_bpm, a.intro_bpm_confidence, a.intro_stability, a.outro_bpm, a.outro_bpm_confidence, a.outro_stability,
+        );
     }
 }
+
