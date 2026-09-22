@@ -38,17 +38,14 @@ key when `keystore.properties` is there (see below), otherwise with the Android 
 
 ## Releasing
 
-`tools/release.sh` builds a release into `build/release-<version>/` (APK, SHA256SUMS, RELEASE.txt);
-`--publish` tags, pushes and creates a draft GitHub release with the CHANGELOG section as its notes.
-The steps, in order:
+`tools/release.sh` is the whole release, asked step by step: it shows the latest GitHub release and
+the version in the code, asks for the new version, bumps it (`tools/bump-version.sh`), writes the
+CHANGELOG section (`tools/changelog.py`), shows the notes and offers `$EDITOR`, commits
+`build: release <version>`, builds, tags, pushes and creates the GitHub release, draft or live.
+Stopping at any question puts every file back. `--build` only builds, into `build/release-<version>/`.
 
-    tools/bump-version.sh 0.3.3          # versionName/Code, Rust workspace, docs/features.md
-    tools/changelog.py --update          # commits since the last tag into CHANGELOG [Unreleased]
-    tools/changelog.py --release 0.3.3   # [Unreleased] becomes [0.3.3] - <date>
-    git commit -am "build: release 0.3.3"
-    tools/release.sh --publish
-
-The changelog is grouped from conventional commit subjects, so write them for a reader. Releases are
+The changelog is grouped from conventional commit subjects (`feat`, `fix`, `perf`; `build`, `docs`,
+`test`, `chore` are left out), so write them for someone who uses the app. Releases are
 signed with `nori-release.jks` through `keystore.properties`, both gitignored; it is this machine's
 original debug key, adopted so that phones with earlier builds update in place. Losing it means every
 install has to be removed before the next release goes on. The benchmark tables name the version they
