@@ -126,19 +126,29 @@ fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePale
 private const val PAGE_LIGHTEST = 0.34f
 private const val PAGE_MAX_LUMA = 0.081f
 
-private fun darkPage(hsl: FloatArray): Color {
+private fun darkPage(hsl: FloatArray, maxLuma: Float = PAGE_MAX_LUMA): Color {
     val sat = (hsl[1] * 0.95f).coerceAtMost(0.62f)
     var lo = 0.04f
     var hi = hsl[2].coerceIn(0.04f, PAGE_LIGHTEST)
     fun at(l: Float) = Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], sat, l)))
-    if (at(hi).luminance() <= PAGE_MAX_LUMA) return at(hi)
+    if (at(hi).luminance() <= maxLuma) return at(hi)
     // Twelve halvings put it within a thousandth of the brightest this colour may be.
     repeat(12) {
         val mid = (lo + hi) / 2f
-        if (at(mid).luminance() <= PAGE_MAX_LUMA) lo = mid else hi = mid
+        if (at(mid).luminance() <= maxLuma) lo = mid else hi = mid
     }
     return at(lo)
 }
+
+/**
+ * How far a dark page is taken down towards a solid dark foot: a third of the way from the foot's own
+ * luminance up to what the page would otherwise be. Enough that the melt out of the foot is a change
+ * of colour rather than of light - which is what melts - while the page still wears the record's hue.
+ */
+private const val FOOT_PULL = 0.35f
+
+/** Contrast between the foot and the page past which the melt reads as a band and not as a fade. */
+private const val FOOT_JUMP = 1.8f
 
 /**
  * The seam is the whole trick. A page tinted with the cover's *dominant* colour still shows a line
@@ -147,30 +157,62 @@ private fun darkPage(hsl: FloatArray): Color {
  * travels from there into a page colour deep or pale enough to carry text.
  */
 private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette {
-    val edgeRaw = Color(bottomAverage(bitmap))
+    val foot = bottomAverage(bitmap)
+    val edgeRaw = Color(foot.colour)
     val p = Palette.from(bitmap).maximumColorCount(16).generate()
     val body = dominant(bitmap, edgeRaw.toArgb())
     val bodyHsl = FloatArray(3).also { ColorUtils.colorToHSL(body, it) }
     // Paper / ink: the sleeve is itself. Do not let Palette's "vibrant" JPEG fringe invent pink.
-    val paper = bodyHsl[2] > 0.85f || (bodyHsl[1] < 0.10f && bodyHsl[2] > 0.72f)
-    val ink = bodyHsl[2] < 0.10f && bodyHsl[1] < 0.18f
+    val sleevePaper = bodyHsl[2] > 0.85f || (bodyHsl[1] < 0.10f && bodyHsl[2] > 0.72f)
+    // The colour there is most of is not always the page's colour. What the eye follows out of the
+    // sleeve is its last rows, and when those are one solid dark strip - a black frame round a pale
+    // record, like Demon Days - a light page under it melts black into white across the whole width:
+    // a soft band, but a band. So a solid near-black foot makes the page a dark one whatever the theme
+    // or the rest of the sleeve says, the way a white sleeve keeps a white page in dark mode.
+    //
+    // Not every strip is a foot, though. A thin one - under half the melt - with the sleeve's own
+    // colour right above it is a frame: Amnesiac's black line under the red book. The melt rubs most
+    // of it out and what goes soft is the red, so the page stays the red's.
+    val above = FloatArray(3).also { ColorUtils.colorToHSL(foot.above, it) }
+    // It has to be a line, too: a strip that stands out from what is over it. A Beautiful Lie ends on
+    // a few white rows under its red lettering, and white on white is no frame.
+    val frame = foot.strip < MELT / 2f && ColorUtils.calculateContrast(foot.colour, foot.above) >= 1.6 &&
+        ColorUtils.calculateContrast(foot.above, body) < 1.25 &&
+        (bodyHsl[1] < 0.15f || kotlin.math.abs(((above[0] - bodyHsl[0] + 540f) % 360f) - 180f) < 30f)
+    val solid = foot.solid && !frame
+    val edgeLuma = edgeRaw.luminance()
+    val blackFoot = solid && edgeLuma < 0.03f
+    val paper = sleevePaper && !blackFoot
+    val ink = (bodyHsl[2] < 0.10f && bodyHsl[1] < 0.18f) || (sleevePaper && blackFoot)
+    val pageDark = dark || blackFoot
     val inkOrPaper = paper || ink || bodyHsl[1] < 0.12f
     val accentSeed = if (inkOrPaper) body
         else (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
     // White sleeves keep a white page even in dark mode: cover colours mean the page follows the
     // record, and paper is white. Charcoal-from-white was the coward's contrast fix and looked wrong.
     // AMOLED still stays black - lighting those pixels would break the promise.
+    // A frame is rubbed out rather than melted from, so what the fade starts from is the colour
+    // just above it: aimed at Amnesiac's black strip, the album page's fade darkened the bottom of
+    // the red book into a dark band before the red page.
+    val footColour = if (frame) Color(foot.above) else edgeRaw
     val edge = when {
-        paper -> Color(ColorUtils.blendARGB(edgeRaw.toArgb(), 0xFFF7F7F7.toInt(), 0.75f))
-        ink -> Color(ColorUtils.blendARGB(edgeRaw.toArgb(), 0xFF0A0A0A.toInt(), 0.70f))
-        else -> edgeRaw
+        paper -> Color(ColorUtils.blendARGB(footColour.toArgb(), 0xFFF7F7F7.toInt(), 0.75f))
+        ink -> Color(ColorUtils.blendARGB(footColour.toArgb(), 0xFF0A0A0A.toInt(), 0.70f))
+        else -> footColour
     }
     val hsl = bodyHsl
+    // And a dark page over a solid foot much darker than it goes down towards the foot, keeping its
+    // own hue: Elephant stays red and Demon Days slate, just deep enough that the strip fades into
+    // them instead of stopping on a lighter colour. A foot that is busy, or close to the page already,
+    // leaves the page alone - that melt is the one that already looks right.
+    val natural = if (pageDark && !ink && !paper) darkPage(hsl) else null
+    val footMax = natural?.takeIf { solid && ColorUtils.calculateContrast(it.toArgb(), edgeRaw.copy(alpha = 1f).toArgb()) >= FOOT_JUMP && edgeLuma < it.luminance() }
+        ?.let { edgeLuma + (it.luminance() - edgeLuma) * FOOT_PULL }
     val background = when {
         dark && amoled -> Color.Black
         paper -> Color(0xFFF7F7F7)
-        dark && ink -> Color(0xFF0A0A0A)
-        dark -> darkPage(hsl)
+        pageDark && ink -> Color(0xFF0A0A0A)
+        pageDark -> if (footMax != null) darkPage(hsl, footMax) else natural!!
         ink -> Color(0xFFECECEC)
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
@@ -179,10 +221,10 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     // saturating a phantom hue.
     val accent = when {
         paper -> Color(0xFF2A2A2A)
-        ink && !dark -> Color(0xFF2A2A2A)
+        ink && !pageDark -> Color(0xFF2A2A2A)
         else -> readable(Color(accentSeed), background, on)
     }
-    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark, paper = paper, ink = ink) }.getOrNull()
+    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, pageDark, paper = paper, ink = ink) }.getOrNull()
     return PagePalette(
         edge, background, on, on.copy(alpha = 0.66f), accent,
         wash = wash?.first, washEdge = wash?.second ?: edge,
@@ -259,7 +301,11 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, paper: Bool
         } else {
             hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
         }
-        hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(pageHsl[2] - spread, pageHsl[2] + spread).coerceIn(0f, 1f)
+        // On a black page the wash may lighten but never go under the page: a black sleeve's bottom
+        // rows are darker than its own average (the logo lifts that), so they came out at pure black
+        // under a page of 0A - a darker line where the sleeve melts, then the page again below it.
+        val floor = if (ink) pageHsl[2] else pageHsl[2] - spread
+        hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(floor, pageHsl[2] + spread).coerceIn(0f, 1f)
         // Then most of the way back to the flat page colour. Clamping the lightness alone was not
         // enough on a record that is many colours at once: one that is teal down one side and warm
         // down the other gave the page teal and warm patches, and a patch reads as a fault where a
@@ -405,6 +451,14 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
     var paper = 0f
     var ink = 0f
     var total = 0f
+    // Pixels of real colour per hue bucket, counted plainly (not weighted), so a colour's share of
+    // the sleeve can be set against black's or white's share on the same terms.
+    val coloured = FloatArray(HUES)
+    // The same pixels as a grid, each cell holding its hue bucket (or -1): to tell a field of colour
+    // from lines of it.
+    val cols = (w + colStep - 1) / colStep
+    val rows = (h + rowStep - 1) / rowStep
+    val grid = IntArray(cols * rows) { -1 }
     var y = 0
     while (y < h) {
         bitmap.getPixels(row, 0, w, 0, y, w, 1)
@@ -418,6 +472,11 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
             val white = hsl[2] > 0.88f && hsl[1] < 0.18f
             if (black) ink += 1f
             if (white) paper += 1f
+            if (!black && !white && hsl[1] >= 0.25f) {
+                val hue = (hsl[0] / (360f / HUES)).toInt().coerceIn(0, HUES - 1)
+                coloured[hue] += 1f
+                grid[(y / rowStep) * cols + x / colStep] = hue
+            }
             val bucket = when {
                 black -> DARK
                 white || hsl[1] < 0.10f -> NEUTRAL
@@ -455,9 +514,31 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
     var best = 0
     for (i in score.indices) if (score[i] > score[best]) best = i
     // Majority paper or ink wins outright: a white cover with a tiny coloured mark is still white.
+    // But only over a mark. Amnesiac is 48 % black and 52 % one red book, and a flat "45 % black is a
+    // black page" gave it a black page without the red ever being weighed. A colour that covers a
+    // third of the sleeve is the subject of the picture, not a speck on it, and it keeps its page unless
+    // black or white fill most of the rest.
     if (total > 0f) {
-        if (paper / total >= 0.45f) best = NEUTRAL
-        if (ink / total >= 0.45f) best = DARK
+        var family = 0
+        var familyShare = 0f
+        for (i in 0 until HUES) {
+            val share = (coloured[i] + coloured[(i + HUES - 1) % HUES] + coloured[(i + 1) % HUES]) / total
+            if (share > familyShare) { familyShare = share; family = i }
+        }
+        // And a field, not lines: A Beautiful Lie is a third red too, but its red is lettering and
+        // rings on white, and it is the white that the eye takes for the sleeve. What counts is the
+        // colour lying in solid blocks - a cell whose eight neighbours are all the same colour.
+        fun inFamily(v: Int) = v >= 0 && run { val d = kotlin.math.abs(v - family); minOf(d, HUES - d) <= 1 }
+        var solid = 0
+        for (gy in 1 until rows - 1) for (gx in 1 until cols - 1) {
+            if (!inFamily(grid[gy * cols + gx])) continue
+            var all = true
+            for (dy in -1..1) for (dx in -1..1) if (!inFamily(grid[(gy + dy) * cols + gx + dx])) all = false
+            if (all) solid++
+        }
+        val subject = familyShare >= 0.30f && solid / total >= 0.18f
+        if (paper / total >= 0.45f) best = if (subject && paper / total < 0.60f) family else NEUTRAL
+        if (ink / total >= 0.45f) best = if (subject && ink / total < 0.60f) family else DARK
     }
     val run = if (best < HUES) intArrayOf((best + HUES - 1) % HUES, best, (best + 1) % HUES) else intArrayOf(best)
     val n = run.sumOf { weight[it].toDouble() }.toFloat()
@@ -468,8 +549,18 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
         (run.sumOf { sumB[it].toDouble() } / n).toInt().coerceIn(0, 255)
 }
 
-/** The colour of the cover's last rows: what the page has to start from for the picture to melt into it. */
-private fun bottomAverage(bitmap: Bitmap): Int {
+/**
+ * The colour of the cover's last rows: what the page has to start from for the picture to melt into it.
+ * With it, whether those rows are one solid strip (most of their pixels close to that average) rather
+ * than a busy picture that merely averages out to something.
+ */
+private class Foot(val colour: Int, val solid: Boolean, val strip: Float, val above: Int)
+
+/**
+ * [Foot.strip] is how much of the height the solid strip at the bottom takes, and [Foot.above] the
+ * average of the melt band's rows above it - what the eye sees going soft once the strip is rubbed out.
+ */
+private fun bottomAverage(bitmap: Bitmap): Foot {
     val h = bitmap.height
     val w = bitmap.width
     val rows = (h / 12).coerceIn(1, 12)
@@ -480,7 +571,34 @@ private fun bottomAverage(bitmap: Bitmap): Int {
         for (px in row) { r += (px shr 16) and 0xFF; g += (px shr 8) and 0xFF; b += px and 0xFF }
     }
     val n = (w * rows).coerceAtLeast(1)
-    return (0xFF shl 24) or ((r / n).toInt() shl 16) or ((g / n).toInt() shl 8) or (b / n).toInt()
+    val mr = (r / n).toInt(); val mg = (g / n).toInt(); val mb = (b / n).toInt()
+    var close = 0
+    for (y in h - rows until h) {
+        bitmap.getPixels(row, 0, w, 0, y, w, 1)
+        for (px in row) {
+            val dr = ((px shr 16) and 0xFF) - mr; val dg = ((px shr 8) and 0xFF) - mg; val db = (px and 0xFF) - mb
+            if (dr * dr + dg * dg + db * db < 48 * 48) close++
+        }
+    }
+    val colour = (0xFF shl 24) or (mr shl 16) or (mg shl 8) or mb
+    fun near(a: Int, b: Int, d: Int = 48): Boolean {
+        val dr = ((a shr 16) and 0xFF) - ((b shr 16) and 0xFF); val dg = ((a shr 8) and 0xFF) - ((b shr 8) and 0xFF); val db = (a and 0xFF) - (b and 0xFF)
+        return dr * dr + dg * dg + db * db < d * d
+    }
+    fun rowMean(y: Int): Int {
+        bitmap.getPixels(row, 0, w, 0, y, w, 1)
+        var rr = 0L; var gg = 0L; var bb = 0L
+        for (px in row) { rr += (px shr 16) and 0xFF; gg += (px shr 8) and 0xFF; bb += px and 0xFF }
+        return (0xFF shl 24) or ((rr / w).toInt() shl 16) or ((gg / w).toInt() shl 8) or (bb / w).toInt()
+    }
+    // Up from the bottom while the rows are still the strip.
+    var top = h
+    while (top > h / 2 && near(rowMean(top - 1), colour)) top--
+    val meltTop = (h * (1f - MELT)).toInt()
+    var ar = 0L; var ag = 0L; var ab = 0L; var an = 0
+    for (y in meltTop until top) { val m = rowMean(y); ar += (m shr 16) and 0xFF; ag += (m shr 8) and 0xFF; ab += m and 0xFF; an++ }
+    val above = if (an == 0) colour else (0xFF shl 24) or ((ar / an).toInt() shl 16) or ((ag / an).toInt() shl 8) or (ab / an).toInt()
+    return Foot(colour, close >= n * 0.85f, (h - top).toFloat() / h, above)
 }
 
 /** Pushes a colour lighter or darker in its own hue until it has contrast against the page. */
