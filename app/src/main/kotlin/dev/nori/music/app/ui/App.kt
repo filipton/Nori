@@ -24,6 +24,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.drawBehind
@@ -569,7 +570,13 @@ private fun PlayerLayer(sheet: PlayerSheet, content: @Composable () -> Unit) {
             val r = radius * (1f - sheet.progress.value).coerceIn(0f, 1f) * 4f
             shape = androidx.compose.foundation.shape.RoundedCornerShape(topStart = r.coerceAtMost(radius), topEnd = r.coerceAtMost(radius))
             clip = true
-        },
+        }
+            // The player is a page, not a pane of glass. Only its buttons and gestures listened, so a
+            // tap anywhere else on it - between the lyrics, beside the artwork - fell through to what
+            // is underneath: the list the player was opened from, playing a song nobody could see.
+            // Being hit at all is enough to keep a touch here; nothing is consumed, so every control
+            // inside works as before.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent() } },
     ) {
         CompositionLocalProvider(LocalChromeInset provides 0.dp, LocalPlayerShown provides shown) { content() }
     }
