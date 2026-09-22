@@ -1692,20 +1692,28 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     var held by remember { mutableStateOf<Long?>(null) }
     // The watch clears the flow when the seek has landed or been given up. The collected state lags
     // the flow by a frame, so the flow's own value is what is checked: right after a release the
-    // collected value is still the old null while the flow already holds the seek.
+    // collected value is still the old null while the flow already holds the seek. Keyed on the hold
+    // too: a seek the connection applies outright (one sent to the song still being heard through a
+    // crossfade) never enters the flow at all, and a hold waiting for that flow to change would wait
+    // for ever - the bar stuck where the finger left it, whatever the song did.
     val watched by vm.pendingSeek.collectAsStateWithLifecycle()
-    LaunchedEffect(watched) { if (vm.pendingSeek.value == null) held = null }
+    LaunchedEffect(watched, held) { if (held != null && vm.pendingSeek.value == null) held = null }
 
     val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, held))
     val shown = when { dragging -> (drag * d).toLong(); held != null -> held!!; else -> pos }
 
     val bar = remember { mutableFloatStateOf((vm.positionMs / d).coerceIn(0f, 1f)) }
-    val moving by rememberUpdatedState(playing)
     val free = !dragging && held == null
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     val shownOnScreen = LocalPlayerShown.current
-    LaunchedEffect(free, resumed, shownOnScreen, state.current?.id, state.index) {
+    // Paused, the loop settles the bar and stops - nothing ticks over a paused song - so anything
+    // that can move a paused player must restart it: play, a skip, a rewind (`pos` is re-read on a
+    // skip and when a hold drops; while the music plays it ticks every second and is deliberately
+    // not a key, or the loop would be restarted and lose a frame each time). `playing` was not a
+    // key once, and a bar that had settled while paused stayed where it was for the rest of the
+    // song after play was pressed again.
+    LaunchedEffect(free, resumed, shownOnScreen, playing, if (playing) null else pos, state.current?.id, state.index) {
         if (!free || !resumed || !shownOnScreen) return@LaunchedEffect
         var last = androidx.compose.runtime.withFrameNanos { it }
         while (isActive) {
@@ -1716,7 +1724,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
             val gap = target - bar.floatValue
             // Exponential approach, 140 ms time constant: settled within a third of a second.
             bar.floatValue = if (kotlin.math.abs(gap) < 0.0005f) target else bar.floatValue + gap * (1f - kotlin.math.exp(-dt / 0.14f))
-            if (!moving && bar.floatValue == target) break
+            if (!playing && bar.floatValue == target) break
         }
     }
 
