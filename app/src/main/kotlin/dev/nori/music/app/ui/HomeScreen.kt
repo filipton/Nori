@@ -234,21 +234,31 @@ private object Arrival {
 }
 
 /**
- * The one animation behind the whole page. It runs once: a section scrolled away and back reads a run
- * that finished long ago, and fresh data for a page already showing does not start it again, so nothing
- * here moves while the page is sitting still.
+ * The one animation behind the whole page. It runs once, the first time the page is on screen after
+ * the app starts: a section scrolled away and back reads a run that finished long ago, and fresh data
+ * for a page already showing does not start it again, so nothing here moves while the page is sitting
+ * still.
+ *
+ * Once per process, not once per visit. Coming back to the page - a pop from an album, a tab tap -
+ * composes it again from nothing, and the run used to start again with it: the page slid back into
+ * place (PageMotion) with every section at nought, so it arrived as a black card and its sections
+ * only appeared once the slide was over. The page is what is coming back; it should look as it did.
  */
 @Composable
 private fun rememberArrival(): State<Float> {
     val plain = reduceMotion()
-    val progress = remember { Animatable(0f) }
+    val progress = remember { Animatable(if (arrived) 1f else 0f) }
     // Linear, because the curve belongs to each section's own move and not to the clock they share.
     LaunchedEffect(plain) {
+        arrived = true
         if (plain) progress.snapTo(1f)
         else if (progress.value < 1f) progress.animateTo(1f, tween(Arrival.RUN, easing = LinearEasing))
     }
     return progress.asState()
 }
+
+/** Whether the home page has arrived once already since the app started; see rememberArrival. */
+private var arrived = false
 
 /** Read in the draw phase: the run redraws the sections on screen and recomposes none of them. */
 private fun Modifier.arriving(arrival: State<Float>, place: Int, rise: Float) = graphicsLayer {

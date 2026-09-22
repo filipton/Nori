@@ -498,11 +498,23 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) = SectionHeader(te
 fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
     // A page's content fades in over its loader instead of replacing it in one frame. Keyed on the kind
     // of state only: fresh data for a page already showing just recomposes it, with no fade.
+    //
+    // But only once a loader has really been seen. The dots stay invisible for their first quarter
+    // second (LoadingDots), so data that arrives inside that window replaces nothing anyone saw - and
+    // a fade there is not a fade over a loader, it is the page's content fading up out of the page's
+    // own background while the page is still sliding in (PageMotion): a black card arriving, and then
+    // the album appearing on it. Quick data snaps in; only a page that was waiting gets the fade.
+    val opened = remember { android.os.SystemClock.uptimeMillis() }
     androidx.compose.animation.AnimatedContent(
         load, contentKey = { it::class },
         transitionSpec = {
-            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260, delayMillis = 60)) togetherWith
-                androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+            if (android.os.SystemClock.uptimeMillis() - opened < QUICK_LOAD_MS) {
+                androidx.compose.animation.fadeIn(androidx.compose.animation.core.snap()) togetherWith
+                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.snap())
+            } else {
+                androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(260, delayMillis = 60)) togetherWith
+                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+            }
         },
         label = "load",
     ) { state ->
@@ -516,6 +528,9 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
         }
     }
 }
+
+/** Data that arrives within this long of a page opening was never waited for; see LoadBox. */
+private const val QUICK_LOAD_MS = 300L
 
 /** Big, quiet type for an empty list: "Nothing here yet". */
 @Composable
