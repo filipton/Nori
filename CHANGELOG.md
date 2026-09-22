@@ -6,7 +6,7 @@ hand. Versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
-## [0.3.2] - 2026-09-22
+## [0.3.3] - 2026-09-22
 
 ### Added
 
