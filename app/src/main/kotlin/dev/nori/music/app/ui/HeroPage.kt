@@ -39,6 +39,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.settings.ThemeMode
 
@@ -82,6 +83,10 @@ fun HeroPage(
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
     val palette = if (prefs.coverColors) rememberCoverPalette(coverUrl?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
+    // Shuffle stays labelled Shuffle (never Pause); it lights while the player is shuffling.
+    val player: PlayerViewModel = viewModel()
+    val playerState by player.state.collectAsStateWithLifecycle()
+    val shuffling = playerState.shuffle
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
@@ -166,7 +171,8 @@ fun HeroPage(
                         ) {
                             CircleButton(
                                 Icons.Filled.Shuffle, "Shuffle",
-                                enabled = onShuffle != null, onClick = onShuffle ?: {},
+                                enabled = onShuffle != null, selected = shuffling && onShuffle != null,
+                                onClick = onShuffle ?: {},
                             )
                             PillButton(
                                 "Play", Icons.Filled.PlayArrow, onPlay ?: {}, Modifier.weight(1f),

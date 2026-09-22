@@ -176,7 +176,13 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
         val snackbar = remember { SnackbarHostState() }
         var menuSong by remember { mutableStateOf<Song?>(null) }
         var menuFromPlayer by remember { mutableStateOf(false) }
-        LaunchedEffect(Unit) { actions.messages.collect { snackbar.showSnackbar(it) } }
+        LaunchedEffect(Unit) {
+            actions.messages.collect { msg ->
+                // Drop whatever is up so fav / unfav flips replace each other at once.
+                snackbar.currentSnackbarData?.dismiss()
+                snackbar.showSnackbar(msg, withDismissAction = true, duration = androidx.compose.material3.SnackbarDuration.Short)
+            }
+        }
         // Headphones or a DAC connected with nothing chosen for them: the service decided (see DeviceSound);
         // this only says so - "use its AutoEQ curve?", or "using AutoEQ for X" with an undo.
         // Marked as seen only once it has been on screen; unplugging the device takes it away with it.
@@ -332,7 +338,28 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               // The tab bar is over the player, not under it: as the player rises it slides down off the
               // screen instead of vanishing under the sheet in one frame. See BottomChrome.
               Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab) { tabsHeight = it } }
-              SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(bottom = chromeHeight))
+              // Top: less in the way of the now-playing bar; swipe or the X dismisses.
+              SnackbarHost(
+                  snackbar,
+                  Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 8.dp, start = 12.dp, end = 12.dp),
+              ) { data ->
+                  val dismiss = androidx.compose.material3.rememberSwipeToDismissBoxState(
+                      confirmValueChange = {
+                          if (it != androidx.compose.material3.SwipeToDismissBoxValue.Settled) {
+                              data.dismiss()
+                              true
+                          } else false
+                      },
+                  )
+                  androidx.compose.material3.SwipeToDismissBox(
+                      state = dismiss,
+                      backgroundContent = {},
+                      enableDismissFromStartToEnd = true,
+                      enableDismissFromEndToStart = true,
+                  ) {
+                      androidx.compose.material3.Snackbar(snackbarData = data)
+                  }
+              }
             }
             SheetBack(sheet)
             }

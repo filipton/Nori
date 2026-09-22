@@ -1535,11 +1535,24 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
     // from the page came out lighter than the page on a bright record and carried a white glyph on top
     // of it - on The Bends, a pale orange disc with a white heart. The disc brings its own contrast.
     val onDark = scheme.onSurface.luminance() > 0.5f
+    val plain = reduceMotion()
+    val scale = remember { androidx.compose.animation.core.Animatable(1f) }
+    var ready by remember { mutableStateOf(false) }
+    // Jump only for the heart, when its selected state flips.
+    val isHeart = icon == Icons.Filled.Favorite || icon == Icons.Filled.FavoriteBorder
+    LaunchedEffect(selected, isHeart) {
+        if (!isHeart) return@LaunchedEffect
+        if (!ready) { ready = true; return@LaunchedEffect }
+        if (plain) return@LaunchedEffect
+        scale.snapTo(1f)
+        scale.animateTo(1.22f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
+        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
+    }
     Surface(
         onClick = onClick, shape = CircleShape,
         color = if (onDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.72f),
         contentColor = if (selected) scheme.primary else scheme.onSurface,
-        modifier = Modifier.size(42.dp),
+        modifier = Modifier.size(42.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value },
     ) {
         Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(25.dp)) }
     }

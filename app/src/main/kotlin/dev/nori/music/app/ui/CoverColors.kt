@@ -150,28 +150,40 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     val edge = Color(bottomAverage(bitmap))
     val p = Palette.from(bitmap).maximumColorCount(16).generate()
     val body = dominant(bitmap, edge.toArgb())
-    val accentSeed = (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
+    val bodyHsl = FloatArray(3).also { ColorUtils.colorToHSL(body, it) }
+    // A field of paper or ink is itself: do not let Palette's "vibrant" scrap of JPEG pink or a
+    // compression fringe paint the page. Near-white and near-black covers keep a grey body and a
+    // grey accent so the wash stays honest.
+    val inkOrPaper = bodyHsl[1] < 0.12f || bodyHsl[2] > 0.88f || bodyHsl[2] < 0.10f
+    val accentSeed = if (inkOrPaper) body
+        else (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
     // The page colour keeps the cover's hue but goes where text can live: deep in dark mode, pale in
     // light. It is [body] alone, with none of [edge] mixed in any more. Both branches below throw the
     // seed's lightness away and clamp it into a narrow band, so all a dark bottom row ever contributed
     // was its hue and its greyness - which is exactly what turned a sleeve of pale dusty pink into a
     // brown page, because that sleeve has dark hair along its bottom edge. Carrying the seam is not
     // this colour's job: [edge] is handed out separately and the wash still starts from it.
-    val hsl = FloatArray(3).also { ColorUtils.colorToHSL(body, it) }
+    val hsl = bodyHsl
     val background = when {
         dark && amoled -> Color.Black
+        // White / black sleeves: keep the page neutral. darkPage() on a near-white with a whisper of
+        // warm hue (JPEG) used to invent a pink or brown wash out of nothing.
+        dark && (hsl[2] > 0.85f || (hsl[1] < 0.08f && hsl[2] > 0.55f)) -> Color(0xFF1C1C1C)
+        dark && hsl[2] < 0.10f && hsl[1] < 0.15f -> Color(0xFF0A0A0A)
         // Clamping to 0.14 and taking a quarter off the saturation left pale sleeves with no colour a
         // viewer would name - a dusty pink arrived as a neutral brown. There was room to spare: white
         // text has about 14:1 on that pink at 0.20, and better than 8:1 on the worst case the band
         // allows (a yellow at the top of it), which still holds after the wash's own +0.05 of lightness.
         dark -> darkPage(hsl)
+        inkOrPaper && hsl[2] > 0.85f -> Color(0xFFF5F5F5)
+        inkOrPaper && hsl[2] < 0.10f -> Color(0xFFE8E8E8)
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
     // An accent that disappears into the page is no accent: lighten or darken it until it reads.
     val accent = readable(Color(accentSeed), background, on)
     // AMOLED black is a promise that those pixels are switched off; a wash would light them up again.
-    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark) }.getOrNull()
+    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark, inkOrPaper) }.getOrNull()
     return PagePalette(
         edge, background, on, on.copy(alpha = 0.66f), accent,
         wash = wash?.first, washEdge = wash?.second ?: edge,
@@ -208,7 +220,7 @@ private const val MUTE = 0.38f
  * Every pixel is then pulled to within a hair of the page colour's own lightness and its saturation
  * held back, so the hues vary across the page but the contrast the text needs does not.
  */
-private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): Pair<ImageBitmap, Color> {
+private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, inkOrPaper: Boolean = false): Pair<ImageBitmap, Color> {
     val small = bitmap.scale(WASH, WASH)
     val px = IntArray(WASH * WASH)
     small.getPixels(px, 0, WASH, 0, 0, WASH, WASH)
@@ -228,10 +240,21 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): Pair<Image
     // own 0.20 lightness reaches 0.31 at its brightest, where white still reads at about five to one.
     val spread = if (dark) 0.11f else 0.055f
     val pull = if (dark) 1f else 0.85f
-    val maxSat = if (dark) 0.62f else 0.40f
+    // Ink/paper covers: kill chromatic drift so a white sleeve cannot bloom pink or mint in the wash.
+    val maxSat = when {
+        inkOrPaper -> 0.06f
+        dark -> 0.62f
+        else -> 0.40f
+    }
+    val mute = if (inkOrPaper) 0.72f else MUTE
     for (i in px.indices) {
         ColorUtils.colorToHSL(px[i], hsl)
-        hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
+        if (inkOrPaper) {
+            hsl[0] = pageHsl[0]
+            hsl[1] = 0f
+        } else {
+            hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
+        }
         hsl[2] = (pageHsl[2] + (hsl[2] - meanL) * spread * 2.5f).coerceIn(pageHsl[2] - spread, pageHsl[2] + spread).coerceIn(0f, 1f)
         // Then most of the way back to the flat page colour. Clamping the lightness alone was not
         // enough on a record that is many colours at once: one that is teal down one side and warm
@@ -240,7 +263,7 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): Pair<Image
         // because their wash does less - measured, their colour actually varies rather more than
         // ours did. Pulling each pixel back towards the page colour keeps the drift and takes the
         // shouting out of it.
-        px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), MUTE)
+        px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), mute)
     }
     // What the soft bottom of the sleeve averages out to, kept with the picture: these are the rows
     // of the page's wash that show through where the records are rubbed out (`rubOutBottom`), so this
@@ -375,6 +398,9 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
     val sumR = FloatArray(HUES + 2)
     val sumG = FloatArray(HUES + 2)
     val sumB = FloatArray(HUES + 2)
+    var paper = 0f
+    var ink = 0f
+    var total = 0f
     var y = 0
     while (y < h) {
         bitmap.getPixels(row, 0, w, 0, y, w, 1)
@@ -382,16 +408,22 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
         while (x < w) {
             val px = row[x]
             ColorUtils.colorToHSL(px, hsl)
+            total += 1f
             // Dark and colourless - or so dark that any hue it has is noise - is black.
             val black = hsl[2] < 0.06f || (hsl[2] < 0.18f && hsl[1] < 0.25f)
+            val white = hsl[2] > 0.88f && hsl[1] < 0.18f
+            if (black) ink += 1f
+            if (white) paper += 1f
             val bucket = when {
                 black -> DARK
-                hsl[2] > 0.97f || hsl[1] < 0.10f -> NEUTRAL
+                white || hsl[1] < 0.10f -> NEUTRAL
                 else -> (hsl[0] / (360f / HUES)).toInt().coerceIn(0, HUES - 1)
             }
             val wt = when (bucket) {
+                // Paper and ink are the field on a white or black sleeve: count them at full weight so
+                // a speck of JPEG pink cannot outvote the page.
                 DARK -> 1f
-                NEUTRAL -> 0.25f * (if (hsl[2] > 0.97f) 0.4f else 1f)
+                NEUTRAL -> if (white) 1f else 0.35f
                 else -> 0.25f + 0.75f * (hsl[1] / 0.25f).coerceAtMost(1f)
             }
             weight[bucket] += wt
@@ -418,6 +450,11 @@ private fun dominant(bitmap: Bitmap, fallback: Int): Int {
     score[DARK] = weight[DARK]
     var best = 0
     for (i in score.indices) if (score[i] > score[best]) best = i
+    // Majority paper or ink wins outright: a white cover with a tiny coloured mark is still white.
+    if (total > 0f) {
+        if (paper / total >= 0.45f) best = NEUTRAL
+        if (ink / total >= 0.45f) best = DARK
+    }
     val run = if (best < HUES) intArrayOf((best + HUES - 1) % HUES, best, (best + 1) % HUES) else intArrayOf(best)
     val n = run.sumOf { weight[it].toDouble() }.toFloat()
     if (n <= 0f) return fallback

@@ -107,6 +107,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * over the ear has left the song, whether or not the sink has been asked since.
      */
     private var heardBefore = false
+    /**
+     * Album/playlist Shuffle with weighted order leaves media3 shuffle off so the spread sticks;
+     * this keeps the UI control lit until Play, or an explicit shuffle-off, clears it.
+     */
+    @Volatile private var shuffleLit = false
     private fun heard(c: MediaController): Pair<String, Long>? {
         val id = TransitionSink.heardId
         val on = id != null && run {
@@ -190,6 +195,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             val at = p.currentMediaItemIndex
             (at - 1 downTo 0).firstOrNull { queue.getOrNull(it)?.id == id } ?: queue.indexOfLast { it.id == id }.takeIf { it >= 0 }
         }
+        // Weighted album shuffle plays a pre-spread list with media3 shuffle off so the order sticks;
+        // [shuffleLit] keeps the Shuffle control lit until the user turns it off or starts a plain Play.
+        if (p.shuffleModeEnabled) shuffleLit = true
         _state.value = old.copy(
             connected = true, queue = queue, order = order, queued = queued,
             index = if (p.mediaItemCount == 0) -1 else heardIndex ?: p.currentMediaItemIndex,
@@ -198,7 +206,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
             radio = item?.takeIf { it.isRadio }?.let { p.mediaMetadata.title?.toString()?.takeIf(String::isNotBlank) ?: it.mediaMetadata.title?.toString() },
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
-            shuffle = p.shuffleModeEnabled,
+            shuffle = p.shuffleModeEnabled || shuffleLit,
             repeat = when (p.repeatMode) { Player.REPEAT_MODE_ALL -> Repeat.ALL; Player.REPEAT_MODE_ONE -> Repeat.ONE; else -> Repeat.OFF },
             durationMs = if (heardIndex != null) queue[heardIndex].duration.toLong() * 1000
                 else p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
@@ -223,10 +231,27 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     fun play(songs: List<Song>, startIndex: Int = 0, shuffle: Boolean = false) = with { c ->
         if (songs.isEmpty()) return@with
+        // Shuffle lit when this start asked for shuffle; cleared on a plain Play so the album control
+        // does not stay on after the user presses Play (which is never Pause on that row).
+        shuffleLit = shuffle
         c.shuffleModeEnabled = shuffle
         c.setMediaItems(items(songs), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)
         c.prepare()
         c.play()
+    }
+
+    /**
+     * Play [songs] in the given order while keeping the Shuffle control lit. Used for weighted
+     * artist-spread shuffles: media3's own shuffle would undo the spread.
+     */
+    fun playShuffledOrder(songs: List<Song>) = with { c ->
+        if (songs.isEmpty()) return@with
+        shuffleLit = true
+        c.shuffleModeEnabled = false
+        c.setMediaItems(items(songs), 0, 0)
+        c.prepare()
+        c.play()
+        _state.value = _state.value.copy(shuffle = true)
     }
 
     // Where these land is the service's business (PlaybackService.upNext): after the playing song, and
@@ -417,7 +442,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             p.seekTo(target)
         } else forget()
     }
-    fun setShuffle(on: Boolean) = with { it.shuffleModeEnabled = on }
+    fun setShuffle(on: Boolean) = with {
+        shuffleLit = on
+        it.shuffleModeEnabled = on
+        _state.value = _state.value.copy(shuffle = on || it.shuffleModeEnabled)
+    }
 
     fun cycleRepeat() = with {
         it.repeatMode = when (it.repeatMode) {

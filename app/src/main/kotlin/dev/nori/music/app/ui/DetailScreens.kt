@@ -92,9 +92,14 @@ private fun FilterField(count: Int, filter: String, onFilter: (String) -> Unit) 
 /** The row of buttons the screens without a hero still use. */
 @Composable
 private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel) {
+    val player: PlayerViewModel = viewModel()
+    val shuffling by player.state.collectAsStateWithLifecycle()
     Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp), Arrangement.spacedBy(10.dp)) {
         PillButton("Play", Icons.Filled.PlayArrow, { actions.play(songs) }, Modifier.weight(1f), prominent = true, enabled = songs.isNotEmpty())
-        PillButton("Shuffle", Icons.Filled.Shuffle, { actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty())
+        PillButton(
+            "Shuffle", Icons.Filled.Shuffle, { actions.shuffle(songs) }, Modifier.weight(1f),
+            prominent = shuffling.shuffle, enabled = songs.isNotEmpty(),
+        )
         IconButton({ actions.enqueue(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add all to queue") }
         IconButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Download, "Download all") }
     }
@@ -184,9 +189,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, album.id, album.starred)
-            CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                actions.starAlbum(album.id, !albumStarred)
-            }
+            FavoriteCircle(albumStarred) { actions.starAlbum(album.id, !albumStarred); Unit }
             // Fixed 46 dp slot: More fades in when the songs land so the Play pill never shifts.
             Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.animation.AnimatedVisibility(
@@ -276,9 +279,7 @@ private fun AlbumBody(
         onShuffle = { actions.shuffle(d.songs) },
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
-            CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                actions.starAlbum(d.album.id, !albumStarred)
-            }
+            FavoriteCircle(albumStarred) { actions.starAlbum(d.album.id, !albumStarred); Unit }
             MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
         },
     ) {
@@ -341,9 +342,7 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         awaitingPlay = ui == null && load !is Load.Failed,
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
-            CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                actions.starArtist(artist.id, !artistStarred)
-            }
+            FavoriteCircle(artistStarred) { actions.starArtist(artist.id, !artistStarred); Unit }
             Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.animation.AnimatedVisibility(
                     visible = ui != null,
@@ -434,9 +433,7 @@ private fun ArtistBody(
         onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
-            CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                actions.starArtist(ui.detail.artist.id, !artistStarred)
-            }
+            FavoriteCircle(artistStarred) { actions.starArtist(ui.detail.artist.id, !artistStarred); Unit }
             MoreCircle(
                 listOf(
                     "Add to queue" to { actions.queueArtist(ui.detail.albums) },
@@ -518,9 +515,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             // from the page whether this playlist was on the home page or not. The server has no
             // way to star a playlist, so it is kept on this phone, and the home page's shelf of
             // them reads it.
-            CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
-                settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
-            }
+            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
             Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.animation.AnimatedVisibility(
                     visible = detail != null,
@@ -597,9 +592,7 @@ private fun PlaylistBody(
         onShuffle = { actions.shuffle(d.songs) },
         actions = {
             val pinned = id in prefs.pinnedPlaylists
-            CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
-                settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
-            }
+            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
             MoreCircle(
                 listOf(
                     "Add to queue" to { actions.enqueue(d.songs) },

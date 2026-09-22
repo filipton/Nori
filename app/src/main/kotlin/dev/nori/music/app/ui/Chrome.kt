@@ -322,13 +322,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
             // for it because the title beside it is already allowed to run out of space gracefully.
             song?.let { s ->
                 val starred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, s.id, s.starred)
-                IconButton({ actions.star(s, !starred) }) {
-                    Icon(
-                        if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        "Favourite", Modifier.size(22.dp),
-                        tint = if (starred) content else content.copy(alpha = 0.75f),
-                    )
-                }
+                FavoriteHeart(starred, tint = content, muted = content.copy(alpha = 0.75f)) { actions.star(s, !starred) }
             }
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
             IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }

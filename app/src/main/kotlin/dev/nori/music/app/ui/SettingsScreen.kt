@@ -152,21 +152,14 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
 private data class Group(val id: String, val title: String, val icon: ImageVector, val summary: String)
 
 private val groups = listOf(
-
-    Group("playing", "Playing", Icons.Outlined.PlayCircle, "Crossfade, speed, what plays next"),
-
-    Group("sound", "Sound", Icons.Outlined.GraphicEq, "Equalizer, volume, USB DAC"),
-
-    Group("data", "Downloads and data", Icons.Outlined.CloudDownload, "Quality, storage, loading ahead"),
-
-    Group("look", "Look", Icons.Outlined.Palette, "Theme, colours, text size, motion"),
-
-    Group("lyrics", "Lyrics", Icons.Outlined.Lyrics, "Size, translations, where they come from"),
-
-    Group("library", "Library and lists", Icons.Outlined.LibraryMusic, "Offline search, history, taps and swipes"),
-
+    // Connect first, then what plays, then how it sounds, then how it looks.
     Group("servers", "Servers", Icons.Outlined.Dns, "Accounts, music folder, bitrate limit"),
-
+    Group("playing", "Playing", Icons.Outlined.PlayCircle, "Crossfade, speed, what plays next"),
+    Group("sound", "Sound", Icons.Outlined.GraphicEq, "Equalizer, volume, USB DAC"),
+    Group("look", "Look", Icons.Outlined.Palette, "Theme, colours, text size, motion"),
+    Group("library", "Library", Icons.Outlined.LibraryMusic, "Search, history, taps, mixes"),
+    Group("data", "Downloads and data", Icons.Outlined.CloudDownload, "Quality, storage, loading ahead"),
+    Group("lyrics", "Lyrics", Icons.Outlined.Lyrics, "Size, translations, where they come from"),
 )
 
 /** One searchable row: which page it lives on, its title, and the words under it. */

@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 
 /** Everything that can be done to a song, album or playlist from any screen. One instance per activity. */
 class ActionsViewModel(app: Application) : NoriViewModel(app) {
-    private val _messages = Channel<String>(Channel.BUFFERED)
+    private val _messages = Channel<String>(Channel.CONFLATED)
     /** One-line confirmations and failures, for a snackbar or whatever the UI uses. */
     val messages = _messages.receiveAsFlow()
     /** This session's star changes, so every heart on screen can prefer them over its snapshot. */
@@ -146,8 +146,12 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     }
     /** Spreads artists and albums apart (in the core) unless the user prefers a plain random order. */
     fun shuffle(songs: List<Song>) {
-        if (nori.settings.value.weightedShuffle && songs.size > 2) nori.player.play(nori.library.shuffled(songs, System.nanoTime()))
-        else nori.player.play(songs, shuffle = true)
+        if (songs.isEmpty()) return
+        if (nori.settings.value.weightedShuffle && songs.size > 2) {
+            nori.player.playShuffledOrder(nori.library.shuffled(songs, System.nanoTime()))
+        } else {
+            nori.player.play(songs, shuffle = true)
+        }
     }
 
     fun instantMix(song: Song) = attempt(null) {

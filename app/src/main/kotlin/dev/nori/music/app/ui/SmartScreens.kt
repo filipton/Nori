@@ -79,7 +79,7 @@ private fun <T> Pick(value: T, options: List<T>, modifier: Modifier = Modifier, 
 private fun mixColour(id: String) = androidx.compose.ui.graphics.Color(
     when (id) {
         FAVOURITES_MIX -> 0xFFE0335A; "quick-picks" -> 0xFF8E3BD6; "discover" -> 0xFF1E88E5
-        "listen-again" -> 0xFF00897B; "top" -> 0xFFE0662B; else -> 0xFF5C6BC0
+        "discover-weekly" -> 0xFF1565C0; "listen-again" -> 0xFF00897B; "top" -> 0xFFE0662B; else -> 0xFF5C6BC0
     },
 )
 

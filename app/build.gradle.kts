@@ -11,8 +11,8 @@ android {
         applicationId = "dev.nori.music"
         minSdk = 26
         targetSdk = 36
-        versionName = "0.3.0"
-        versionCode = 300
+        versionName = "0.3.1"
+        versionCode = 301
         ndk { abiFilters += (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",") }
     }
 

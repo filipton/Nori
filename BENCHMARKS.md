@@ -5,7 +5,7 @@ same tracks, media volume 0, screen off, no touches. Nori is the **release**
 build throughout; the other three are Play releases. Full per-thread outputs
 and profiles: [perf-shootout.md](perf-shootout.md).
 
-| Metric | **Nori 0.3.0** | Symfonium 15.0.1 | musly 2.0.2 | Navic alpha55 |
+| Metric | **Nori 0.3.1** | Symfonium 15.0.1 | musly 2.0.2 | Navic alpha55 |
 |---|---|---|---|---|
 | Cold start | **~590 ms** | ~900 ms | ~1050 ms | ~700 ms |
 | MP3 CPU | **1.26%** | 10.7% | 4.01% | 3.10% |
@@ -34,7 +34,7 @@ paused rows are settled background windows.
 
 Notes:
 
-- MP3, FLAC, EQ and cold-start rows re-measured 2026-09-22 on release **0.3.0**
+- MP3, FLAC, EQ and cold-start rows re-measured 2026-09-22 on release **0.3.0** (unchanged for 0.3.1 UX)
   (EQ off + offload on for the stock rows; Nori EQ at 8 kHz **+8.4 dB**).
   Mix and paused rows are still from 2026-09-21.
 - Symfonium is hotter on this install than on 2026-09-21 (MP3 was 6.66% then,

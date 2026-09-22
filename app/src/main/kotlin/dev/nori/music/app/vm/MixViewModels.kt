@@ -29,8 +29,20 @@ import kotlinx.coroutines.sync.withLock
 /** The id of the favourites tile and page; every other id names one of [MIXES]. */
 const val FAVOURITES_MIX = "favourites"
 
+/**
+ * One "For you" mix: [id] is the route, [kind] is what the core draws, [title] is what the tile says.
+ * Discover Daily and Discover Weekly both call the same taste-based draw; only the seed period differs.
+ */
+private data class MixSpec(val id: String, val kind: Mix, val title: String, val weekly: Boolean = false)
+
 /** The mixes "For you" offers, in the order it offers them. The id is what the `mix/{id}` route carries. */
-private val MIXES = listOf("quick-picks" to Mix.QUICK_PICKS, "discover" to Mix.DISCOVER, "listen-again" to Mix.LISTEN_AGAIN, "top" to Mix.TOP)
+private val MIXES = listOf(
+    MixSpec("quick-picks", Mix.QUICK_PICKS, "Quick picks"),
+    MixSpec("discover", Mix.DISCOVER, "Discover"),
+    MixSpec("discover-weekly", Mix.DISCOVER, "Discover Weekly", weekly = true),
+    MixSpec("listen-again", Mix.LISTEN_AGAIN, "Listen again"),
+    MixSpec("top", Mix.TOP, "Your top songs"),
+)
 
 /** A "For you" tile: what it is called and up to four covers of what is in it. */
 data class MixCard(val id: String, val title: String, val covers: List<String>, val favourites: Boolean)
@@ -50,13 +62,16 @@ private fun NoriViewModel.coversOf(songs: List<Song>?): List<String> =
     songs.orEmpty().asSequence().mapNotNull { it.coverArt }.distinct().take(4).mapNotNull { cover(it, 320) }.toList()
 
 /**
- * Today's draw of each mix, shared by the Home tiles and the mix pages, so the covers on a tile, the
- * list on its page and what plays are one list. Drawn once a day (the seed is the date) or when the
- * page asks for another; never written to the server. Held in memory: after a restart the same seed
- * over the same index draws the same mix again.
+ * Today's (or this week's) draw of each mix, shared by the Home tiles and the mix pages, so the covers
+ * on a tile, the list on its page and what plays are one list. Drawn once per period (day, or ISO week
+ * for Discover Weekly) or when the page asks for another; never written to the server. Held in memory:
+ * after a restart the same seed over the same index draws the same mix again.
+ *
+ * The algorithm is on-device: play counts, skips, stars and genres in the local index (see mixes.rs).
+ * Last.fm / ListenBrainz stay on the server — Navidrome already scrobbles there.
  */
 internal object MixStore {
-    data class Drawn(val songs: List<Song>, val day: Long, val generation: Int)
+    data class Drawn(val songs: List<Song>, val period: Long, val generation: Int)
 
     private val _drawn = MutableStateFlow<Map<String, Drawn>>(emptyMap())
     val drawn: StateFlow<Map<String, Drawn>> = _drawn
@@ -64,18 +79,22 @@ internal object MixStore {
 
     fun key(nori: Nori, id: String) = "${nori.settings.value.activeServerId}|$id"
 
-    /** Draws mix [id] unless today's draw is already here; [again] asks for a different one. */
+    /** Draws mix [id] unless this period's draw is already here; [again] asks for a different one. */
     suspend fun ensure(nori: Nori, id: String, again: Boolean = false) = lock.withLock {
-        val kind = MIXES.firstOrNull { it.first == id }?.second ?: return@withLock
+        val spec = MIXES.firstOrNull { it.id == id } ?: return@withLock
         val key = key(nori, id)
         val day = java.time.LocalDate.now().toEpochDay()
+        // Weekly mixes share one seed for seven days so the tile does not churn every midnight.
+        val period = if (spec.weekly) day / 7 else day
         val have = _drawn.value[key]
-        if (have != null && have.day == day && !again) return@withLock
-        val generation = if (have != null && have.day == day) have.generation + 1 else 0
-        val songs = runCatching { nori.library.mix(kind, day * 1_000 + generation) }.getOrDefault(emptyList()).filter(::playable)
+        if (have != null && have.period == period && !again) return@withLock
+        val generation = if (have != null && have.period == period) have.generation + 1 else 0
+        // Offset weekly seeds so they never collide with the same day's Discover draw.
+        val seed = period * 1_000L + generation + if (spec.weekly) 7_000_000L else 0L
+        val songs = runCatching { nori.library.mix(spec.kind, seed) }.getOrDefault(emptyList()).filter(::playable)
         // With no listening history yet the personal mixes are empty: what the server thinks is random stands in.
         val list = songs.ifEmpty { runCatching { nori.library.randomSongs(50) }.getOrDefault(emptyList()).filter(::playable) }
-        _drawn.update { it + (key to Drawn(list.distinctBy { s -> s.id }, day, generation)) }
+        _drawn.update { it + (key to Drawn(list.distinctBy { s -> s.id }, period, generation)) }
     }
 }
 
@@ -93,10 +112,12 @@ private fun Nori.favouriteSongs(): Flow<List<Song>> =
 class MixesViewModel(app: Application) : NoriViewModel(app) {
     private fun cards(favourites: List<Song>, taste: Boolean, drawn: Map<String, MixStore.Drawn>): List<MixCard> =
         listOf(MixCard(FAVOURITES_MIX, "Favourites", coversOf(favourites), favourites = true)) +
-            if (!taste) emptyList() else MIXES.map { (id, kind) -> MixCard(id, kind.title, coversOf(drawn[MixStore.key(nori, id)]?.songs), favourites = false) }
+            if (!taste) emptyList() else MIXES.map { spec ->
+                MixCard(spec.id, spec.title, coversOf(drawn[MixStore.key(nori, spec.id)]?.songs), favourites = false)
+            }
 
-    /** Draws whichever mixes are missing or from yesterday; a few milliseconds each, off the main thread. */
-    private fun warm() = viewModelScope.launch { MIXES.forEach { MixStore.ensure(nori, it.first) } }
+    /** Draws whichever mixes are missing or from the last period; a few milliseconds each, off the main thread. */
+    private fun warm() = viewModelScope.launch { MIXES.forEach { MixStore.ensure(nori, it.id) } }
 
     // Starts with the tiles it can name right away, so the row is there from the first frame and only
     // the covers arrive later (the tile cross-fades to them).
@@ -124,12 +145,12 @@ class MixViewModel(app: Application) : NoriViewModel(app) {
     fun refresh() { id.value?.let { viewModelScope.launch { MixStore.ensure(nori, it, again = true) } } }
 
     val ui: StateFlow<Load<MixPage>> = id.filterNotNull().flatMapLatest { id ->
-        val kind = MIXES.firstOrNull { it.first == id }?.second
+        val spec = MIXES.firstOrNull { it.id == id }
         when {
             id == FAVOURITES_MIX -> nori.favouriteSongs().map { MixPage(id, "Favourites", it, coversOf(it), refreshable = false, favourites = true) }
-            kind == null -> flow { throw IllegalArgumentException("There is no mix called $id") }
+            spec == null -> flow { throw IllegalArgumentException("There is no mix called $id") }
             else -> MixStore.drawn.mapNotNull { it[MixStore.key(nori, id)] }.distinctUntilChanged()
-                .map { MixPage(id, kind.title, it.songs, coversOf(it.songs), refreshable = kind != Mix.TOP, favourites = false) }
+                .map { MixPage(id, spec.title, it.songs, coversOf(it.songs), refreshable = spec.kind != Mix.TOP, favourites = false) }
         }
     }.asLoad()
 }

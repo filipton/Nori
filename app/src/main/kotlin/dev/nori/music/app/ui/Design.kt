@@ -3,6 +3,10 @@ package dev.nori.music.app.ui
 import androidx.compose.runtime.setValue
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.graphics.graphicsLayer
@@ -710,16 +714,75 @@ fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Bo
 @Composable
 fun CircleButton(
     icon: ImageVector, description: String, modifier: Modifier = Modifier,
-    enabled: Boolean = true, onClick: () -> Unit,
+    enabled: Boolean = true, selected: Boolean = false, onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
-    // absent on a dark page, so the row still "popped" when Play became tappable.
+    // absent on a dark page, so the row still "popped" when Play became tappable. [selected] is the
+    // lit Shuffle state: a stronger fill so the page shows that shuffle is on.
     Surface(
         onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
-        color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background), contentColor = scheme.primary,
+        color = if (selected) scheme.primary.copy(alpha = 0.28f).over(scheme.background)
+            else scheme.onSurface.copy(alpha = 0.12f).over(scheme.background),
+        contentColor = scheme.primary,
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
+}
+
+/**
+ * Heart that fills and gives a short jump when favourited. [starred] is what is shown; the jump runs
+ * on a change, not on every recomposition of an already-hearted song.
+ */
+@Composable
+fun FavoriteHeart(
+    starred: Boolean,
+    modifier: Modifier = Modifier,
+    size: Dp = 22.dp,
+    tint: Color = MaterialTheme.colorScheme.primary,
+    muted: Color = tint.copy(alpha = 0.75f),
+    onClick: () -> Unit,
+) {
+    val plain = reduceMotion()
+    val scale = remember { androidx.compose.animation.core.Animatable(1f) }
+    var ready by remember { mutableStateOf(false) }
+    LaunchedEffect(starred) {
+        if (!ready) { ready = true; return@LaunchedEffect }
+        if (plain) return@LaunchedEffect
+        scale.snapTo(1f)
+        scale.animateTo(1.28f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
+        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
+    }
+    IconButton(onClick, modifier) {
+        Icon(
+            if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            if (starred) "Remove from favourites" else "Add to favourites",
+            Modifier.size(size).graphicsLayer { scaleX = scale.value; scaleY = scale.value },
+            tint = if (starred) tint else muted,
+        )
+    }
+}
+
+/** Favourite as a [CircleButton] with the same fill/jump as [FavoriteHeart]. */
+@Composable
+fun FavoriteCircle(starred: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val plain = reduceMotion()
+    val scale = remember { androidx.compose.animation.core.Animatable(1f) }
+    var ready by remember { mutableStateOf(false) }
+    LaunchedEffect(starred) {
+        if (!ready) { ready = true; return@LaunchedEffect }
+        if (plain) return@LaunchedEffect
+        scale.snapTo(1f)
+        scale.animateTo(1.22f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
+        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
+    }
+    Box(modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
+        CircleButton(
+            if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+            if (starred) "Remove from favourites" else "Favourite",
+            selected = starred,
+            onClick = onClick,
+        )
+    }
 }
 
 /** The circle that holds whatever did not fit beside a page's Play button. */

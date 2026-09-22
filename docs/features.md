@@ -1,6 +1,6 @@
 # Feature checklist
 
-Living inventory for **Nori 0.3.0**. Every distinct feature found in Symfonium (S), Musly (M) and
+Living inventory for **Nori 0.3.1**. Every distinct feature found in Symfonium (S), Musly (M) and
 Navic (N), merged. The raw, sourced inventories are in `docs/research/` (Symfonium: all 67 release
 posts, the docs site, the Play listing and the APK's strings; Musly: changelog, 892 l10n keys,
 source at v2.0.2; Navic: releases alpha19-55, 836 commits, source). Provider-specific items that
@@ -202,7 +202,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Multiple saved queues (last 15) | x | | | | add |
 | Auto-continue with similar songs | x | x | 1 random | yes | |
 | Auto-continue modes: random, same genre, same artist, similar; how many | x | x | | similar only | add |
-| Mixes: instant mix from track/artist, decade, genre; "exclude from mixes" | x | x | | yes | done |
+| Mixes: instant mix from track/artist, decade, genre; "exclude from mixes" | x | x | | yes | done: Discover + Discover Weekly (on-device taste, daily/weekly seed) |
 | On-device taste model (plays, skips, completion, hour of day) feeding mixes | x | x | | yes | done |
 | Live queue reshaping ("Smart Flow") | x | | | | skip: opaque behaviour, little demand |
 

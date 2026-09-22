@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-2b7fff?style=flat-square">
+  <img alt="version 0.3.1" src="https://img.shields.io/badge/version-0.3.1-2b7fff?style=flat-square">
   <img alt="Android 8.0+" src="https://img.shields.io/badge/Android-8.0%2B-3ddc84?style=flat-square&logo=android&logoColor=white">
   <img alt="Kotlin · Rust" src="https://img.shields.io/badge/Kotlin%20%C2%B7%20Rust-555?style=flat-square">
   <img alt="arm64 · x86_64" src="https://img.shields.io/badge/arm64%20%C2%B7%20x86__64-555?style=flat-square">
@@ -54,7 +54,7 @@ Same emulator, same server, same track, screen off — release Nori against
 Play builds of the alternatives. Quiet seconds are how often the process
 almost never woke: the number that decides overnight battery.
 
-| | **Nori 0.3.0** | Symfonium | musly | Navic |
+| | **Nori 0.3.1** | Symfonium | musly | Navic |
 |---|---|---|---|---|
 | CPU while playing (MP3 / FLAC / EQ) | **1.26 / 1.30 / 1.35 %** | 10.7 / 8.74 / 13.4 % | 4.01 / 4.70 / no EQ | 3.10 / 3.72 / 2.92 % |
 | Seconds asleep of 90 (MP3 / FLAC / EQ) | **75 / 69 / 73** | 1 / 0 / 1 | 0 / 0 / 0 | 1 / 1 / 1 |
