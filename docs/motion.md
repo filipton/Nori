@@ -79,7 +79,7 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   route: the four tab roots are `home`, `search`, `library`, `settings`, and a transition between two
   of them is a tab change; anything else is a push/pop.
 - Check: tap Library then Home: nothing slides.
-- Done as: `PageMotion.tab()` - both routes in `roots` - returns a 150 ms fade and sets `pop = null`
+- Done as: `PageMotion.tab()` - both routes in `roots` - returns a 100 ms fade and sets `pop = null`
   so neither page is dimmed.
 - Status: **done**
 
