@@ -119,26 +119,56 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     @Volatile private var shuffleLit = false
     private fun heard(c: MediaController): Pair<String, Long>? {
         val id = TransitionSink.heardId
-        val result = if (id == null) null else {
+        val next = TransitionSink.mixNextId
+        val playerOn = c.currentMediaItem?.mediaId
+        val result = if (id != null) {
             val since = if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - TransitionSink.heardAtMs else 0L
             val ms = TransitionSink.heardUs / 1000 + since
             val until = TransitionSink.heardUntilUs / 1000
-            val next = TransitionSink.mixNextId
             when {
                 ms < until -> id to ms.coerceIn(0, durationOf(id))
                 // The mix is audible: from here what is heard is the next song, at the point the mix
                 // entered it, whatever the player's own clock says. As Spotify does it - the next song
                 // from the moment it can be heard, never the old one's last seconds jumped through.
-                next != null -> next to (TransitionSink.mixNextFromUs / 1000 + ((ms - until) * TransitionSink.mixNextRate).toLong()).coerceIn(0, durationOf(next))
+                next != null -> next to intoNext(ms - until)
                 else -> null
             }
+        } else if (next != null && playerOn != null && playerOn == TransitionSink.mixFromId && next != consumed) {
+            // The next track arrived at once, so the player was never ahead of the ear and its own clock
+            // is the truth - but past the point the mix is heard, the truth is the next song.
+            val until = TransitionSink.mixAudibleUs / 1000
+            val pos = c.currentPosition
+            if (pos >= until) next to intoNext(pos - until) else null
+        } else null
+        // Once the page is on the next song it stays there until the player has left the old one: the
+        // sink letting go and the player moving on are not the same moment, and in between the page used
+        // to fall back to the player's word - the old song - and flash its cover and colours back.
+        val shown = result ?: carryId?.takeIf { playerOn == TransitionSink.mixFromId && it != consumed }?.let { held ->
+            held to (carryMs + if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - carryAt else 0L).coerceIn(0, durationOf(held))
         }
+        if (shown != null && shown.first == next && playerOn != next) {
+            carryId = shown.first; carryMs = shown.second; carryAt = android.os.SystemClock.elapsedRealtime()
+        }
+        // The player has reached the next song: this mix is done with, whatever the sink still holds.
+        if (next != null && playerOn == next) { consumed = next; carryId = null }
         // The ear changed song between two readings: the page changes with it now, not at the next one.
-        val now = result?.first
+        val now = shown?.first
         if (now != heardBefore) main.post { controller?.let { publish(it, queueChanged = false) } }
         heardBefore = now
-        return result
+        return shown
     }
+
+    /** Where in the next song the ear is, [msIn] after the mix became audible. */
+    private fun intoNext(msIn: Long): Long {
+        val id = TransitionSink.mixNextId ?: return 0L
+        return (TransitionSink.mixNextFromUs / 1000 + (msIn * TransitionSink.mixNextRate).toLong()).coerceIn(0, durationOf(id))
+    }
+
+    private var carryId: String? = null
+    private var carryMs = 0L
+    private var carryAt = 0L
+    /** The next song of the last mix the player has already reached, so a later visit to the old song is not mistaken for the mix. */
+    private var consumed: String? = null
 
     private fun durationOf(id: String) = _state.value.queue.firstOrNull { it.id == id }?.duration?.toLong()?.times(1000) ?: Long.MAX_VALUE
 

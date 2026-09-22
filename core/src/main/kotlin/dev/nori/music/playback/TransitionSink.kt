@@ -89,6 +89,16 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         /** How fast the incoming song runs through the mix: its tempo stretch. */
         @Volatile var mixNextRate = 1f
             private set
+        /**
+         * The song whose ending is being mixed out of, and where in it the mix becomes audible, in its
+         * own time. When the next song arrives at once the player is never ahead of the ear, [heardId]
+         * stays null, and this is how a reader still knows that past this point it is the next song
+         * that is heard.
+         */
+        @Volatile var mixFromId: String? = null
+            private set
+        @Volatile var mixAudibleUs = Long.MAX_VALUE
+            private set
         /** Called on the playback thread when [heardId] appears or goes: the ear has left the player, or caught up with it. */
         @Volatile var onHeardChanged: (() -> Unit)? = null
 
@@ -435,6 +445,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                 beginHold(p!!)
                 if (late) Log.i("nori", "transition: late hold, ${lateUs / 1000} ms in")
                 heldFromUs = presentationTimeUs + before.toLong() / frameBytes * 1_000_000L / rate
+                mixAudibleUs = heldFromUs - heldOffsetUs
                 heldAt = android.os.SystemClock.elapsedRealtime()
                 val at = super.getCurrentPositionUs(false)
                 val runwayUs = if (at == AudioSink.CURRENT_POSITION_NOT_SET) Long.MAX_VALUE else heldFromUs - at
@@ -547,6 +558,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         mixNextRate = if (stretchingIn) p.tempoRatio else 1f
         mixNextFromUs = p.inSkipUs + (lateUs.coerceIn(0L, p.durationUs) * mixNextRate).toLong()
         mixNextId = p.incomingId
+        mixFromId = heldId
+        mixAudibleUs = Long.MAX_VALUE
         // Outro remix: only the loop slice is captured; the mix reads it with wrap for the full duration.
         val holdUs = if (p.outLoopUs > 0) p.outLoopUs else p.durationUs
         val bytes = (holdUs * rate / 1_000_000).toInt() * frameBytes
@@ -846,7 +859,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         }
         if (phase != Phase.PASS) Log.i("nori", "transition abandoned in $phase")
         // The ending plays out on its own; the next song starts from its beginning, in the player's word.
-        mixNextId = null
+        mixNextId = null; mixFromId = null
         phase = Phase.PASS
         tailLen = 0
         heldFromUs = C.TIME_UNSET
@@ -997,7 +1010,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         mixedEndUs = C.TIME_UNSET; mixFromUs = C.TIME_UNSET; mixing = false
         heldFromUs = C.TIME_UNSET; heldUs = 0L; reported = Long.MIN_VALUE
         heldId = null; lateUs = 0L
-        mixNextId = null
+        mixNextId = null; mixFromId = null
         shiftUs = 0L; shiftUntilUs = C.TIME_UNSET
         if (heardId != null) { heardId = null; onHeardChanged?.invoke() }
         plan = null; planFor = null
