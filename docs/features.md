@@ -309,7 +309,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 
 ## Owner's list, 2026-09-18
 
-The owner asked for these explicitly; they override the "UI later" note below.
+The owner asked for these explicitly.
 
 - USB DAC handling like Symfonium, and earphone-model auto EQ -> AutoEQ browser done; when a Bluetooth or USB device
   connects whose name matches a measured headphone, the app offers its curve and remembers it for that device;
@@ -331,8 +331,8 @@ The owner asked for these explicitly; they override the "UI later" note below.
 
 ## Look and feel
 
-Symfonium's style builders, Navic's five themes and Musly's artwork editor are all UI-layer work.
-The owner's instruction is to leave UI for a later rewrite, so only function-bearing options are
-planned here: theme mode (system/light/dark), dynamic colour, cover-based player colour (one palette
-extraction per track; **ask** if even that is wanted), keep-screen-on for lyrics, configurable
-mini-player buttons, tab order/hide.
+The interface is a priority alongside performance: Apple Music-like, the cover colour melting into
+every page, smooth motion, nothing blocky. Symfonium's style builders, Navic's five themes and Musly's
+artwork editor are reference points, not goals in themselves; options here are theme mode
+(system/light/dark), dynamic colour, cover-based page and player colour, keep-screen-on for lyrics,
+configurable mini-player buttons, tab order/hide.

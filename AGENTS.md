@@ -1,7 +1,8 @@
 # Working in this repo
 
 nori music is an Android client for Navidrome / octo-fiesta (Subsonic API): a Kotlin app over a
-Rust core. Priorities, in order: battery and performance, functionality, and only then looks.
+Rust core. Battery and performance come first, and the interface matters just as much: it should look
+and move like Apple Music (the cover melting into the page, no blocky Material defaults), cheaply.
 `CLAUDE.md` points here, so there is one copy of these instructions.
 
 ## Where things are
