@@ -209,7 +209,6 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
                 if let Some(p) = echo_out(a, b, out_dur, in_dur, max_len, s, v.cause) {
                     return p;
                 }
-                why_not = format!("echo-out would not fit ({})", v.cause);
             }
             match beat_matched(a, b, out_dur, in_dur, max_len, s, short_cause) {
                 Ok(p) => return p,

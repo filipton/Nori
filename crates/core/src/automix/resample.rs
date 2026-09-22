@@ -16,8 +16,6 @@ use parking_lot::Mutex;
 use super::{PCM_16, PCM_FLOAT};
 
 pub struct Resampler {
-    in_rate: f64,
-    out_rate: f64,
     in_ch: usize,
     out_ch: usize,
     /// Input frames per output frame.
@@ -39,8 +37,6 @@ impl Resampler {
             return None;
         }
         Some(Resampler {
-            in_rate: in_rate as f64,
-            out_rate: out_rate as f64,
             in_ch: in_ch as usize,
             out_ch: out_ch as usize,
             step: in_rate as f64 / out_rate as f64,

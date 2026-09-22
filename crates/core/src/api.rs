@@ -60,6 +60,9 @@ impl Server {
     /// The salt is derived, not random: a stable token keeps every URL stable
     /// across sessions, so HTTP, image and media caches keep hitting. A token
     /// is replayable either way; TLS is what protects it.
+    /// Test-only: production builds its servers through [Self::with], which is what carries
+    /// the API-key and legacy auth the settings can hold.
+    #[cfg(test)]
     pub fn new(base: &str, user: &str, password: &str) -> Self {
         Self::with(base, Auth::Token { user, password })
     }
