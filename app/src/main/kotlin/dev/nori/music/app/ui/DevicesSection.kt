@@ -66,7 +66,7 @@ fun DevicesSection(vm: SettingsViewModel) {
     ) { on -> vm.update { it.copy(autoEqAuto = on) } }
     AnimatedVisibility(!p.profilePerOutput, enter = fadeIn(tween(motion())) + expandVertically(tween(motion())), exit = fadeOut(tween(motion())) + shrinkVertically(tween(motion()))) {
         Text(
-            "Devices keep their sound only while Settings, then Sound, then Remember the sound per device is on.",
+            "Devices keep their sound only while Settings, then Sound, then Remember sound per device is on.",
             Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
         )
