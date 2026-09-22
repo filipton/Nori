@@ -156,6 +156,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
      * off that id silently skips the transition (a seek past the planned start does the same).
      */
     private var playingId: String? = null
+    /** Flushed, and nothing has flowed since: the next configure is for the stream about to play. */
+    private var fresh = false
     private var offsetUs = 0L
 
     private var phase = Phase.PASS
@@ -252,7 +254,13 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         // samples, and then no transition is possible at all - which is worth saying out loud, because
         // every other sign of it is a boundary that simply passes.
         Log.i("nori", "sink: $id ${f.sampleMimeType} ${f.sampleRate} Hz x${f.channelCount} enc=$enc${if (enc == 0) " - not PCM, no transitions" else ""}")
-        val forCurrent = id == null || id == currentId
+        // Just after a flush (a skip, a jump in the queue, a seek) no buffer has flowed yet, and the
+        // first format announced is the stream about to flow - never decode-ahead. Treated as ahead, it
+        // was staged to be armed "when its buffers flow", but a flush had just emptied the stage and no
+        // discontinuity was coming: a 48 kHz song skipped to under a 44.1 kHz latch then played
+        // unconverted, 8.8 % slow and flat, with a timestamp resync - a stutter - every two seconds.
+        val forCurrent = id == null || id == currentId || fresh
+        if (fresh) { fresh = false; if (id != null) playingId = id }
         if (id != null && id != currentId) onNewStream(id)
         if (enc == 0) {
             // Not samples: there is nothing to convert, so the downstream format has to follow.
@@ -392,6 +400,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     // ---- the audio path ----
 
     override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
+        fresh = false
         pendingConfig?.let { config ->
             if (!drain()) return false
             pendingConfig = null
@@ -1030,7 +1039,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         analysisTainted = true
     }
 
-    override fun flush() { clear(); super.flush() }
+    override fun flush() { clear(); fresh = true; super.flush() }
 
     override fun reset() {
         clear()
