@@ -178,7 +178,7 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     // On paper, a near-white accentSeed is useless: nudge to a readable ink grey rather than
     // saturating a phantom hue.
     val accent = when {
-        paper -> Color(0xFF3A3A3A)
+        paper -> Color(0xFF2A2A2A)
         ink && !dark -> Color(0xFF2A2A2A)
         else -> readable(Color(accentSeed), background, on)
     }

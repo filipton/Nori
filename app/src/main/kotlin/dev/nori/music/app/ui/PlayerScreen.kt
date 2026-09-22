@@ -296,7 +296,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         // the page is already drawing them.
         shift.adopted = rowUrl
         // As long as the record takes to slide across, so the page and the sleeve arrive together.
-        if (fadingFrom != null && !AppMotion.reduce) { washFade.snapTo(0f); washFade.animateTo(1f, androidx.compose.animation.core.tween(420)) }
+        // Theme colours (text, Play, heart) travel with the wash via mixPalette - snapping the theme
+        // while only the wash faded left the controls jumping a frame ahead of the page.
+        if (fadingFrom != null && !AppMotion.reduce) {
+            washFade.snapTo(0f)
+            washFade.animateTo(1f, androidx.compose.animation.core.tween(420))
+        }
         fadingFrom = null
     }
 
@@ -331,7 +336,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         }
     }
 
-    TintedTheme(palette) {
+    // While the wash cross-fades, the theme rides the same progress so buttons and type do not snap.
+    val fadeT = washFade.value
+    val themePalette = fadingFrom?.let { from ->
+        val to = palette
+        if (to != null) mixPalette(from, to, fadeT) else from
+    } ?: palette
+
+    TintedTheme(themePalette) {
         val scheme = MaterialTheme.colorScheme
         if (LocalPlayerShown.current) SystemBarIcons(scheme.background)
         Box(

@@ -395,6 +395,7 @@ fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = Text
 /**
  * The button the page is built around: a full pill, tinted with the page's accent. [prominent] is the
  * one the eye should land on (Play); the others sit on a translucent version of the same colour.
+ * On a paper-white page the plates go darker so they do not wash out into the background.
  */
 @Composable
 fun PillButton(
@@ -402,8 +403,19 @@ fun PillButton(
     prominent: Boolean = false, enabled: Boolean = true,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val container = if (prominent) scheme.primary else scheme.onSurface.copy(alpha = 0.12f).over(scheme.background)
-    val content = if (prominent) scheme.onPrimary else scheme.primary
+    val light = scheme.background.luminance() > 0.55f
+    val container = when {
+        prominent && light -> Color(0xFF1A1A1A)
+        prominent -> scheme.primary
+        light -> scheme.onSurface.copy(alpha = 0.16f).over(scheme.background)
+        else -> scheme.onSurface.copy(alpha = 0.12f).over(scheme.background)
+    }
+    val content = when {
+        prominent && light -> Color.White
+        prominent -> scheme.onPrimary
+        light -> scheme.onSurface
+        else -> scheme.primary
+    }
     Surface(
         onClick = onClick, enabled = enabled, shape = PillShape, color = container, contentColor = content,
         modifier = modifier.heightIn(min = 42.dp),
@@ -719,12 +731,19 @@ fun CircleButton(
     val scheme = MaterialTheme.colorScheme
     // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
     // absent on a dark page, so the row still "popped" when Play became tappable. [selected] is the
-    // lit Shuffle state: a stronger fill so the page shows that shuffle is on.
+    // lit Shuffle state: a stronger fill so the page shows that shuffle is on. On paper-white pages
+    // the plate is a shade darker so it still reads.
+    val light = scheme.background.luminance() > 0.55f
+    val plate = when {
+        selected && light -> scheme.onSurface.copy(alpha = 0.22f).over(scheme.background)
+        selected -> scheme.primary.copy(alpha = 0.28f).over(scheme.background)
+        light -> scheme.onSurface.copy(alpha = 0.14f).over(scheme.background)
+        else -> scheme.onSurface.copy(alpha = 0.12f).over(scheme.background)
+    }
     Surface(
         onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
-        color = if (selected) scheme.primary.copy(alpha = 0.28f).over(scheme.background)
-            else scheme.onSurface.copy(alpha = 0.12f).over(scheme.background),
-        contentColor = scheme.primary,
+        color = plate,
+        contentColor = if (light) scheme.onSurface else scheme.primary,
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
 }
