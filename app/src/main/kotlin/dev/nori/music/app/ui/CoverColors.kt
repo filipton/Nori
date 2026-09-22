@@ -151,6 +151,18 @@ private const val FOOT_PULL = 0.35f
 private const val FOOT_JUMP = 1.8f
 
 /**
+ * A light sleeve's page: its own colour at a lightness text reads on. Saturation is held back a
+ * little - at 92 % lightness a cream reads as cream at well under its full strength - and capped, so
+ * a pale but vivid sleeve gives a tinted page rather than a coloured one.
+ */
+private fun paperPage(hsl: FloatArray): Color =
+    Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceIn(0.92f, 0.96f))))
+
+/** A black sleeve's page: its own black, deep enough for white text, keeping whatever hue it has. */
+private fun inkPage(hsl: FloatArray): Color =
+    Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], hsl[1].coerceAtMost(0.35f), hsl[2].coerceIn(0.03f, 0.06f))))
+
+/**
  * The seam is the whole trick. A page tinted with the cover's *dominant* colour still shows a line
  * where the picture ends, because the bottom of a picture is rarely its dominant colour. So the wash
  * starts from the average of the cover's bottom rows - the exact colour the last pixel row is - and
@@ -182,9 +194,23 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     val solid = foot.solid && !frame
     val edgeLuma = edgeRaw.luminance()
     val blackFoot = solid && edgeLuma < 0.03f
-    val paper = sleevePaper && !blackFoot
-    val ink = (bodyHsl[2] < 0.10f && bodyHsl[1] < 0.18f) || (sleevePaper && blackFoot)
-    val pageDark = dark || blackFoot
+    // A light sleeve's page is that sleeve's own light, and a black sleeve's its own black - never one
+    // fixed white or black for all of them. Paper used to be #F7F7F7 whatever the paper was, so the
+    // cream of Dire Straits and Rumours came out plain white, and its wash was drained to grey on top.
+    // Only the lightness is set (to what the text needs); hue and tint are the record's, so a white
+    // sleeve still gets white, a cream one cream, a blue-black one blue-black. And like a white sleeve
+    // keeping a white page in dark mode, a black one keeps a black page in light mode.
+    //
+    // And the mirror of a black foot: a solid light strip, a real part of the sleeve (8 % of its height
+    // or more - a thinner one lies where the melt has already rubbed it out), under what would be a
+    // dark page. In Utero is cream from the middle down and Dreamland ends in cloud; a dark page under
+    // them faded light into dark across the whole width. The page is that strip's own light instead.
+    val bodyInk = bodyHsl[2] < 0.10f && bodyHsl[1] < 0.18f
+    val lightFoot = solid && foot.strip >= 0.08f && edgeLuma > 0.45f && !sleevePaper && (dark || bodyInk)
+    val paperHsl = if (lightFoot) FloatArray(3).also { ColorUtils.colorToHSL(edgeRaw.toArgb(), it) } else bodyHsl
+    val paper = (sleevePaper && !blackFoot) || lightFoot
+    val ink = (bodyInk && !lightFoot) || (sleevePaper && blackFoot)
+    val pageDark = (dark && !paper) || ink || blackFoot
     val inkOrPaper = paper || ink || bodyHsl[1] < 0.12f
     val accentSeed = if (inkOrPaper) body
         else (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
@@ -196,8 +222,8 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
     // the red book into a dark band before the red page.
     val footColour = if (frame) Color(foot.above) else edgeRaw
     val edge = when {
-        paper -> Color(ColorUtils.blendARGB(footColour.toArgb(), 0xFFF7F7F7.toInt(), 0.75f))
-        ink -> Color(ColorUtils.blendARGB(footColour.toArgb(), 0xFF0A0A0A.toInt(), 0.70f))
+        paper -> Color(ColorUtils.blendARGB(footColour.toArgb(), paperPage(paperHsl).toArgb(), 0.75f))
+        ink -> Color(ColorUtils.blendARGB(footColour.toArgb(), inkPage(bodyHsl).toArgb(), 0.70f))
         else -> footColour
     }
     val hsl = bodyHsl
@@ -210,18 +236,19 @@ private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette 
         ?.let { edgeLuma + (it.luminance() - edgeLuma) * FOOT_PULL }
     val background = when {
         dark && amoled -> Color.Black
-        paper -> Color(0xFFF7F7F7)
-        pageDark && ink -> Color(0xFF0A0A0A)
+        paper -> paperPage(paperHsl)
+        // A black sleeve with a white strip at its foot (blackFoot's mirror is not a thing: a light foot
+        // on ink simply melts into a dark page) - or plain ink: its own black.
+        ink -> inkPage(if (sleevePaper && blackFoot) FloatArray(3).also { ColorUtils.colorToHSL(edgeRaw.toArgb(), it) } else hsl)
         pageDark -> if (footMax != null) darkPage(hsl, footMax) else natural!!
-        ink -> Color(0xFFECECEC)
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
     // On paper, a near-white accentSeed is useless: nudge to a readable ink grey rather than
     // saturating a phantom hue.
     val accent = when {
-        paper -> Color(0xFF2A2A2A)
-        ink && !pageDark -> Color(0xFF2A2A2A)
+        // Near-black ink on paper, in the paper's own hue: warm on cream, neutral on white.
+        paper -> Color(ColorUtils.HSLToColor(floatArrayOf(paperHsl[0], paperHsl[1].coerceAtMost(0.25f), 0.17f)))
         else -> readable(Color(accentSeed), background, on)
     }
     val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, pageDark, paper = paper, ink = ink) }.getOrNull()
@@ -296,8 +323,10 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, paper: Bool
     for (i in px.indices) {
         ColorUtils.colorToHSL(px[i], hsl)
         if (inkOrPaper) {
+            // The wash wears the page's own tint - none on a white or black page, cream on a cream one -
+            // so it varies in light only, not in colour, and never paints a hue the page has not got.
             hsl[0] = pageHsl[0]
-            hsl[1] = 0f
+            hsl[1] = pageHsl[1]
         } else {
             hsl[1] = (hsl[1] * pull).coerceAtMost(maxSat)
         }

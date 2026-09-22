@@ -1439,20 +1439,32 @@ private fun SleeveCarousel(
         val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
             androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
         val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
-        // A white or a black page has a colourless wash (CoverColors.washOf), and the blurred band has
-        // to arrive at the same thing: blurred as it is, A Beautiful Lie's red lettering spread across
-        // its white bottom as a pink haze and the page under it was grey. So on a neutral page the band
-        // loses its colour as it blurs; on a coloured one it keeps it, as the wash does.
+        // A white, cream or black page has a wash in its own tint only (CoverColors.washOf), and the
+        // blurred band has to arrive at the same thing: blurred as it is, A Beautiful Lie's red
+        // lettering spread across its white bottom as a pink haze over a grey page. So on such a page
+        // the band keeps its light and dark but takes the page's tint - grey on white, cream on cream,
+        // whatever the page is, nothing fixed. A coloured page keeps the band's colours, as its wash does.
         val pageBg = MaterialTheme.colorScheme.background
-        val neutralPage = remember(pageBg) {
-            FloatArray(3).also { androidx.core.graphics.ColorUtils.colorToHSL(pageBg.toArgb(), it) }[1] < 0.06f
+        val tintTo = remember(pageBg) {
+            val hsl = FloatArray(3).also { androidx.core.graphics.ColorUtils.colorToHSL(pageBg.toArgb(), it) }
+            pageBg.takeIf { hsl[2] > 0.85f || hsl[2] < 0.08f }
         }
-        val bandEffect = remember(blurPx, neutralPage) {
+        val bandEffect = remember(blurPx, tintTo) {
             if (android.os.Build.VERSION.SDK_INT < 31) null else {
                 val blur = android.graphics.RenderEffect.createBlurEffect(blurPx, blurPx, android.graphics.Shader.TileMode.CLAMP)
-                if (!neutralPage) blur else android.graphics.RenderEffect.createColorFilterEffect(
-                    android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) }), blur,
-                )
+                if (tintTo == null) blur else {
+                    // Luminance, then scaled by the page's colour relative to its brightest channel: grey
+                    // for a white page, the same shading warmed for a cream one.
+                    val top = maxOf(tintTo.red, tintTo.green, tintTo.blue).coerceAtLeast(0.01f)
+                    val kr = tintTo.red / top; val kg = tintTo.green / top; val kb = tintTo.blue / top
+                    val m = android.graphics.ColorMatrix(floatArrayOf(
+                        0.2126f * kr, 0.7152f * kr, 0.0722f * kr, 0f, 0f,
+                        0.2126f * kg, 0.7152f * kg, 0.0722f * kg, 0f, 0f,
+                        0.2126f * kb, 0.7152f * kb, 0.0722f * kb, 0f, 0f,
+                        0f, 0f, 0f, 1f, 0f,
+                    ))
+                    android.graphics.RenderEffect.createColorFilterEffect(android.graphics.ColorMatrixColorFilter(m), blur)
+                }
             }?.asComposeRenderEffect()
         }
         Box(
