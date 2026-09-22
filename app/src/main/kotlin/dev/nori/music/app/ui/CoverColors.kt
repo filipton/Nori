@@ -147,43 +147,42 @@ private fun darkPage(hsl: FloatArray): Color {
  * travels from there into a page colour deep or pale enough to carry text.
  */
 private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette {
-    val edge = Color(bottomAverage(bitmap))
+    val edgeRaw = Color(bottomAverage(bitmap))
     val p = Palette.from(bitmap).maximumColorCount(16).generate()
-    val body = dominant(bitmap, edge.toArgb())
+    val body = dominant(bitmap, edgeRaw.toArgb())
     val bodyHsl = FloatArray(3).also { ColorUtils.colorToHSL(body, it) }
-    // A field of paper or ink is itself: do not let Palette's "vibrant" scrap of JPEG pink or a
-    // compression fringe paint the page. Near-white and near-black covers keep a grey body and a
-    // grey accent so the wash stays honest.
-    val inkOrPaper = bodyHsl[1] < 0.12f || bodyHsl[2] > 0.88f || bodyHsl[2] < 0.10f
+    // Paper / ink: the sleeve is itself. Do not let Palette's "vibrant" JPEG fringe invent pink.
+    val paper = bodyHsl[2] > 0.85f || (bodyHsl[1] < 0.10f && bodyHsl[2] > 0.72f)
+    val ink = bodyHsl[2] < 0.10f && bodyHsl[1] < 0.18f
+    val inkOrPaper = paper || ink || bodyHsl[1] < 0.12f
     val accentSeed = if (inkOrPaper) body
         else (p.vibrantSwatch ?: p.lightVibrantSwatch ?: p.lightMutedSwatch ?: p.dominantSwatch)?.rgb ?: body
-    // The page colour keeps the cover's hue but goes where text can live: deep in dark mode, pale in
-    // light. It is [body] alone, with none of [edge] mixed in any more. Both branches below throw the
-    // seed's lightness away and clamp it into a narrow band, so all a dark bottom row ever contributed
-    // was its hue and its greyness - which is exactly what turned a sleeve of pale dusty pink into a
-    // brown page, because that sleeve has dark hair along its bottom edge. Carrying the seam is not
-    // this colour's job: [edge] is handed out separately and the wash still starts from it.
+    // White sleeves keep a white page even in dark mode: cover colours mean the page follows the
+    // record, and paper is white. Charcoal-from-white was the coward's contrast fix and looked wrong.
+    // AMOLED still stays black - lighting those pixels would break the promise.
+    val edge = when {
+        paper -> Color(ColorUtils.blendARGB(edgeRaw.toArgb(), 0xFFF7F7F7.toInt(), 0.75f))
+        ink -> Color(ColorUtils.blendARGB(edgeRaw.toArgb(), 0xFF0A0A0A.toInt(), 0.70f))
+        else -> edgeRaw
+    }
     val hsl = bodyHsl
     val background = when {
         dark && amoled -> Color.Black
-        // White / black sleeves: keep the page neutral. darkPage() on a near-white with a whisper of
-        // warm hue (JPEG) used to invent a pink or brown wash out of nothing.
-        dark && (hsl[2] > 0.85f || (hsl[1] < 0.08f && hsl[2] > 0.55f)) -> Color(0xFF1C1C1C)
-        dark && hsl[2] < 0.10f && hsl[1] < 0.15f -> Color(0xFF0A0A0A)
-        // Clamping to 0.14 and taking a quarter off the saturation left pale sleeves with no colour a
-        // viewer would name - a dusty pink arrived as a neutral brown. There was room to spare: white
-        // text has about 14:1 on that pink at 0.20, and better than 8:1 on the worst case the band
-        // allows (a yellow at the top of it), which still holds after the wash's own +0.05 of lightness.
+        paper -> Color(0xFFF7F7F7)
+        dark && ink -> Color(0xFF0A0A0A)
         dark -> darkPage(hsl)
-        inkOrPaper && hsl[2] > 0.85f -> Color(0xFFF5F5F5)
-        inkOrPaper && hsl[2] < 0.10f -> Color(0xFFE8E8E8)
+        ink -> Color(0xFFECECEC)
         else -> Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.55f).coerceAtMost(0.4f), hsl[2].coerceIn(0.90f, 0.96f))))
     }
     val on = if (background.luminance() < 0.4f) Color.White else Color(0xFF0D0D0D)
-    // An accent that disappears into the page is no accent: lighten or darken it until it reads.
-    val accent = readable(Color(accentSeed), background, on)
-    // AMOLED black is a promise that those pixels are switched off; a wash would light them up again.
-    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark, inkOrPaper) }.getOrNull()
+    // On paper, a near-white accentSeed is useless: nudge to a readable ink grey rather than
+    // saturating a phantom hue.
+    val accent = when {
+        paper -> Color(0xFF3A3A3A)
+        ink && !dark -> Color(0xFF2A2A2A)
+        else -> readable(Color(accentSeed), background, on)
+    }
+    val wash = if (amoled && dark) null else runCatching { washOf(bitmap, background, dark, paper = paper, ink = ink) }.getOrNull()
     return PagePalette(
         edge, background, on, on.copy(alpha = 0.66f), accent,
         wash = wash?.first, washEdge = wash?.second ?: edge,
@@ -220,7 +219,8 @@ private const val MUTE = 0.38f
  * Every pixel is then pulled to within a hair of the page colour's own lightness and its saturation
  * held back, so the hues vary across the page but the contrast the text needs does not.
  */
-private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, inkOrPaper: Boolean = false): Pair<ImageBitmap, Color> {
+private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, paper: Boolean = false, ink: Boolean = false): Pair<ImageBitmap, Color> {
+    val inkOrPaper = paper || ink
     val small = bitmap.scale(WASH, WASH)
     val px = IntArray(WASH * WASH)
     small.getPixels(px, 0, WASH, 0, 0, WASH, WASH)
@@ -238,15 +238,19 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean, inkOrPaper:
     // How far from the page colour a pixel may stray. Wide enough for the record's own light and dark
     // to show through, narrow enough that white text never lands on a pale patch: at 0.11 the page's
     // own 0.20 lightness reaches 0.31 at its brightest, where white still reads at about five to one.
-    val spread = if (dark) 0.11f else 0.055f
-    val pull = if (dark) 1f else 0.85f
-    // Ink/paper covers: kill chromatic drift so a white sleeve cannot bloom pink or mint in the wash.
+    // Paper: keep the wash bright and grey - soft white variation, no chromatic bloom.
+    val spread = when {
+        paper -> 0.04f
+        dark -> 0.11f
+        else -> 0.055f
+    }
+    val pull = if (dark && !paper) 1f else 0.85f
     val maxSat = when {
-        inkOrPaper -> 0.06f
+        inkOrPaper -> 0.04f
         dark -> 0.62f
         else -> 0.40f
     }
-    val mute = if (inkOrPaper) 0.72f else MUTE
+    val mute = if (inkOrPaper) 0.78f else MUTE
     for (i in px.indices) {
         ColorUtils.colorToHSL(px[i], hsl)
         if (inkOrPaper) {
