@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Builds a release: a signed APK, checksums and a summary, ready to put on GitHub.
+#
+#   tools/release.sh                    one APK for phones and emulators -> build/release-<version>/
+#   tools/release.sh --abi arm64-v8a    phones only: about half the size
+#   tools/release.sh --no-test          skip cargo test first
+#   tools/release.sh --publish          tag, push and put it on GitHub as a draft release
+#   tools/release.sh --publish --live   ... published rather than a draft
+#
+# The steps of a release, in order:
+#   tools/bump-version.sh 0.3.3                      the version everywhere it is written
+#   tools/changelog.py --update                      commits since the last tag into [Unreleased]
+#   (read CHANGELOG.md, edit what reads badly)
+#   tools/changelog.py --release 0.3.3               [Unreleased] becomes [0.3.3] - <date>
+#   git commit -am "build: release 0.3.3"
+#   tools/release.sh --publish
+#
+# By default the APK carries the Rust core for both 64-bit ABIs, so nobody has to choose: Android
+# installs the slice that matches. arm64-v8a is every phone of the last decade, x86_64 is emulators
+# and Chromebooks.
+#
+# Leaves one directory holding everything a release page needs:
+#
+#   nori-music-<version>.apk    (nori-music-<version>-<abi>.apk with --abi)
+#   SHA256SUMS                  one line per file, as `sha256sum -c` wants it
+#   RELEASE.txt                 version, commit, ABIs, size, signing certificate
+#
+# The APK is signed with nori-release.jks, through keystore.properties (both gitignored). The first
+# run adopts this machine's Android debug key as that key (what every earlier build was signed with,
+# so installed copies update in place), or creates a new one if there is none. That key is what lets
+# a phone update rather than reinstall: lose it and every install has to be removed before the next
+# release will go on. Keep a copy somewhere safe. The certificate is printed rather than assumed, so
+# compare it with the last release before uploading.
+#
+# --publish is the only part that leaves this machine. It refuses to run from a dirty tree, takes the
+# release notes from the CHANGELOG section for this version, tags the commit, pushes it, and attaches
+# the files to a GitHub release - a draft, so nothing is public until you press publish. --live skips
+# the draft.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+ABI=arm64-v8a,x86_64
+RUN_TESTS=1
+PUBLISH=0
+DRAFT=--draft
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --abi) ABI="$2"; shift ;;
+    --no-test) RUN_TESTS=0 ;;
+    --publish) PUBLISH=1 ;;
+    --live) DRAFT="" ;;
+    -h|--help) sed -n 2,39p "$0"; exit 0 ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+die() { echo "$@" >&2; exit 1; }
+
+version=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+commit=$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then dirty=" (dirty)"; else dirty=""; fi
+
+# Everything that would stop a publish is checked before the build rather than after it.
+if [ "$PUBLISH" = 1 ]; then
+  command -v gh >/dev/null || die "publishing needs the GitHub CLI (gh) on PATH"
+  gh auth status >/dev/null 2>&1 || die "gh is not logged in: run 'gh auth login'"
+  git remote get-url origin >/dev/null 2>&1 || die "this repository has no 'origin' remote to publish to"
+  [ -z "$dirty" ] || die "refusing to publish from a dirty tree: commit or stash first"
+  [ -f keystore.properties ] || die "no keystore.properties: run tools/release.sh once without --publish to create the key, and back it up"
+  ./tools/changelog.py --notes "$version" >/dev/null ||
+    die "CHANGELOG.md has no section for $version.
+write one, or generate it:  tools/changelog.py --update && tools/changelog.py --release $version"
+  ! gh release view "v$version" >/dev/null 2>&1 ||
+    die "a release v$version already exists. move to a new version first: tools/bump-version.sh <x.y.z>"
+fi
+
+# --- signing key ----------------------------------------------------------------
+# Every build before 0.3.2 was signed with this machine's Android debug key, and a phone only updates
+# in place from the same key. So the first run adopts that key as the release key - a copy, kept
+# here - and nothing installed has to be removed. Only a machine without one gets a fresh key.
+if [ ! -f keystore.properties ]; then
+  debug_ks="$HOME/.android/debug.keystore"
+  if [ -f "$debug_ks" ]; then
+    cp "$debug_ks" nori-release.jks
+    cat > keystore.properties <<PROPS
+storeFile=nori-release.jks
+storePassword=android
+keyAlias=androiddebugkey
+keyPassword=android
+PROPS
+    echo "adopted this machine's debug key as nori-release.jks, so installed builds update in place."
+  else
+    KEYTOOL=$(command -v keytool || ls "${JAVA_HOME:-/usr/lib/jvm/default}"/bin/keytool 2>/dev/null | head -1)
+    [ -n "$KEYTOOL" ] || die "keytool not found; set JAVA_HOME"
+    PASS=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+    "$KEYTOOL" -genkeypair -keystore nori-release.jks -alias nori -keyalg RSA -keysize 4096 \
+      -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Nori" >/dev/null 2>&1
+    cat > keystore.properties <<PROPS
+storeFile=nori-release.jks
+storePassword=$PASS
+keyAlias=nori
+keyPassword=$PASS
+PROPS
+    echo "created a new key, nori-release.jks."
+  fi
+  chmod 600 keystore.properties nori-release.jks
+  echo "keystore.properties + nori-release.jks are gitignored. BACK THEM UP: without them no phone can update to a later release."
+fi
+
+if [ "$RUN_TESTS" = 1 ]; then
+  echo "==> cargo test"
+  cargo test -q
+fi
+
+out="build/release-$version"
+rm -rf "$out"
+mkdir -p "$out"
+
+echo "==> building $version for $ABI"
+./gradlew :app:assembleRelease -PrustTargets="$ABI" -q
+case "$ABI" in
+  *,*) name="nori-music-$version.apk" ;;
+  *) name="nori-music-$version-$ABI.apk" ;;
+esac
+cp app/build/outputs/apk/release/app-release.apk "$out/$name"
+
+# --- what is in the directory ---------------------------------------------------
+apksigner=$(ls -d "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
+signer() {
+  [ -x "${apksigner:-}" ] || { echo "unknown (apksigner not found)"; return; }
+  "$apksigner" verify --print-certs "$1" 2>/dev/null |
+    sed -n 's/.*certificate SHA-256 digest: \(.*\)/\1/p' | head -1
+}
+
+( cd "$out" && sha256sum ./*.apk | sed 's# \./# #' > SHA256SUMS )
+
+{
+  echo "Nori $version"
+  echo "commit $commit$dirty"
+  echo "built $(date -u '+%Y-%m-%d %H:%M UTC')"
+  echo "minSdk 26 (Android 8.0)"
+  echo
+  f="$out/$name"
+  echo "$name"
+  echo "  carries ${ABI//,/ + }"
+  echo "  $(du -h "$f" | cut -f1)  ·  sha256 $(sha256sum "$f" | cut -c1-16)…"
+  echo "  signing certificate SHA-256: $(signer "$f")"
+} > "$out/RELEASE.txt"
+
+echo
+cat "$out/RELEASE.txt"
+echo
+echo "everything to upload is in $out/"
+
+if [ "$PUBLISH" != 1 ]; then
+  echo
+  echo "to publish it:  tools/release.sh --publish"
+  exit 0
+fi
+
+# --- publish --------------------------------------------------------------------
+notes=$(mktemp)
+trap 'rm -f "$notes"' EXIT
+./tools/changelog.py --notes "$version" > "$notes"
+
+if git rev-parse "v$version" >/dev/null 2>&1; then
+  echo "==> tag v$version already exists, reusing it"
+else
+  echo "==> tagging v$version"
+  git tag -a "v$version" -m "Nori $version"
+fi
+# The branch goes first: a tag whose commit is on no branch is one nobody can reach from the repo page.
+git push origin "$(git branch --show-current)"
+git push origin "v$version"
+
+echo "==> creating the release${DRAFT:+ (draft)}"
+# shellcheck disable=SC2086
+gh release create "v$version" "$out/$name" "$out/SHA256SUMS" \
+  --title "Nori $version" --notes-file "$notes" $DRAFT
+
+echo
+echo "done: $(gh release view "v$version" --json url --jq .url 2>/dev/null || echo "v$version")"
+if [ -n "$DRAFT" ]; then
+  echo "it is a draft - nothing is public until you press publish."
+fi

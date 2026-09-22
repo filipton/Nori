@@ -33,8 +33,26 @@ Run `cargo test` and a build before committing.
 
 `tools/apk.sh` builds a release APK for a phone: arm64 by default, `tools/apk.sh x86_64` for an
 emulator, `tools/apk.sh --install` to push it straight to whatever is connected. It lands in
-`build/nori-music-<version>-<abi>.apk` and prints which ABIs are inside. The signature is the Android
-debug key, which installs and updates on your own device but cannot be published.
+`build/nori-music-<version>-<abi>.apk` and prints which ABIs are inside. It is signed with the release
+key when `keystore.properties` is there (see below), otherwise with the Android debug key.
+
+## Releasing
+
+`tools/release.sh` builds a release into `build/release-<version>/` (APK, SHA256SUMS, RELEASE.txt);
+`--publish` tags, pushes and creates a draft GitHub release with the CHANGELOG section as its notes.
+The steps, in order:
+
+    tools/bump-version.sh 0.3.3          # versionName/Code, Rust workspace, docs/features.md
+    tools/changelog.py --update          # commits since the last tag into CHANGELOG [Unreleased]
+    tools/changelog.py --release 0.3.3   # [Unreleased] becomes [0.3.3] - <date>
+    git commit -am "build: release 0.3.3"
+    tools/release.sh --publish
+
+The changelog is grouped from conventional commit subjects, so write them for a reader. Releases are
+signed with `nori-release.jks` through `keystore.properties`, both gitignored; it is this machine's
+original debug key, adopted so that phones with earlier builds update in place. Losing it means every
+install has to be removed before the next release goes on. The benchmark tables name the version they
+were measured on and are not bumped; the README badge reads the latest GitHub release.
 
 `tools/app.sh` drives a **debug** build over adb without touching the screen - `open <route>`,
 `play "search:…"`, `do download album:<id>`, `do "dac <name>@44100/16"` (a USB DAC that is not there,
