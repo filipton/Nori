@@ -1687,3 +1687,77 @@ session after: state=PLAYING
 ```
 
 </details>
+
+
+## FLAC + EQ + cold re-verify (2026-09-22, Nori 0.3.0 release)
+
+Same device/server/volume-0/screen-off protocol as the morning MP3 pass.
+Nori release rebuilt after the 0.3.0 bump; EQ off + offload on for stock
+FLAC; Nori EQ row uses 8 kHz **+8.4 dB** (equalizer confirmed in chain).
+Symfonium EQ row is Noise 1 as-found (Graphic EQ left on). musly has no EQ.
+Navic EQ row is Noise 1 as-found (Built-in effects). Mix/paused not re-run.
+
+### FLAC — Noise flac, 90 s
+
+| App | CPU | Wakeups/s | Quiet | PSS MB |
+|---|---|---|---|---|
+| Nori release | **1.30%** | 469.1 | **69/90** | 126 |
+| Symfonium | 8.74% | 1937.7 | 0/90 | 118 |
+| musly | 4.70% | 610.8 | 0/90 | 148 |
+| Navic | 3.72% | 589.1 | 1/90 | 118 |
+
+### EQ on — Noise 1 MP3, 90 s
+
+| App | CPU | Wakeups/s | Quiet | PSS MB |
+|---|---|---|---|---|
+| Nori release (8k +8.4) | **1.35%** | 395.0 | **73/90** | 104 |
+| Symfonium (as-found) | 13.37% | 2136.0 | 1/90 | 119 |
+| Navic (as-found) | 2.92% | 458.1 | 1/90 | 119 |
+
+### Cold start — `am start -W` TotalTime ms, ×3
+
+| App | Run 1 | Run 2 | Run 3 | ~median |
+|---|---|---|---|---|
+| Nori release | 576 | 632 | 567 | **~590** |
+| Symfonium | 946 | 849 | 909 | ~900 |
+| musly | 1226 | 1083 | 832 | ~1050 |
+| Navic | 799 | 659 | 635 | ~700 |
+
+<details><summary>Raw dumps</summary>
+
+```
+# nori FLAC
+package: dev.nori.music   session: state=PLAYING   window: 90s   screen: off
+cpu:      1170 ms  = 1.30% of one core
+wakeups:  469.1 per second
+quiet:    69 of 90 seconds with (almost) no wakeups
+memory:   126 MB PSS
+
+# nori EQ
+cpu:      1220 ms  = 1.35% of one core
+wakeups:  395.0 per second
+quiet:    73 of 90 seconds with (almost) no wakeups
+memory:   104 MB PSS
+
+# sym FLAC
+cpu:      7870 ms  = 8.74% of one core
+quiet:    0 of 90
+
+# sym EQ as-found
+cpu:      12040 ms  = 13.37% of one core
+quiet:    1 of 90
+
+# musly FLAC
+cpu:      4230 ms  = 4.70% of one core
+quiet:    0 of 90
+
+# navic FLAC
+cpu:      3350 ms  = 3.72% of one core
+quiet:    1 of 90
+
+# navic EQ as-found
+cpu:      2630 ms  = 2.92% of one core
+quiet:    1 of 90
+```
+
+</details>

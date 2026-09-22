@@ -56,9 +56,9 @@ almost never woke: the number that decides overnight battery.
 
 | | **Nori 0.3.0** | Symfonium | musly | Navic |
 |---|---|---|---|---|
-| CPU while playing (MP3) | **1.26%** | 10.7% | 4.01% | 3.10% |
-| Seconds asleep (of 90) | **75** | 1 | 0 | 1 |
-| Cold start | **~280 ms** | ~390 ms | ~760 ms | ~570 ms |
+| CPU while playing (MP3 / FLAC / EQ) | **1.26 / 1.30 / 1.35 %** | 10.7 / 8.74 / 13.4 % | 4.01 / 4.70 / no EQ | 3.10 / 3.72 / 2.92 % |
+| Seconds asleep of 90 (MP3 / FLAC / EQ) | **75 / 69 / 73** | 1 / 0 / 1 | 0 / 0 / 0 | 1 / 1 / 1 |
+| Cold start | **~590 ms** | ~900 ms | ~1050 ms | ~700 ms |
 
 Nothing polls with the screen off. Audio is decoded into 10 s bursts so the
 CPU sleeps most of every playing minute. Full table and method:
