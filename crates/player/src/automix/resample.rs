@@ -6,13 +6,6 @@
 //! Two input frames' worth of history carry across buffers; neighbours past the buffer end clamp
 //! to its last frame, so no content is ever skipped at a buffer edge.
 
-use jni::{
-    objects::{JByteBuffer, JClass},
-    sys::{jint, jlong},
-    JNIEnv,
-};
-use parking_lot::Mutex;
-
 use super::{PCM_16, PCM_FLOAT};
 
 pub struct Resampler {
@@ -136,62 +129,6 @@ fn cubic(p0: f32, p1: f32, p2: f32, p3: f32, f: f64) -> f32 {
 }
 
 // ---- JNI: dev.nori.music.playback.AutoMixResample ---------------------------------------------------------------
-
-fn handle(h: jlong) -> Option<&'static Mutex<Resampler>> {
-    (h != 0).then(|| unsafe { &*(h as *const Mutex<Resampler>) })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_create(
-    _: JNIEnv, _: JClass, in_rate: jint, in_ch: jint, out_rate: jint, out_ch: jint,
-) -> jlong {
-    Resampler::new(in_rate, in_ch, out_rate, out_ch).map_or(0, |r| Box::into_raw(Box::new(Mutex::new(r))) as jlong)
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Mutex<Resampler>) });
-    }
-}
-
-/// Converts `in_bytes` of `input[in_pos..]` (`in_enc`) into `output[out_pos..]` (at most `out_cap` bytes,
-/// `out_enc`). Returns `(consumed_bytes << 32) | produced_bytes`, or -1 when the buffers cannot be used.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixResample_process(
-    env: JNIEnv, _: JClass, h: jlong, input: JByteBuffer, in_pos: jint, in_bytes: jint, output: JByteBuffer, out_pos: jint, out_cap: jint,
-    in_enc: jint, out_enc: jint,
-) -> jlong {
-    let (Ok(src), Ok(dst)) = (env.get_direct_buffer_address(&input), env.get_direct_buffer_address(&output)) else { return -1 };
-    let Some(h) = handle(h) else { return -1 };
-    if src.is_null() || dst.is_null() || in_pos < 0 || out_pos < 0 || in_bytes < 0 || out_cap < 0 {
-        return -1;
-    }
-    let (Ok(icap), Ok(ocap)) = (env.get_direct_buffer_capacity(&input), env.get_direct_buffer_capacity(&output)) else { return -1 };
-    if in_pos as usize + in_bytes as usize > icap || out_pos as usize + out_cap as usize > ocap {
-        return -1;
-    }
-    let wi = match in_enc {
-        PCM_16 => 2,
-        PCM_FLOAT => 4,
-        _ => return -1,
-    };
-    let wo = match out_enc {
-        PCM_16 => 2,
-        PCM_FLOAT => 4,
-        _ => return -1,
-    };
-    if in_pos as usize % wi != 0 || out_pos as usize % wo != 0 {
-        return -1;
-    }
-    let (i, o) = unsafe {
-        (
-            std::slice::from_raw_parts(src.add(in_pos as usize), in_bytes as usize),
-            std::slice::from_raw_parts_mut(dst.add(out_pos as usize), out_cap as usize),
-        )
-    };
-    h.lock().process(i, in_enc, o, out_enc).map_or(-1, |(used, made)| ((used as jlong) << 32) | made as jlong)
-}
 
 #[cfg(test)]
 mod tests {

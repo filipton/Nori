@@ -19,6 +19,8 @@ use super::loudness::Meter;
 
 pub const TARGET_RATE: f64 = 22050.0;
 /// Hop between onset frames, seconds (256 samples at 22.05 kHz, 86 frames/s).
+/// What an analysis of a song of unknown length is sized for.
+const UNKNOWN_LENGTH_MS: u64 = 8 * 60_000;
 const HOP_S: f64 = 256.0 / 22050.0;
 /// Log-spaced bands for the spectral flux, 30 Hz up to 11 kHz (or Nyquist).
 const BANDS: usize = 40;
@@ -157,6 +159,9 @@ impl Analyzer {
             }
         }
 
+        // Sized for the whole song, with room for a length that was a little off, so that nothing grows
+        // (and reallocates) while it plays. Unknown, it is sized for a long song.
+        let expected_ms = if expected_ms == 0 { UNKNOWN_LENGTH_MS } else { expected_ms + expected_ms / 20 + 10_000 };
         let frames = (expected_ms as f64 / 1000.0 / HOP_S) as usize + 16;
         let blocks = (expected_ms / 100) as usize + 4;
         Analyzer {

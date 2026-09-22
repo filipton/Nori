@@ -13,7 +13,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.graphics.ColorUtils
 import dev.nori.music.settings.Prefs
 import dev.nori.music.settings.ThemeMode
 
@@ -62,20 +61,17 @@ fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
 
 private const val REFERENCE_WIDTH_DP = 411f
 
-/** A light or dark scheme from one colour: tones of the same hue, like Material's own generator but tiny. */
+/** A light or dark scheme from one colour: tones of the same hue, worked out in Rust (`nori_look::theme::seeded`). */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {
-    val hsl = FloatArray(3).also { ColorUtils.colorToHSL(seed.toArgb(), it) }
-    fun tone(l: Float, s: Float = hsl[1]) = Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], s.coerceIn(0f, 1f), l)))
+    val t = dev.nori.music.look.CoverLook.tones(seed.toArgb(), dark).map { Color(it) }
     return if (dark) darkColorScheme(
-        primary = tone(0.80f), onPrimary = tone(0.20f), primaryContainer = tone(0.30f), onPrimaryContainer = tone(0.90f),
-        secondary = tone(0.78f, hsl[1] * 0.4f), secondaryContainer = tone(0.28f, hsl[1] * 0.4f), onSecondaryContainer = tone(0.90f, hsl[1] * 0.4f),
-        surface = tone(0.07f, hsl[1] * 0.12f), background = tone(0.07f, hsl[1] * 0.12f),
-        surfaceVariant = tone(0.22f, hsl[1] * 0.15f), onSurfaceVariant = tone(0.80f, hsl[1] * 0.15f),
+        primary = t[0], onPrimary = t[1], primaryContainer = t[2], onPrimaryContainer = t[3],
+        secondary = t[4], secondaryContainer = t[5], onSecondaryContainer = t[6],
+        surface = t[7], background = t[8], surfaceVariant = t[9], onSurfaceVariant = t[10],
     ) else lightColorScheme(
-        primary = tone(0.40f), onPrimary = Color.White, primaryContainer = tone(0.90f), onPrimaryContainer = tone(0.12f),
-        secondary = tone(0.40f, hsl[1] * 0.4f), secondaryContainer = tone(0.90f, hsl[1] * 0.4f), onSecondaryContainer = tone(0.12f, hsl[1] * 0.4f),
-        surface = tone(0.98f, hsl[1] * 0.2f), background = tone(0.98f, hsl[1] * 0.2f),
-        surfaceVariant = tone(0.90f, hsl[1] * 0.15f), onSurfaceVariant = tone(0.30f, hsl[1] * 0.15f),
+        primary = t[0], onPrimary = t[1], primaryContainer = t[2], onPrimaryContainer = t[3],
+        secondary = t[4], secondaryContainer = t[5], onSecondaryContainer = t[6],
+        surface = t[7], background = t[8], surfaceVariant = t[9], onSurfaceVariant = t[10],
     )
 }
 

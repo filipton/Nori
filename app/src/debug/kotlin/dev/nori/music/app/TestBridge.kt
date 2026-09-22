@@ -27,7 +27,7 @@ class TestBridge : BroadcastReceiver() {
             """"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},"error":"${st.error.orEmpty()}",""" +
             """"dspActive":${dev.nori.music.playback.Equalizer.active != null},""" +
             """"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
-            """"sinkBytes":${dev.nori.music.playback.BurstSink.bytesWritten}}"""
+            """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten}}"""
     }
 
     override fun onReceive(context: Context, intent: Intent) {

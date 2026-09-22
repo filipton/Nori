@@ -190,6 +190,10 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 "coversAhead" -> it.copy(coversAhead = value.toIntOrNull()?.coerceIn(0, 10) ?: it.coversAhead)
                 "cacheMb" -> it.copy(cacheMb = value.toIntOrNull()?.coerceIn(256, 16384) ?: it.cacheMb).also { viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() } }
                 "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
+                "speed" -> it.copy(speed = value.toFloatOrNull()?.coerceIn(0.25f, 4f) ?: it.speed)
+                "pitch" -> it.copy(pitch = value.toFloatOrNull()?.coerceIn(0.25f, 4f) ?: it.pitch)
+                "skipSilence" -> it.copy(skipSilence = on)
+                "fadeMs" -> it.copy(fadeMs = value.toIntOrNull()?.coerceIn(0, 5000) ?: it.fadeMs)
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
                 "autoFill" -> it.copy(autoFill = on)

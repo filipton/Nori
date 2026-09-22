@@ -1,0 +1,169 @@
+//! The songs of the queue, kept by id. The platform's player holds only ids (and what its system
+//! notification shows); everything that needs to know about a queued song - the transition planner's
+//! window, ReplayGain, the queue as the app lists it, the queue saved for next time - reads it here,
+//! instead of rebuilding a song from the player's metadata on every event.
+
+use std::collections::HashMap;
+
+use nori_player::policy::{replay_gain, GainMode as PlayerGainMode, GainTags as PlayerGainTags};
+use nori_player::transitions::{in_album_run, WindowSong};
+use parking_lot::Mutex;
+
+use crate::{db, Core, Song};
+
+/// A song not asked for again within this long, and no longer in the queue, may be let go.
+const KEEP_MS: i64 = 60_000;
+
+struct Store {
+    songs: HashMap<String, (Song, i64)>,
+}
+
+static STORE: Mutex<Option<Store>> = Mutex::new(None);
+
+fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
+    f(STORE.lock().get_or_insert_with(|| Store { songs: HashMap::new() }))
+}
+
+const RADIO_PREFIX: &str = "radio:";
+
+/// Songs about to be queued. One call per list.
+#[uniffi::export]
+pub fn queue_register(songs: Vec<Song>) {
+    let now = db::now_ms();
+    with(|s| {
+        for song in songs {
+            s.songs.insert(song.id.clone(), (song, now));
+        }
+    });
+}
+
+/// A queued song, if it is known.
+#[uniffi::export]
+pub fn queue_song(id: String) -> Option<Song> {
+    with(|s| s.songs.get(&id).map(|(song, _)| song.clone()))
+}
+
+/// The queue as the app lists it, in the player's order. A song the store does not know (an item a
+/// system controller added from outside) comes back with its id only. The store keeps these and what
+/// was registered in the last minute, and lets the rest go.
+#[uniffi::export]
+pub fn queue_songs(ids: Vec<String>) -> Vec<Song> {
+    let now = db::now_ms();
+    with(|s| {
+        let listed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
+        s.songs.retain(|id, (_, at)| listed.contains(id.as_str()) || now - *at < KEEP_MS);
+        ids.iter().map(|id| s.songs.get(id).map_or_else(|| Song { id: id.clone(), ..Default::default() }, |(song, _)| song.clone())).collect()
+    })
+}
+
+fn window_song(s: &Store, id: &str) -> WindowSong {
+    match s.songs.get(id) {
+        Some((song, _)) => WindowSong {
+            id: song.id.clone(),
+            title: song.title.clone(),
+            duration_ms: song.duration as i64 * 1000,
+            album_id: song.album_id.clone(),
+            disc: song.disc_number as i32,
+            track: song.track as i32,
+            tag_bpm: song.bpm as f32,
+            radio: false,
+        },
+        None => WindowSong { id: id.to_string(), radio: id.starts_with(RADIO_PREFIX), ..Default::default() },
+    }
+}
+
+/// The transition planner's window by id: the song before the current one, then the current one and
+/// those after it, in play order.
+#[uniffi::export]
+pub fn queue_window(ids: Vec<String>, shuffling: bool) {
+    let window = with(|s| ids.iter().map(|id| window_song(s, id)).collect());
+    crate::automix::planner::transition_window(window, shuffling);
+}
+
+/// The volume `current` plays at under ReplayGain, between the songs before and after it in play
+/// order (album mode keeps an album played in order at its own levels). See `nori_player::policy`.
+/// Nothing playing, or a radio stream, plays at full volume.
+#[uniffi::export]
+pub fn queue_gain(
+    before: Option<String>, current: Option<String>, after: Option<String>, mode: crate::GainMode, preamp_db: f32, untagged_db: f32,
+    bit_perfect: bool, shuffling: bool,
+) -> f32 {
+    let current = current.unwrap_or_else(|| RADIO_PREFIX.to_string());
+    let radio = current.starts_with(RADIO_PREFIX);
+    with(|s| {
+        let w = |id: &Option<String>| id.as_deref().map(|i| window_song(s, i));
+        let (b, c, a) = (w(&before), window_song(s, &current), w(&after));
+        let run = !radio && in_album_run(b.as_ref(), &c, a.as_ref(), shuffling);
+        let tags = s.songs.get(&current).and_then(|(song, _)| song.replay_gain.as_ref()).map(|g| PlayerGainTags {
+            track_gain: g.track_gain,
+            album_gain: g.album_gain,
+            track_peak: g.track_peak,
+            album_peak: g.album_peak,
+        });
+        let mode: PlayerGainMode = mode;
+        replay_gain(mode, tags.as_ref(), run, preamp_db, untagged_db, radio, bit_perfect)
+    })
+}
+
+#[uniffi::export]
+impl Core {
+    /// Saves the queue for next time from its ids (radio streams are left out: they do not come back).
+    pub fn queue_save(&self, ids: Vec<String>, index: u32, position_ms: u64) -> crate::Result<()> {
+        let (songs, index) = with(|s| {
+            let mut kept = Vec::with_capacity(ids.len());
+            let mut at = 0;
+            for (i, id) in ids.iter().enumerate() {
+                if id.starts_with(RADIO_PREFIX) {
+                    continue;
+                }
+                if i < index as usize {
+                    at += 1;
+                }
+                if let Some((song, _)) = s.songs.get(id) {
+                    kept.push(song.clone());
+                }
+            }
+            (kept, at.min(index))
+        });
+        self.save_queue(crate::PlayQueue { index: index.min(songs.len().saturating_sub(1) as u32), songs, position_ms })
+    }
+}
+
+/// [`queue_flags`]: the song is marked explicit.
+pub const EXPLICIT: u32 = 1;
+/// The song is starred (as the server said when it was queued).
+pub const STARRED: u32 = 2;
+/// The song is a provider's, not the library's (octo-fiesta).
+pub const EXTERNAL: u32 = 4;
+
+/// A queued song's flags ([`EXPLICIT`], [`STARRED`], [`EXTERNAL`]); 0 when it is not known.
+#[uniffi::export]
+pub fn queue_flags(id: String) -> u32 {
+    with(|s| {
+        s.songs.get(&id).map_or(0, |(song, _)| {
+            (if song.explicit_status == "explicit" { EXPLICIT } else { 0 })
+                | (if song.starred { STARRED } else { 0 })
+                | (if song.is_external { EXTERNAL } else { 0 })
+        })
+    })
+}
+
+/// The albums the queued songs `ids` come from (each once).
+#[uniffi::export]
+pub fn queue_albums(ids: Vec<String>) -> Vec<String> {
+    with(|s| {
+        let mut seen = std::collections::HashSet::new();
+        ids.iter().filter_map(|id| s.songs.get(id)?.0.album_id.clone()).filter(|a| seen.insert(a.clone())).collect()
+    })
+}
+
+/// Of the queued songs `ids`, those that can be fetched ahead: not a radio stream, not a provider's
+/// song (fetching one makes the provider download it for the server).
+#[uniffi::export]
+pub fn queue_fetchable(ids: Vec<String>) -> Vec<String> {
+    with(|s| {
+        ids.into_iter()
+            .filter(|id| !id.starts_with(RADIO_PREFIX) && !id.starts_with("ext-") && !s.songs.get(id).is_some_and(|(song, _)| song.is_external))
+            .collect()
+    })
+}

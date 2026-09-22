@@ -16,12 +16,9 @@ md-5 = "0.11"
 thiserror = "2"
 parking_lot = "0.12"
 jni = { version = "0.21", default-features = false }
-# AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
-rustfft = "6"
-signalsmith-stretch = "0.1"
+# How music is played - the sound chain and AutoMix - lives in the shared player crate.
+nori-player = { path = "../player" }
+nori-look = { path = "../look" }
 
-# Test-only: the resample evaluation in automix::resample compares the transition-time cubic
-# interpolator against a sinc resampler. It stays out of release builds: transitions are seconds
-# of mixed music, where the cubic's worst spur measures below -15 dB on a torture-test chord.
 [dev-dependencies]
-rubato = "5.0.0"
+nori-player = { path = "../player", features = ["synth"] }

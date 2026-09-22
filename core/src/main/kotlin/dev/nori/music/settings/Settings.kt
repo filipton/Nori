@@ -282,7 +282,11 @@ data class Prefs(
     val dsp get() = eqEnabled || crossfeedDb > 0f || balance != 0f || mono || limiter
 
     /** What the pre-amp actually is, automatic headroom included. */
-    val effectivePreampDb get() = if (!eqEnabled) 0f else eqPreampDb ?: -(eqBands.filter { it.kind.usesGain }.maxOfOrNull { it.gainDb } ?: 0f).coerceAtLeast(0f)
+    /** The pre-amp in effect: the one set, or the automatic one (nori_player::dsp::auto_preamp_db), worked out once per settings. */
+    val effectivePreampDb: Float by lazy {
+        if (!eqEnabled) 0f
+        else eqPreampDb ?: dev.nori.music.playback.Dsp.autoPreampDb(IntArray(eqBands.size) { eqBands[it].kind.ordinal }, FloatArray(eqBands.size) { eqBands[it].gainDb })
+    }
 }
 
 /**

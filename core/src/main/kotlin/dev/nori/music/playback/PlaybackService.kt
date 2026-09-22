@@ -1,5 +1,6 @@
 package dev.nori.music.playback
 
+import dev.nori.music.ffi.Switch
 import android.app.AlarmManager
 import android.app.PendingIntent
 import android.media.AudioFormat
@@ -56,8 +57,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.min
-import kotlin.math.pow
 
 /**
  * The one place audio is played. Built for the screen-off case: decoding is
@@ -97,7 +96,6 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var scrobbler: Scrobbler
     private val equalizer = Equalizer()
     private var hiRes = false
-    private var burst: BurstSink? = null
     /** Kept so a freshly measured track can have its transition planned again; see AutoMixPrefetch. */
     private var transitionSink: TransitionSink? = null
     @Suppress("DEPRECATION")
@@ -115,7 +113,6 @@ class PlaybackService : MediaLibraryService() {
     /** Items from the current one onwards, as the playback thread may ask about them (decoding runs ahead). */
     @Volatile private var upcoming: List<MediaItem> = emptyList()
     @Volatile private var previous: MediaItem? = null
-    private val analysisWorker = java.util.concurrent.Executors.newSingleThreadExecutor { Thread(it, "nori-analysis").apply { priority = Thread.MIN_PRIORITY } }
     private lateinit var precacher: Precacher
     private lateinit var analyser: AutoMixPrefetch
     private val precache = Runnable { precacheAhead(); analyseAhead() }
@@ -136,17 +133,12 @@ class PlaybackService : MediaLibraryService() {
     private var pendingNext = false
     /** Song id that asked for the pending next; ignored if the user has moved on (previous, jump). */
     private var pendingNextFrom: String? = null
-    /** A band is being moved: trade the deep buffer for immediate response. */
-    private var tuning = false
-    /** Tuning has ended; rebuild with the deep buffer when the music is next paused, where it is silent. */
-    private var deepAtNextPause = false
     /**
-     * A settings change needs a new sink chain but the music is playing through the old one.
-     * Rebuilding mid-track cuts the song, so it waits for the next boundary instead; see
-     * [reconfigureSink]. A silent path never waits (see there); the deep buffer's return goes
-     * at the next pause instead.
+     * When the output is rebuilt: for the equalizer screen's shallow buffer and back, and for settings
+     * that need a new chain - at the next boundary or pause while music plays, at once otherwise. The
+     * rules are nori_player::transport::Chain's.
      */
-    private var chainSwapPending = false
+    private val chain = dev.nori.music.ffi.ChainState()
     /**
      * The last thing that happens before the AudioTrack exists, and the only place that knows exactly what it
      * will be: encoding, rate and whether the stream is being offloaded. Preferred mixer attributes are read
@@ -165,7 +157,7 @@ class PlaybackService : MediaLibraryService() {
     }
 
     private val shallowBuffer = DefaultAudioTrackBufferSizeProvider.Builder().build()
-    private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(BurstSink.BUFFER_US).setMaxPcmBufferDurationUs(BurstSink.BUFFER_US).build()
+    private val deepBuffer = DefaultAudioTrackBufferSizeProvider.Builder().setTargetPcmBufferDurationUs(dev.nori.music.ffi.burstBufferUs().toInt()).setMaxPcmBufferDurationUs(dev.nori.music.ffi.burstBufferUs().toInt()).build()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val main = Handler(Looper.getMainLooper())
     private val served = LruCache<String, MediaItem>(500)
@@ -180,16 +172,16 @@ class PlaybackService : MediaLibraryService() {
 
         val renderers = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                TransitionSink(BurstSink(
-                    DefaultAudioSink.Builder(context).setAudioProcessors(arrayOf(equalizer))
-                        // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU; see BurstSink.
+                TransitionSink(
+                    DefaultAudioSink.Builder(context).setAudioProcessorChain(SoundChain(equalizer))
+                        // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU, and fed in bursts (nori_player::burst).
                         .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
                             // Deep for bursts; shallow only while the equalizer screen is open, so that moving a band is heard at once.
-                            (if (tuning) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
+                            (if (chain.isTuning()) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
                         }
                         .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                         .setAudioTrackProvider(tracks).build()
-                ).also { burst = it }, transitions).also { transitionSink = it }
+                ).also { transitionSink = it; updateBurst() }
         }
         hiRes = nori.settings.value.hiRes
         renderers.setEnableAudioFloatOutput(hiRes)
@@ -205,8 +197,10 @@ class PlaybackService : MediaLibraryService() {
             .setLoadControl(
                 // Fill up to ten minutes in one go, then leave the network alone until a minute is left. The cap is a
                 // quarter of the app's heap class, at most 48 MB: a whole MP3/Opus track everywhere, FLAC in two or three fetches.
-                DefaultLoadControl.Builder().setBufferDurationsMs(60_000, 600_000, 1_000, 2_000)
-                    .setTargetBufferBytes(minOf(48, getSystemService(android.app.ActivityManager::class.java).memoryClass / 4).coerceAtLeast(16) * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false).build()
+                dev.nori.music.ffi.loadControl(getSystemService(android.app.ActivityManager::class.java).memoryClass.toUInt()).let { c ->
+                    DefaultLoadControl.Builder().setBufferDurationsMs(c[0].toInt(), c[1].toInt(), c[2].toInt(), c[3].toInt())
+                        .setTargetBufferBytes(c[4].toInt()).setPrioritizeTimeOverSizeThresholds(false).build()
+                }
             )
             .build()
         precacher = Precacher(nori.sources)
@@ -224,7 +218,7 @@ class PlaybackService : MediaLibraryService() {
                 eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
                 bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long,
             ) {
-                android.util.Log.w("nori", "audio underrun: ${bufferSizeMs} ms buffer, ${elapsedSinceLastFeedMs} ms since last feed, mixing=${TransitionSink.mixing}, heard=${TransitionSink.heardId != null}")
+                android.util.Log.w("nori", "audio underrun: ${bufferSizeMs} ms buffer, ${elapsedSinceLastFeedMs} ms since last feed, mixing=${TransitionSink.mixing}, holding=${TransitionSink.holding}")
             }
             override fun onAudioSinkError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, audioSinkError: Exception) {
                 android.util.Log.w("nori", "audio sink error: $audioSinkError")
@@ -255,6 +249,8 @@ class PlaybackService : MediaLibraryService() {
             nori.settings.prefs.collect { p ->
                 if (p.copy(replayGain = last.replayGain, preampDb = last.preampDb, untaggedGainDb = last.untaggedGainDb, scrobblePercent = last.scrobblePercent, listPrefs = last.listPrefs, homeRows = last.homeRows, pinnedPlaylists = last.pinnedPlaylists, autoEqAuto = last.autoEqAuto) != last) applyAudio(p)
                 if (p.replayGain != last.replayGain || p.preampDb != last.preampDb || p.untaggedGainDb != last.untaggedGainDb) applyGain()
+                // AutoMix's loudness matching stands down under ReplayGain, so the planner hears of it too.
+                if (p.replayGain != last.replayGain) setupTransitions(p)
                 last = p
             }
         }
@@ -299,7 +295,6 @@ class PlaybackService : MediaLibraryService() {
         nori.dac.stop()
         nori.outputs.stop()
         if (wifiLock.isHeld) wifiLock.release()
-        analysisWorker.shutdown()
         session.release()
         player.release()
         scope.cancel()
@@ -314,18 +309,14 @@ class PlaybackService : MediaLibraryService() {
             // track: this is it. Skipped on a repeat-one loop, which should restart seamlessly; the
             // swap then waits for a real boundary. A planned crossfade into this track dies with the
             // rebuild - the setting wins over one mix.
-            if (chainSwapPending && !(reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && player.repeatMode == Player.REPEAT_MODE_ONE)) {
-                chainSwapPending = false
-                // The rebuild below reconfigures with the current flags, so whatever else was
-                // waiting (the deep buffer's return included) comes back with it.
-                deepAtNextPause = false
+            if (chain.boundary(reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && player.repeatMode == Player.REPEAT_MODE_ONE)) {
                 android.util.Log.i("nori", "chain swap at the boundary")
                 if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
             }
             refreshButtons()
-            if (item != null && nori.settings.value.skipExplicit && item.mediaMetadata.extras?.getString("explicit") == "explicit" && player.hasNextMediaItem()) return player.seekToNextMediaItem()
-            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && item != null) return scrobbler.onTrack(item.toSong(), player.isPlaying)
-            scrobbler.onTrack(item?.takeUnless { it.isRadio }?.toSong(), player.isPlaying)
+            if (item != null && nori.settings.value.skipExplicit && dev.nori.music.ffi.queueFlags(item.mediaId) and 1u != 0u && player.hasNextMediaItem()) return player.seekToNextMediaItem()
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT && item != null) return scrobbler.onTrack(item.mediaId, player.isPlaying)
+            scrobbler.onTrack(item?.takeUnless { it.isRadio }?.mediaId, player.isPlaying)
             applyGain()
             scheduleSave()
             autoFill(item)
@@ -336,7 +327,10 @@ class PlaybackService : MediaLibraryService() {
             // A few seconds in, the current track has been fetched and the radio is still up: fetch ahead now.
             main.removeCallbacks(precache)
             main.postDelayed(precache, 6_000)
-            if (sleepAfterSongs > 0 && --sleepAfterSongs == 0) player.pauseAtEndOfMediaItems = true
+            if (sleepAfterSongs > 0) dev.nori.music.ffi.sleepSongChanged(sleepAfterSongs.toUInt()).let { (left, pause) ->
+                sleepAfterSongs = left.toInt()
+                if (pause != 0u) player.pauseAtEndOfMediaItems = true
+            }
         }
 
         override fun onIsLoadingChanged(isLoading: Boolean) {
@@ -344,13 +338,9 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (!isPlaying && !player.playWhenReady && deepAtNextPause) {
-                deepAtNextPause = false
-                // Paused is silent: the deep buffer comes back at once rather than waiting a track,
-                // and the rebuild carries any other pending swap with it.
-                chainSwapPending = false
-                reconfigureSink(urgent = true)
-            }
+            // Paused is silent: the deep buffer comes back at once rather than waiting a song, and the
+            // rebuild carries any other pending swap with it.
+            if (!isPlaying && !player.playWhenReady && chain.paused()) reconfigureSink(urgent = true)
             announce()
             scrobbler.onPlaying(isPlaying)
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
@@ -372,30 +362,24 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-            // An output that refuses the offloaded stream fails here, and skipping to the next track would fail
-            // the same way. Rebuild the chain on the CPU path instead and play the same track again.
+            // What to do is nori_player::queue::on_error's call: an output that refuses the offloaded
+            // stream goes back to the CPU path, a network failure goes to the offline bridge when it is on,
+            // anything else skips a few and then stops.
             val sink = generateSequence(error.cause) { it.cause }.any {
                 it is AudioSink.InitializationException || it is AudioSink.WriteException || it is AudioSink.ConfigurationException
             }
-            if (sink && !offloadRefused) {
-                android.util.Log.w("nori", "audio sink refused the stream, giving up offload", error)
-                offloadRefused = true
-                applyAudio(nori.settings.value)
-                player.prepare()
-                player.play()
-                return
-            }
-            // One unplayable or unreachable track should not end the evening. Network failures with the
-            // offline bridge on jump to a download still in the queue, or park the rest and play from
-            // downloads until the server is back. Other errors still skip a few and then stop.
-            if (nori.settings.value.bridgeOffline && offlineBridge?.onPlaybackError(error) == true) {
-                errorsInARow = 0
-                return
-            }
-            if (nori.settings.value.skipOnError && player.hasNextMediaItem() && ++errorsInARow <= 3) {
-                player.seekToNextMediaItem()
-                player.prepare()
-                player.play()
+            val kind: UByte = when { sink -> 0u; error.isNetworkish() -> 1u; else -> 2u }
+            val p = nori.settings.value
+            when (dev.nori.music.ffi.queueOnError(kind, offloadRefused, p.bridgeOffline && offlineBridge != null, p.skipOnError, player.hasNextMediaItem(), errorsInARow.toUInt()).toInt()) {
+                0 -> {
+                    android.util.Log.w("nori", "audio sink refused the stream, giving up offload", error)
+                    offloadRefused = true
+                    applyAudio(p)
+                    player.prepare()
+                    player.play()
+                }
+                1 -> if (offlineBridge?.onPlaybackError(error) == true) errorsInARow = 0 else skipAfterError(p)
+                2 -> skipAfterError(p)
             }
         }
 
@@ -405,11 +389,19 @@ class PlaybackService : MediaLibraryService() {
     }
 
 
+    private fun skipAfterError(p: Prefs) {
+        if (!p.skipOnError || !player.hasNextMediaItem() || errorsInARow >= 3) return
+        errorsInARow++
+        player.seekToNextMediaItem()
+        player.prepare()
+        player.play()
+    }
+
     /** What the heart and shuffle buttons last showed, so an unrelated change does not rebuild the notification. */
     private var buttonsShown: String? = null
 
     private fun currentStarred(item: MediaItem): Boolean =
-        nori.library.isStarred(StarKind.SONG, item.mediaId, item.mediaMetadata.extras?.getBoolean("starred") == true)
+        nori.library.isStarred(StarKind.SONG, item.mediaId, dev.nori.music.ffi.queueFlags(item.mediaId) and 2u != 0u)
 
     /**
      * Heart and shuffle beside previous / play / next, in the secondary slots the way other players put
@@ -435,7 +427,7 @@ class PlaybackService : MediaLibraryService() {
         session.setMediaButtonPreferences(buttons)
     }
 
-    private fun updateBurst() { burst?.enabled = !offloaded && !tuning }
+    private fun updateBurst() { transitionSink?.bursting = chain.bursting(offloaded) }
 
     private fun announce() {
         val m = player.currentMediaItem?.mediaMetadata
@@ -451,31 +443,52 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun reconfigureSink(urgent: Boolean = false) {
         if (player.playbackState == Player.STATE_IDLE || urgent) {
-            if (player.playbackState != Player.STATE_IDLE) { player.stop(); player.prepare() }
+            if (player.playbackState != Player.STATE_IDLE) {
+                android.util.Log.i("nori", "chain swap now")
+                player.stop(); player.prepare()
+            }
             return
         }
-        if (offloaded && !offloadWanted) {
-            android.util.Log.i("nori", "chain swap now: the offloaded path is ending")
-            player.stop(); player.prepare()
-            return
-        }
-        if (!chainSwapPending) android.util.Log.i("nori", "chain swap deferred to the next track")
-        chainSwapPending = true
+        if (chain.defer()) android.util.Log.i("nori", "chain swap deferred to the next track")
+    }
+
+    /** The transition planner's settings, which it keeps in Rust (crates/core/src/automix/planner.rs). */
+    private fun setupTransitions(p: Prefs) {
+        dev.nori.music.ffi.transitionSetup(
+            dev.nori.music.ffi.TransitionPrefs(
+                autoMix = p.autoMix, crossfadeS = p.crossfadeSec, autoMixMaxS = p.autoMixMaxS, beatMatch = p.autoMixBeatMatch,
+                maxTempoChangePct = p.autoMixMaxTempoPct, bassSwap = p.autoMixBassSwap, filterEffects = p.autoMixFilters,
+                echoOut = p.autoMixEchoOut, keepPitch = p.autoMixKeepPitch, keepAlbums = p.crossfadeKeepAlbums,
+                replayGain = p.replayGain != ReplayGainMode.OFF,
+            ),
+            transitionsOff,
+        )
+        transitionSink?.replan()
     }
 
     /** DSP, crossfade, speed, offload and bit-perfect constrain each other; this is where that is decided. */
     private fun applyAudio(p: Prefs) {
         nori.dac.setEnabled(p.bitPerfect)
-        val untouched = hiRes || nori.dac.state.value.bitPerfect
-        val processing = p.dsp && !untouched
+        // Which parts of the chain may run is decided in the player crate (nori_player::policy), the same
+        // for every platform; what follows only applies it to media3.
+        val usb = nori.outputs.usb.value
+        val policy = dev.nori.music.ffi.audioPolicy(
+            dev.nori.music.ffi.AudioPrefs(
+                dsp = p.dsp, skipSilence = p.skipSilence, offload = p.offload, crossfadeS = p.crossfadeSec,
+                autoMix = p.autoMix, speed = p.speed, pitch = p.pitch,
+            ),
+            dev.nori.music.ffi.OutputState(hiRes = hiRes, bitPerfect = nori.dac.state.value.bitPerfect, usb = usb, offloadRefused = offloadRefused),
+        )
+        val untouched = policy.untouched
         // Curve and output stage are always live: the Rust side picks them up on the next buffer.
         // Empty bands + flat output is an identity memcpy, so "EQ off" on a PCM path costs almost nothing.
         equalizer.setChain(if (p.eqEnabled) p.eqBands else emptyList(), p.effectivePreampDb, p.crossfeedDb)
         equalizer.setOutput(p.balance, p.mono, p.limiterThresholdDb, 120f, if (p.limiter) 5f else 0f)
-        transitionsOff = untouched
+        transitionsOff = policy.transitionsOff
+        setupTransitions(p)
         // The pinned output rate stands down with everything else that touches samples.
-        transitionSink?.lockRate = !untouched
-        player.skipSilenceEnabled = p.skipSilence && !untouched
+        transitionSink?.lockRate = policy.lockRate
+        player.skipSilenceEnabled = policy.skipSilence
         // Speed and pitch ride the player's parameters, which the sink's own stretcher hears live -
         // no rebuild, no gap. The one exception is an offloaded track: the chip plays what it was
         // given at 1x, so leaving offload still cuts (and the position is kept).
@@ -483,13 +496,10 @@ class PlaybackService : MediaLibraryService() {
         appliedSpeed = p.speed
         appliedPitch = p.pitch
         player.playbackParameters = androidx.media3.common.PlaybackParameters(p.speed, p.pitch)
-        // Offload hands the compressed stream to the audio chip, so it is only possible while the app needs no samples.
-        // It also only reaches the phone's own outputs: the chip has no path to a USB DAC, but Android still
-        // opens the offloaded track and reports it playing, so the DAC just sits there in silence. Decode on
-        // the CPU whenever anything USB is attached, and after the sink has failed to open once (offloadRefused).
-        val usb = nori.outputs.usb.value
-        val offload = p.offload && !processing && !usb && !offloadRefused &&
-            p.crossfadeSec == 0 && !p.autoMix && !p.skipSilence && p.speed == 1f && p.pitch == 1f
+        // Offload hands the compressed stream to the audio chip: only while nothing needs the samples, and
+        // never to a USB output, which the chip cannot reach (Android still opens the track and reports it
+        // playing, so a DAC just sits there in silence). See nori_player::policy.
+        val offload = policy.offload
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
@@ -499,15 +509,20 @@ class PlaybackService : MediaLibraryService() {
         // Toggling EQ / bands / limiter then only touches setChain/setOutput — no sink rebuild, no gap.
         // Joining or leaving the chain still needs a rebuild; that waits for the next track unless the
         // current offloaded path is already the wrong one (USB / refused), where silence is worse.
-        val wantProcessor = !offload && !untouched
+        val wantProcessor = policy.processorInChain
         val offloadChanged = offloadWanted != offload
         offloadWanted = offload
         val processorChanged = equalizer.enabled != wantProcessor
         if (processorChanged) equalizer.enabled = wantProcessor
-        when {
-            offloaded && !offload && (usb || offloadRefused) -> reconfigureSink(urgent = true)
-            tempoChanged && offloaded -> reconfigureSink(urgent = true)
-            processorChanged || (offloadChanged && offloaded) -> reconfigureSink()
+        // Whether that rebuilds the output now, at the next song boundary or not at all: nori_player::transport::rebuild.
+        val change = dev.nori.music.ffi.ChainChange(
+            offloaded = offloaded, offload = offload, offloadChanged = offloadChanged, usb = usb,
+            offloadRefused = offloadRefused, tempoChanged = tempoChanged, processorChanged = processorChanged,
+        )
+        when (dev.nori.music.ffi.sinkRebuild(change)) {
+            dev.nori.music.ffi.Rebuild.NOW -> reconfigureSink(urgent = true)
+            dev.nori.music.ffi.Rebuild.AT_BOUNDARY -> reconfigureSink()
+            dev.nori.music.ffi.Rebuild.NONE -> {}
         }
         // The song playing was planned under the old settings. Turning a crossfade on and waiting for
         // the song to end is how anyone tries this out, and without asking again that first ending was
@@ -535,6 +550,7 @@ class PlaybackService : MediaLibraryService() {
      * queue reordered or shuffle turned on after the track had started.
      */
     private fun refreshUpcoming() {
+        val wasShuffling = shuffling
         shuffling = player.shuffleModeEnabled
         val t = player.currentTimeline
         val was = upcoming
@@ -550,119 +566,32 @@ class PlaybackService : MediaLibraryService() {
             i = t.getNextWindowIndex(i, player.repeatMode, player.shuffleModeEnabled)
         }
         upcoming = list
-        if (was.size != list.size || was.indices.any { was[it].mediaId != list[it].mediaId }) transitionSink?.replan()
-    }
-
-    /**
-     * Plans each transition when the sink reaches a track: from the stored analyses (AutoMix) or, without them,
-     * a plain crossfade. The Rust planner decides; this only gathers its inputs.
-     */
-    private val transitions = object : TransitionSink.Listener {
-        override fun planFor(outgoingId: String): TransitionSink.Plan? {
-            val p = nori.settings.value
-            if (transitionsOff || (!p.autoMix && p.crossfadeSec == 0)) {
-                android.util.Log.i("nori", "planFor: off (transitionsOff=$transitionsOff autoMix=${p.autoMix} crossfadeSec=${p.crossfadeSec})")
-                return null
-            }
-            // Why a boundary passed without a transition is otherwise invisible, and every reason below
-            // is a deliberate one - which is hard to tell apart from a broken feature without a word.
-            // The song before the current one leads the order here. Its ending can still be the audio
-            // flowing through the sink after the player has moved on (decoding runs seconds ahead of the
-            // ear), and asked then for the mix out of it the planner answered "not in the upcoming
-            // window": no plan, no hold, the ending played out unmixed and the fallback planned the
-            // song after it instead.
-            val order = listOfNotNull(previous) + upcoming
-            val at = order.indexOfFirst { it.mediaId == outgoingId }.takeIf { it >= 0 } ?: run {
-                android.util.Log.i("nori", "planFor: $outgoingId not in the upcoming window")
-                return null
-            }
-            val out = order[at]
-            val next = order.getOrNull(at + 1) ?: run { android.util.Log.i("nori", "planFor: nothing after $outgoingId"); return null }
-            if (out.isRadio || next.isRadio) { android.util.Log.i("nori", "planFor: radio"); return null }
-            val settings = dev.nori.music.ffi.AutoMixSettings(
-                maxTransitionS = (if (p.autoMix) p.autoMixMaxS else p.crossfadeSec).toFloat(),
-                beatMatch = p.autoMix && p.autoMixBeatMatch, maxTempoChangePct = p.autoMixMaxTempoPct,
-                bassSwap = p.autoMix && p.autoMixBassSwap, filterEffects = p.autoMix && p.autoMixFilters, echoOut = p.autoMix && p.autoMixEchoOut,
-                keepPitch = p.autoMixKeepPitch, sameAlbumInOrder = p.crossfadeKeepAlbums && followsOnAlbum(out, next),
-                // LUFS trim only when ReplayGain is off: otherwise the player volume already levels tracks.
-                matchLoudness = p.autoMix && p.replayGain == ReplayGainMode.OFF,
-                outTagBpm = out.mediaMetadata.extras?.getInt("bpm", 0)?.toFloat() ?: 0f,
-                inTagBpm = next.mediaMetadata.extras?.getInt("bpm", 0)?.toFloat() ?: 0f,
-            )
-            val a = if (p.autoMix) runCatching { nori.core.analysisGet(out.mediaId) }.getOrNull() else null
-            val b = if (p.autoMix) runCatching { nori.core.analysisGet(next.mediaId) }.getOrNull() else null
-            val outMs = (out.mediaMetadata.durationMs ?: 0L)
-            val inMs = (next.mediaMetadata.durationMs ?: 0L)
-            if (outMs <= 0 || inMs <= 0) { android.util.Log.i("nori", "planFor: durations $outMs/$inMs"); return null }
-            val plan = dev.nori.music.ffi.planTransition(a, b, outMs, inMs, settings)
-            if (plan.kind == dev.nori.music.ffi.TransitionKind.GAPLESS) { android.util.Log.i("nori", "planFor: gapless (${plan.reason})"); return null }
-            android.util.Log.i("nori", "transition ${out.mediaMetadata.title} -> ${next.mediaMetadata.title}: ${plan.kind} ${plan.durationMs} ms at ${plan.outStartMs}, tempo x${"%.3f".format(plan.tempoRatio)} (${plan.reason})")
-            return TransitionSink.Plan(
-                incomingId = next.mediaId, outStartUs = plan.outStartMs * 1000, durationUs = plan.durationMs * 1000, inSkipUs = plan.inStartMs * 1000,
-                mixer = dev.nori.music.ffi.automixMixerParams(plan).toFloatArray(), tempoRatio = plan.tempoRatio.toFloat(),
-                keepPitch = plan.keepPitch, rampUs = plan.tempoRampMs * 1000,
-                outLoopUs = plan.outLoopMs.coerceAtLeast(0) * 1000L,
-                inLoopUs = plan.inLoopMs.coerceAtLeast(0) * 1000L,
-            )
-        }
-
-        override fun wantsAnalysis(songId: String): Boolean {
-            if (!nori.settings.value.autoMix || songId.startsWith(RADIO_PREFIX) || songId.startsWith("ext-")) return false
-            // Missing *or* measured by an older analyser: without the overlap windows the pair
-            // gates read zeros and never fire, so old rows are measured again, not kept.
-            return runCatching { nori.core.analysisMissing(listOf(songId)).isNotEmpty() }.getOrDefault(false)
-        }
-
-        override fun analysed(songId: String, handle: Long, frames: Long, sampleRate: Int) {
-            analysisWorker.execute {
-                try {
-                    // Only a track heard from start to end: the duration has to agree with what the server says.
-                    val expectedMs = upcoming.firstOrNull { it.mediaId == songId }?.mediaMetadata?.durationMs ?: 0L
-                    val heardMs = frames * 1000 / sampleRate.coerceAtLeast(1)
-                    if (expectedMs <= 0 || kotlin.math.abs(heardMs - expectedMs) <= 3000) {
-                        val a = nori.core.analysisFinishStream(songId, handle)
-                        android.util.Log.i("nori", "analysed $songId: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s, heard %d ms of %d ms, %d frames at %d Hz".format(it.bpm, it.bpmConfidence, it.stability, dev.nori.music.ffi.automixKeyName(it.key), it.durationMs, expectedMs, frames, sampleRate) } ?: "too short"}")
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w("nori", "analysis of $songId failed: $e")
-                } finally {
-                    AutoMixAnalyzer.destroy(handle)
-                }
-            }
+        if (was.size != list.size || was.indices.any { was[it].mediaId != list[it].mediaId } || shuffling != wasShuffling) {
+            // The planner reads its window in Rust (crates/core/src/automix/planner.rs); it is handed over
+            // only when it changes.
+            dev.nori.music.ffi.queueWindow((listOfNotNull(previous) + list).map { it.mediaId }, shuffling)
+            transitionSink?.replan()
         }
     }
 
     private fun nextItem(): MediaItem? = player.nextMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
     private fun previousItem(): MediaItem? = player.previousMediaItemIndex.takeIf { it != C.INDEX_UNSET }?.let(player::getMediaItemAt)
 
-    /** Two tracks are "the album in order" only when the queue is actually playing it in order: shuffle breaks that. */
-    private fun followsOnAlbum(a: MediaItem?, b: MediaItem?): Boolean {
-        // The flag, not the player: this runs on the audio thread while a buffer is being handed over,
-        // and ExoPlayer throws if it is touched from anywhere but the thread that owns it.
-        if (shuffling) return false
-        val (x, y) = (a?.mediaMetadata?.extras ?: return false) to (b?.mediaMetadata?.extras ?: return false)
-        val album = x.getString("albumId")
-        return album != null && album == y.getString("albumId") && x.getInt("disc") == y.getInt("disc") && y.getInt("track") == x.getInt("track") + 1
-    }
-
     /** ReplayGain as plain volume: costs nothing and survives offload. Attenuation only. */
     private fun applyGain() {
         val p = nori.settings.value
-        val item = player.currentMediaItem?.takeUnless { it.isRadio }
-        targetVolume = if (p.replayGain == ReplayGainMode.OFF || item == null || nori.dac.state.value.bitPerfect) 1f else {
-            val g = item.toSong().replayGain
-            val album = when (p.replayGain) {
-                ReplayGainMode.ALBUM -> true
-                // Inside an album played in order the album gain keeps the tracks' relative levels; elsewhere track gain evens things out.
-                ReplayGainMode.AUTO -> followsOnAlbum(item, nextItem()) || followsOnAlbum(previousItem(), item)
-                else -> false
-            }
-            val db = if (g == null) p.untaggedGainDb else ((if (album) g.albumGain ?: g.trackGain else g.trackGain ?: g.albumGain) ?: p.untaggedGainDb) + p.preampDb
-            val peak = g?.let { if (album) it.albumPeak ?: it.trackPeak else it.trackPeak ?: it.albumPeak } ?: 0f
-            var v = 10f.pow(db / 20f)
-            if (peak > 0f) v = min(v, 1f / peak)
-            v.coerceIn(0f, 1f)
-        }
+        // The level is the core's decision (nori_player::policy::replay_gain over the queued songs it
+        // keeps, crates/core/src/queue.rs); this names the songs around the one playing.
+        targetVolume = dev.nori.music.ffi.queueGain(
+            before = previousItem()?.mediaId, current = player.currentMediaItem?.mediaId, after = nextItem()?.mediaId,
+            mode = when (p.replayGain) {
+                ReplayGainMode.OFF -> dev.nori.music.ffi.GainMode.OFF
+                ReplayGainMode.TRACK -> dev.nori.music.ffi.GainMode.TRACK
+                ReplayGainMode.ALBUM -> dev.nori.music.ffi.GainMode.ALBUM
+                ReplayGainMode.AUTO -> dev.nori.music.ffi.GainMode.AUTO
+            },
+            preampDb = p.preampDb, untaggedDb = p.untaggedGainDb, bitPerfect = nori.dac.state.value.bitPerfect, shuffling = shuffling,
+        )
         if (fade == null) player.volume = targetVolume
     }
 
@@ -675,7 +604,7 @@ class PlaybackService : MediaLibraryService() {
         fade = object : Runnable {
             override fun run() {
                 val t = ((SystemClock.uptimeMillis() - start) / ms.toFloat()).coerceIn(0f, 1f)
-                player.volume = from + (to * targetVolume - from) * t
+                player.volume = Dsp.fadeVolume(from, to * targetVolume, t)
                 if (t < 1f) main.postDelayed(this, 16) else { fade = null; then() }
             }
         }.also(main::post)
@@ -685,16 +614,19 @@ class PlaybackService : MediaLibraryService() {
     private inner class Controls(p: ExoPlayer) : androidx.media3.common.ForwardingPlayer(p) {
         private val ms get() = nori.settings.value.fadeMs
 
+        // How each control sounds is decided in nori-player (nori_player::transport); this runs the fades.
         override fun play() {
             takePending()
-            if (ms > 0 && !wrappedPlayer.isPlaying) wrappedPlayer.volume = 0f
+            val fadeIn = dev.nori.music.ffi.playFade(ms, wrappedPlayer.isPlaying)
+            if (fadeIn != null) wrappedPlayer.volume = 0f
             super.play()
-            if (ms > 0) ramp(1f, ms)
+            if (fadeIn != null) ramp(1f, fadeIn)
         }
 
         override fun pause() {
             takePending()
-            if (ms > 0 && wrappedPlayer.isPlaying) ramp(0f, ms) { super.pause(); wrappedPlayer.volume = targetVolume } else super.pause()
+            val fadeOut = dev.nori.music.ffi.pauseFade(ms, wrappedPlayer.isPlaying)
+            if (fadeOut != null) ramp(0f, fadeOut) { super.pause(); wrappedPlayer.volume = targetVolume } else super.pause()
         }
 
         /**
@@ -716,18 +648,14 @@ class PlaybackService : MediaLibraryService() {
             if (player.currentMediaItem?.mediaId == softItem && player.currentMediaItemIndex == softIndex) action()
         }
 
-        private fun softly(floorMs: Int = 0, action: () -> Unit) {
-            // Down first, then the switch, then back up: cutting dead reads as a chop, and out of a
-            // blend it lands like the sound dropped out. The dip is quick; the configured fade is
-            // the way back in. Switches to another song always dip a little, even with fades off:
-            // a hard digital cut mid-sound clicks, and out of a mix it snaps texture as well as place.
-            val ms = maxOf(ms, floorMs)
-            if (ms <= 0 || !wrappedPlayer.isPlaying) { action(); return }
+        /** Down first, then the switch, then back up (the dip is nori_player::transport::switch_dip's). */
+        private fun softly(switch: Switch, action: () -> Unit) {
+            val dip = dev.nori.music.ffi.switchDip(ms, switch, wrappedPlayer.isPlaying) ?: run { action(); return }
             takePending()
             softPending = action
             softItem = player.currentMediaItem?.mediaId
             softIndex = player.currentMediaItemIndex
-            ramp(0f, minOf(ms, 150)) { takePending(); ramp(1f, ms) }
+            ramp(0f, dip.downMs) { takePending(); ramp(1f, dip.upMs) }
         }
 
         /**
@@ -765,15 +693,15 @@ class PlaybackService : MediaLibraryService() {
             super.clearMediaItems()
         }
 
-        override fun seekTo(positionMs: Long) = softly { super.seekTo(positionMs) }
-        override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly(floorMs = 120) { super.seekTo(mediaItemIndex, positionMs) }
-        override fun seekToNext() = andPlay { softly { super.seekToNext() } }
-        override fun seekToNextMediaItem() = andPlay { softly { super.seekToNextMediaItem() } }
-        override fun seekToPreviousMediaItem() = andPlay { softly { super.seekToPreviousMediaItem() } }
+        override fun seekTo(positionMs: Long) = softly(Switch.SEEK) { super.seekTo(positionMs) }
+        override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly(Switch.TO_SONG) { super.seekTo(mediaItemIndex, positionMs) }
+        override fun seekToNext() = andPlay { softly(Switch.SKIP) { super.seekToNext() } }
+        override fun seekToNextMediaItem() = andPlay { softly(Switch.SKIP) { super.seekToNextMediaItem() } }
+        override fun seekToPreviousMediaItem() = andPlay { softly(Switch.SKIP) { super.seekToPreviousMediaItem() } }
         // Well into a song this goes back to 0:00 rather than to the song before (media3's own rule,
         // three seconds), which paused means: start this one again, from the top, playing.
         override fun seekToPrevious() = andPlay {
-            softly { if (nori.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
+            softly(Switch.SKIP) { if (nori.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
         }
 
         /** Stopping drops a switch still waiting out its dip; starting over is not continuing it. */
@@ -788,62 +716,48 @@ class PlaybackService : MediaLibraryService() {
      * order is rebuilt with them where they belong and everything else where it was.
      */
     private fun upNext(items: List<MediaItem>) {
+        // Where they go, and the play order when shuffling, is nori_player::queue::place's call.
+        val n = player.mediaItemCount
+        val hand = List(n) { player.getMediaItemAt(it).queuedAs() != null }
+        val p = dev.nori.music.ffi.queuePlace(
+            n.toUInt(), player.currentMediaItemIndex.coerceAtLeast(0).toUInt(), hand,
+            if (player.shuffleModeEnabled) playOrder().map { it.toUInt() } else null,
+            items.first().queuedAs() == "last", items.size.toUInt(),
+        )
+        player.addMediaItems(p.at.toInt(), items)
+        p.order?.let { order -> player.setShuffleOrder(DefaultShuffleOrder(IntArray(order.size) { order[it].toInt() }, SystemClock.elapsedRealtime())) }
+    }
+
+    /** The shuffled play order as the player walks it. */
+    private fun playOrder(): List<Int> {
         val t = player.currentTimeline
-        val cur = player.currentMediaItemIndex
-        val last = items.first().queuedAs() == "last"
-        fun runEnd(shuffled: Boolean): Int {
-            var end = cur
-            if (!last) return end
-            var i = t.getNextWindowIndex(cur, Player.REPEAT_MODE_OFF, shuffled)
-            while (i != C.INDEX_UNSET && player.getMediaItemAt(i).queuedAs() != null) { end = i; i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, shuffled) }
-            return end
-        }
-        val at = runEnd(false) + 1
-        if (!player.shuffleModeEnabled) return player.addMediaItems(at, items)
-        val shift = { i: Int -> if (i >= at) i + items.size else i }
-        val order = ArrayList<Int>(t.windowCount + items.size)
+        val order = ArrayList<Int>(t.windowCount)
         var i = t.getFirstWindowIndex(true)
-        while (i != C.INDEX_UNSET) { order += shift(i); i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, true) }
-        order.addAll(order.indexOf(shift(runEnd(true))) + 1, items.indices.map { at + it })
-        player.addMediaItems(at, items)
-        player.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), SystemClock.elapsedRealtime()))
+        while (i != C.INDEX_UNSET) { order += i; i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, true) }
+        return order
     }
 
     /**
-     * Shuffle turned on: the playing song goes first, the songs added by hand after it keep their order,
-     * and only the rest is shuffled. ExoPlayer's own order would leave the playing song somewhere in the
-     * middle, so the songs before it in that order were never played, and it scatters the hand-added ones.
+     * Shuffle turned on: the playing song first, the songs added by hand after it, the rest shuffled
+     * (nori_player::queue::shuffle_around).
      */
     private fun shuffleAroundCurrent() {
         val n = player.mediaItemCount
         val cur = player.currentMediaItemIndex
         if (n < 2 || cur == C.INDEX_UNSET) return
-        val kept = ArrayList<Int>().apply {
-            add(cur)
-            var i = cur + 1
-            while (i < n && player.getMediaItemAt(i).queuedAs() != null) add(i++)
-        }
-        val rest = (0 until n).filterNot { it in kept }.shuffled()
-        player.setShuffleOrder(DefaultShuffleOrder((kept + rest).toIntArray(), SystemClock.elapsedRealtime()))
+        val order = dev.nori.music.ffi.queueShuffleAround(n.toUInt(), cur.toUInt(), List(n) { player.getMediaItemAt(it).queuedAs() != null }, System.nanoTime().toULong())
+        player.setShuffleOrder(DefaultShuffleOrder(IntArray(order.size) { order[it].toInt() }, SystemClock.elapsedRealtime()))
     }
 
     private fun precacheAhead() {
         val p = nori.settings.value
-        val count = if (nori.http.metered) p.precacheMobile else p.precacheWifi
-        // The player itself already buffers the very next track, which is why this normally covers the
-        // ones after it - except with a transition on. A mix needs that next track decodable a whole
-        // crossfade before the player would otherwise want it, and audio that arrives too late to be
-        // mixed into leaves a hole where the end of the song should be (see TransitionSink), so then it
-        // is fetched here too. Nothing extra is fetched, only earlier: these are the same bytes the
-        // player would ask for a minute later.
-        val mixing = !transitionsOff && (p.crossfadeSec > 0 || p.autoMix)
-        val first = if (mixing) 1 else 2
-        // Shuffle moves the goalposts, so nothing is fetched deep into a queue about to be reordered -
-        // but the next track is the next track whatever the order.
-        val last = maxOf(if (player.shuffleModeEnabled) 0 else count, if (mixing) 1 else 0)
-        if (last < first) return precacher.cancel()
+        // Which songs coming up are fetched early is nori_player::queue::precache_range's call.
+        val range = dev.nori.music.ffi.queuePrecache(
+            (if (nori.http.metered) p.precacheMobile else p.precacheWifi).toUInt(), !transitionsOff && (p.crossfadeSec > 0 || p.autoMix), player.shuffleModeEnabled,
+        )
+        if (range.isEmpty()) return precacher.cancel()
         val fetching = nori.downloads.state.value.pendingIds
-        precacher.update(upcoming.drop(first).take(last - first + 1)) { it in fetching }
+        precacher.update(upcoming.drop(range[0].toInt()).take((range[1] - range[0]).toInt() + 1)) { it in fetching }
     }
 
     /**
@@ -855,7 +769,7 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun analyseAhead() {
         if (!nori.settings.value.autoMix) return analyser.cancel()
-        analyser.update(upcoming.take(3).map { it.mediaId })
+        analyser.update(upcoming.take(dev.nori.music.ffi.queueMeasureAhead().toInt()).map { it.mediaId })
     }
 
     /**
@@ -877,7 +791,7 @@ class PlaybackService : MediaLibraryService() {
         // follows runs on an IO thread.
         val seed = item.toSong()
         val queued = (0 until player.mediaItemCount).mapTo(HashSet()) { player.getMediaItemAt(it).mediaId }
-        val played = (0 until player.mediaItemCount).mapNotNullTo(HashSet()) { player.getMediaItemAt(it).mediaMetadata.extras?.getString("albumId") }
+        val played = dev.nori.music.ffi.queueAlbums(List(player.mediaItemCount) { player.getMediaItemAt(it).mediaId }).toHashSet()
         autoFillInFlight = true
         scope.launch {
             val fresh = runCatching {
@@ -888,7 +802,7 @@ class PlaybackService : MediaLibraryService() {
             }.getOrDefault(emptyList())
             // Player work stays on this scope's main dispatcher.
             if (fresh.isNotEmpty() && songsAfter() <= 1) {
-                player.addMediaItems(fresh.map(::item))
+                player.addMediaItems(items(fresh))
                 refreshUpcoming()
                 val still = pendingNext && player.currentMediaItem?.mediaId == pendingNextFrom
                 pendingNext = false
@@ -985,13 +899,16 @@ class PlaybackService : MediaLibraryService() {
 
     private fun persistQueue(push: Boolean) {
         main.removeCallbacks(saveQueue)
-        val songs = (0 until player.mediaItemCount).map(player::getMediaItemAt).filterNot { it.isRadio }.map { it.toSong() }
+        // The songs themselves are the core's (crates/core/src/queue.rs); the queue is its ids.
+        val ids = List(player.mediaItemCount) { player.getMediaItemAt(it).mediaId }
         val index = player.currentMediaItemIndex.coerceAtLeast(0)
+        val current = player.currentMediaItem?.mediaId
         val position = player.currentPosition.coerceAtLeast(0)
         scope.launch(Dispatchers.IO) {
-            runCatching { nori.core.saveQueue(PlayQueue(songs, index.toUInt(), position.toULong())) }
+            runCatching { nori.core.queueSave(ids, index.toUInt(), position.toULong()) }
+            val songs = ids.filterNot { it.startsWith(RADIO_PREFIX) }
             if (push && songs.isNotEmpty() && nori.settings.value.scrobble) {
-                runCatching { nori.library.pushQueue(songs.map { it.id }, songs.getOrNull(index)?.id, position) }
+                runCatching { nori.library.pushQueue(songs, current, position) }
             }
         }
     }
@@ -1000,10 +917,12 @@ class PlaybackService : MediaLibraryService() {
         val q = withContext(Dispatchers.IO) { runCatching { nori.core.loadQueue() }.getOrNull() } ?: return@launch
         if (q.songs.isEmpty() || player.mediaItemCount > 0) return@launch
         // Not prepared: nothing touches the network until the user presses play.
-        player.setMediaItems(q.songs.map(::item), q.index.toInt().coerceIn(0, q.songs.lastIndex), q.positionMs.toLong())
+        player.setMediaItems(items(q.songs), q.index.toInt().coerceIn(0, q.songs.lastIndex), q.positionMs.toLong())
     }
 
-    private fun item(s: Song): MediaItem = s.toMediaItem(nori.library.coverUrl(s.coverArt, NOTIFICATION_ART))
+    /** Songs as the player's items, handed to the core in one call (see MediaItems.toMediaItems). */
+    private fun items(songs: List<Song>): List<MediaItem> = songs.toMediaItems { nori.library.coverUrl(it.coverArt, NOTIFICATION_ART) }
+    private fun item(s: Song): MediaItem = items(listOf(s)).first()
 
     // ---- session: custom commands, Android Auto browsing, voice search ----
 
@@ -1019,12 +938,14 @@ class PlaybackService : MediaLibraryService() {
             if (command.customAction == CMD_SLEEP) {
                 val alarms = getSystemService(AlarmManager::class.java)
                 alarms.cancel(sleepAlarm)
-                sleepAfterSongs = args.getInt(ARG_SONGS)
-                player.pauseAtEndOfMediaItems = args.getBoolean(ARG_END_OF_TRACK) || sleepAfterSongs == 1
-                if (sleepAfterSongs == 1) sleepAfterSongs = 0 else if (sleepAfterSongs > 1) sleepAfterSongs--
+                val (pause, left) = dev.nori.music.ffi.sleepAfter(args.getInt(ARG_SONGS).coerceAtLeast(0).toUInt(), args.getBoolean(ARG_END_OF_TRACK))
+                player.pauseAtEndOfMediaItems = pause != 0u
+                sleepAfterSongs = left.toInt()
                 val minutes = args.getInt(ARG_MINUTES)
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
-                if (minutes > 0) alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + minutes * 60_000L, 15_000L, "nori.sleep", sleepAlarm, main)
+                if (minutes > 0) dev.nori.music.ffi.sleepDelay(minutes.toUInt()).let { (delay, slack) ->
+                    alarms.setWindow(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delay, slack, "nori.sleep", sleepAlarm, main)
+                }
             }
             if (command.customAction == CMD_FAVOURITE) {
                 val item = player.currentMediaItem?.takeUnless { it.isRadio }
@@ -1041,30 +962,18 @@ class PlaybackService : MediaLibraryService() {
                 val on = args.getBoolean(ARG_ON)
                 // Shallow buffer makes a band move audible within ~0.5 s instead of up to the deep
                 // 10 s AudioTrack fill. Rebuilding mid-track is a stop/prepare gap, so while music
-                // plays the swap waits for the next boundary (or the next pause); BurstSink turns
+                // plays the swap waits for the next boundary (or the next pause); bursts turn
                 // off immediately so the track stops being topped up in multi-second bursts.
-                if (on && !tuning && equalizer.enabled) {
-                    tuning = true
-                    updateBurst()
-                    if (player.playbackState != Player.STATE_IDLE && player.playWhenReady) {
-                        // No cut while playing; shallow buffer arrives at the next pause or track.
-                        chainSwapPending = true
-                        deepAtNextPause = true
-                    } else if (player.playbackState != Player.STATE_IDLE) reconfigureSink(urgent = true)
-                } else if (!on && tuning) {
-                    tuning = false
-                    updateBurst()
-                    if (player.playbackState != Player.STATE_IDLE && player.playWhenReady) chainSwapPending = true
-                    else if (player.playbackState != Player.STATE_IDLE) reconfigureSink(urgent = true)
-                    deepAtNextPause = true
-                }
+                val rebuild = chain.tuning(on, equalizer.enabled, player.playbackState == Player.STATE_IDLE, player.playWhenReady)
+                updateBurst()
+                if (rebuild) reconfigureSink(urgent = true)
             }
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
 
         override fun onAddMediaItems(session: MediaSession, controller: MediaSession.ControllerInfo, items: MutableList<MediaItem>): ListenableFuture<MutableList<MediaItem>> {
             val query = items.singleOrNull()?.requestMetadata?.searchQuery
-            if (query != null) return scope.future { nori.library.search(query).songs.map(::item).toMutableList() }
+            if (query != null) return scope.future { items(nori.library.search(query).songs).toMutableList() }
             // Our own UI sends complete items. Android Auto sends bare ids of things it was shown earlier.
             if (items.all { it.mediaMetadata.title != null }) return Futures.immediateFuture(items.map { it.playable() }.toMutableList())
             return scope.future {
@@ -1074,7 +983,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onPlaybackResumption(session: MediaSession, controller: MediaSession.ControllerInfo): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = scope.future {
             val q = withContext(Dispatchers.IO) { nori.core.loadQueue() }
-            MediaSession.MediaItemsWithStartPosition(q.songs.map(::item), q.index.toInt(), q.positionMs.toLong())
+            MediaSession.MediaItemsWithStartPosition(items(q.songs), q.index.toInt(), q.positionMs.toLong())
         }
 
         override fun onGetLibraryRoot(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, params: LibraryParams?) =
@@ -1097,7 +1006,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onGetSearchResult(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, query: String, page: Int, pageSize: Int, params: LibraryParams?): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> =
             scope.future {
-                val songs = runCatching { nori.library.search(query).songs.map(::item) }.getOrDefault(emptyList())
+                val songs = runCatching { items(nori.library.search(query).songs) }.getOrDefault(emptyList())
                 songs.forEach { served.put(it.mediaId, it) }
                 LibraryResult.ofItemList(songs.drop(page * pageSize).take(pageSize), params)
             }
@@ -1115,12 +1024,12 @@ class PlaybackService : MediaLibraryService() {
             "root" -> listOf(folder("albums:RECENT", "Recently played"), folder("albums:NEWEST", "Recently added"), folder("albums:FREQUENT", "Most played"),
                 folder("playlists", "Playlists"), folder("starred", "Favourites"), folder("random", "Random"), folder("downloads", "Downloads"))
             "albums" -> lib.albums(AlbumSort.valueOf(arg), size = 40).first().map { folder("album:${it.id}", it.name, it.artist, lib.coverUrl(it.coverArt, 300)) }
-            "album" -> lib.albumSongs(arg).map(::item)
+            "album" -> items(lib.albumSongs(arg))
             "playlists" -> lib.playlists().first().map { folder("playlist:${it.id}", it.name, "${it.songCount} songs", lib.coverUrl(it.coverArt, 300)) }
-            "playlist" -> lib.playlistSongs(arg).map(::item)
-            "starred" -> lib.starred().first().songs.map(::item)
-            "random" -> lib.randomSongs(50).map(::item)
-            "downloads" -> nori.downloads.state.value.done.map(::item)
+            "playlist" -> items(lib.playlistSongs(arg))
+            "starred" -> items(lib.starred().first().songs)
+            "random" -> items(lib.randomSongs(50))
+            "downloads" -> items(nori.downloads.state.value.done)
             else -> emptyList()
         }
     }

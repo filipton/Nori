@@ -1,8 +1,11 @@
 package dev.nori.music.playback
 
 import android.content.Context
+import dev.nori.music.ffi.Arrival
 import dev.nori.music.ffi.AutoEqEntry
 import dev.nori.music.ffi.Core
+import dev.nori.music.ffi.CurveStep
+import dev.nori.music.ffi.deviceArrival
 import dev.nori.music.ffi.SoundProfile
 import dev.nori.music.ffi.parseEqPreset
 import dev.nori.music.net.Http
@@ -19,7 +22,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Which sound each output device gets. A device can be given a saved profile, a flat sound, an AutoEQ
+ * Which sound each output device gets; the decision is nori-player's (crates/player/src/device.rs),
+ * this looks things up and applies it. A device can be given a saved profile, a flat sound, an AutoEQ
  * curve, or nothing; when it becomes the active output its sound is loaded, and when music goes back
  * to a device with nothing chosen the sound from before comes back. Headphones with nothing chosen and
  * a curve in the AutoEQ list get it offered, or applied straight away when [autoEqAuto] is on.
@@ -67,14 +71,12 @@ class DeviceSound(context: Context, private val settings: Settings, private val 
         val p = settings.value
         val bound = io { runCatching { core().profileForOutput(output) }.getOrNull() }
         android.util.Log.i("nori", "device sound: $output -> ${bound?.name ?: "nothing chosen"}")
-        if (bound != null) {
-            if (p.profilePerOutput) Sound.fromJson(bound.json)?.let(::load)
-            return
-        }
-        if (p.profilePerOutput) restore()
-        if (output == Outputs.SPEAKER || output in quiet.value) return
+        val plan = deviceArrival(Arrival(bound = bound != null, perOutput = p.profilePerOutput, speaker = output == Outputs.SPEAKER, quiet = output in quiet.value, autoApply = p.autoEqAuto))
+        if (plan.loadBound) bound?.let { Sound.fromJson(it.json) }?.let(::load)
+        if (plan.restore) restore()
+        if (plan.curve == CurveStep.NONE) return
         val entry = curvesFor(output).firstOrNull() ?: return
-        if (!(p.autoEqAuto && p.profilePerOutput)) {
+        if (plan.curve == CurveStep.OFFER) {
             post(Offer(output, entry))
             return
         }

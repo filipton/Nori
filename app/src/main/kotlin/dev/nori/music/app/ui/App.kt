@@ -234,8 +234,10 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     """"dspActive":${dev.nori.music.playback.Equalizer.active != null},"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"mixing":${dev.nori.music.playback.TransitionSink.mixing},""" +
-                    """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${actions.downloadStats.value.speedBps},"dlEta":${actions.downloadStats.value.etaSec ?: -1},""" +
-                    """"sinkBytes":${dev.nori.music.playback.BurstSink.bytesWritten},""" +
+                    """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.downloadSpeedEta()[1]},""" +
+                    """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten},""" +
+                    // Everything the app's Java side has allocated since it started, for allocation checks.
+                    """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
                     dev.nori.music.Nori.get(context).dac.state.value.let { d ->
                         """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
                             """"dacBlocked":"${d.blockedBy.orEmpty()}","dacTrack":"${d.track.orEmpty()}","""

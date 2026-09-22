@@ -56,7 +56,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.downloads.formatBytes
+import dev.nori.music.ffi.formatBytes
 import dev.nori.music.playback.Equalizer
 import dev.nori.music.settings.Quality
 import dev.nori.music.settings.ThemeMode

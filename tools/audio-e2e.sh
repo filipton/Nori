@@ -17,9 +17,15 @@ field() { state | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1
 # and a controller in the background reports a stale one - a test watching either can pass in silence.
 # The bytes this app hands to the AudioTrack are honest but arrive in ten-second bursts, so a short
 # window sees nothing. What the system itself says about our AudioTrack is instant and background-safe.
+# Only this app's own tracks: the list also holds other apps' and dead processes' tracks, and the first
+# line of it was a stopped track left by something else - every check then read "stopped" over music.
 track_state() {
-  adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/[0-9]+ state:[a-z]+" |
-    grep -oE "state:[a-z]+" | sed 's/state://' | head -1
+  local pid; pid=$(adb shell pidof dev.nori.music | tr -d '\r')
+  [ -n "$pid" ] || return 0
+  local states; states=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/$pid state:[a-z]+" |
+    grep -oE "state:[a-z]+" | sed 's/state://')
+  # Several of ours can be listed (a track rebuilt at a format change); playing means one is started.
+  if echo "$states" | grep -qx started; then echo started; else echo "$states" | head -1; fi
 }
 playing_audio() { [ "$(track_state)" = "started" ]; }
 # For the checks that matter most, also prove the bursts keep coming over a full buffer cycle.
@@ -183,16 +189,19 @@ echo "-- tuning borrows the shallow buffer and returns it"
 # The equalizer screen trades the deep buffer for instant response; leaving it schedules the
 # deep buffer's return at the next boundary. Without that the pipeline stays half a second deep
 # and every transition bows out for want of runway.
+# Both ways, the swap waits for a boundary while music plays: rebuilding the track mid-song is a gap.
 "$app" set eq true >/dev/null; sleep 2
 watch_from_now
-"$app" do "tuning on" >/dev/null; sleep 4
+"$app" do "tuning on" >/dev/null; sleep 2
+"$app" do "playnext $other" >/dev/null; sleep 2
+"$app" do next >/dev/null; sleep 6
 check "still playing after tuning cuts in" playing_audio
 shallow=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
 "$app" do "tuning off" >/dev/null; sleep 2
 "$app" do "playnext $other" >/dev/null; sleep 2
 "$app" do next >/dev/null; sleep 6
 deep=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
-check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ]"
+check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ] && [ '${shallow:-0}' -lt 1764000 ]"
 check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
 check "the deep buffer swap happens at the boundary" waitfor "chain swap at the boundary" 15
 check "still playing after the deep swap" playing_audio
@@ -205,6 +214,22 @@ check "measuring starts when AutoMix is switched on" waitfor "measuring ahead:" 
 check "the tracks coming up are measured" waitfor "analysed [^ ]+ ahead: [0-9]|not on the device yet" 120
 check "the mix is planned from what was measured" waitfor "transition .*: [A-Z_]+ [0-9]+ ms at" 30
 "$app" set autoMix false >/dev/null
+
+echo "-- speed, pitch and silence skipping (nori-player's Sonic and skipper)"
+watch_from_now
+"$app" set speed 1.5 >/dev/null; sleep 3
+check "speed runs through the rust stage" waitfor "speed in chain: x1.5" 15
+a=$(field positionMs); sleep 6; b=$(field positionMs)
+check "1.5x plays 6 s of wall clock as ~9 s of song ($((b - a)) ms)" bash -c "[ $((b - a)) -ge 7800 ] && [ $((b - a)) -le 10200 ]"
+check "still playing at 1.5x" playing_audio
+"$app" set speed 1 >/dev/null; "$app" set pitch 1.1 >/dev/null; sleep 3
+a=$(field positionMs); sleep 6; b=$(field positionMs)
+check "pitch alone keeps the pace ($((b - a)) ms)" bash -c "[ $((b - a)) -ge 5200 ] && [ $((b - a)) -le 6800 ]"
+"$app" set pitch 1 >/dev/null
+"$app" set skipSilence true >/dev/null; sleep 3
+check "silence skipping runs through the rust stage" waitfor "silence skipping in chain" 15
+check "still playing while skipping silence" playing_audio
+"$app" set skipSilence false >/dev/null; sleep 2
 
 echo "-- skipping and seeking"
 "$app" do next >/dev/null; sleep 5; check "next track plays" playing_audio

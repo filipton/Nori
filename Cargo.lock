@@ -733,18 +733,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "nori-look"
+version = "0.3.3"
+
+[[package]]
+name = "nori-player"
+version = "0.3.3"
+dependencies = [
+ "parking_lot",
+ "rubato",
+ "rustfft",
+ "signalsmith-stretch",
+]
+
+[[package]]
 name = "norimusic"
 version = "0.3.3"
 dependencies = [
  "jni",
  "md-5",
+ "nori-look",
+ "nori-player",
  "parking_lot",
- "rubato",
  "rusqlite",
- "rustfft",
  "serde",
  "serde_json",
- "signalsmith-stretch",
  "thiserror 2.0.20",
  "uniffi",
 ]

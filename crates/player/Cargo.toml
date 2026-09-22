@@ -1,0 +1,24 @@
+[package]
+name = "nori-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "How Nori plays music: the sound chain, AutoMix analysis, planning and mixing, shared by every platform"
+
+[lib]
+name = "nori_player"
+
+[features]
+# Synthetic tracks with a known tempo and structure, for other crates' tests.
+synth = []
+
+[dependencies]
+parking_lot = "0.12"
+# AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
+rustfft = "6"
+signalsmith-stretch = "0.1"
+
+# Test-only: the resample evaluation compares the transition-time cubic interpolator against a
+# sinc resampler. It stays out of release builds.
+[dev-dependencies]
+rubato = "5.0.0"

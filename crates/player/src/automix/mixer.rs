@@ -11,12 +11,7 @@
 //! Past the end of the transition the output is the incoming stream untouched, so a late call does no harm.
 //! The per-buffer call allocates nothing and may run in place (`dest` equal to either input).
 
-use jni::objects::{JByteBuffer, JClass, JFloatArray};
-use jni::sys::{jint, jlong};
-use jni::JNIEnv;
-use parking_lot::Mutex;
-
-use crate::{FadeCurve, TransitionPlan};
+use crate::types::{FadeCurve, TransitionPlan};
 
 const MAX_CHANNELS: usize = 8;
 /// Frames between low-pass coefficient updates.
@@ -142,7 +137,7 @@ impl Span {
 
 pub struct Mixer {
     rate: f64,
-    ch: usize,
+    pub ch: usize,
     pos: u64,
     len: u64,
     curve: FadeCurve,
@@ -307,7 +302,9 @@ impl Mixer {
     ///
     /// # Safety
     /// All three pointers must be valid for `frames * channels` elements.
-    unsafe fn run<T: Copy>(&mut self, out: *const T, inc: *const T, dst: *mut T, frames: usize, load: impl Fn(T) -> f64, store: impl Fn(f64) -> T) {
+    /// # Safety
+    /// `out`, `inc` and `dst` must each point at `frames` frames of this mixer's channel count.
+    pub unsafe fn run<T: Copy>(&mut self, out: *const T, inc: *const T, dst: *mut T, frames: usize, load: impl Fn(T) -> f64, store: impl Fn(f64) -> T) {
         let ch = self.ch;
         let mut xo = [0f64; MAX_CHANNELS];
         let mut xi = [0f64; MAX_CHANNELS];
@@ -405,103 +402,10 @@ impl Mixer {
     }
 }
 
-// ---- JNI: dev.nori.music.playback.AutoMixMixer ----------------------------------------------------------------
-
-const PCM_16: jint = 2;
-const PCM_FLOAT: jint = 4;
-
-fn mixer<'a>(h: jlong) -> Option<&'a Mutex<Mixer>> {
-    (h != 0).then(|| unsafe { &*(h as *const Mutex<Mixer>) })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
-    Box::into_raw(Box::new(Mutex::new(Mixer::new(rate.max(1) as u32, channels.max(1) as usize)))) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Mutex<Mixer>) });
-    }
-}
-
-/// `params` is `automix_mixer_params(plan)`. Restarts the transition clock at 0.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_configure(env: JNIEnv, _: JClass, h: jlong, params: JFloatArray) {
-    let Some(m) = mixer(h) else { return };
-    let mut p = [0f32; param::COUNT];
-    let n = (env.get_array_length(&params).unwrap_or(0).max(0) as usize).min(param::COUNT);
-    if env.get_float_array_region(&params, 0, &mut p[..n]).is_err() {
-        return;
-    }
-    m.lock().configure(&p[..n]);
-}
-
-/// Frames mixed since `configure`.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_position(_: JNIEnv, _: JClass, h: jlong) -> jlong {
-    mixer(h).map_or(0, |m| m.lock().position() as jlong)
-}
-
-/// Moves the transition clock to `frames` in; see [Mixer::seek].
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_seek(_: JNIEnv, _: JClass, h: jlong, frames: jlong) {
-    if let Some(m) = mixer(h) {
-        m.lock().seek(frames.max(0) as u64);
-    }
-}
-
-/// Mixes `frames` frames of `outgoing[out_pos..]` and `incoming[in_pos..]` into `dest[dest_pos..]` (byte positions;
-/// all direct buffers, `dest` may be either input). Returns false when the buffers cannot be used.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_process(
-    env: JNIEnv, _: JClass, h: jlong, outgoing: JByteBuffer, out_pos: jint, incoming: JByteBuffer, in_pos: jint, dest: JByteBuffer, dest_pos: jint,
-    frames: jint, encoding: jint,
-) -> bool {
-    let (Ok(o), Ok(i), Ok(d)) =
-        (env.get_direct_buffer_address(&outgoing), env.get_direct_buffer_address(&incoming), env.get_direct_buffer_address(&dest))
-    else {
-        return false;
-    };
-    let Some(m) = mixer(h) else { return false };
-    if o.is_null() || i.is_null() || d.is_null() || frames < 0 {
-        return false;
-    }
-    let (Ok(ocap), Ok(icap), Ok(dcap)) =
-        (env.get_direct_buffer_capacity(&outgoing), env.get_direct_buffer_capacity(&incoming), env.get_direct_buffer_capacity(&dest))
-    else {
-        return false;
-    };
-    let mut m = m.lock();
-    let width = match encoding {
-        PCM_16 => 2,
-        PCM_FLOAT => 4,
-        _ => return false,
-    };
-    let bytes = frames as usize * m.ch * width;
-    if out_pos < 0 || in_pos < 0 || dest_pos < 0 || out_pos as usize + bytes > ocap || in_pos as usize + bytes > icap || dest_pos as usize + bytes > dcap {
-        return false;
-    }
-    let (o, i, d) = unsafe { (o.add(out_pos as usize), i.add(in_pos as usize), d.add(dest_pos as usize)) };
-    if o as usize % width != 0 || i as usize % width != 0 || d as usize % width != 0 {
-        return false;
-    }
-    let n = frames as usize;
-    unsafe {
-        if width == 2 {
-            m.run(o as *const i16, i as *const i16, d as *mut i16, n, |x| x as f64, |y| y.round().clamp(-32768.0, 32767.0) as i16);
-        } else {
-            m.run(o as *const f32, i as *const f32, d as *mut f32, n, |x| x as f64, |y| y as f32);
-        }
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransitionKind;
+    use crate::types::TransitionKind;
 
     const RATE: f64 = 48000.0;
 

@@ -5,7 +5,6 @@ import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import dev.nori.music.ffi.RadioStation
-import dev.nori.music.ffi.ReplayGain
 import dev.nori.music.ffi.Song
 
 /**
@@ -22,57 +21,44 @@ const val SONG_SCHEME = "nori"
 fun songUri(id: String): Uri = Uri.Builder().scheme(SONG_SCHEME).authority("song").appendPath(id).build()
 
 /**
- * The song rides along in the metadata extras, so the service can rebuild it
- * (ReplayGain, scrobbling, queue persistence) without asking the server again.
+ * What the player itself carries for a song: its id, and what the system's notification and lock screen
+ * show. Everything else about it (ReplayGain, the transition planner's window, the queue as the app
+ * lists it, the queue saved for next time) the core keeps by id - see [toMediaItems], which hands the
+ * songs to it, and crates/core/src/queue.rs.
  */
-fun Song.toMediaItem(coverUrl: String?): MediaItem {
-    val extras = Bundle().apply {
-        putString("album", album); putString("albumId", albumId); putString("artistId", artistId); putString("coverArt", coverArt)
-        putInt("duration", duration.toInt()); putInt("track", track.toInt()); putInt("disc", discNumber.toInt()); putInt("year", year.toInt())
-        putString("suffix", suffix); putString("contentType", contentType); putInt("bitRate", bitRate.toInt()); putLong("size", size.toLong())
-        putInt("samplingRate", samplingRate.toInt()); putInt("bitDepth", bitDepth.toInt())
-        putBoolean("starred", starred); putInt("rating", userRating.toInt()); putBoolean("external", isExternal); putString("explicit", explicitStatus)
-        putInt("bpm", bpm.toInt())
-        replayGain?.let { g ->
-            g.trackGain?.let { putFloat("trackGain", it) }; g.albumGain?.let { putFloat("albumGain", it) }
-            g.trackPeak?.let { putFloat("trackPeak", it) }; g.albumPeak?.let { putFloat("albumPeak", it) }
-        }
-    }
-    return MediaItem.Builder()
-        .setMediaId(id)
-        .setUri(songUri(id))
-        .setMediaMetadata(
-            MediaMetadata.Builder()
-                .setTitle(title).setArtist(artist).setAlbumTitle(album)
-                .setArtworkUri(coverUrl?.let(Uri::parse))
-                .setDurationMs(duration.toLong() * 1000)
-                .setTrackNumber(track.toInt()).setGenre(genre)
-                .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC).setIsPlayable(true).setIsBrowsable(false)
-                .setExtras(extras)
-                .build()
-        )
-        .build()
+fun Song.toMediaItem(coverUrl: String?): MediaItem = MediaItem.Builder()
+    .setMediaId(id)
+    .setUri(songUri(id))
+    .setMediaMetadata(
+        MediaMetadata.Builder()
+            .setTitle(title).setArtist(artist).setAlbumTitle(album)
+            .setArtworkUri(coverUrl?.let(Uri::parse))
+            .setDurationMs(duration.toLong() * 1000)
+            .setTrackNumber(track.toInt()).setGenre(genre)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_MUSIC).setIsPlayable(true).setIsBrowsable(false)
+            .build()
+    )
+    .build()
+
+/** Songs about to be queued: handed to the core in one call, and made into the player's items. */
+fun List<Song>.toMediaItems(coverUrl: (Song) -> String?): List<MediaItem> {
+    if (isNotEmpty()) dev.nori.music.ffi.queueRegister(this)
+    return map { it.toMediaItem(coverUrl(it)) }
 }
 
-fun MediaItem.toSong(): Song {
-    val m = mediaMetadata
-    val e = m.extras ?: Bundle.EMPTY
-    fun f(k: String) = if (e.containsKey(k)) e.getFloat(k) else null
-    val gain = ReplayGain(f("trackGain"), f("albumGain"), f("trackPeak"), f("albumPeak"))
-    return Song(
-        id = mediaId, title = m.title?.toString().orEmpty(), album = e.getString("album") ?: m.albumTitle?.toString().orEmpty(),
-        artist = m.artist?.toString().orEmpty(), albumId = e.getString("albumId"), artistId = e.getString("artistId"),
-        coverArt = e.getString("coverArt"), duration = e.getInt("duration").toUInt(), track = e.getInt("track").toUInt(),
-        discNumber = e.getInt("disc").toUInt(), year = e.getInt("year").toUInt(), genre = m.genre?.toString(),
-        suffix = e.getString("suffix").orEmpty(), contentType = e.getString("contentType").orEmpty(),
-        bitRate = e.getInt("bitRate").toUInt(), size = e.getLong("size").toULong(),
-        samplingRate = e.getInt("samplingRate").toUInt(), bitDepth = e.getInt("bitDepth").toUInt(),
-        userRating = e.getInt("rating").toUByte(), starred = e.getBoolean("starred"), isExternal = e.getBoolean("external"),
-        replayGain = gain.takeIf { it.trackGain != null || it.albumGain != null },
-        artists = emptyList(), created = null, playCount = 0u, played = null, path = null, explicitStatus = e.getString("explicit").orEmpty(),
-        channelCount = 0u, musicBrainzId = null, bpm = e.getInt("bpm").toUInt(), comment = null,
-    )
-}
+/**
+ * The song behind a queued item, from the core. An item a system controller added from outside that the
+ * core never saw comes back with what the player itself knows.
+ */
+fun MediaItem.toSong(): Song = dev.nori.music.ffi.queueSong(mediaId) ?: Song(
+    id = mediaId, title = mediaMetadata.title?.toString().orEmpty(), album = mediaMetadata.albumTitle?.toString().orEmpty(),
+    artist = mediaMetadata.artist?.toString().orEmpty(), albumId = null, artistId = null, coverArt = null,
+    duration = ((mediaMetadata.durationMs ?: 0L) / 1000).toUInt(), track = (mediaMetadata.trackNumber ?: 0).toUInt(),
+    discNumber = 0u, year = 0u, genre = mediaMetadata.genre?.toString(), suffix = "", contentType = "", bitRate = 0u, size = 0u,
+    samplingRate = 0u, bitDepth = 0u, userRating = 0u, starred = false, isExternal = false, replayGain = null,
+    artists = emptyList(), created = null, playCount = 0u, played = null, path = null, explicitStatus = "",
+    channelCount = 0u, musicBrainzId = null, bpm = 0u, comment = null,
+)
 
 const val RADIO_PREFIX = "radio:"
 
@@ -101,3 +87,4 @@ fun MediaItem.queued(how: String): MediaItem =
 
 fun MediaItem.playable(): MediaItem =
     buildUpon().setUri(requestMetadata.mediaUri ?: songUri(mediaId)).build()
+

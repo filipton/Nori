@@ -13,20 +13,16 @@
 //!
 //! `process` never allocates; everything is sized in `new`.
 
-use jni::objects::{JByteBuffer, JClass};
-use jni::sys::{jboolean, jfloat, jint, jlong};
-use jni::JNIEnv;
-use parking_lot::Mutex;
 
 /// Input frames per engine call; the tempo is updated this often (about 6 ms).
-const BLOCK: usize = 256;
+pub const BLOCK: usize = 256;
 /// Slowest ratio accepted; bounds the output of one block.
 const MIN_RATIO: f64 = 0.5;
 const MAX_RATIO: f64 = 2.0;
 const MAX_OUT: usize = (BLOCK as f64 / MIN_RATIO) as usize + 8;
 /// Crossfade from the stretched to the plain signal, frames.
 const XFADE: usize = 1024;
-const MAX_CHANNELS: usize = 8;
+pub const MAX_CHANNELS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum State {
@@ -384,144 +380,6 @@ impl Stretcher {
 }
 
 // ---- JNI: dev.nori.music.playback.AutoMixStretch --------------------------------------------------------------
-
-const PCM_16: jint = 2;
-const PCM_FLOAT: jint = 4;
-
-struct Handle {
-    s: Mutex<Stretcher>,
-    ch: usize,
-    /// f32 staging for 16-bit input and output.
-    inb: Mutex<(Vec<f32>, Vec<f32>)>,
-}
-
-fn handle<'a>(h: jlong) -> Option<&'a Handle> {
-    (h != 0).then(|| unsafe { &*(h as *const Handle) })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, keep_pitch: jboolean) -> jlong {
-    let ch = (channels.max(1) as usize).min(MAX_CHANNELS);
-    let s = Stretcher::new(rate.max(1) as u32, ch, keep_pitch != 0);
-    let stage = (vec![0f32; BLOCK * 4 * ch], vec![0f32; BLOCK * 8 * ch]);
-    Box::into_raw(Box::new(Handle { s: Mutex::new(s), ch, inb: Mutex::new(stage) })) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Handle) });
-    }
-}
-
-/// `ratio` playback speed (>1 faster), held for `hold_frames` output frames, then ramped to 1 over `ramp_frames`.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_configure(_: JNIEnv, _: JClass, h: jlong, ratio: jfloat, hold_frames: jlong, ramp_frames: jlong) {
-    if let Some(h) = handle(h) {
-        h.s.lock().configure(ratio as f64, hold_frames.max(0) as u64, ramp_frames.max(0) as u64);
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_bypassed(_: JNIEnv, _: JClass, h: jlong) -> jboolean {
-    handle(h).map_or(1, |h| h.s.lock().bypassed() as jboolean)
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_latencyFrames(_: JNIEnv, _: JClass, h: jlong) -> jint {
-    handle(h).map_or(0, |h| h.s.lock().latency_frames() as jint)
-}
-
-/// Runs `in_bytes` bytes of `input[in_pos..]` through the stretcher into `output[out_pos..]`, at most `out_cap`
-/// bytes. Returns `(consumed_bytes << 32) | produced_bytes`, or -1 when the buffers cannot be used.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_process(
-    env: JNIEnv, _: JClass, h: jlong, input: JByteBuffer, in_pos: jint, in_bytes: jint, output: JByteBuffer, out_pos: jint, out_cap: jint, encoding: jint,
-) -> jlong {
-    let (Ok(src), Ok(dst)) = (env.get_direct_buffer_address(&input), env.get_direct_buffer_address(&output)) else { return -1 };
-    let Some(h) = handle(h) else { return -1 };
-    if src.is_null() || dst.is_null() || in_bytes < 0 || out_cap < 0 {
-        return -1;
-    }
-    let (src, dst) = unsafe { (src.add(in_pos as usize), dst.add(out_pos as usize)) };
-    let ch = h.ch;
-    let mut s = h.s.lock();
-    match encoding {
-        PCM_FLOAT if src as usize % 4 == 0 && dst as usize % 4 == 0 => {
-            let fi = in_bytes as usize / 4 / ch * ch;
-            let fo = out_cap as usize / 4 / ch * ch;
-            let (i, o) = unsafe { (std::slice::from_raw_parts(src as *const f32, fi), std::slice::from_raw_parts_mut(dst as *mut f32, fo)) };
-            let (used, made) = s.process(i, o);
-            (((used * ch * 4) as jlong) << 32) | (made * ch * 4) as jlong
-        }
-        PCM_16 if src as usize % 2 == 0 && dst as usize % 2 == 0 => {
-            let si = in_bytes as usize / 2 / ch * ch;
-            let so = out_cap as usize / 2 / ch * ch;
-            let (i, o) = unsafe { (std::slice::from_raw_parts(src as *const i16, si), std::slice::from_raw_parts_mut(dst as *mut i16, so)) };
-            let mut st = h.inb.lock();
-            let (fin, fout) = &mut *st;
-            let (mut used, mut made) = (0usize, 0usize);
-            // Staged in blocks, so neither side needs more memory than was reserved at create.
-            loop {
-                let n_in = (i.len() - used).min(fin.len());
-                let n_out = (o.len() - made).min(fout.len());
-                if n_out == 0 {
-                    break;
-                }
-                for (d, v) in fin[..n_in].iter_mut().zip(&i[used..used + n_in]) {
-                    *d = *v as f32 / 32768.0;
-                }
-                let (u, m) = s.process(&fin[..n_in], &mut fout[..n_out]);
-                for (d, v) in o[made..made + m * ch].iter_mut().zip(&fout[..m * ch]) {
-                    *d = (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
-                }
-                used += u * ch;
-                made += m * ch;
-                if u == 0 && m == 0 {
-                    break;
-                }
-                if used == i.len() && m * ch < n_out {
-                    break;
-                }
-            }
-            (((used * 2) as jlong) << 32) | (made * 2) as jlong
-        }
-        _ => -1,
-    }
-}
-
-/// Writes what is still inside the stretcher to `output[out_pos..]` (at most `out_cap` bytes); returns bytes written.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixStretch_drain(
-    env: JNIEnv, _: JClass, h: jlong, output: JByteBuffer, out_pos: jint, out_cap: jint, encoding: jint,
-) -> jint {
-    let Ok(dst) = env.get_direct_buffer_address(&output) else { return 0 };
-    let Some(h) = handle(h) else { return 0 };
-    if dst.is_null() || out_cap <= 0 {
-        return 0;
-    }
-    let dst = unsafe { dst.add(out_pos as usize) };
-    let ch = h.ch;
-    let mut s = h.s.lock();
-    match encoding {
-        PCM_FLOAT if dst as usize % 4 == 0 => {
-            let o = unsafe { std::slice::from_raw_parts_mut(dst as *mut f32, out_cap as usize / 4 / ch * ch) };
-            (s.drain(o) * ch * 4) as jint
-        }
-        PCM_16 if dst as usize % 2 == 0 => {
-            let o = unsafe { std::slice::from_raw_parts_mut(dst as *mut i16, out_cap as usize / 2 / ch * ch) };
-            let mut st = h.inb.lock();
-            let fout = &mut st.1;
-            let n = o.len().min(fout.len());
-            let m = s.drain(&mut fout[..n]);
-            for (d, v) in o.iter_mut().zip(&fout[..m * ch]) {
-                *d = (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
-            }
-            (m * ch * 2) as jint
-        }
-        _ => 0,
-    }
-}
 
 #[cfg(test)]
 mod tests {

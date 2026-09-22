@@ -1,206 +1,17 @@
-//! AutoMix: DJ-style transitions (see docs/research/automix.md).
-//!
-//! - `analysis` + `tempo` + `structure` + `loudness`: one pass over a track's PCM gives a `TrackAnalysis`
-//!   (tempo and beat grid, downbeats, phrase cues, key, loudness, silence and MixRamp points). Coarse uniffi call
-//!   with the whole decoded track, or a JNI streaming tap on PCM the player already decodes.
-//! - `store`: the `track_analysis` table and the `Core` methods around it.
-//! - `plan`: a pure function from two analyses and the user's settings to a `TransitionPlan`.
-//! - `mixer` and `stretch`: per-buffer JNI building blocks that render a plan (gain curves, bass swap, filter
-//!   sweep; time-stretch of the incoming track).
+//! AutoMix on this side of the FFI: the analysis store (SQLite) and the calls Kotlin makes. The
+//! analysis, planning and per-sample work itself lives in the player crate (`nori_player::automix`),
+//! shared with every platform.
 
-pub mod analysis;
-pub mod loudness;
-pub mod mixer;
-pub mod plan;
-pub mod resample;
+pub mod engine_jni;
 pub mod store;
-pub mod stretch;
-pub mod structure;
-pub mod tempo;
+pub mod planner;
 
 #[cfg(test)]
 mod tests;
 
+pub use nori_player::automix::*;
+
 use crate::{AutoMixSettings, TrackAnalysis, TransitionPlan};
-use analysis::{Analyzer, Features};
-
-/// Bump when the analysis changes enough that stored rows should be redone.
-pub const ANALYSIS_VERSION: i32 = 4;
-/// How much music at each end the intro and outro grids are measured over: long enough for a steady
-/// tempo estimate (dozens of beats at any tempo), short enough that a live band's drift inside it is
-/// a fraction of a beat.
-pub const GRID_WINDOW_S: f64 = 40.0;
-/// Below these the grid is not used for cue placement either (cues fall back to the energy envelope).
-const CUE_MIN_CONFIDENCE: f32 = 0.4;
-const CUE_MIN_STABILITY: f32 = 0.5;
-
-/// Mean of a per-frame `curve` over `[from_s, to_s)`. Too short a window to say anything (under a
-/// second of frames) falls back to the whole track rather than to noise.
-fn window_mean(curve: &[f32], fps: f64, t0: f64, from_s: f64, to_s: f64) -> f32 {
-    if curve.is_empty() || !fps.is_finite() || fps <= 0.0 {
-        return 0.0;
-    }
-    let idx = |t: f64| ((t - t0) * fps).round().max(0.0) as usize;
-    let (mut a, mut b) = (idx(from_s).min(curve.len()), idx(to_s).min(curve.len()));
-    if b.saturating_sub(a) < fps as usize {
-        (a, b) = (0, curve.len());
-    }
-    if b <= a {
-        return 0.0;
-    }
-    curve[a..b].iter().sum::<f32>() / (b - a) as f32
-}
-
-/// One stretch of music's beat grid; all zeros when it could not be measured.
-#[derive(Default, Clone, Copy, Debug)]
-pub struct Grid {
-    pub bpm: f64,
-    pub confidence: f32,
-    pub offset_ms: f64,
-    pub stability: f32,
-    pub downbeat_phase: i32,
-}
-
-/// The beat grid of `[from_s, to_s)` alone: the same tempo estimate and downbeat search as the whole
-/// track, on that stretch of the onset envelope. The first beat is given in track time, so the grid
-/// `offset + n * period` lands on the same beats as it does inside the window.
-pub fn window_grid(f: &Features, from_s: f64, to_s: f64) -> Grid {
-    if !(f.fps > 0.0) || to_s - from_s < GRID_WINDOW_S / 2.0 {
-        return Grid::default();
-    }
-    let a = (((from_s - f.t0) * f.fps).round().max(0.0) as usize).min(f.onset.len());
-    let b = (((to_s - f.t0) * f.fps).round().max(0.0) as usize).min(f.onset.len());
-    if b <= a {
-        return Grid::default();
-    }
-    let t = tempo::estimate(&f.onset[a..b], f.fps, f.t0 + a as f64 / f.fps);
-    if !(t.bpm > 0.0 && t.bpm.is_finite()) {
-        return Grid::default();
-    }
-    let db = structure::downbeat(&t, f, (from_s, to_s));
-    Grid { bpm: t.bpm, confidence: t.confidence, offset_ms: t.offset_s * 1000.0, stability: t.stability, downbeat_phase: db.phase }
-}
-
-/// A `TrackAnalysis` plus the working data behind it, for tests and diagnostics.
-pub struct Analysis {
-    pub track: TrackAnalysis,
-    pub tempo: tempo::Tempo,
-}
-
-/// Runs the whole-track steps on the features of one track.
-pub fn finish(song_id: &str, f: &Features) -> Analysis {
-    let duration_ms = (f.duration_s * 1000.0).round() as i64;
-    let (s0, s1) = loudness::silence_trim(&f.blocks_raw);
-    let (s0, s1) = (s0.min(duration_ms), s1.min(duration_ms));
-    let lufs = loudness::integrated(&f.blocks_k);
-    let (mr0, mr1) = loudness::mixramp(&f.blocks_k, lufs).map_or((s0, s1), |(a, b)| (a.clamp(s0, s1.max(s0)), b.clamp(s0, s1.max(s0))));
-    let silent = s1 <= s0;
-    let music = if silent { (0.0, f.duration_s) } else { (s0 as f64 / 1000.0, s1 as f64 / 1000.0) };
-
-    let t = if silent { tempo::Tempo::default() } else { tempo::estimate(&f.onset, f.fps, f.t0) };
-    let db = structure::downbeat(&t, f, music);
-    let grid_ok = t.bpm > 0.0 && t.confidence >= CUE_MIN_CONFIDENCE && t.stability >= CUE_MIN_STABILITY;
-    let (intro, outro) = if silent { (0.0, 0.0) } else { structure::cues(&t, &db, f, music, grid_ok) };
-    let (key, key_confidence) = if silent { (0, 0.0) } else { structure::key(&f.chroma) };
-    // What the overlap windows sound like: vocal share and brightness of the outgoing outro and the
-    // incoming intro, for the pair gates in `plan`. Silence has neither.
-    let (outro_vocal, outro_centroid, intro_vocal, intro_centroid) = if silent {
-        (0.0, 0.0, 0.0, 0.0)
-    } else {
-        (
-            window_mean(&f.vocal, f.fps, f.t0, outro, music.1),
-            window_mean(&f.centroid, f.fps, f.t0, outro, music.1),
-            window_mean(&f.vocal, f.fps, f.t0, music.0, intro),
-            window_mean(&f.centroid, f.fps, f.t0, music.0, intro),
-        )
-    };
-
-    let (outro_grid, intro_grid) = if silent {
-        (Grid::default(), Grid::default())
-    } else {
-        (
-            window_grid(f, (music.1 - GRID_WINDOW_S).max(music.0), music.1),
-            window_grid(f, music.0, (music.0 + GRID_WINDOW_S).min(music.1)),
-        )
-    };
-
-    let track = TrackAnalysis {
-        song_id: song_id.to_string(),
-        analysis_version: ANALYSIS_VERSION,
-        duration_ms,
-        bpm: if t.bpm.is_finite() { t.bpm } else { 0.0 },
-        bpm_confidence: t.confidence,
-        beat_offset_ms: t.offset_s * 1000.0,
-        stability: t.stability,
-        downbeat_phase: db.phase,
-        downbeat_confidence: db.confidence,
-        lufs: lufs as f32,
-        key,
-        key_confidence,
-        silence_start_ms: s0,
-        silence_end_ms: s1,
-        mixramp_start_ms: mr0,
-        mixramp_end_ms: mr1,
-        intro_end_ms: (intro * 1000.0).round() as i64,
-        outro_start_ms: (outro * 1000.0).round() as i64,
-        outro_vocal,
-        intro_vocal,
-        outro_centroid,
-        intro_centroid,
-        analysed_ms: crate::db::now_ms(),
-        outro_bpm: outro_grid.bpm,
-        outro_bpm_confidence: outro_grid.confidence,
-        outro_beat_offset_ms: outro_grid.offset_ms,
-        outro_stability: outro_grid.stability,
-        outro_downbeat_phase: outro_grid.downbeat_phase,
-        intro_bpm: intro_grid.bpm,
-        intro_bpm_confidence: intro_grid.confidence,
-        intro_beat_offset_ms: intro_grid.offset_ms,
-        intro_stability: intro_grid.stability,
-        intro_downbeat_phase: intro_grid.downbeat_phase,
-    };
-    Analysis { track, tempo: t }
-}
-
-/// Analyses one whole track of mono samples at `sample_rate`.
-pub fn analyse(song_id: &str, pcm: &[f32], sample_rate: u32) -> Analysis {
-    let mut a = Analyzer::new(sample_rate, (pcm.len() as u64 * 1000) / sample_rate.max(1) as u64);
-    a.feed(pcm);
-    let f = a.take_features();
-    finish(song_id, &f)
-}
-
-/// `C.ENCODING_PCM_16BIT` and `C.ENCODING_PCM_FLOAT`, as media3 numbers them.
-pub const PCM_16: i32 = 2;
-pub const PCM_FLOAT: i32 = 4;
-
-/// Analyses interleaved little-endian PCM bytes, 16-bit or float, as a decoder hands them out.
-pub fn analyse_bytes(song_id: &str, pcm: &[u8], sample_rate: i32, channels: i32, encoding: i32) -> Analysis {
-    let ch = channels.clamp(1, 8) as usize;
-    let rate = sample_rate.max(1) as u32;
-    let width = if encoding == PCM_FLOAT { 4 } else { 2 };
-    let frames = pcm.len() / width / ch;
-    let mut a = Analyzer::new(rate, frames as u64 * 1000 / rate as u64);
-    // Decoded in slices so a whole track never exists as f32 on top of the bytes.
-    let chunk = 1024 * ch * width;
-    for part in pcm.chunks(chunk) {
-        let part = &part[..part.len() / (ch * width) * (ch * width)];
-        if encoding == PCM_FLOAT {
-            let mut s = [0f32; 1024 * 8];
-            for (d, b) in s.iter_mut().zip(part.chunks_exact(4)) {
-                *d = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            }
-            a.feed_interleaved(&s[..part.len() / 4], ch, |v| v);
-        } else {
-            let mut s = [0i16; 1024 * 8];
-            for (d, b) in s.iter_mut().zip(part.chunks_exact(2)) {
-                *d = i16::from_le_bytes([b[0], b[1]]);
-            }
-            a.feed_interleaved(&s[..part.len() / 2], ch, |v| v as f32 / 32768.0);
-        }
-    }
-    finish(song_id, &a.take_features())
-}
 
 /// Analyses a whole decoded track without storing it: interleaved little-endian PCM (`encoding` 2 = 16-bit,
 /// 4 = float) at any rate and channel count, exactly as MediaCodec hands it out. A `ByteArray` on the Kotlin side,
@@ -216,7 +27,7 @@ pub fn automix_analyse(song_id: String, pcm: Vec<u8>, sample_rate: i32, channels
 pub fn plan_transition(
     outgoing: Option<TrackAnalysis>, incoming: Option<TrackAnalysis>, out_duration_ms: i64, in_duration_ms: i64, settings: AutoMixSettings,
 ) -> TransitionPlan {
-    plan::plan(outgoing.as_ref(), incoming.as_ref(), out_duration_ms, in_duration_ms, &settings)
+    nori_player::automix::plan::plan(outgoing.as_ref(), incoming.as_ref(), out_duration_ms, in_duration_ms, &settings)
 }
 
 /// The plan as the flat array `AutoMixMixer.configure` takes.
@@ -253,4 +64,11 @@ pub fn automix_key_distance(a: i32, b: i32) -> i32 {
 #[uniffi::export]
 pub fn automix_default_settings() -> AutoMixSettings {
     AutoMixSettings::default()
+}
+
+/// `current` sits inside an album played in order (for ReplayGain's album mode); see
+/// `nori_player::transitions::in_album_run`.
+#[uniffi::export]
+pub fn in_album_run(before: Option<crate::WindowSong>, current: crate::WindowSong, after: Option<crate::WindowSong>, shuffling: bool) -> bool {
+    nori_player::transitions::in_album_run(before.as_ref(), &current, after.as_ref(), shuffling)
 }

@@ -191,24 +191,14 @@ class BitPerfect(context: Context) {
         }
         val modes = port.modes
         val labels = modes.map(::label)
-        if (!enabled || modes.isEmpty() || sampleRate == 0) {
-            clear()
-            return DacState(name, supported = modes.isNotEmpty(), modes = labels, playing = playing, track = track)
-        }
-        val match = modes.firstOrNull { it.sampleRate == sampleRate && it.encoding == encoding }
+        // Which mode fits, or why none does, is nori-player's call (nori_player::dac).
+        fun mode(rate: Int, enc: Int) = dev.nori.music.ffi.DacMode(rate.toUInt(), bits(enc).toUInt(), enc == AudioFormat.ENCODING_PCM_FLOAT)
+        val choice = dev.nori.music.ffi.dacChoice(enabled, modes.map { mode(it.sampleRate, it.encoding) }, mode(sampleRate, encoding))
+        val match = modes.getOrNull(choice.useIndex)
         if (match == null) {
-            // Either the DAC cannot take this rate at all, or it can but only in a sample format this app
-            // cannot write yet: media3's sink emits 16-bit or float, never 24- or 32-bit integer.
-            val sameRate = modes.filter { it.sampleRate == sampleRate }
-            val why = when {
-                sameRate.isEmpty() -> "this DAC has no bit-perfect mode at ${playing?.substringBefore(" /")}"
-                // The planned way in is the USB exclusive driver (docs/features.md, build step 10):
-                // Android's own path writes 16-bit or float and nothing else.
-                else -> "this DAC wants ${sameRate.joinToString(" or ") { "${bits(it.encoding)} bit" }} at ${playing?.substringBefore(" /")}, which needs USB exclusive output (not built yet)"
-            }
-            Log.w("BitPerfect", "no usable bit-perfect mode: $why")
+            choice.blockedBy?.let { Log.w("BitPerfect", "no usable bit-perfect mode: $it") }
             clear()
-            return DacState(name, supported = true, modes = labels, blockedBy = why, playing = playing, track = track)
+            return DacState(name, supported = modes.isNotEmpty(), modes = labels, blockedBy = choice.blockedBy, playing = playing, track = track)
         }
         if (applied?.id == port.id && applied?.modes?.contains(match) == true && _state.value.bitPerfect) {
             return _state.value.copy(modes = labels, playing = playing, track = track)

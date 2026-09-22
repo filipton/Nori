@@ -117,7 +117,7 @@ class OfflineBridge(
                 // [at] is the failed song; park it and everything after, play downloads in between.
                 val parked = (at until player.mediaItemCount).map(player::getMediaItemAt)
                 player.removeMediaItems(at, player.mediaItemCount)
-                val bridge = picks.map { it.toMediaItem(cover(it)).asBridge() }
+                val bridge = picks.toMediaItems(cover).map { it.asBridge() }
                 val rest = parked.mapIndexed { i, m -> if (i == 0) m.asParkedHead() else m.clearBridgeTags() }
                 player.addMediaItems(bridge + rest)
                 player.seekTo(at, C.TIME_UNSET)
@@ -141,7 +141,7 @@ class OfflineBridge(
         val queued = (0 until player.mediaItemCount).mapTo(HashSet()) { player.getMediaItemAt(it).mediaId }
         val picks = extra ?: pick(seed, downloads.state.value.done, queued, BRIDGE_BATCH)
         if (picks.isEmpty()) return
-        player.addMediaItems(head, picks.map { it.toMediaItem(cover(it)).asBridge() })
+        player.addMediaItems(head, picks.toMediaItems(cover).map { it.asBridge() })
     }
 
     private fun nextDownloadedIndex(): Int? {

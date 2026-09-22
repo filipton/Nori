@@ -95,5 +95,4 @@ dependencies {
     implementation(libs.compose.material.icons)
     implementation(libs.coil.compose)
     implementation(libs.coil.okhttp)
-    implementation(libs.androidx.palette)
 }

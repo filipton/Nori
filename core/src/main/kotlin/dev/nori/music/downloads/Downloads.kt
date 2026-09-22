@@ -29,7 +29,6 @@ import dev.nori.music.playback.MediaSources
 import dev.nori.music.settings.Settings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.update
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
@@ -57,38 +56,20 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     private val _state = MutableStateFlow(DownloadState())
     val state: StateFlow<DownloadState> = _state
 
-    /** The run of the queue the notification counts. Main thread only, where the manager reports. */
-    private val batch = DownloadBatch()
-
     private val _marks = MutableStateFlow<Map<String, DownloadMark>>(emptyMap())
     /**
      * The songs this session's downloads are doing something with: downloading, failed, or finished
-     * lately (the last [RECENT] of them). A pending song with no mark is waiting its turn. It changes
-     * when a download changes phase, never with its progress, which each mark carries in a flow of its
-     * own - so a list watching this map is not redrawn per percent.
+     * lately. A pending song with no mark is waiting its turn. It changes when a download changes phase,
+     * never with its progress, which each mark carries in a flow of its own - so a list watching this
+     * map is not redrawn per percent. The phases and the bookkeeping are the core's
+     * (crates/core/src/transfers.rs); this mirrors them for the screens.
      */
     val marks: StateFlow<Map<String, DownloadMark>> = _marks
 
-    /** The progress of each download that has a task, written from that task's own thread. */
+    /** Each marked song's progress, 0..1 or negative while its size is unknown. */
     private val progress = ConcurrentHashMap<String, MutableStateFlow<Float>>()
 
-    /** How fast the batch is moving, for the notification and the downloads screen. */
-    private val _stats = MutableStateFlow(DownloadStats())
-    val stats: StateFlow<DownloadStats> = _stats
-
-    /** How fast each running song is arriving, written from its task's own thread. */
-    private val _tempos = MutableStateFlow<Map<String, DownloadTempo>>(emptyMap())
-    val tempos: StateFlow<Map<String, DownloadTempo>> = _tempos
-
-    /** Latest byte counts per running download, for speed and ETA. Task threads only. */
-    private val bytesOf = ConcurrentHashMap<String, Long>()
-    private val totalOf = ConcurrentHashMap<String, Long>()
-    private data class SpeedSample(var bytes: Long, var at: Long, var rate: Double)
-    private val speedOf = ConcurrentHashMap<String, SpeedSample>()
-    @Volatile private var lastTemposAt = 0L
-
-    private fun progressOf(request: DownloadRequest) =
-        progress.getOrPut(request.id) { MutableStateFlow(if (estimateOf(request) > 0) 0f else -1f) }
+    private fun progressOf(id: String) = progress.getOrPut(id) { MutableStateFlow(DownloadsJni.startFraction(id)) }
 
     val manager: DownloadManager by lazy {
         // media3's own wiring (DefaultDownloadIndex, DefaultDownloaderFactory over the download cache),
@@ -122,11 +103,11 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
-                    val wasOpen = batch.isOpen(d.request.id)
-                    batch.removed(d.request.id)
-                    unmark(listOf(d.request.id))
+                    val flags = DownloadsJni.removed(d.request.id)
+                    progress.remove(d.request.id)
+                    if (flags and DownloadsJni.MARKS != 0) refreshMarks()
                     io.execute { core.downloadRemove(d.request.id); publish() }
-                    if (wasOpen && batch.drained) summarise()
+                    if (flags and DownloadsJni.DRAINED != 0) summarise()
                 }
             })
         }
@@ -138,7 +119,10 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     /** Whether the queue has been handed back to media3 in this process; see [resume]. */
     @Volatile private var resumed = false
 
-    init { io.execute { publish(); reconcile() } }
+    init {
+        DownloadsJni.setup(settings.value.download.bitRate)
+        io.execute { publish(); reconcile() }
+    }
 
     private fun publish() {
         val next = DownloadState(core.downloads(true), core.downloads(false))
@@ -171,7 +155,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 buildMap { while (c.moveToNext()) c.download.let { put(it.request.id, it) } }
             }
         }.getOrDefault(emptyMap())
-        val failed = HashMap<String, DownloadMark>()
+        var failed = 0
         val lost = ArrayList<Song>()
         var finished = false
         var unfinished = false
@@ -180,16 +164,17 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             when (d?.state) {
                 null, Download.STATE_REMOVING -> lost += s
                 Download.STATE_COMPLETED -> { core.downloadDone(s.id); finished = true; sources.dropStreamCopies(s.id) }
-                Download.STATE_FAILED -> failed[s.id] = DownloadMark(
-                    DownloadPhase.FAILED, MutableStateFlow(downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request))), 0L,
-                )
+                Download.STATE_FAILED -> {
+                    progress.getOrPut(s.id) { MutableStateFlow(DownloadsJni.restoreFailed(s.id, d.contentLength, d.bytesDownloaded)) }
+                    failed++
+                }
                 else -> unfinished = true
             }
         }
         if (finished) publish()
-        if (failed.isNotEmpty()) _marks.update { m -> failed.filterKeys { it !in m } + m }
+        if (failed > 0) main.post { refreshMarks() }
         if (!unfinished && lost.isEmpty()) { resumed = true; return }
-        Log.i(TAG, "resuming: ${pending.size} pending, ${lost.size} asked for again, ${failed.size} failed")
+        Log.i(TAG, "resuming: ${pending.size} pending, ${lost.size} asked for again, $failed failed")
         main.post {
             resumed = runCatching {
                 // The first intent brings the service - and with it the manager and its restored queue - up.
@@ -200,95 +185,39 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /**
-     * Follows one download into [batch] and [marks]. Runs on the main thread, where media3 reports.
-     * When the last song of a batch settles, the batch says how it went.
+     * Hands one download's state to the core, which keeps the batch and the phases, and follows what it
+     * says: a new batch takes the last one's result away, the phases changed, or the batch is over and
+     * says how it went. Runs on the main thread, where media3 reports.
      */
     private fun follow(d: Download) {
         val id = d.request.id
-        val wasOpen = batch.isOpen(id)
+        val flags = DownloadsJni.followed(id, d.state, SystemClock.elapsedRealtime())
+        if (flags and DownloadsJni.NEW_BATCH != 0) cancelResult()
         when (d.state) {
-            Download.STATE_QUEUED, Download.STATE_DOWNLOADING, Download.STATE_RESTARTING, Download.STATE_STOPPED ->
-                if (batch.queued(id, albumOf(d.request))) cancelResult()
-            Download.STATE_COMPLETED -> batch.completed(id)
-            Download.STATE_FAILED -> batch.failed(id)
+            Download.STATE_DOWNLOADING -> progressOf(id)
+            Download.STATE_COMPLETED -> progress.getOrPut(id) { MutableStateFlow(1f) }.value = 1f
         }
-        mark(d)
-        if (wasOpen && batch.drained) summarise()
+        if (flags and DownloadsJni.MARKS != 0) refreshMarks()
+        if (flags and DownloadsJni.DRAINED != 0) summarise()
     }
 
-    private fun mark(d: Download) {
-        val id = d.request.id
-        val now = SystemClock.elapsedRealtime()
-        when (d.state) {
-            Download.STATE_DOWNLOADING -> {
-                val flow = progressOf(d.request)
-                if (_marks.value[id]?.phase != DownloadPhase.DOWNLOADING) {
-                    _marks.update { it + (id to DownloadMark(DownloadPhase.DOWNLOADING, flow, now)) }
-                    Log.d(TAG, "start $id: ${running()} downloading at once")
-                }
-            }
-            Download.STATE_COMPLETED -> {
-                progress.remove(id)
-                dropTempo(id)
-                _marks.update { recentOnly(it + (id to DownloadMark(DownloadPhase.DONE, MutableStateFlow(1f), now))) }
-            }
-            Download.STATE_FAILED -> {
-                val last = progress.remove(id)?.value ?: -1f
-                dropTempo(id)
-                _marks.update { it + (id to DownloadMark(DownloadPhase.FAILED, MutableStateFlow(last), now)) }
-                Log.w(TAG, "failed $id")
-            }
-            // Queued, stopped, restarting or on its way out: no mark, so a pending song reads as waiting.
-            else -> if (id in _marks.value) _marks.update { it - id }
+    /** The core's phases as the screens read them, each with its song's progress flow. */
+    private fun refreshMarks() {
+        val m = dev.nori.music.ffi.downloadMarks()
+        val next = HashMap<String, DownloadMark>(m.ids.size)
+        for (i in m.ids.indices) {
+            val id = m.ids[i]
+            val phase = when (m.phases[i]) { 1 -> DownloadPhase.DOWNLOADING; 2 -> DownloadPhase.FAILED; else -> DownloadPhase.DONE }
+            next[id] = DownloadMark(phase, progressOf(id), m.at[i])
         }
+        progress.keys.retainAll(next.keys + (_state.value.pendingIds))
+        _marks.value = next
     }
-
-    /**
-     * What a task's thread reports: bytes so far and what the song should weigh. Folds the delta
-     * into a smoothed per-song rate and, at most twice a second, publishes every running song's
-     * tempo for the downloads screen.
-     */
-    private fun noteBytes(id: String, bytes: Long, total: Long, now: Long) {
-        bytesOf[id] = bytes
-        if (total > 0) totalOf[id] = total
-        val sample = speedOf.getOrPut(id) { SpeedSample(bytes, now, 0.0) }
-        val dt = (now - sample.at) / 1000.0
-        if (dt >= 0.4 && bytes >= sample.bytes) {
-            val instant = (bytes - sample.bytes) / dt
-            sample.rate = if (sample.rate <= 0) instant else sample.rate * 0.7 + instant * 0.3
-            sample.bytes = bytes
-            sample.at = now
-        }
-        if (now - lastTemposAt >= 500) {
-            lastTemposAt = now
-            _tempos.value = bytesOf.entries.associate { (song, b) ->
-                val t = (totalOf[song] ?: 0L) - b
-                song to DownloadTempo(speedOf[song]?.rate?.toLong() ?: 0L, t.coerceAtLeast(0L))
-            }
-        }
-    }
-
-    private fun dropTempo(id: String) {
-        bytesOf.remove(id); totalOf.remove(id); speedOf.remove(id)
-        if (id in _tempos.value) _tempos.value = _tempos.value - id
-        if (speedOf.isEmpty()) _stats.value = DownloadStats()
-    }
-
-    /** How many songs are downloading right now. */
-    fun running(): Int = _marks.value.values.count { it.phase == DownloadPhase.DOWNLOADING }
 
     private fun unmark(ids: Collection<String>) {
-        ids.forEach { progress.remove(it); dropTempo(it) }
-        _marks.update { m -> if (ids.none { it in m }) m else m - ids.toSet() }
-    }
-
-    /** Finished marks beyond the latest [RECENT] go; the song's own "downloaded" state carries on. */
-    private fun recentOnly(m: Map<String, DownloadMark>): Map<String, DownloadMark> {
-        val done = m.values.count { it.phase == DownloadPhase.DONE }
-        if (done <= RECENT) return m
-        val drop = m.entries.filter { it.value.phase == DownloadPhase.DONE }.sortedBy { it.value.at }
-            .take(done - RECENT).mapTo(HashSet()) { it.key }
-        return m - drop
+        var changed = false
+        for (id in ids) { progress.remove(id); if (DownloadsJni.unmark(id) and DownloadsJni.MARKS != 0) changed = true }
+        if (changed) main.post { refreshMarks() }
     }
 
     /**
@@ -297,6 +226,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * skipped, so the download button always does something.
      */
     fun download(songs: List<Song>) = io.execute {
+        DownloadsJni.setup(settings.value.download.bitRate)
         val st = _state.value
         val fresh = songs.filter { it.id !in st.doneIds && it.id !in st.pendingIds }.distinctBy { it.id }
         val again = songs.filter { it.id in st.pendingIds }
@@ -306,7 +236,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         val retries = again.map(::request)
         main.post {
             for (r in requests) add(r)
-            for (r in retries) if (!batch.isOpen(r.id)) { unmark(listOf(r.id)); add(r) }
+            for (r in retries) if (!manager.currentDownloads.any { it.request.id == r.id }) { unmark(listOf(r.id)); add(r) }
         }
     }
 
@@ -327,18 +257,9 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             .onFailure { Log.w(TAG, "could not queue ${r.id}", it) }
     }
 
-    /**
-     * The title, the album and the expected size ride along with the request: the notification and the
-     * progress ring need them, and a transcoding server usually answers without a Content-Length, which
-     * leaves media3's own progress empty and the download looking stuck.
-     */
-    private fun request(s: Song): DownloadRequest {
-        val expected = expectedBytes(s.size.toLong(), s.duration.toLong(), settings.value.download.bitRate)
-        return DownloadRequest.Builder(s.id, Uri.parse(sources.downloadUrl(s.id)))
-            .setCustomCacheKey(sources.downloadKey(s.id))
-            .setData("$expected\n${s.title.replace('\n', ' ')}\n${s.album.replace('\n', ' ')}".toByteArray())
-            .build()
-    }
+    /** What the song is and how much it should weigh the core knows from its own downloads table. */
+    private fun request(s: Song): DownloadRequest =
+        DownloadRequest.Builder(s.id, Uri.parse(sources.downloadUrl(s.id))).setCustomCacheKey(sources.downloadKey(s.id)).build()
 
     fun remove(ids: List<String>) = ids.forEach { DownloadService.sendRemoveDownload(context, DownloadWorker::class.java, it, false) }
 
@@ -374,12 +295,13 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * nothing else redraws it. The batch's aggregate speed is published for the downloads screen.
      */
     internal fun progressNotification(context: Context, downloads: List<Download>, notMetRequirements: Int): Notification {
-        val running = downloads.filter { it.state == Download.STATE_DOWNLOADING }
-        val total = maxOf(batch.total, batch.finished + downloads.size)
-        if (total == 0) {
-            // Nothing left: the service is on its way out, and the batch's own summary (its own id,
-            // so stopping the service does not take it) says how it went. No bar here.
-            return NotificationCompat.Builder(context, CHANNEL)
+        // The words and the bar are the core's; asked once a second, it says whether they changed, and
+        // an unchanged notification is handed back as it was rather than built again.
+        when (DownloadsJni.notice(downloads.size, notMetRequirements, SystemClock.elapsedRealtime())) {
+            0 -> lastProgress?.let { return it }
+            2 -> return complete ?: NotificationCompat.Builder(context, CHANNEL)
+                // Nothing left: the service is on its way out, and the batch's own summary (its own id,
+                // so stopping the service does not take it) says how it went. No bar here.
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle("Downloads complete")
                 .setContentIntent(openDownloads(context))
@@ -387,38 +309,13 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 .setOnlyAlertOnce(true)
                 .setSilent(true)
                 .setShowWhen(false)
-                .build()
-        }
-        val inFlight = running.sumOf { d -> downloadFraction(d.contentLength, d.bytesDownloaded, estimateOf(d.request)).coerceAtLeast(0f).toDouble() }
-        val fraction = batch.fraction(inFlight)
-        val position = (batch.finished + 1).coerceAtMost(total.coerceAtLeast(1))
-        val label = batch.label()
-        val current = running.minByOrNull { it.startTimeMs }?.let { titleOf(it.request) }
-        val now = SystemClock.elapsedRealtime()
-        val speed = speedOf.values.sumOf { if (now - it.at < 3_000) it.rate else 0.0 }.toLong()
-        val expected = downloads.map { if (it.contentLength > 0) it.contentLength else estimateOf(it.request) }
-        val unlisted = (total - batch.finished - downloads.size).coerceAtLeast(0)
-        val avg = expected.filter { it > 0 }.average().takeIf { !it.isNaN() }?.toLong() ?: 8_000_000L
-        val remaining = expected.zip(downloads).sumOf { (e, d) -> (e - d.bytesDownloaded).coerceAtLeast(0L) } + unlisted * avg
-        val eta = if (speed > 0 && remaining > 0) remaining / speed else null
-        _stats.value = DownloadStats(speed, remaining, eta)
-        val title = when {
-            notMetRequirements != 0 -> "Waiting for a network"
-            total == 1 -> current?.let { "Downloading “$it”" } ?: "Downloading 1 song"
-            else -> "Downloading: $position of $total"
-        }
-        val speedText = formatSpeed(speed)
-        val etaText = formatEta(eta)
-        val text = if (total == 1) {
-            listOfNotNull(current, speedText.ifEmpty { null }, etaText.ifEmpty { null }).joinToString(" · ")
-        } else {
-            listOfNotNull(current, label?.let { "“$it”" }, speedText.ifEmpty { null }, etaText.ifEmpty { null }).joinToString(" · ")
+                .build().also { complete = it }
         }
         return NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(title)
-            .setContentText(text.ifEmpty { null })
-            .setProgress(1000, (fraction * 1000).toInt(), false)
+            .setContentTitle(DownloadsJni.noticeTitle())
+            .setContentText(DownloadsJni.noticeText().ifEmpty { null })
+            .setProgress(1000, DownloadsJni.noticePermille(), false)
             .setContentIntent(openDownloads(context))
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelIntent(context))
             .setOngoing(true)
@@ -426,8 +323,11 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             .setSilent(true)
             .setShowWhen(false)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
-            .build()
+            .build().also { lastProgress = it }
     }
+
+    private var lastProgress: Notification? = null
+    private var complete: Notification? = null
 
     /**
      * How the batch went, once it has. Its own notification id: the service takes the progress one with
@@ -435,31 +335,19 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * by itself. Something failed: it stays, and a tap shows which.
      */
     private fun summarise() {
-        val done = batch.done
-        val failed = batch.failed
-        if (done == 0 && failed == 0) return
+        val summary = DownloadsJni.summary()
+        if (summary.isEmpty()) return
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
-        val label = batch.label()
-        val title = when {
-            failed > 0 -> if (failed == 1) "1 song couldn’t be downloaded" else "$failed songs couldn’t be downloaded"
-            label != null && done > 1 -> "“$label” downloaded"
-            done == 1 -> "1 song downloaded"
-            else -> "$done songs downloaded"
-        }
-        val text = when {
-            failed > 0 && done > 0 -> "$done downloaded · tap to see what failed"
-            failed > 0 -> "Tap to try again"
-            else -> null
-        }
+        val failed = DownloadsJni.summaryFailed() > 0
         val b = NotificationCompat.Builder(context, CHANNEL)
-            .setSmallIcon(if (failed > 0) android.R.drawable.stat_notify_error else android.R.drawable.stat_sys_download_done)
-            .setContentTitle(title)
-            .setContentText(text)
+            .setSmallIcon(if (failed) android.R.drawable.stat_notify_error else android.R.drawable.stat_sys_download_done)
+            .setContentTitle(summary.substringBefore('\n'))
+            .setContentText(summary.substringAfter('\n').ifEmpty { null })
             .setContentIntent(openDownloads(context))
             .setAutoCancel(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
-        if (failed == 0) b.setTimeoutAfter(8_000)
+        if (!failed) b.setTimeoutAfter(8_000)
         runCatching { nm.notify(DOWNLOAD_RESULT_NOTIFICATION, b.build()) }
     }
 
@@ -468,19 +356,22 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         context.getSystemService(NotificationManager::class.java)?.cancel(DOWNLOAD_RESULT_NOTIFICATION)
     }
 
-    /** Hands each downloader's progress to [progress], through a [ProgressGate] so it arrives at a drawable rate. */
+    /**
+     * Reports each downloader's chunks to the core against a slot of its own - three numbers a chunk,
+     * nothing looked up or allocated - and passes on only the progress the core says is worth drawing.
+     */
     private inner class TrackedDownloaders(private val inner: DownloaderFactory) : DownloaderFactory {
         override fun createDownloader(request: DownloadRequest): Downloader {
             val downloader = inner.createDownloader(request)
-            val estimate = estimateOf(request)
-            val flow = progressOf(request)
-            val gate = ProgressGate()
+            val flow = progressOf(request.id)
             return object : Downloader {
-                override fun download(listener: Downloader.ProgressListener?) = downloader.download { length, bytes, percent ->
-                    listener?.onProgress(length, bytes, percent)
-                    val f = downloadFraction(length, bytes, estimate)
-                    if (gate.offer(f, SystemClock.elapsedRealtime())) flow.value = f
-                    noteBytes(request.id, bytes, if (length > 0) length else estimate, SystemClock.elapsedRealtime())
+                override fun download(listener: Downloader.ProgressListener?) {
+                    val slot = DownloadsJni.open(request.id, SystemClock.elapsedRealtime())
+                    downloader.download { length, bytes, percent ->
+                        listener?.onProgress(length, bytes, percent)
+                        val f = DownloadsJni.note(slot, length, bytes, SystemClock.elapsedRealtime())
+                        if (!f.isNaN()) flow.value = f
+                    }
                 }
                 override fun cancel() = downloader.cancel()
                 override fun remove() = downloader.remove()
@@ -489,17 +380,36 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     companion object {
-        /** Finished downloads the downloads screen keeps listing this session. */
-        const val RECENT = 50
         internal const val TAG = "noridl"
     }
 }
 
-/** What a request says the song will weigh, its title and its album: the lines of its data (see [Downloads.request]). */
-private fun dataLine(request: DownloadRequest, n: Int): String? = request.data.decodeToString().split('\n').getOrNull(n)?.takeIf(String::isNotBlank)
-private fun estimateOf(request: DownloadRequest): Long = dataLine(request, 0)?.toLongOrNull() ?: 0L
-private fun titleOf(request: DownloadRequest): String? = dataLine(request, 1)
-private fun albumOf(request: DownloadRequest): String? = dataLine(request, 2)
+/** The core's side of the downloads; see crates/core/src/transfers.rs. */
+internal object DownloadsJni {
+    init { System.loadLibrary("norimusic") }
+
+    const val NEW_BATCH = 1
+    const val DRAINED = 2
+    const val MARKS = 4
+
+    @JvmStatic external fun setup(downloadKbps: Int)
+    @JvmStatic external fun followed(id: String, state: Int, now: Long): Int
+    @JvmStatic external fun removed(id: String): Int
+    @JvmStatic external fun unmark(id: String): Int
+    @JvmStatic external fun restoreFailed(id: String, length: Long, bytes: Long): Float
+    @JvmStatic external fun startFraction(id: String): Float
+    @JvmStatic external fun open(id: String, now: Long): Int
+    /** Per chunk: the progress to show, or NaN when it has not moved enough to draw. */
+    @JvmStatic external fun note(slot: Int, length: Long, bytes: Long, now: Long): Float
+    /** 0 unchanged, 1 changed, 2 the batch is over. */
+    @JvmStatic external fun notice(listed: Int, waiting: Int, now: Long): Int
+    @JvmStatic external fun noticeTitle(): String
+    @JvmStatic external fun noticeText(): String
+    @JvmStatic external fun noticePermille(): Int
+    /** "title\ntext", or empty when there is nothing to say. */
+    @JvmStatic external fun summary(): String
+    @JvmStatic external fun summaryFailed(): Int
+}
 
 /** Asks the app to open on its downloads screen. The activity answers it; the core only names it. */
 const val ACTION_OPEN_DOWNLOADS = "dev.nori.music.OPEN_DOWNLOADS"

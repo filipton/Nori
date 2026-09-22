@@ -3,6 +3,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+// Defined in the player crate, where the audio code that uses them lives; described here again so
+// uniffi can hand them to Kotlin unchanged.
+pub use nori_player::types::{AutoMixSettings, EqBand, EqKind, FadeCurve, NamedPreset, TrackAnalysis, TransitionKind, TransitionPlan};
+
 /// `starred` is a timestamp on the wire and a bool once stored.
 fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     #[derive(Deserialize)]
@@ -283,7 +287,7 @@ pub struct PlayQueue {
 }
 
 /// The order is the wire format: `dsp.rs` reads the ordinal out of the flat band array, so only append.
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum EqKind {
     Peaking,
     LowShelf,
@@ -298,7 +302,7 @@ pub enum EqKind {
     HighShelfSlope,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct EqBand {
     pub kind: EqKind,
     pub freq: f32,
@@ -313,7 +317,7 @@ pub struct EqPreset {
 }
 
 /// One of the built-in curves from `dsp::eq_presets`.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct NamedPreset {
     pub name: String,
     pub preamp_db: f32,
@@ -451,7 +455,7 @@ pub struct SoundProfile {
 /// What AutoMix knows about one track, from `automix::analysis`. One row in `track_analysis`.
 /// Times are milliseconds from the start of the file. The beat grid is not stored beat by beat: beat `n` sits at
 /// `beat_offset_ms + n * 60000 / bpm`, and beats with `n % 4 == downbeat_phase` start a bar.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct TrackAnalysis {
     pub song_id: String,
     /// Rows older than `automix::ANALYSIS_VERSION` are reported by `analysis_missing` so they get redone.
@@ -513,7 +517,7 @@ pub struct TrackAnalysis {
 }
 
 /// The user's AutoMix switches, as the planner sees them.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct AutoMixSettings {
     /// Longest transition, seconds.
     pub max_transition_s: f32,
@@ -536,25 +540,8 @@ pub struct AutoMixSettings {
     pub in_tag_bpm: f32,
 }
 
-impl Default for AutoMixSettings {
-    fn default() -> Self {
-        AutoMixSettings {
-            max_transition_s: 16.0,
-            beat_match: true,
-            max_tempo_change_pct: 6.0,
-            bass_swap: true,
-            filter_effects: true,
-            echo_out: true,
-            keep_pitch: true,
-            same_album_in_order: false,
-            match_loudness: false,
-            out_tag_bpm: 0.0,
-            in_tag_bpm: 0.0,
-        }
-    }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum TransitionKind {
     /// No overlap: the next track follows sample for sample.
     Gapless,
@@ -569,7 +556,7 @@ pub enum TransitionKind {
 }
 
 /// The order is the wire format of `automix_mixer_params`; only append.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[uniffi::remote(Enum)]
 pub enum FadeCurve {
     /// cos/sin: constant power, for material that does not add coherently.
     EqualPower,
@@ -580,7 +567,7 @@ pub enum FadeCurve {
 
 /// How to get from one track to the next. Fields marked "relative" count from the moment the transition starts;
 /// -1 means "not used".
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[uniffi::remote(Record)]
 pub struct TransitionPlan {
     pub kind: TransitionKind,
     /// Position in the outgoing track where the transition starts. It stops at `out_start_ms + duration_ms`.
@@ -635,4 +622,156 @@ pub struct TransitionPlan {
     pub hp_to_hz: f32,
     /// Why this plan, for logs.
     pub reason: String,
+}
+
+// ---- the player's decisions (nori_player::policy), described again for uniffi ----
+
+pub use nori_player::policy::{AudioPolicy, AudioPrefs, GainMode, GainTags, OutputState};
+
+#[uniffi::remote(Record)]
+pub struct AudioPrefs {
+    pub dsp: bool,
+    pub skip_silence: bool,
+    pub offload: bool,
+    pub crossfade_s: i32,
+    pub auto_mix: bool,
+    pub speed: f32,
+    pub pitch: f32,
+}
+
+#[uniffi::remote(Record)]
+pub struct OutputState {
+    pub hi_res: bool,
+    pub bit_perfect: bool,
+    pub usb: bool,
+    pub offload_refused: bool,
+}
+
+#[uniffi::remote(Record)]
+pub struct AudioPolicy {
+    pub untouched: bool,
+    pub processing: bool,
+    pub transitions_off: bool,
+    pub lock_rate: bool,
+    pub skip_silence: bool,
+    pub offload: bool,
+    pub processor_in_chain: bool,
+}
+
+#[uniffi::remote(Enum)]
+pub enum GainMode {
+    Off,
+    Track,
+    Album,
+    Auto,
+}
+
+#[uniffi::remote(Record)]
+pub struct GainTags {
+    pub track_gain: Option<f32>,
+    pub album_gain: Option<f32>,
+    pub track_peak: Option<f32>,
+    pub album_peak: Option<f32>,
+}
+
+pub use nori_player::device::{Arrival, ArrivalPlan, CurveStep};
+
+#[uniffi::remote(Record)]
+pub struct Arrival {
+    pub bound: bool,
+    pub per_output: bool,
+    pub speaker: bool,
+    pub quiet: bool,
+    pub auto_apply: bool,
+}
+
+#[uniffi::remote(Enum)]
+pub enum CurveStep {
+    None,
+    Offer,
+    Apply,
+}
+
+#[uniffi::remote(Record)]
+pub struct ArrivalPlan {
+    pub load_bound: bool,
+    pub restore: bool,
+    pub curve: CurveStep,
+}
+
+pub use nori_player::transitions::{TransitionPrefs, WindowSong};
+
+#[uniffi::remote(Record)]
+pub struct WindowSong {
+    pub id: String,
+    pub title: String,
+    pub duration_ms: i64,
+    pub album_id: Option<String>,
+    pub disc: i32,
+    pub track: i32,
+    pub tag_bpm: f32,
+    pub radio: bool,
+}
+
+#[uniffi::remote(Record)]
+pub struct TransitionPrefs {
+    pub auto_mix: bool,
+    pub crossfade_s: i32,
+    pub auto_mix_max_s: i32,
+    pub beat_match: bool,
+    pub max_tempo_change_pct: f32,
+    pub bass_swap: bool,
+    pub filter_effects: bool,
+    pub echo_out: bool,
+    pub keep_pitch: bool,
+    pub keep_albums: bool,
+    pub replay_gain: bool,
+}
+
+pub use nori_player::transport::{ChainChange, Dip, Rebuild, Switch};
+
+#[uniffi::remote(Enum)]
+pub enum Switch {
+    Seek,
+    ToSong,
+    Skip,
+}
+
+#[uniffi::remote(Record)]
+pub struct Dip {
+    pub down_ms: i32,
+    pub up_ms: i32,
+}
+
+#[uniffi::remote(Record)]
+pub struct ChainChange {
+    pub offloaded: bool,
+    pub offload: bool,
+    pub offload_changed: bool,
+    pub usb: bool,
+    pub offload_refused: bool,
+    pub tempo_changed: bool,
+    pub processor_changed: bool,
+}
+
+#[uniffi::remote(Enum)]
+pub enum Rebuild {
+    None,
+    Now,
+    AtBoundary,
+}
+
+pub use nori_player::dac::{DacChoice, DacMode};
+
+#[uniffi::remote(Record)]
+pub struct DacMode {
+    pub rate: u32,
+    pub bits: u32,
+    pub float: bool,
+}
+
+#[uniffi::remote(Record)]
+pub struct DacChoice {
+    pub use_index: i32,
+    pub blocked_by: Option<String>,
 }

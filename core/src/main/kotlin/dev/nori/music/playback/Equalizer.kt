@@ -7,7 +7,7 @@ import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 
 /** The Rust side of the equalizer; see crates/core/src/dsp.rs. */
-internal object Dsp {
+object Dsp {
     init { System.loadLibrary("norimusic") }
 
     @JvmStatic external fun create(sampleRate: Int, channels: Int): Long
@@ -22,6 +22,10 @@ internal object Dsp {
     @JvmStatic external fun gainReductionDb(handle: Long): Float
     @JvmStatic external fun reset(handle: Long)
     @JvmStatic external fun process(handle: Long, input: ByteBuffer, inPos: Int, output: ByteBuffer, outPos: Int, bytes: Int, encoding: Int): Boolean
+    /** The automatic pre-amp for these bands (kinds as BandKind ordinals); see nori_player::dsp::auto_preamp_db. */
+    @JvmStatic external fun autoPreampDb(kinds: IntArray, gains: FloatArray): Float
+    /** Where a volume fade from [from] to [to] stands at [t] (0..1); see nori_player::policy::fade. */
+    @JvmStatic external fun fadeVolume(from: Float, to: Float, t: Float): Float
 }
 
 /**

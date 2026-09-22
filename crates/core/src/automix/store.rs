@@ -11,6 +11,7 @@ use super::analysis::Analyzer;
 use super::ANALYSIS_VERSION;
 use crate::{Core, Result, TrackAnalysis};
 
+
 const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confidence, beat_offset_ms, stability, downbeat_phase, \
      downbeat_confidence, lufs, key, key_confidence, silence_start_ms, silence_end_ms, mixramp_start_ms, mixramp_end_ms, \
      intro_end_ms, outro_start_ms, outro_vocal, intro_vocal, outro_centroid, intro_centroid, analysed_ms, \
@@ -149,6 +150,19 @@ struct Stream {
     channels: usize,
 }
 
+/// A streaming-analyser handle (the kind `AutoMixAnalyzer.create` returns) around an analyser that was
+/// fed elsewhere - by the transition engine's tap - so the store can finish it the same way.
+pub fn stream_handle(a: Analyzer, channels: usize) -> i64 {
+    Box::into_raw(Box::new(Stream { a: Mutex::new(a), channels: channels.clamp(1, 8) })) as i64
+}
+
+/// Frees a handle from [`stream_handle`] that never reached anyone.
+pub fn free_stream_handle(h: i64) {
+    if h != 0 {
+        drop(unsafe { Box::from_raw(h as *mut Stream) });
+    }
+}
+
 fn stream<'a>(h: i64) -> Option<&'a Stream> {
     (h != 0).then(|| unsafe { &*(h as *const Stream) })
 }
@@ -187,6 +201,21 @@ impl Core {
         let a = super::analyse_bytes(&song_id, &pcm, sample_rate, channels, encoding).track;
         put(&self.db.lock(), &a)?;
         Ok(a)
+    }
+
+    /// [`Core::analysis_finish_stream`], but only for a whole song: `expected_ms` is the song's length as
+    /// the server has it (0 unknown), and a measurement that heard much less or more is dropped.
+    pub fn analysis_finish_whole(&self, song_id: String, handle: i64, expected_ms: i64) -> Result<Option<TrackAnalysis>> {
+        let Some(s) = stream(handle) else { return Ok(None) };
+        let heard_ms = {
+            let a = s.a.lock();
+            (a.samples() as f64 * 1000.0 / a.rate()) as i64
+        };
+        if !nori_player::transitions::whole_song(heard_ms, expected_ms) {
+            s.a.lock().reset();
+            return Ok(None);
+        }
+        self.analysis_finish_stream(song_id, handle)
     }
 
     /// Finishes a JNI streaming analyser (`AutoMixAnalyzer.create`) that was fed one whole track from its first

@@ -139,7 +139,9 @@ adb shell svc wifi disable; adb shell svc data disable; sleep 3
 adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 4
 # From the device's own list: looking the song up by id would need the network and prove nothing.
 "$app" play "downloaded:0" >/dev/null; sleep 12
-state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/[0-9]+ state:[a-z]+" | grep -oE "state:[a-z]+" | head -1)
+# Our own track: other apps' tracks are listed too, and the first of them can be a stopped one.
+pid=$(adb shell pidof dev.nori.music | tr -d '\r')
+state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/$pid state:[a-z]+" | grep -oE "state:[a-z]+" | tail -1)
 check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
 adb shell svc wifi enable; adb shell svc data enable; sleep 6
 
@@ -178,14 +180,14 @@ if [ -n "$aid" ]; then
   # playback notification's id (1001) and replace the now-playing notification while downloading.
   notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "dev.nori.music|[0-9]*" | sort -u | tr '\n' ' ')
   echo "     notifications: $notifs"
-  check "the download notification posts under its own id" bash -c '[[ "$notifs" == *"|2001"* ]]'
+  check "the download notification posts under its own id" bash -c "[[ '$notifs' == *'|2001'* ]]"
   speed=0; eta=-1
   for _ in $(seq 10); do
     speed=$(field dlSpeed); eta=$(field dlEta); [ "${speed:-0}" -gt 0 ] && break; sleep 2
   done
   echo "     $speed B/s, ETA ${eta}s"
   check "the batch reports a download speed ($speed B/s)" test "${speed:-0}" -gt 0
-  check "the batch reports an ETA (${eta}s)" bash -c '[ "${eta:- -1}" -gt 0 ]'
+  check "the batch reports an ETA (${eta}s)" test "${eta:--1}" -gt 0
   adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
   left=$(field downloading); active=$(field dlActive)
   check "after a force stop the queue picks up again ($left left, $active downloading)" bash -c "[ '${left:-1}' = 0 ] || [ '${active:-0}' -gt 0 ]"

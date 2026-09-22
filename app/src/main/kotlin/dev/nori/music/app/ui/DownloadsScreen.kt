@@ -80,9 +80,6 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.downloads.DownloadMark
 import dev.nori.music.downloads.DownloadPhase
 import dev.nori.music.downloads.DownloadState
-import dev.nori.music.downloads.DownloadStats
-import dev.nori.music.downloads.formatEta
-import dev.nori.music.downloads.formatSpeed
 import dev.nori.music.ffi.Song
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
@@ -252,8 +249,12 @@ private fun DrawScope.arc(color: Color, stroke: Dp, start: Float, sweep: Float) 
 fun DownloadsScreen(actions: ActionsViewModel) {
     val nav = LocalNav.current
     val sections by actions.downloadSections.collectAsStateWithLifecycle()
-    val stats by actions.downloadStats.collectAsStateWithLifecycle()
-    val tempos by actions.downloadTempos.collectAsStateWithLifecycle()
+    // Speed and time left move every second while something downloads; the words are the core's,
+    // asked again on this beat only while the screen is open and something is running.
+    val running = (sections?.active?.size ?: 0) > 0
+    val beat by androidx.compose.runtime.produceState(0, running) {
+        while (running) { kotlinx.coroutines.delay(1_000); value++ }
+    }
     val plain = reduceMotion()
     val cover = { id: String? -> actions.cover(id, CoverSize.ROW) }
     var confirm by remember { mutableStateOf(false) }
@@ -279,7 +280,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
             }
         }
         LargeTitle("Downloads")
-        val summary = s?.let { summaryOf(it.active.size, it.queued.size, it.failed.size, stats) }.orEmpty()
+        val summary = s?.let { beat.let { _ -> dev.nori.music.ffi.downloadSummary(it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
         AnimatedContent(
             summary, Modifier.padding(start = Space.gutter, end = Space.gutter, bottom = 6.dp),
             transitionSpec = { fadeIn(tween(if (plain) 0 else 180)) togetherWith fadeOut(tween(if (plain) 0 else 120)) },
@@ -296,7 +297,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                 itemsIndexed(songs, key = { _, song -> song.id }, contentType = { _, _ -> "download" }) { i, song -> row(i, song) }
             }
             section("active", "Downloading", s.active) { i, song ->
-                DownloadRow(song, cover(song.coverArt), DownloadPhase.DOWNLOADING, i < s.active.lastIndex, plain, moving(plain), sub = activeSub(song, tempos[song.id])) {
+                DownloadRow(song, cover(song.coverArt), DownloadPhase.DOWNLOADING, i < s.active.lastIndex, plain, moving(plain), sub = activeSub(song)) {
                     StopControl(song, plain) { actions.cancelDownloads(listOf(song)) }
                 }
             }
@@ -341,35 +342,17 @@ fun DownloadsScreen(actions: ActionsViewModel) {
     }
 }
 
-/** "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or what is left when those are all nought. */
-private fun summaryOf(active: Int, queued: Int, failed: Int, stats: DownloadStats): String {
-    val parts = listOfNotNull(
-        "$active downloading".takeIf { active > 0 },
-        "$queued waiting".takeIf { queued > 0 },
-        "$failed failed".takeIf { failed > 0 },
-    ).toMutableList()
-    if (active > 0) {
-        formatSpeed(stats.speedBps).ifEmpty { null }?.let(parts::add)
-        formatEta(stats.etaSec).ifEmpty { null }?.let(parts::add)
-    }
-    return parts.joinToString(" · ").ifEmpty { "Nothing downloading" }
-}
-
 /**
- * An active row's second line: the artist, then where its song stands ("45% · 2.1 MB/s · 1:20 left").
- * The percent is the ring's own progress, so the line and the stop control never disagree.
+ * An active row's second line: the artist, then where its song stands ("45% · 2.1 MB/s · 1:20 left"),
+ * in the core's words. It is asked again whenever the ring's progress moves, so the line and the ring
+ * never disagree.
  */
 @Composable
-private fun activeSub(song: Song, tempo: dev.nori.music.downloads.DownloadTempo?): String {
+private fun activeSub(song: Song): String {
     val all = LocalDownloadMarks.current
     val progress = all?.marks?.value?.get(song.id)
         ?.takeIf { it.phase == DownloadPhase.DOWNLOADING }?.progress?.collectAsStateWithLifecycle()?.value
-    val detail = listOfNotNull(
-        progress?.takeIf { it >= 0f }?.let { "${(it * 100).roundToInt()}%" },
-        tempo?.let { formatSpeed(it.speedBps).ifEmpty { null } },
-        tempo?.let { formatEta(it.etaSec).ifEmpty { null } },
-    ).joinToString(" · ")
-    return if (detail.isEmpty()) song.artist else "${song.artist} · $detail"
+    return progress.let { _ -> dev.nori.music.ffi.downloadRow(song.id, song.artist) }
 }
 
 /** A song on the downloads screen: the same proportions as a row in any song list. */

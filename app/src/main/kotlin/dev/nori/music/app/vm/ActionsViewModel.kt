@@ -5,8 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dev.nori.music.data.StarKind
 import dev.nori.music.downloads.DownloadState
 import dev.nori.music.downloads.DownloadMark
-import dev.nori.music.downloads.DownloadSections
-import dev.nori.music.downloads.downloadSections
+import dev.nori.music.ffi.DownloadSections
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
@@ -254,21 +253,15 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     /** What each download this session touched is doing; see [dev.nori.music.downloads.Downloads.marks]. */
     val downloadMarks: StateFlow<Map<String, DownloadMark>> = nori.downloads.marks
 
-    /** How fast the batch is moving and how long it should take; see [dev.nori.music.downloads.Downloads.stats]. */
-    val downloadStats: StateFlow<dev.nori.music.downloads.DownloadStats> = nori.downloads.stats
-
-    /** How fast each running song is arriving; see [dev.nori.music.downloads.Downloads.tempos]. */
-    val downloadTempos: StateFlow<Map<String, dev.nori.music.downloads.DownloadTempo>> = nori.downloads.tempos
-
     /**
      * The downloads screen's lists: downloading, waiting (in the order they will run), failed, and
-     * finished this session. Worked out off the main thread, since a whole library can be waiting, and
+     * finished this session - split in the core, asked again when the index or a phase changes, and
      * only while the screen is watching. Null until the first answer, which is not the same as empty.
      */
-    val downloadSections: StateFlow<DownloadSections<Song>?> =
-        combine(nori.downloads.state, nori.downloads.marks) { s, m -> downloadSections(s.pending, s.done, m) { it.id } }
-            .flowOn(kotlinx.coroutines.Dispatchers.Default)
-            .stateIn<DownloadSections<Song>?>(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    val downloadSections: StateFlow<DownloadSections?> =
+        combine(nori.downloads.state, nori.downloads.marks) { _, _ -> runCatching { nori.core.downloadSections() }.getOrNull() }
+            .flowOn(kotlinx.coroutines.Dispatchers.IO)
+            .stateIn<DownloadSections?>(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     fun retryDownloads(songs: List<Song>) = nori.downloads.retry(songs)
     fun cancelDownloads(songs: List<Song>) = nori.downloads.cancel(songs.map { it.id })

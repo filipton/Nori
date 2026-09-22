@@ -87,29 +87,24 @@ class AutoMixPrefetch(
             val format = extractor.getTrackFormat(track)
             extractor.selectTrack(track)
             val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
-            val decodedUs = try {
+            val ended = try {
                 codec.configure(format, null, null, 0)
                 codec.start()
                 // Handed over as it is created, so a decode that throws half way still has its handle freed.
-                decode(codec, extractor) { analyser = it }
+                decode(codec, extractor, if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000 else 0L) { analyser = it }
             } finally {
                 runCatching { codec.stop() }
                 codec.release()
             }
-            // Only a whole song is an analysis of it. A measurement cut short - the queue moved, the app
-            // closed, a read failed half way and looked like the end of the file - used to be stored as
-            // if it were the song: a third of your library was "analysed" over its first minute or two,
-            // the planner refused every one of them for not matching the file's length ("not analysed"),
-            // and the outro grid was measured somewhere in the middle.
-            val expectedUs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
-            if (decodedUs < 0 || (expectedUs > 0 && kotlin.math.abs(decodedUs - expectedUs) > 3_000_000L)) {
-                android.util.Log.i("nori", "measuring $id ahead stopped at ${decodedUs.coerceAtLeast(0) / 1000} of ${expectedUs / 1000} ms: not stored")
+            // Only a whole song is an analysis of it (nori_player::transitions::whole_song decides, in
+            // analysisFinishWhole); an interrupted decode is not even offered.
+            val expectedMs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000 else 0L
+            if (!ended || analyser == 0L) {
+                android.util.Log.i("nori", "measuring $id ahead stopped before its end: not stored")
                 return
             }
-            if (analyser != 0L) {
-                val a = coreOf().analysisFinishStream(id, analyser)
-                android.util.Log.i("nori", "analysed $id ahead: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s".format(it.bpm, it.bpmConfidence, it.stability, dev.nori.music.ffi.automixKeyName(it.key)) } ?: "too short"}")
-            }
+            val a = coreOf().analysisFinishWhole(id, analyser, expectedMs)
+            android.util.Log.i("nori", "analysed $id ahead: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s".format(it.bpm, it.bpmConfidence, it.stability, dev.nori.music.ffi.automixKeyName(it.key)) } ?: "not stored: not the whole song, or too short"}")
         } finally {
             if (analyser != 0L) AutoMixAnalyzer.destroy(analyser)
             extractor.release()
@@ -118,16 +113,17 @@ class AutoMixPrefetch(
     }
 
     /**
-     * The plain synchronous decode loop; every output buffer goes into the analyser and is released again.
-     * How much audio came out, in µs, once the decoder has reached the end of the stream; -1 when it was
-     * interrupted first.
+     * The plain synchronous decode loop; every output buffer goes into the analyser and is released
+     * again. True once the decoder has reached the end of the stream, false when it was interrupted
+     * first. How much was heard is the analyser's own count; whether that is the whole song is the
+     * core's call (analysisFinishWhole). The output format is read when it changes, not per buffer.
      */
-    private fun decode(codec: MediaCodec, extractor: MediaExtractor, created: (Long) -> Unit): Long {
+    private fun decode(codec: MediaCodec, extractor: MediaExtractor, expectedMs: Long, created: (Long) -> Unit): Boolean {
         val info = MediaCodec.BufferInfo()
         var analyser = 0L
         var fed = false
-        var frames = 0L
-        var rateSeen = 0
+        var rate = 0
+        var channels = 0
         while (!Thread.currentThread().isInterrupted) {
             if (!fed) {
                 val index = codec.dequeueInputBuffer(TIMEOUT_US)
@@ -145,27 +141,28 @@ class AutoMixPrefetch(
             }
             when (val index = codec.dequeueOutputBuffer(info, TIMEOUT_US)) {
                 MediaCodec.INFO_TRY_AGAIN_LATER -> {}
-                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {}
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    val out = codec.outputFormat
+                    rate = out.getInteger(MediaFormat.KEY_SAMPLE_RATE, 0)
+                    channels = out.getInteger(MediaFormat.KEY_CHANNEL_COUNT, 0)
+                }
                 else -> if (index >= 0) {
                     if (info.size > 0) {
-                        val out = codec.outputFormat
-                        val rate = out.getInteger(MediaFormat.KEY_SAMPLE_RATE, 0)
-                        val channels = out.getInteger(MediaFormat.KEY_CHANNEL_COUNT, 0)
+                        if (rate == 0) codec.outputFormat.let { rate = it.getInteger(MediaFormat.KEY_SAMPLE_RATE, 0); channels = it.getInteger(MediaFormat.KEY_CHANNEL_COUNT, 0) }
                         if (analyser == 0L && rate > 0 && channels > 0) {
-                            analyser = AutoMixAnalyzer.create(rate, channels, 0)
+                            analyser = AutoMixAnalyzer.create(rate, channels, expectedMs)
                             created(analyser)
                         }
                         val buffer = codec.getOutputBuffer(index)
                         // 16-bit is what a decoder hands out unless it is asked for float, which this never does.
                         if (analyser != 0L && buffer != null) AutoMixAnalyzer.feed(analyser, buffer, info.offset, info.size, PCM_16)
-                        if (rate > 0 && channels > 0) { frames += info.size / (channels * 2); rateSeen = rate }
                     }
                     codec.releaseOutputBuffer(index, false)
-                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return if (rateSeen > 0) frames * 1_000_000L / rateSeen else 0L
+                    if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) return true
                 }
             }
         }
-        return -1L
+        return false
     }
 
     /**

@@ -703,7 +703,7 @@ Every one of these produced a wrong conclusion in an earlier session:
   off deliberately to save wakeups. A test that watches it passes in silence.
 - **A `MediaController` in the background reports a stale position**, so the app's own numbers lie
   too while it is not on screen.
-- **`BurstSink.bytesWritten` is honest but bursty** — ten seconds of audio are written at once, then
+- **`TransitionSink.bytesWritten` (the burst count) is honest but bursty** — ten seconds of audio are written at once, then
   nothing for about eight. A three-second sampling window sees zero and calls it silence.
 - What can be trusted: `adb shell dumpsys audio` showing our `AudioTrack` as `state:started`, plus
   sink bytes measured over a full buffer cycle. `tools/audio-e2e.sh` does exactly this.

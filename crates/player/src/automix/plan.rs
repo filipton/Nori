@@ -17,7 +17,7 @@
 
 use super::structure::key_distance;
 use super::tempo::{fold, match_ratio};
-use crate::{AutoMixSettings, FadeCurve, TrackAnalysis, TransitionKind, TransitionPlan};
+use crate::types::{AutoMixSettings, FadeCurve, TrackAnalysis, TransitionKind, TransitionPlan};
 
 pub const MAX_SKIP_MS: i64 = 15_000;
 pub const MIN_BPM_CONFIDENCE: f32 = 0.5;

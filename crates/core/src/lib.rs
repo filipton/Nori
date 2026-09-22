@@ -10,6 +10,16 @@ pub mod automix;
 mod db;
 mod lyrics;
 pub mod dsp;
+mod stages;
+mod alog;
+pub mod transfers;
+mod look;
+mod seek;
+pub mod queue;
+mod background;
+mod scrobble;
+mod rules;
+mod heard;
 mod history;
 mod m3u;
 mod mixes;
@@ -256,6 +266,15 @@ fn parse(body: &[u8]) -> Result<Response> {
 
 // ---- the object Kotlin holds -----------------------------------------------
 
+/// The core the app is using now, for the parts of the core that run without Kotlin (the transition
+/// planner on the audio thread, analyses finished in the background).
+static ACTIVE: Mutex<std::sync::Weak<Core>> = Mutex::new(std::sync::Weak::new());
+
+/// The core the app is using now, if there is one.
+pub(crate) fn active() -> Option<Arc<Core>> {
+    ACTIVE.lock().upgrade()
+}
+
 #[derive(uniffi::Object)]
 pub struct Core {
     db: Mutex<Connection>,
@@ -269,7 +288,10 @@ impl Core {
     pub fn new(db_path: String) -> Result<Arc<Self>> {
         let db = db::open(&db_path)?;
         automix::store::migrate(&db)?;
-        Ok(Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) }))
+        let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) });
+        // The newest core is the one the app is using: the audio path finds the database through it.
+        *ACTIVE.lock() = Arc::downgrade(&core);
+        Ok(core)
     }
 
     /// Returns the normalised base url. Each server profile has its own database file, so the

@@ -13,37 +13,56 @@ internal object AutoMixAnalyzer {
     @JvmStatic external fun destroy(h: Long)
 }
 
-internal object AutoMixMixer {
+/**
+ * The transition engine (`nori_player::engine`, through `crates/core/src/automix/engine_jni.rs`). Every
+ * call that can reach the output below takes the [TransitionSink] it calls back into, and the time now
+ * (elapsedRealtime), which the engine stamps what it reports with.
+ */
+internal object TransitionEngineJni {
     init { System.loadLibrary("norimusic") }
-    @JvmStatic external fun create(sampleRate: Int, channels: Int): Long
-    /** [params] from `automixMixerParams(plan)`; restarts the transition clock. */
-    @JvmStatic external fun configure(h: Long, params: FloatArray)
-    /** Mixes [frames] frames of each stream into [dest] (which may be either input). */
-    @JvmStatic external fun process(h: Long, outgoing: ByteBuffer, outPos: Int, incoming: ByteBuffer, inPos: Int, dest: ByteBuffer, destPos: Int, frames: Int, encoding: Int): Boolean
-    @JvmStatic external fun position(h: Long): Long
-    /** Starts the transition clock [frames] in: curves and filters as if the mix had run that far. */
-    @JvmStatic external fun seek(h: Long, frames: Long)
+    @JvmStatic external fun create(): Long
     @JvmStatic external fun destroy(h: Long)
+    @JvmStatic external fun replan(h: Long)
+    @JvmStatic external fun setLockRate(h: Long, on: Boolean)
+    @JvmStatic external fun setOffset(h: Long, offsetUs: Long)
+    /** [encoding] is media3's; anything but 16-bit or float PCM is not samples. */
+    @JvmStatic external fun configure(h: Long, sink: TransitionSink, nowMs: Long, id: String?, rate: Int, channels: Int, encoding: Int, token: Int)
+    /** `(taken << 32) | bytes used` of [len] bytes of [buffer] from [pos]. */
+    @JvmStatic external fun handleBuffer(h: Long, sink: TransitionSink, nowMs: Long, buffer: ByteBuffer, pos: Int, len: Int, ptsUs: Long, downPositionUs: Long): Long
+    @JvmStatic external fun handleDiscontinuity(h: Long, sink: TransitionSink, nowMs: Long)
+    /** [downPositionUs] is the output's own position, read just before: the engine's first question about it. */
+    @JvmStatic external fun position(h: Long, sink: TransitionSink, nowMs: Long, sourceEnded: Boolean, downPositionUs: Long): Long
+    @JvmStatic external fun playToEnd(h: Long, sink: TransitionSink, nowMs: Long): Boolean
+    /** A direct buffer over the engine's status words, read with no call: long 0 is whether audio is queued, long 1 the bytes handed to the output. */
+    @JvmStatic external fun status(h: Long): java.nio.ByteBuffer
+    @JvmStatic external fun mixing(): Boolean
+    /** Bursts on or off (see nori_player::burst). */
+    @JvmStatic external fun setBurst(h: Long, on: Boolean)
+    @JvmStatic external fun restartBurst(h: Long)
+    @JvmStatic external fun holding(): Boolean
+    @JvmStatic external fun queueEmpty(h: Long, sink: TransitionSink, nowMs: Long): Boolean
+    @JvmStatic external fun flush(h: Long, sink: TransitionSink, nowMs: Long)
+    @JvmStatic external fun reset(h: Long, sink: TransitionSink, nowMs: Long)
 }
 
-/** Converts between sample rates (and mono/stereo): crates/core/src/automix/resample.rs. Every buffer argument is a direct ByteBuffer; sizes are in bytes. */
-internal object AutoMixResample {
+/** Which song the ear is on during a mix; see crates/core/src/heard.rs. */
+internal object HeardJni {
     init { System.loadLibrary("norimusic") }
-    @JvmStatic external fun create(inRate: Int, inChannels: Int, outRate: Int, outChannels: Int): Long
-    /** Returns (consumed shl 32) or produced, both in bytes; -1 when the buffers cannot be used. */
-    @JvmStatic external fun process(h: Long, input: ByteBuffer, inPos: Int, inBytes: Int, output: ByteBuffer, outPos: Int, outCap: Int, inEnc: Int, outEnc: Int): Long
+
+    @JvmStatic external fun create(): Long
     @JvmStatic external fun destroy(h: Long)
+    @JvmStatic external fun setQueue(h: Long, ids: Array<String>, durationsMs: LongArray)
+    /** `(index + 1) << 44 | changed << 43 | ms`; index -1 means the player's own word stands. */
+    @JvmStatic external fun at(h: Long, nowMs: Long, playing: Boolean, on: Int, positionMs: Long): Long
 }
 
-internal object AutoMixStretch {
+/** Making a seek stick; see crates/core/src/seek.rs. */
+internal object SeekJni {
     init { System.loadLibrary("norimusic") }
-    @JvmStatic external fun create(sampleRate: Int, channels: Int, keepPitch: Boolean): Long
-    /** [ratio] is playback speed, held for [holdFrames] output frames, then ramped to 1 over [rampFrames]. */
-    @JvmStatic external fun configure(h: Long, ratio: Float, holdFrames: Long, rampFrames: Long)
-    /** Returns (consumed shl 32) or produced, both in bytes; -1 when the buffers cannot be used. */
-    @JvmStatic external fun process(h: Long, input: ByteBuffer, inPos: Int, inBytes: Int, output: ByteBuffer, outPos: Int, outCap: Int, encoding: Int): Long
-    @JvmStatic external fun drain(h: Long, output: ByteBuffer, outPos: Int, outCap: Int, encoding: Int): Int
-    @JvmStatic external fun bypassed(h: Long): Boolean
-    @JvmStatic external fun latencyFrames(h: Long): Int
-    @JvmStatic external fun destroy(h: Long)
+
+    @JvmStatic external fun create(): Long
+    @JvmStatic external fun ask(h: Long, target: Long, now: Long, ready: Boolean, pos: Long)
+    @JvmStatic external fun forget(h: Long)
+    /** -1 keep watching, -2 done with it, otherwise the place to ask the player for again. */
+    @JvmStatic external fun look(h: Long, now: Long, sameSong: Boolean, ready: Boolean, pos: Long, playing: Boolean): Long
 }
