@@ -44,7 +44,7 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - Check: home → tap an album → back button. Both pages must stay opaque throughout; the album must
   arrive from the right, not from above; the home page must be visibly *under* it, shifted, and come
   back to place on pop.
-- Done as: `PageMotion` (push/pop slides, 380 ms, `Settle` ease; tab roots cross-fade) and `Page`
+- Done as: `PageMotion` (push/pop slides, 260 ms, sharp `Settle` ease; tab roots cross-fade) and `Page`
   (paints the page's background while it moves, and the scrim on the page underneath, as a child of
   the page's own transition so the gesture scrubs it). Every route goes through `page(route)`.
   Two things the old fades had been hiding had to go with it: the home page replayed its sections'

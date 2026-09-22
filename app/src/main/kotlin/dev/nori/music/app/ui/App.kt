@@ -421,16 +421,19 @@ private fun androidx.navigation.NavGraphBuilder.page(
  */
 private object PageMotion {
     /** How long a push or a pop takes on its own. The gesture sets its own pace. */
-    const val MS = 380
+    // 380 ms with a long ease-out made button-back feel stuck: Compose also spends ~100 ms
+    // composing the page underneath before the slide starts (docs/motion.md). 260 + a sharper
+    // settle keeps the stack feel without the crawl at the end.
+    const val MS = 260
     /** The share of the width the page underneath moves. */
     const val UNDER = 3
     /** How dark the page underneath goes at the far end of its travel. */
     const val SCRIM = 0.28f
     /** A tab change: a cross-fade this long. */
-    private const val TAB_MS = 150
+    private const val TAB_MS = 120
 
-    /** Nearly all of the travel is spent in the first half of the time: quick to move, slow to land. */
-    val Settle = androidx.compose.animation.core.CubicBezierEasing(0.2f, 0.85f, 0.15f, 1f)
+    /** Sharp settle: most of the travel early, a short ease into place - not a long coast. */
+    val Settle = androidx.compose.animation.core.CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
     private val roots = setOf("home", "search", "library", "settings")
 
