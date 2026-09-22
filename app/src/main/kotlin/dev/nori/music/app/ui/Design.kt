@@ -395,7 +395,9 @@ fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = Text
 /**
  * The button the page is built around: a full pill, tinted with the page's accent. [prominent] is the
  * one the eye should land on (Play); the others sit on a translucent version of the same colour.
- * On a paper-white page the plates go darker so they do not wash out into the background.
+ * On a paper-white page the plates go darker so they do not wash out into the background - and the
+ * darkening is continuous in the page's lightness, so a cross-fade onto white does not flip the
+ * Play button black in one frame.
  */
 @Composable
 fun PillButton(
@@ -403,18 +405,17 @@ fun PillButton(
     prominent: Boolean = false, enabled: Boolean = true,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val light = scheme.background.luminance() > 0.55f
-    val container = when {
-        prominent && light -> Color(0xFF1A1A1A)
-        prominent -> scheme.primary
-        light -> scheme.onSurface.copy(alpha = 0.16f).over(scheme.background)
-        else -> scheme.onSurface.copy(alpha = 0.12f).over(scheme.background)
+    // 0 on a dark page, 1 on paper: how far to lean into the high-contrast treatment.
+    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
+    val container = if (prominent) {
+        androidx.compose.ui.graphics.lerp(scheme.primary, Color(0xFF1A1A1A), paper)
+    } else {
+        scheme.onSurface.copy(alpha = 0.12f + 0.05f * paper).over(scheme.background)
     }
-    val content = when {
-        prominent && light -> Color.White
-        prominent -> scheme.onPrimary
-        light -> scheme.onSurface
-        else -> scheme.primary
+    val content = if (prominent) {
+        androidx.compose.ui.graphics.lerp(scheme.onPrimary, Color.White, paper)
+    } else {
+        androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper)
     }
     Surface(
         onClick = onClick, enabled = enabled, shape = PillShape, color = container, contentColor = content,
@@ -731,19 +732,22 @@ fun CircleButton(
     val scheme = MaterialTheme.colorScheme
     // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
     // absent on a dark page, so the row still "popped" when Play became tappable. [selected] is the
-    // lit Shuffle state: a stronger fill so the page shows that shuffle is on. On paper-white pages
-    // the plate is a shade darker so it still reads.
-    val light = scheme.background.luminance() > 0.55f
-    val plate = when {
-        selected && light -> scheme.onSurface.copy(alpha = 0.22f).over(scheme.background)
-        selected -> scheme.primary.copy(alpha = 0.28f).over(scheme.background)
-        light -> scheme.onSurface.copy(alpha = 0.14f).over(scheme.background)
-        else -> scheme.onSurface.copy(alpha = 0.12f).over(scheme.background)
+    // lit Shuffle state: a stronger fill so the page shows that shuffle is on. Plate strength tracks
+    // page lightness continuously (same reason as [PillButton]) so a swipe onto white does not snap.
+    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
+    val plate = if (selected) {
+        androidx.compose.ui.graphics.lerp(
+            scheme.primary.copy(alpha = 0.28f).over(scheme.background),
+            scheme.onSurface.copy(alpha = 0.22f).over(scheme.background),
+            paper,
+        )
+    } else {
+        scheme.onSurface.copy(alpha = 0.12f + 0.04f * paper).over(scheme.background)
     }
     Surface(
         onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
         color = plate,
-        contentColor = if (light) scheme.onSurface else scheme.primary,
+        contentColor = androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper),
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
 }

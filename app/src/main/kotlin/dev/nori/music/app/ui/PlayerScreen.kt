@@ -336,12 +336,19 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         }
     }
 
-    // While the wash cross-fades, the theme rides the same progress so buttons and type do not snap.
+    // Theme follows the same progress as the wash: with the sleeve while it scrolls, then with the
+    // post-skip fade when the song changes without a swipe. A hard light/dark cut on the buttons used
+    // to fire near the end of a white↔colour cross-fade and look like a snap.
     val fadeT = washFade.value
-    val themePalette = fadingFrom?.let { from ->
-        val to = palette
-        if (to != null) mixPalette(from, to, fadeT) else from
-    } ?: palette
+    val slideT = shift.amount
+    val heldWash = held?.takeIf { it != palette }
+    val themePalette = when {
+        heldWash != null -> heldWash
+        fadingFrom != null && palette != null -> mixPalette(fadingFrom!!, palette!!, fadeT)
+        arriving != null && palette != null && arriving != palette && slideT > 0.001f ->
+            mixPalette(palette!!, arriving, slideT)
+        else -> palette
+    }
 
     TintedTheme(themePalette) {
         val scheme = MaterialTheme.colorScheme
