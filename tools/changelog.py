@@ -183,6 +183,19 @@ def release(version: str) -> None:
     CHANGELOG.write_text("".join(h + c for h, c in out))
 
 
+def retitle(old: str, new: str) -> bool:
+    """Give a version that never went out a new number and today's date, keeping what it says."""
+    today = datetime.date.today().isoformat()
+    out, found = [], False
+    for heading, content in split_sections(read_changelog()):
+        if heading.startswith(f"## [{old}]"):
+            heading, found = f"## [{new}] - {today}\n", True
+        out.append((heading, content))
+    if found:
+        CHANGELOG.write_text("".join(h + c for h, c in out))
+    return found
+
+
 def notes(version: str) -> str:
     """One version's section, without its heading — what a release page shows."""
     for heading, content in split_sections(read_changelog()):
@@ -197,8 +210,15 @@ def main() -> int:
     p.add_argument("--update", action="store_true", help="write into CHANGELOG.md's Unreleased section")
     p.add_argument("--release", metavar="VERSION", help="close Unreleased as this dated version")
     p.add_argument("--notes", metavar="VERSION", help="print one version's section")
+    p.add_argument("--retitle", nargs=2, metavar=("OLD", "NEW"), help="renumber an unreleased version's section")
     a = p.parse_args()
 
+    if a.retitle:
+        if not retitle(*a.retitle):
+            print(f"no section for {a.retitle[0]} in CHANGELOG.md", file=sys.stderr)
+            return 1
+        print(f"CHANGELOG.md: [{a.retitle[0]}] is now [{a.retitle[1]}]")
+        return 0
     if a.notes:
         text = notes(a.notes)
         if not text:

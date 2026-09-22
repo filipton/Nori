@@ -83,9 +83,12 @@ if [ "$GUIDED" = 1 ]; then
     base=$current; [ -n "$latest" ] && newer "$latest" "$base" && base=$latest
     IFS=. read -r ma mi pa <<< "$base"; suggest="$ma.$mi.$((pa + 1))"
   fi
-  read -rp "new version [$suggest]: " new
+  echo "(the GitHub tag gets its v by itself: 0.3.3 is released as v0.3.3)"
+  # -e: line editing, so an arrow key moves the cursor instead of typing an escape sequence.
+  read -erp "new version [$suggest]: " new
+  new=$(printf '%s' "$new" | tr -d '[:space:]'); new=${new#[vV]}
   new=${new:-$suggest}
-  [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a version: $new (want major.minor.patch)"
+  [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a version: $new (want major.minor.patch, e.g. 0.3.3)"
   [ -z "$latest" ] || newer "$new" "$latest" || die "$new is not after the latest release, $latest"
   ! gh release view "v$new" >/dev/null 2>&1 || die "a release v$new already exists on GitHub"
 
@@ -94,6 +97,16 @@ if [ "$GUIDED" = 1 ]; then
   undo() { if [ "$committed" = 0 ]; then git checkout -q -- . && echo "stopped: every file is as it was."; fi; }
   trap undo EXIT
   [ "$new" = "$current" ] || tools/bump-version.sh "$new"
+  # The version in the code never went out, and this one replaces it: its notes are this release's.
+  if [ "$new" != "$current" ] && ! gh release view "v$current" >/dev/null 2>&1 &&
+     tools/changelog.py --notes "$current" >/dev/null 2>&1; then
+    tools/changelog.py --retitle "$current" "$new"
+    extra=$(tools/changelog.py 2>/dev/null)
+    if [ "$extra" != "_Nothing user-visible._" ]; then
+      echo "also since then, not yet in the notes - add what matters when you edit:"
+      echo "$extra"
+    fi
+  fi
   if ! tools/changelog.py --notes "$new" >/dev/null 2>&1; then
     tools/changelog.py --update
     tools/changelog.py --release "$new"
@@ -102,12 +115,12 @@ if [ "$GUIDED" = 1 ]; then
   echo "---- release notes for $new ----"
   tools/changelog.py --notes "$new"
   echo "--------------------------------"
-  read -rp "edit them first? [y/N] " a
+  read -erp "edit them first? [y/N] " a
   if [[ "$a" =~ ^[Yy] ]]; then
     "${EDITOR:-nano}" CHANGELOG.md
     tools/changelog.py --notes "$new" >/dev/null || die "CHANGELOG.md lost its [$new] section"
   fi
-  read -rp "publish $new as a (d)raft, (l)ive, or (s)top? [d/l/s] " a
+  read -erp "publish $new as a (d)raft, (l)ive, or (s)top? [d/l/s] " a
   case "$a" in
     l|L) DRAFT="" ;;
     d|D|"") DRAFT=--draft ;;
