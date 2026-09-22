@@ -216,6 +216,19 @@ class PlaybackService : MediaLibraryService() {
             onChanged = { /* PlayerConnection picks bridging up from media extras on the next publish. */ },
         )
         player.addListener(listener)
+        // A dropout is otherwise invisible: the output ran dry and the listener heard a gap, but nothing
+        // says so. Named in the log, with whether a mix was on, so "a cut on the change" has a trace.
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onAudioUnderrun(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long,
+            ) {
+                android.util.Log.w("nori", "audio underrun: ${bufferSizeMs} ms buffer, ${elapsedSinceLastFeedMs} ms since last feed, mixing=${TransitionSink.mixing}, heard=${TransitionSink.heardId != null}")
+            }
+            override fun onAudioSinkError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, audioSinkError: Exception) {
+                android.util.Log.w("nori", "audio sink error: $audioSinkError")
+            }
+        })
         player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
             override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
         })

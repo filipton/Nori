@@ -1,6 +1,5 @@
 package dev.nori.music.playback
 
-import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
@@ -22,6 +21,8 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
         /** Depth of the AudioTrack buffer this is meant to be used with. */
         const val BUFFER_US = 10_000_000
         private const val LOW_US = 2_000_000L
+        /** Slack for the clock moving a little further than the count between two readings. */
+        private const val JUMP_US = 250_000L
 
         /**
          * Bytes this sink has handed to the AudioTrack since the process started. The only honest
@@ -36,7 +37,47 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     /** False while playback is offloaded or something needs low latency (the equalizer being tuned). */
     @Volatile var enabled = true
     private var filling = true
-    private var writtenUntilUs = C.TIME_UNSET
+
+    /**
+     * How much audio is in the track, counted from what was handed to it and how far its clock has
+     * moved - never from timestamps. It used to be the last buffer's timestamp less the clock, which
+     * is wrong across a jump: a mix is stamped in the next song's time (TransitionSink), so the moment
+     * its first chunk went in the timestamps leapt ahead by the length of the mix while the clock only
+     * follows once that chunk is heard. The buffer looked twelve seconds deeper than it was, this sink
+     * stopped feeding it for twice as long as it should, and the track ran dry near the end of the mix:
+     * the cut heard on an AutoMix change ("audio underrun ... 10 s since last feed").
+     *
+     * A jump of the clock is not playing, so a move larger than what could have been queued is left
+     * out. Anything that makes the count unsure starts it again at nothing, which can only make this
+     * sink feed a little early, never late.
+     */
+    private var writtenUs = 0L
+    private var playedUs = 0L
+    private var lastPositionUs = AudioSink.CURRENT_POSITION_NOT_SET
+    private var lastReadAtMs = 0L
+    private var frameBytes = 0
+    private var sampleRate = 0
+
+    private fun queuedUs(): Long? {
+        val position = getCurrentPositionUs(false)
+        if (position == AudioSink.CURRENT_POSITION_NOT_SET) return null
+        val last = lastPositionUs
+        val now = android.os.SystemClock.elapsedRealtime()
+        val wall = (now - lastReadAtMs) * 1000
+        lastPositionUs = position
+        lastReadAtMs = now
+        if (last != AudioSink.CURRENT_POSITION_NOT_SET) {
+            val moved = position - last
+            val queued = writtenUs - playedUs
+            playedUs += when {
+                moved <= 0 -> 0L
+                moved <= queued + JUMP_US -> moved
+                // The clock jumped. What played meanwhile is at most the time that passed.
+                else -> minOf(wall, queued)
+            }
+        }
+        return (writtenUs - playedUs).coerceAtLeast(0)
+    }
 
     override fun handleBuffer(buffer: ByteBuffer, presentationTimeUs: Long, encodedAccessUnitCount: Int): Boolean {
         // Offloaded playback goes straight through, but it still has to be counted: a test that watches
@@ -48,29 +89,39 @@ class BurstSink(sink: AudioSink) : ForwardingAudioSink(sink) {
         }
         if (!filling) {
             // The sink has no position to report while it is stopped, paused before it ever played, or
-            // freshly restarted. Subtracting CURRENT_POSITION_NOT_SET (Long.MIN_VALUE) from what we wrote
-            // produces an enormous "queued" figure, and this sink then refuses every buffer for ever -
-            // which is silence that only a sink rebuild (any audio setting) recovers from.
-            val position = getCurrentPositionUs(false)
-            val known = writtenUntilUs != C.TIME_UNSET && position != AudioSink.CURRENT_POSITION_NOT_SET
-            if (known && writtenUntilUs - position > LOW_US) return false
+            // freshly restarted; then nothing is known and it takes audio rather than wait for ever.
+            val queued = queuedUs()
+            if (queued != null && queued > LOW_US) return false
             filling = true
         }
         val before = buffer.remaining()
         val taken = super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
-        if (taken) { writtenUntilUs = presentationTimeUs; bytesWritten += before - buffer.remaining() } else filling = false
+        val bytes = before - buffer.remaining()
+        bytesWritten += bytes
+        if (frameBytes > 0 && sampleRate > 0) writtenUs += bytes.toLong() / frameBytes * 1_000_000L / sampleRate
+        queuedUs()
+        if (!taken) filling = false
         return taken
     }
 
-    private fun restart() { filling = true; writtenUntilUs = C.TIME_UNSET }
+    private fun restart() { filling = true; writtenUs = 0L; playedUs = 0L; lastPositionUs = AudioSink.CURRENT_POSITION_NOT_SET }
 
     // Resuming is a fresh start for the burst bookkeeping: the track may have been stopped and its
     // position reset while the app sat in the background, so what was written before means nothing now.
     override fun play() { restart(); super.play() }
     override fun pause() { restart(); super.pause() }
 
-    override fun configure(config: AudioSink.AudioSinkConfig) { restart(); super.configure(config) }
-    override fun handleDiscontinuity() { restart(); super.handleDiscontinuity() }
+    override fun configure(config: AudioSink.AudioSinkConfig) {
+        restart()
+        val f = config.format
+        val pcm = f.sampleMimeType == androidx.media3.common.MimeTypes.AUDIO_RAW && f.pcmEncoding != androidx.media3.common.Format.NO_VALUE
+        frameBytes = if (pcm) androidx.media3.common.util.Util.getPcmFrameSize(f.pcmEncoding, f.channelCount) else 0
+        sampleRate = if (pcm) f.sampleRate else 0
+        super.configure(config)
+    }
+    // A timestamp discontinuity leaves the audio already written in the track, so the count stands;
+    // the clock's jump when it is reached is left out by [queuedUs].
+    override fun handleDiscontinuity() { filling = true; super.handleDiscontinuity() }
     override fun flush() { restart(); super.flush() }
     override fun reset() { restart(); super.reset() }
 }

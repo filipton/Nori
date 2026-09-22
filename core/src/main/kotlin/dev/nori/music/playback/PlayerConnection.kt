@@ -86,7 +86,12 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             // Through a transition the player runs ahead of the ear (the held ending is counted as
             // played so the next track arrives in time to be mixed in); the sink says what is really
             // heard, and the bar shows that, in the song it belongs to (see publish).
-            lastPosition = heard(c)?.second ?: c.currentPosition
+            val h = heard(c)
+            // The ear has just changed song and the page follows on the next tick (see heard): until it
+            // has, the old song's title must not be shown with the new song's time under it.
+            val shown = _state.value.queue.getOrNull(_state.value.index)?.id
+            if (h != null && shown != null && h.first != shown) return lastPosition
+            lastPosition = h?.second ?: c.currentPosition
             lastPositionAt = android.os.SystemClock.elapsedRealtime()
             return lastPosition
         }
@@ -106,7 +111,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * seconds apart, so it is run on from there at one times - and past the point where the mix takes
      * over the ear has left the song, whether or not the sink has been asked since.
      */
-    private var heardBefore = false
+    private var heardBefore: String? = null
     /**
      * Album/playlist Shuffle with weighted order leaves media3 shuffle off so the spread sticks;
      * this keeps the UI control lit until Play, or an explicit shuffle-off, clears it.
@@ -114,19 +119,28 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     @Volatile private var shuffleLit = false
     private fun heard(c: MediaController): Pair<String, Long>? {
         val id = TransitionSink.heardId
-        val on = id != null && run {
+        val result = if (id == null) null else {
             val since = if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - TransitionSink.heardAtMs else 0L
             val ms = TransitionSink.heardUs / 1000 + since
-            ms < TransitionSink.heardUntilUs / 1000
+            val until = TransitionSink.heardUntilUs / 1000
+            val next = TransitionSink.mixNextId
+            when {
+                ms < until -> id to ms.coerceIn(0, durationOf(id))
+                // The mix is audible: from here what is heard is the next song, at the point the mix
+                // entered it, whatever the player's own clock says. As Spotify does it - the next song
+                // from the moment it can be heard, never the old one's last seconds jumped through.
+                next != null -> next to (TransitionSink.mixNextFromUs / 1000 + ((ms - until) * TransitionSink.mixNextRate).toLong()).coerceIn(0, durationOf(next))
+                else -> null
+            }
         }
-        // The ear left the song between two readings: the page changes song now, not at the next one.
-        if (heardBefore && !on) main.post { controller?.let { publish(it, queueChanged = false) } }
-        heardBefore = on
-        if (!on) return null
-        val since = if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - TransitionSink.heardAtMs else 0L
-        val duration = _state.value.queue.firstOrNull { it.id == id }?.duration?.toLong()?.times(1000) ?: Long.MAX_VALUE
-        return id!! to (TransitionSink.heardUs / 1000 + since).coerceIn(0, duration)
+        // The ear changed song between two readings: the page changes with it now, not at the next one.
+        val now = result?.first
+        if (now != heardBefore) main.post { controller?.let { publish(it, queueChanged = false) } }
+        heardBefore = now
+        return result
     }
+
+    private fun durationOf(id: String) = _state.value.queue.firstOrNull { it.id == id }?.duration?.toLong()?.times(1000) ?: Long.MAX_VALUE
 
     val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
 
@@ -189,11 +203,14 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val queued = if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
         // The song on the page is the one being heard. Into a transition the player has moved on to
         // the next song while the ending of this one still plays alone (see heard); the page stays
-        // on this song until the mix is heard. Its place in the queue is the nearest earlier one
-        // with that id, the song it just left.
+        // on this song until the mix is heard, and moves to the next one the moment it is, even while
+        // the player is still on the old one. The heard song is the player's next one, or the nearest
+        // earlier one with that id - the song it just left.
         val heardIndex = (p as? MediaController)?.let(::heard)?.first?.takeIf { it != item?.mediaId }?.let { id ->
             val at = p.currentMediaItemIndex
-            (at - 1 downTo 0).firstOrNull { queue.getOrNull(it)?.id == id } ?: queue.indexOfLast { it.id == id }.takeIf { it >= 0 }
+            p.nextMediaItemIndex.takeIf { it >= 0 && queue.getOrNull(it)?.id == id }
+                ?: (at - 1 downTo 0).firstOrNull { queue.getOrNull(it)?.id == id }
+                ?: queue.indexOfLast { it.id == id }.takeIf { it >= 0 }
         }
         // Weighted album shuffle plays a pre-spread list with media3 shuffle off so the order sticks;
         // [shuffleLit] keeps the Shuffle control lit until the user turns it off or starts a plain Play.
