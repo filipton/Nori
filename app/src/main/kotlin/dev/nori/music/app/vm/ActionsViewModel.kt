@@ -197,9 +197,19 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
         nori.library.star(if (isAlbum) StarKind.ALBUM else StarKind.SONG, id, true)
     }
 
-    fun star(song: Song, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { nori.library.star(StarKind.SONG, song.id, on) }
-    fun starAlbum(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { nori.library.star(StarKind.ALBUM, id, on) }
-    fun starArtist(id: String, on: Boolean) = attempt(if (on) "Added to favourites" else "Removed from favourites") { nori.library.star(StarKind.ARTIST, id, on) }
+    fun star(song: Song, on: Boolean) = favourite(on) { nori.library.star(StarKind.SONG, song.id, on) }
+    fun starAlbum(id: String, on: Boolean) = favourite(on) { nori.library.star(StarKind.ALBUM, id, on) }
+    fun starArtist(id: String, on: Boolean) = favourite(on) { nori.library.star(StarKind.ARTIST, id, on) }
+
+    /**
+     * The heart changes the moment it is pressed (starMarks), so its message does too: it used to wait
+     * for the server, and a quick favourite-unfavourite showed "Added" long after the heart was empty
+     * again. Only a failure comes back afterwards. The message can be switched off in Settings.
+     */
+    private fun favourite(on: Boolean, block: suspend () -> Unit) {
+        if (nori.settings.value.favouriteNotice) _messages.trySend(if (on) "Added to favourites" else "Removed from favourites")
+        attempt(null, block)
+    }
 
     private val _shares = Channel<String>(Channel.BUFFERED)
     /** Links ready to hand to the system share sheet. */

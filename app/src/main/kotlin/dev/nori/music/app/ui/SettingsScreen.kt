@@ -209,6 +209,7 @@ private val index = listOf(
     Entry("look", "Wallpaper colours", "Material You. Accent colour from your wallpaper"),
     Entry("look", "Colours from the cover", "Pages take their colours from the artwork"),
     Entry("look", "Blur the bottom of the cover", "The player's artwork softens into the page"),
+    Entry("look", "Confirm favourites", "A short message when you favourite or unfavourite something"),
     Entry("look", "Text and button size", ""),
     Entry("look", "Less movement", "Shorter, simpler animations"),
     Entry("look", "Animate anyway", "Keeps animations on even when Android's are off"),
@@ -506,6 +507,9 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Section("Cover art") {
                 Toggle("Colours from the cover", "Pages take their colours from the artwork.", p.coverColors) { on -> vm.update { it.copy(coverColors = on) } }
                 if (android.os.Build.VERSION.SDK_INT >= 31) Toggle("Blur the bottom of the cover", "The player's artwork softens into the page.", p.softSleeve) { on -> vm.update { it.copy(softSleeve = on) } }
+            }
+            Section("Messages") {
+                Toggle("Confirm favourites", "A short message when you favourite or unfavourite something.", p.favouriteNotice) { on -> vm.update { it.copy(favouriteNotice = on) } }
             }
             Section("Size and motion") {
                 Choice(

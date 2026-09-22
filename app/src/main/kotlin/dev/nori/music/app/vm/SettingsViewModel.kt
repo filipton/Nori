@@ -185,6 +185,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 "crossfadeKeepAlbums" -> it.copy(crossfadeKeepAlbums = on)
                 "lyricsSweep" -> it.copy(lyricsSweep = on)
                 "softSleeve" -> it.copy(softSleeve = on)
+                "favouriteNotice" -> it.copy(favouriteNotice = on)
                 "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
                 "coversAhead" -> it.copy(coversAhead = value.toIntOrNull()?.coerceIn(0, 10) ?: it.coversAhead)
                 "cacheMb" -> it.copy(cacheMb = value.toIntOrNull()?.coerceIn(256, 16384) ?: it.cacheMb).also { viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() } }

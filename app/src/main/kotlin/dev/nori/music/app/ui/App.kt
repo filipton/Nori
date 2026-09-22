@@ -1,5 +1,6 @@
 package dev.nori.music.app.ui
 
+import kotlinx.coroutines.flow.collectLatest
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
@@ -177,8 +178,11 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
         var menuSong by remember { mutableStateOf<Song?>(null) }
         var menuFromPlayer by remember { mutableStateOf(false) }
         LaunchedEffect(Unit) {
-            actions.messages.collect { msg ->
-                // Drop whatever is up so fav / unfav flips replace each other at once.
+            // Latest, not in turn: showing a message suspends until it goes away, so a plain collect
+            // could not even see the next one until the last had sat out its four seconds - a quick
+            // favourite then unfavourite read "Added to favourites" for the whole of that. Cancelling
+            // the one that is up takes it off at once and the new one replaces it.
+            actions.messages.collectLatest { msg ->
                 snackbar.currentSnackbarData?.dismiss()
                 snackbar.showSnackbar(msg, withDismissAction = true, duration = androidx.compose.material3.SnackbarDuration.Short)
             }
