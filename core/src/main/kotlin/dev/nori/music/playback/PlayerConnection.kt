@@ -231,8 +231,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     fun play(songs: List<Song>, startIndex: Int = 0, shuffle: Boolean = false) = with { c ->
         if (songs.isEmpty()) return@with
-        // Shuffle lit when this start asked for shuffle; cleared on a plain Play so the album control
-        // does not stay on after the user presses Play (which is never Pause on that row).
+        // Shuffle lit when this start asked for shuffle; cleared on a plain Play, so the album
+        // control does not stay on after the row's Play starts some other queue. Pause and resume on
+        // the page's own queue do not come through here, and leave the light as it was.
         shuffleLit = shuffle
         c.shuffleModeEnabled = shuffle
         c.setMediaItems(items(songs), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)

@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.MaterialTheme
@@ -41,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
+import dev.nori.music.playback.PlayerState
 import dev.nori.music.settings.ThemeMode
 
 /**
@@ -70,6 +72,15 @@ fun HeroPage(
      * transport when the detail lands - a one-frame pop.
      */
     awaitingPlay: Boolean = false,
+    /**
+     * Says whether the queue on the phone was started from this page. A page only has to say what
+     * "this page's own" means - its songs, or the albums of an artist - and reads [PlayerState] for
+     * the rest, so the two big buttons can answer for that queue rather than for the player in
+     * general: Play becomes Pause while it sounds (and picks it up where it stopped rather than
+     * starting the record again), Shuffle lights while it is shuffling, and a second press on Shuffle
+     * turns shuffle off instead of drawing the same songs into a new queue.
+     */
+    playingHere: (PlayerState) -> Boolean = { false },
     /** Icon buttons on the line with the pills: favourite, queue, download. */
     actions: @Composable RowScope.() -> Unit = {},
     /**
@@ -83,10 +94,14 @@ fun HeroPage(
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
     val palette = if (prefs.coverColors) rememberCoverPalette(coverUrl?.takeUnless(::isProviderCover), dark, prefs.amoled) else null
-    // Shuffle stays labelled Shuffle (never Pause); it lights while the player is shuffling.
+    // Shuffle stays labelled Shuffle (never Pause); it lights while this page's queue is shuffling.
     val player: PlayerViewModel = viewModel()
     val playerState by player.state.collectAsStateWithLifecycle()
-    val shuffling = playerState.shuffle
+    // The queue this page started is what is on - whichever song of it happens to be sounding.
+    val here = playingHere(playerState)
+    val shuffling = playerState.shuffle && here
+    // Pause while that queue sounds; otherwise Play starts one, or picks this one back up.
+    val pausing = here && (playerState.playing || playerState.buffering)
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
@@ -171,12 +186,19 @@ fun HeroPage(
                         ) {
                             CircleButton(
                                 Icons.Filled.Shuffle, "Shuffle",
-                                enabled = onShuffle != null, selected = shuffling && onShuffle != null,
-                                onClick = onShuffle ?: {},
+                                enabled = shuffling || onShuffle != null, lit = shuffling,
+                                onClick = {
+                                    // On the page that is what sounds, a second press turns shuffle off
+                                    // for this queue rather than shuffling the same songs once more.
+                                    if (shuffling) player.toggleShuffle() else onShuffle?.invoke()
+                                },
                             )
                             PillButton(
-                                "Play", Icons.Filled.PlayArrow, onPlay ?: {}, Modifier.weight(1f),
-                                prominent = true, enabled = onPlay != null,
+                                if (pausing) "Pause" else "Play", if (pausing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                // On its own queue the pill pauses and resumes; starting the record
+                                // over is what it does only for a queue that is not this page's.
+                                { if (here) player.toggle() else onPlay?.invoke() }, Modifier.weight(1f),
+                                prominent = true, enabled = here || onPlay != null,
                             )
                             actions()
                         } else Row(

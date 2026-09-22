@@ -162,12 +162,14 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
     val playing by player.currentId.collectAsStateWithLifecycle()
     val menu = LocalSongMenu.current
     LoadBox(load) { m ->
+        val songIds = remember(m) { m.songs.mapTo(HashSet()) { it.id } }
         HeroPage(
             coverUrl = null,
             title = m.title,
             caption = if (m.songs.isEmpty()) "" else "${m.songs.size} song${if (m.songs.size == 1) "" else "s"} · ${duration(m.songs.sumOf { it.duration.toLong() })}",
             onPlay = { if (m.songs.isNotEmpty()) actions.play(m.songs) },
             onShuffle = { if (m.songs.isNotEmpty()) actions.shuffle(m.songs) },
+            playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
             art = { MixArt(MixCard(m.id, m.title, m.covers, m.favourites), 236.dp, large = true) },
             actions = {
                 if (m.refreshable) CircleButton(Icons.Filled.Refresh, "New mix") { vm.refresh() }

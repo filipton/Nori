@@ -723,33 +723,44 @@ fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Bo
     }
 }
 
-/** A round, softly filled button: the small actions either side of a page's Play pill. */
+/**
+ * A round, softly filled button: the small actions either side of a page's Play pill.
+ *
+ * [lit] fills the whole disc with the page's accent and its glyph with the accent's own ink - that is
+ * Shuffle while shuffle is on, and it has to read as pressed at a glance. A stronger plate was not
+ * enough: on a paper-white page it came out as a few percent more grey. [selected] is the quieter
+ * plate, under a heart that is on, where the filled glyph already says it. Plate strength tracks page
+ * lightness continuously (same reason as [PillButton]) so a swipe onto white does not snap.
+ *
+ * [iconModifier] reaches the glyph alone, for an animation that must leave the disc it sits in still.
+ */
 @Composable
 fun CircleButton(
     icon: ImageVector, description: String, modifier: Modifier = Modifier,
-    enabled: Boolean = true, selected: Boolean = false, onClick: () -> Unit,
+    enabled: Boolean = true, selected: Boolean = false, lit: Boolean = false,
+    iconModifier: Modifier = Modifier, onClick: () -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
     // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
-    // absent on a dark page, so the row still "popped" when Play became tappable. [selected] is the
-    // lit Shuffle state: a stronger fill so the page shows that shuffle is on. Plate strength tracks
-    // page lightness continuously (same reason as [PillButton]) so a swipe onto white does not snap.
+    // absent on a dark page, so the row still "popped" when Play became tappable.
     val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
-    val plate = if (selected) {
-        androidx.compose.ui.graphics.lerp(
+    val plate = when {
+        lit -> scheme.primary
+        selected -> androidx.compose.ui.graphics.lerp(
             scheme.primary.copy(alpha = 0.28f).over(scheme.background),
-            scheme.onSurface.copy(alpha = 0.22f).over(scheme.background),
+            scheme.onSurface.copy(alpha = 0.14f).over(scheme.background),
             paper,
         )
-    } else {
-        scheme.onSurface.copy(alpha = 0.12f + 0.04f * paper).over(scheme.background)
+        // Lighter on paper than on a dark page, not heavier: at 16 % black the heart and "..." discs
+        // read as grey slabs on a white page. Eight percent is still a disc, just a quiet one.
+        else -> scheme.onSurface.copy(alpha = 0.12f - 0.04f * paper).over(scheme.background)
     }
     Surface(
         onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
         color = plate,
-        contentColor = androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper),
+        contentColor = if (lit) scheme.onPrimary else androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper),
         modifier = modifier.size(46.dp),
-    ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }
+    ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp).then(iconModifier)) } }
 }
 
 /**
@@ -772,8 +783,9 @@ fun FavoriteHeart(
         if (!ready) { ready = true; return@LaunchedEffect }
         if (plain) return@LaunchedEffect
         scale.snapTo(1f)
-        scale.animateTo(1.28f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
-        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
+        // Stiffer springs than they were: same jump, a beat quicker - the old one hung at the top.
+        scale.animateTo(1.28f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 1350f))
+        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 900f))
     }
     IconButton(onClick, modifier) {
         Icon(
@@ -795,17 +807,19 @@ fun FavoriteCircle(starred: Boolean, modifier: Modifier = Modifier, onClick: () 
         if (!ready) { ready = true; return@LaunchedEffect }
         if (plain) return@LaunchedEffect
         scale.snapTo(1f)
-        scale.animateTo(1.22f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
-        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
+        // Stiffer springs than they were: same jump, a beat quicker - the old one hung at the top.
+        scale.animateTo(1.22f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 1350f))
+        scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 900f))
     }
-    Box(modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
-        CircleButton(
-            if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-            if (starred) "Remove from favourites" else "Favourite",
-            selected = starred,
-            onClick = onClick,
-        )
-    }
+    // The jump is the heart's alone. It used to scale the whole Box, disc included, so the circle
+    // around the heart bulged with it; only the glyph moves now, and the plate holds its place.
+    CircleButton(
+        if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+        if (starred) "Remove from favourites" else "Favourite",
+        modifier, selected = starred,
+        iconModifier = Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value },
+        onClick = onClick,
+    )
 }
 
 /** The circle that holds whatever did not fit beside a page's Play button. */

@@ -15,6 +15,21 @@ api() { local m="$1"; shift; local s=nori$RANDOM; local t
   curl -s "$URL/rest/$m?u=$USER&t=$t&s=$s&v=1.16.1&c=nori&f=json$*"
 }
 json() { python3 -c "import sys,json;d=json.load(sys.stdin)['subsonic-response'];print(eval('d$1',{'d':d}))" 2>/dev/null; }
+# What the screen itself reports, read out of the accessibility tree rather than guessed at from a
+# screenshot: a label to assert on, and a node to press where the UI says the button is.
+ui() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml 2>/dev/null; }
+pill() { ui | grep -oE 'text="(Play|Pause)"' | head -1 | cut -d'"' -f2; }
+tapnode() { # $1 = text|content-desc, $2 = that value
+  local c; c=$(ui | python3 -c "
+import sys,re
+for m in re.finditer(r'<node[^>]*>', sys.stdin.read()):
+    a=re.search('$1=\"([^\"]*)\"', m.group(0))
+    if a and a.group(1)=='$2':
+        b=[int(v) for v in re.findall(r'\d+', re.search(r'bounds=\"([^\"]*)\"', m.group(0)).group(1))]
+        print((b[0]+b[2])//2, (b[1]+b[3])//2); break")
+  [ -n "$c" ] || return 1
+  adb shell input tap $c
+}
 
 echo "== features end to end against $URL"
 "$app" wake >/dev/null; adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null
@@ -78,6 +93,45 @@ shuffle=$(field notification); shuffle=${shuffle##* }
 after=$(field notification); after=${after##* }
 check "the notification's shuffle toggles ($shuffle -> $after)" bash -c '[ "'"$shuffle"'" = shuffle_on -a "'"$after"'" = shuffle_off ] || [ "'"$shuffle"'" = shuffle_off -a "'"$after"'" = shuffle_on ]'
 "$app" do "notification shuffle" >/dev/null; sleep 2   # put it back
+
+echo "-- the album page answers for its own queue"
+# The hero's pills answer for the queue the page started: Play becomes Pause while that queue sounds,
+# and a second press on Shuffle switches shuffle off where it stands instead of drawing the same songs
+# into a new queue. Picked: an album whose songs all run past a minute, so no track ends on its own in
+# the middle and resets the position these checks compare.
+"$app" wake >/dev/null
+aid=""
+for a in $(api getAlbumList2 "&type=recent&size=25" | python3 -c "
+import sys,json
+for x in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
+    if not x['id'].startswith('ext-') and x.get('songCount',0) >= 2: print(x['id'])"); do
+  d=$(api getAlbum "&id=$a" | python3 -c "import sys,json;print(min(x.get('duration',0) for x in json.load(sys.stdin)['subsonic-response']['album']['song']))" 2>/dev/null)
+  [ "${d:-0}" -ge 60 ] && { aid=$a; break; }
+done
+if [ -z "$aid" ]; then
+  echo "     (no album of songs a minute or more long; nothing to tap at)"
+else
+  "$app" open "album/$aid" >/dev/null; sleep 3
+  check "the pill reads Play before the album is played" test "$(pill)" = "Play"
+  "$app" play "album:$aid" >/dev/null; sleep 8
+  check "the pill reads Pause while this album is what sounds" test "$(pill)" = "Pause"
+  was=$(field shuffle)
+  tapnode content-desc Shuffle; sleep 4
+  check "shuffle starts this page's queue and lights ($was -> $(field shuffle))" test "$(field shuffle)" = "True"
+  check "and the pill stays Pause over the queue it started" test "$(pill)" = "Pause"
+  title=$(field title); pos=$(field positionMs)
+  tapnode content-desc Shuffle; sleep 3
+  left=$(field shuffle); now=$(field title); nowpos=$(field positionMs)
+  check "a second press turns shuffle off on this queue ($was -> $left)" test "$left" = "False"
+  check "without drawing a new queue (still $now)" test "$now" = "$title"
+  check "and without restarting it ($pos -> $nowpos ms)" test "$nowpos" -ge "$pos"
+  tapnode text Pause; sleep 2
+  check "the pill pauses playback" test "$(field playing)" = "False"
+  check "and reads Play again" test "$(pill)" = "Play"
+  pos=$(field positionMs)
+  tapnode text Play; sleep 4
+  check "Play picks the queue up where it stopped ($pos -> $(field positionMs) ms)" test "$(field positionMs)" -gt "$pos"
+fi
 
 echo "-- offline playback of a download"
 "$app" do "download song:$id" >/dev/null; sleep 14

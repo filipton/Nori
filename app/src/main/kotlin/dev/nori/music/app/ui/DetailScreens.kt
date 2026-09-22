@@ -166,6 +166,8 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     val discs = remember(detail) {
         detail?.songs?.groupBy { it.discNumber.toInt().coerceAtLeast(1) }?.toSortedMap().orEmpty()
     }
+    // This page's own queue: its songs, plus a song of this record some other queue carried along.
+    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
     HeroPage(
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
         title = album.name,
@@ -187,6 +189,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         awaitingPlay = detail == null && load !is Load.Failed,
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
+        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == album.id } == true },
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, album.id, album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(album.id, !albumStarred); Unit }
@@ -263,6 +266,7 @@ private fun AlbumBody(
     // An album is short enough to scroll and its running order is the point of it, so the songs
     // stay exactly as the record has them, grouped by disc and never narrowed.
     val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
+    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
         title = d.album.name,
@@ -277,6 +281,7 @@ private fun AlbumBody(
         },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
+        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == d.album.id } == true },
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(d.album.id, !albumStarred); Unit }
@@ -332,6 +337,9 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             ?.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } })
             .orEmpty()
     }
+    // An artist's page has no song list of its own - the queue is every album's songs - so what
+    // makes it the page playing is a song of one of its albums sounding.
+    val albumIds = remember(ui?.detail) { ui?.detail?.albums?.mapTo(HashSet()) { it.id } ?: emptySet() }
     HeroPage(
         coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
         title = artist.name,
@@ -340,6 +348,7 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
         onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
         awaitingPlay = ui == null && load !is Load.Failed,
+        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(artist.id, !artistStarred); Unit }
@@ -425,12 +434,14 @@ private fun ArtistBody(
     leave: (String) -> Unit,
 ) {
     val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
+    val albumIds = remember(ui.detail) { ui.detail.albums.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
         title = ui.detail.artist.name,
         caption = "${ui.detail.albums.size} releases",
         onPlay = { actions.playArtist(ui.detail.albums) },
         onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
+        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(ui.detail.artist.id, !artistStarred); Unit }
@@ -496,6 +507,8 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         return
     }
     val shown = remember(detail, filter) { detail?.songs?.matching(filter).orEmpty() }
+    // This playlist's own queue: its songs, whatever order they are being played in.
+    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
     HeroPage(
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
@@ -508,6 +521,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         awaitingPlay = detail == null && load !is Load.Failed,
+        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             // A favourite, drawn and named as every other favourite in the app is: a heart, filled
@@ -583,6 +597,7 @@ private fun PlaylistBody(
     onExport: () -> Unit,
 ) {
     val shown = remember(d, filter) { d.songs.matching(filter) }
+    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
         title = d.playlist.name,
@@ -590,6 +605,7 @@ private fun PlaylistBody(
         caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
+        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
