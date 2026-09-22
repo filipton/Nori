@@ -105,6 +105,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.isSpecified
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -793,18 +795,22 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom(top: F
     fun stop(a: Float) = Color.Black.copy(alpha = a * strength)
     drawRect(
         Brush.verticalGradient(
-            // The melt's own easing, in stops: quick at first, then a long tail, and gone at the
+            // The melt's own easing, in stops: quick at first, then settling, and gone well before the
             // record's bottom edge.
+            //
+            // Rubbing out fades the record; it does not blur it. A sharp line in the picture inside
+            // the band stays a sharp line, only fainter - and the old tail, 87 % at the middle and 98 %
+            // at three quarters, left the bottom half of the band drawn at a tenth or so. That is the
+            // hard edge a framed sleeve shows: Amnesiac's red book ends on a thin black strip at 60 %
+            // of the band, and a tenth of red-against-black is still a line. The top of the melt, the
+            // part that reads as the fade, is as it was; the tail now finishes by 70 %, so what lies
+            // below is the page's blur alone.
             0f to Color.Transparent,
-            0.25f to stop(0.58f),
-            0.5f to stop(0.87f),
-            0.75f to stop(0.98f),
-            // Gone before the bottom edge, not at it. A ramp that only reaches full strength on the last
-            // row leaves that row not quite rubbed out, and what is left is a sharp line of the cover
-            // along the bottom of the record - a hairline while the record is small, and plain to see the
-            // moment it grows. The old painted melt pinned its last slice to the record's bottom for
-            // exactly this reason.
-            0.92f to stop(1f),
+            0.12f to stop(0.31f),
+            0.25f to stop(0.60f),
+            0.40f to stop(0.86f),
+            0.55f to stop(0.97f),
+            0.70f to stop(1f),
             1f to stop(1f),
             startY = top, endY = bottom,
         ),
@@ -1424,11 +1430,65 @@ private fun SleeveCarousel(
         // All the records in one layer, and the sleeve's soft bottom rubbed out of that layer once: the
         // band is the sleeve's, and a record lifted, sliding or growing back is whole above it and soft
         // inside it. A layer of its own, or the erase would take the page behind it too.
+        //
+        // Rubbing out only fades: a sharp line in the picture inside the band - a frame, a black strip -
+        // stays a sharp line, fainter. So before the band starts, a blurred copy of the same records is
+        // faded in over them, and it is that copy the band melts away: sharp, then soft, then the page's
+        // own blur, with no step between. Inside the same layer, so it moves with the records and the
+        // erase takes it with them. Android 12 and later; a switch in Appearance turns it off.
+        val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
+            androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
+        val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
+        // A white or a black page has a colourless wash (CoverColors.washOf), and the blurred band has
+        // to arrive at the same thing: blurred as it is, A Beautiful Lie's red lettering spread across
+        // its white bottom as a pink haze and the page under it was grey. So on a neutral page the band
+        // loses its colour as it blurs; on a coloured one it keeps it, as the wash does.
+        val pageBg = MaterialTheme.colorScheme.background
+        val neutralPage = remember(pageBg) {
+            FloatArray(3).also { androidx.core.graphics.ColorUtils.colorToHSL(pageBg.toArgb(), it) }[1] < 0.06f
+        }
+        val bandEffect = remember(blurPx, neutralPage) {
+            if (android.os.Build.VERSION.SDK_INT < 31) null else {
+                val blur = android.graphics.RenderEffect.createBlurEffect(blurPx, blurPx, android.graphics.Shader.TileMode.CLAMP)
+                if (!neutralPage) blur else android.graphics.RenderEffect.createColorFilterEffect(
+                    android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix().apply { setSaturation(0f) }), blur,
+                )
+            }?.asComposeRenderEffect()
+        }
         Box(
             Modifier.fillMaxSize()
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
                 .drawWithContent { drawContent(); rubOutBottom() },
-        ) { records() }
+        ) {
+            records()
+            if (soft) Box(
+                Modifier.fillMaxSize()
+                    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        // Where the blurred copy shows: nowhere above the band's upper reach, all of it
+                        // by the time the rub-out is under way. Eased, so its own start is no line.
+                        val h = size.height
+                        drawRect(
+                            Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                0.3f to Color.Black.copy(alpha = 0.10f),
+                                0.6f to Color.Black.copy(alpha = 0.50f),
+                                0.85f to Color.Black.copy(alpha = 0.92f),
+                                1f to Color.Black,
+                                startY = h * (1f - MELT * 2.2f), endY = h * (1f - MELT * 0.55f),
+                            ),
+                            blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+                        )
+                    },
+            ) {
+                Box(
+                    Modifier.fillMaxSize().graphicsLayer {
+                        renderEffect = bandEffect
+                    },
+                ) { records() }
+            }
+        }
     }
 }
 }
@@ -1553,7 +1613,16 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
     // what is behind them is a piece of the record, and it can be any brightness at all. A disc tinted
     // from the page came out lighter than the page on a bright record and carried a white glyph on top
     // of it - on The Bends, a pale orange disc with a white heart. The disc brings its own contrast.
-    val onDark = scheme.onSurface.luminance() > 0.5f
+    //
+    // Disc strength tracks page lightness continuously (same as Play): a boolean onSurface cut flipped
+    // black↔white midway through a swipe onto paper, and a white disc on a white wash had no contrast.
+    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
+    val disc = Color.Black.copy(alpha = 0.40f + 0.28f * paper)
+    val ink = if (selected) {
+        androidx.compose.ui.graphics.lerp(scheme.primary, Color.White, paper)
+    } else {
+        Color.White
+    }
     val plain = reduceMotion()
     val scale = remember { androidx.compose.animation.core.Animatable(1f) }
     var ready by remember { mutableStateOf(false) }
@@ -1569,8 +1638,7 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
     }
     Surface(
         onClick = onClick, shape = CircleShape,
-        color = if (onDark) Color.Black.copy(alpha = 0.42f) else Color.White.copy(alpha = 0.72f),
-        contentColor = if (selected) scheme.primary else scheme.onSurface,
+        color = disc, contentColor = ink,
         modifier = Modifier.size(42.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value },
     ) {
         Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(25.dp)) }

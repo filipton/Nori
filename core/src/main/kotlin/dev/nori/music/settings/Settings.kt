@@ -218,6 +218,8 @@ data class Prefs(
     val weightedShuffle: Boolean = true,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
     val lyricsSweep: Boolean = true,
+    /** The bottom of the player's cover goes blurred before it melts into the page. One blur pass per frame while the cover moves. */
+    val softSleeve: Boolean = true,
     val lyricsKeepScreenOn: Boolean = true,
     val lyricsTranslation: Boolean = true,
     /** 0 small, 1 medium, 2 large. */
@@ -388,7 +390,7 @@ class Settings(context: Context) {
             liveSearchDelayMs = sp.getInt("liveSearchDelayMs", d.liveSearchDelayMs),
             profilePerOutput = sp.getBoolean("profilePerOutput", true), autoEqAuto = sp.getBoolean("autoEqAuto", false),
             tasteModel = sp.getBoolean("tasteModel", true), thirdPartyLookups = sp.getBoolean("thirdPartyLookups", false), weightedShuffle = sp.getBoolean("weightedShuffle", true),
-            lyricsSweep = sp.getBoolean("lyricsSweep", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1), lyricsLrclib = sp.getBoolean("lyricsLrclib", true),
+            lyricsSweep = sp.getBoolean("lyricsSweep", true), softSleeve = sp.getBoolean("softSleeve", true), lyricsKeepScreenOn = sp.getBoolean("lyricsKeepScreenOn", true), lyricsTranslation = sp.getBoolean("lyricsTranslation", true), lyricsSize = sp.getInt("lyricsSize", 1), lyricsLrclib = sp.getBoolean("lyricsLrclib", true),
             theme = ThemeMode.entries.getOrElse(sp.getInt("theme", 0)) { ThemeMode.SYSTEM }, amoled = sp.getBoolean("amoled", false),
             dynamicColor = sp.getBoolean("dynamicColor", true), accent = sp.getLong("accent", 0xFF6750A4), coverColors = sp.getBoolean("coverColors", true), reduceMotion = sp.getBoolean("reduceMotion", false), ignoreSystemMotion = sp.getBoolean("ignoreSystemMotion", false), uiScale = sp.getFloat("uiScale", 0f), playerColours = sp.getBoolean("playerColours", true),
             tapAction = TapAction.entries.getOrElse(sp.getInt("tapAction", 0)) { d.tapAction },
@@ -426,7 +428,7 @@ class Settings(context: Context) {
         putFloat("speed", p.speed); putBoolean("skipSilence", p.skipSilence); putInt("scrobblePercent", p.scrobblePercent)
         putInt("liveSearchDelayMs", p.liveSearchDelayMs)
         putBoolean("profilePerOutput", p.profilePerOutput); putBoolean("autoEqAuto", p.autoEqAuto); putBoolean("tasteModel", p.tasteModel); putBoolean("thirdPartyLookups", p.thirdPartyLookups); putBoolean("weightedShuffle", p.weightedShuffle)
-        putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
+        putBoolean("lyricsSweep", p.lyricsSweep); putBoolean("softSleeve", p.softSleeve); putBoolean("lyricsKeepScreenOn", p.lyricsKeepScreenOn); putBoolean("lyricsTranslation", p.lyricsTranslation); putInt("lyricsSize", p.lyricsSize); putBoolean("lyricsLrclib", p.lyricsLrclib)
         putInt("theme", p.theme.ordinal); putBoolean("amoled", p.amoled); putBoolean("dynamicColor", p.dynamicColor); putLong("accent", p.accent); putBoolean("coverColors", p.coverColors); putBoolean("reduceMotion", p.reduceMotion); putBoolean("ignoreSystemMotion", p.ignoreSystemMotion); putFloat("uiScale", p.uiScale); putBoolean("playerColours", p.playerColours)
         putInt("tapAction", p.tapAction.ordinal); putInt("swipeRight", p.swipeRight.ordinal); putInt(SWIPE_LEFT, p.swipeLeft.ordinal)
         putBoolean("skipExplicit", p.skipExplicit); putString("homeRows", p.homeRows.joinToString(",") { it.name })
