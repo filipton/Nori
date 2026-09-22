@@ -151,12 +151,26 @@ private const val FOOT_PULL = 0.35f
 private const val FOOT_JUMP = 1.8f
 
 /**
- * A light sleeve's page: its own colour at a lightness text reads on. Saturation is held back a
- * little - at 92 % lightness a cream reads as cream at well under its full strength - and capped, so
- * a pale but vivid sleeve gives a tinted page rather than a coloured one.
+ * A light sleeve's page: its own colour, at its own lightness, lifted only as far as dark text needs -
+ * the mirror of [darkPage]. It used to be pushed to 92-96 % lightness whatever the sleeve was, which
+ * bleached The Bravery's yellow foot to near white and Dire Straits' cream to a paler cream than the
+ * sleeve. Now a yellow page is that yellow, and a white sleeve is still white because it already is.
  */
-private fun paperPage(hsl: FloatArray): Color =
-    Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], (hsl[1] * 0.85f).coerceAtMost(0.55f), hsl[2].coerceIn(0.92f, 0.96f))))
+private const val PAGE_MIN_LUMA = 0.42f
+
+private fun paperPage(hsl: FloatArray): Color {
+    val sat = hsl[1].coerceAtMost(0.75f)
+    fun at(l: Float) = Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], sat, l)))
+    var lo = hsl[2].coerceIn(0.5f, 0.96f)
+    if (at(lo).luminance() >= PAGE_MIN_LUMA) return at(lo)
+    var hi = 0.96f
+    // Twelve halvings: within a thousandth of the darkest this colour may be under dark text.
+    repeat(12) {
+        val mid = (lo + hi) / 2f
+        if (at(mid).luminance() >= PAGE_MIN_LUMA) hi = mid else lo = mid
+    }
+    return at(hi)
+}
 
 /** A black sleeve's page: its own black, deep enough for white text, keeping whatever hue it has. */
 private fun inkPage(hsl: FloatArray): Color =
