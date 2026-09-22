@@ -12,6 +12,34 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **The bar shows what is heard.** With a crossfade or AutoMix on, `TransitionSink` holds the outgoing
+  song's ending and mixes the next one into it, and the player counts that held ending as played the
+  moment it is decoded (it has to: ExoPlayer only starts reading the next item within ten seconds of
+  the end of the current one, so an honest position starved the mix). The bar used to show that lead:
+  a jump of the whole crossfade as the hold began, then the next song at 0:00 while the old one was
+  still playing alone. The sink now also keeps what the ear is at (`heardId`, `heardUs`, `heardAtMs`),
+  `PlayerConnection` publishes that instead of the player's own position, and the title, cover and
+  bar change on the frame the mix becomes audible. A seek is sent to the heard item, so scrubbing
+  during the held ending stays on the song being heard.
+- **A scrub into the transition hears the transition.** Seeking to -0:02 of a song whose mix started at
+  -0:04 used to jump to where the mix would have been about to begin. The hold now measures how late it
+  began (`lateUs`), the Rust mixer is seeked to that point in its curves (`Mixer::seek`) and the
+  incoming track skips the same amount, so what is heard is what would have been heard had the song
+  played on.
+- **The seek bar has one clock.** `SeekBar` is one per-frame loop while the player screen is resumed:
+  it reads the position, moves the bar towards it at a steady rate (a short exponential approach), and
+  only teleports when the gap is a whole song. A song change and an outside seek glide; a finger holds
+  the bar exactly where it is and seeks once, on release.
+- **One soft bottom, the sleeve's.** Every record - flat, lifted, sliding or flying in from the now
+  playing bar or the lyrics thumbnail - used to carry its own blurred bottom, which travelled and
+  changed size with it, and two records side by side met at a seam between two blurs. Now the records
+  are whole squares and the sleeve's last rows are rubbed out of the whole layer once (`rubOutBottom`,
+  `MELT`), so the band stays at the bottom of the sleeve whatever the records do, and a record picked
+  up is clean above it and soft inside it. `SoftCover` and its per-record `BACKDROP` are gone.
+- **A swipe within an album left the record half off the screen.** Every song of an album has the
+  album's cover, and `land` read "the next record has the same picture" as "the player never caught
+  up with the last change" and changed the song without moving the record. It now only takes that
+  way out when a committed change really has not arrived (the 500 ms wait ran out).
 - **The page's colours travel with the record.** The song only changes when the record has finished
   sliding, so the page's colours could not start before that either - the whole change happened after
   the move. `PageShift` carries how far the record has gone and which cover it is going to, the page
@@ -21,8 +49,8 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   a flick back to the old colour).
 - **The page follows the record as it is picked up.** The blur behind is the record at the record's own
   size, so when the record shrinks the blur shrinks with it; left at the resting size, it carried on
-  below a card that had shrunk away from it as a band at the wrong scale. The sleeve's soft bottom
-  fades out over the same move, since a card that is up has its own clean edge.
+  below a card that had shrunk away from it as a band at the wrong scale. (The soft bottom no longer
+  belongs to the record at all; see "One soft bottom" above.)
 - **The page is more of a blurred mirror, less of a tint.** Each pixel of the wash was pulled two
   thirds of the way back to a flat colour; it is pulled about a third now, with a wider lightness band
   and more of the record's own saturation, and two more blur passes so that more colour does not
@@ -404,16 +432,19 @@ spread, and a patch reads as a fault where a glow does not. `CoverColors.MUTE` p
 of the way back to the flat page colour after the lightness clamp; that is what makes it subtle
 without making it grey.
 
-Below that, `Design.drawSleeveMelt` cross-fades the sharp sleeve into its own blur in slices, and
-`drawSleeveWash` draws that blur behind and below it at the same scale, so the two are the same
-picture and the join cannot be seen. **Nowhere in either is there a flat colour**, which is the whole
+Below that, the sleeve's last rows are rubbed out of the records' layer (`rubOutBottom` in
+PlayerScreen, a `DstOut` gradient over the last `MELT` of the sleeve) and `drawSleeveWash` draws the
+cover's blur behind and below at the sleeve's own scale, so what shows through the rubbed-out rows is
+the same picture gone soft and the join cannot be seen. (`drawSleeveMelt`, which painted the blurred
+rows over each record, is gone: a band painted on a record travelled with it.) **Nowhere in either is
+there a flat colour**, which is the whole
 point — every earlier version faded the picture onto some computed colour, and that colour met the
 page along a dead straight line every time.
 
-Two bugs to know about if you touch the slicing: a band of 14.2 px drawn as `band.toInt()` = 14
-leaves a fifth of a pixel behind on each slice, and by the last one that is six rows of raw, unmelted
-cover lying across the bottom of the sleeve — a bright hairline. Round the *edges*, not the heights,
-and pin the last slice to the sleeve's own bottom. `drawSleeveWash`'s three bands have the same trap.
+Two traps at that edge: the rub-out must reach full strength *before* the sleeve's last row, not on
+it, or a hairline of raw cover is left along the bottom (plain to see the moment a lifted record grows
+back); and `drawSleeveWash`'s three bands must round their *edges*, not their heights, or a row of page
+colour shows between them.
 
 ## Sizes, measured
 

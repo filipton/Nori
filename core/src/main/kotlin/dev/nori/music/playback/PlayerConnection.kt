@@ -78,13 +78,44 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     val positionMs: Long get() {
         val c = controller
         if (c != null) {
-            lastPosition = c.currentPosition
+            // Through a transition the player runs ahead of the ear (the held ending is counted as
+            // played so the next track arrives in time to be mixed in); the sink says what is really
+            // heard, and the bar shows that, in the song it belongs to (see publish).
+            lastPosition = heard(c)?.second ?: c.currentPosition
             lastPositionAt = android.os.SystemClock.elapsedRealtime()
             return lastPosition
         }
         // Still reconnecting: carry on from where it was, moving if it was playing.
         val elapsed = if (_state.value.playing && lastPositionAt > 0) android.os.SystemClock.elapsedRealtime() - lastPositionAt else 0
         return (lastPosition + elapsed).coerceAtLeast(0)
+    }
+
+    /**
+     * The song being heard and the place in it, while that is not what the player says. Through a
+     * transition the player runs ahead of the ear: the held ending is counted as played the moment it
+     * is decoded, so that the next track arrives in time to be mixed in, and the player is on the next
+     * song while this one's ending still plays alone. The sink says what is really heard; the UI shows
+     * that, in the song it belongs to. Null when the player's own word is the truth.
+     *
+     * The sink's reading is taken when the player asks for its position, which with a deep buffer is
+     * seconds apart, so it is run on from there at one times - and past the point where the mix takes
+     * over the ear has left the song, whether or not the sink has been asked since.
+     */
+    private var heardBefore = false
+    private fun heard(c: MediaController): Pair<String, Long>? {
+        val id = TransitionSink.heardId
+        val on = id != null && run {
+            val since = if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - TransitionSink.heardAtMs else 0L
+            val ms = TransitionSink.heardUs / 1000 + since
+            ms < TransitionSink.heardUntilUs / 1000
+        }
+        // The ear left the song between two readings: the page changes song now, not at the next one.
+        if (heardBefore && !on) main.post { controller?.let { publish(it, queueChanged = false) } }
+        heardBefore = on
+        if (!on) return null
+        val since = if (c.isPlaying) android.os.SystemClock.elapsedRealtime() - TransitionSink.heardAtMs else 0L
+        val duration = _state.value.queue.firstOrNull { it.id == id }?.duration?.toLong()?.times(1000) ?: Long.MAX_VALUE
+        return id!! to (TransitionSink.heardUs / 1000 + since).coerceIn(0, duration)
     }
 
     val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
@@ -98,6 +129,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             val c = runCatching { future.get() }.getOrNull() ?: return@addListener
             controller = c
             c.addListener(listener)
+            // The ear leaving the player's song, or catching up with it, is a song change to the
+            // UI, and the player itself fires no event for it. Fired on the playback thread.
+            TransitionSink.onHeardChanged = { main.post { controller?.let { publish(it, queueChanged = false) } } }
             publish(c, queueChanged = true)
             pending.forEach { it(c) }
             pending.clear()
@@ -143,8 +177,17 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val queue = if (fresh) (0 until p.mediaItemCount).map { p.getMediaItemAt(it).toSong() } else old.queue
         val order = if (fresh || p.shuffleModeEnabled != old.shuffle) playOrder(p) else old.order
         val queued = if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
+        // The song on the page is the one being heard. Into a transition the player has moved on to
+        // the next song while the ending of this one still plays alone (see heard); the page stays
+        // on this song until the mix is heard. Its place in the queue is the nearest earlier one
+        // with that id, the song it just left.
+        val heardIndex = (p as? MediaController)?.let(::heard)?.first?.takeIf { it != item?.mediaId }?.let { id ->
+            val at = p.currentMediaItemIndex
+            (at - 1 downTo 0).firstOrNull { queue.getOrNull(it)?.id == id } ?: queue.indexOfLast { it.id == id }.takeIf { it >= 0 }
+        }
         _state.value = old.copy(
-            connected = true, queue = queue, order = order, queued = queued, index = if (p.mediaItemCount == 0) -1 else p.currentMediaItemIndex,
+            connected = true, queue = queue, order = order, queued = queued,
+            index = if (p.mediaItemCount == 0) -1 else heardIndex ?: p.currentMediaItemIndex,
             nextIndex = if (p.mediaItemCount == 0) -1 else p.nextMediaItemIndex,
             previousIndex = if (p.mediaItemCount == 0) -1 else p.previousMediaItemIndex,
             // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
@@ -152,7 +195,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
             shuffle = p.shuffleModeEnabled,
             repeat = when (p.repeatMode) { Player.REPEAT_MODE_ALL -> Repeat.ALL; Player.REPEAT_MODE_ONE -> Repeat.ONE; else -> Repeat.OFF },
-            durationMs = p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
+            durationMs = if (heardIndex != null) queue[heardIndex].duration.toLong() * 1000
+                else p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
         )
     }
@@ -228,6 +272,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
+        // A tap is a place in the song on the page. While the ear is still on the song the player
+        // has left (see publish), that is the earlier song: the seek goes to it, not to the one the
+        // player is already counting.
+        val heardIndex = _state.value.index.takeIf { heard(c) != null && it >= 0 && it != c.currentMediaItemIndex }
+        if (heardIndex != null) { forget(); c.seekTo(heardIndex, ms); return@with }
         // Where it was is read here, when it means something - a ready player - and the watch only
         // falls back to anchoring on its first READY observation while the player is still opening
         // (see keepSeek). Anchoring unconditionally after the fact puts the anchor next to the
@@ -236,8 +285,10 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         // back to the tapped place with a gap each time. On a player that is not ready yet the
         // position read now is meaningless - idle reports 0 while the session restores to wherever
         // the queue was left, and anchoring on 0 makes the watch read the restored position as
-        // "moved by someone else" and give up on a dropped seek.
-        val atAsk = if (c.playbackState == Player.STATE_READY) c.currentPosition else null
+        // "moved by someone else" and give up on a dropped seek. Already at the target anchors
+        // AT it: the controller answers from its own books, so this can catch the asked place
+        // itself and the direction test would otherwise misfire on it the same way.
+        val atAsk = if (c.playbackState == Player.STATE_READY) c.currentPosition.let { if (kotlin.math.abs(it - ms) <= 1_500) ms else it } else null
         wanted = Seek(ms, c.currentMediaItem?.mediaId, android.os.SystemClock.elapsedRealtime() + KEEP_SEEK_MS, atAsk)
         _pendingSeek.value = ms
         // A queue restored from the last time the app ran is deliberately left unprepared, so that
@@ -305,9 +356,13 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             // then: this first sight of a ready player is what "where it was" means. The original
             // seek may have landed already (then pos is the target and the checks below keep it)
             // or been dropped (then the loop below re-asks). Either way the watch now measures
-            // from truth.
-            w.from = pos
-            w.low = pos
+            // from truth. Already there anchors AT the target: the controller answers from its own
+            // books, so this can catch the asked place itself, and the direction test below would
+            // otherwise read a forward seek as a backward one and fire it again, yanking the song
+            // back once it has played on. Same snap as the ask-time anchor above.
+            val landed = kotlin.math.abs(pos - w.target) <= 1_500
+            w.from = if (landed) w.target else pos
+            w.low = if (landed) w.target else pos
             w.until = now + KEEP_SEEK_MS
             return
         }

@@ -21,6 +21,8 @@ internal object AutoMixMixer {
     /** Mixes [frames] frames of each stream into [dest] (which may be either input). */
     @JvmStatic external fun process(h: Long, outgoing: ByteBuffer, outPos: Int, incoming: ByteBuffer, inPos: Int, dest: ByteBuffer, destPos: Int, frames: Int, encoding: Int): Boolean
     @JvmStatic external fun position(h: Long): Long
+    /** Starts the transition clock [frames] in: curves and filters as if the mix had run that far. */
+    @JvmStatic external fun seek(h: Long, frames: Long)
     @JvmStatic external fun destroy(h: Long)
 }
 

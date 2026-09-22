@@ -622,17 +622,48 @@ class PlaybackService : MediaLibraryService() {
         private val ms get() = nori.settings.value.fadeMs
 
         override fun play() {
+            takePending()
             if (ms > 0 && !wrappedPlayer.isPlaying) wrappedPlayer.volume = 0f
             super.play()
             if (ms > 0) ramp(1f, ms)
         }
 
         override fun pause() {
+            takePending()
             if (ms > 0 && wrappedPlayer.isPlaying) ramp(0f, ms) { super.pause(); wrappedPlayer.volume = targetVolume } else super.pause()
         }
 
-        private fun softly(action: () -> Unit) {
-            if (ms > 0 && wrappedPlayer.isPlaying) { wrappedPlayer.volume = 0f; action(); ramp(1f, ms) } else action()
+        /**
+         * A switch waiting out its dip: the old sound has to fall before the flush, so the action
+         * runs a heartbeat after the finger. Guarded by what was current when asked: anything else
+         * moving on first (a track ending inside the dip) drops it instead of yanking back.
+         */
+        private var softPending: (() -> Unit)? = null
+        private var softItem: String? = null
+        private var softIndex = C.INDEX_UNSET
+
+        /**
+         * Complete a waiting switch now: a second switch chains behind instead of cancelling the
+         * first, so the queue steps once per tap, and a pause never swallows the seek it interrupts.
+         */
+        private fun takePending() {
+            val action = softPending ?: return
+            softPending = null
+            if (player.currentMediaItem?.mediaId == softItem && player.currentMediaItemIndex == softIndex) action()
+        }
+
+        private fun softly(floorMs: Int = 0, action: () -> Unit) {
+            // Down first, then the switch, then back up: cutting dead reads as a chop, and out of a
+            // blend it lands like the sound dropped out. The dip is quick; the configured fade is
+            // the way back in. Switches to another song always dip a little, even with fades off:
+            // a hard digital cut mid-sound clicks, and out of a mix it snaps texture as well as place.
+            val ms = maxOf(ms, floorMs)
+            if (ms <= 0 || !wrappedPlayer.isPlaying) { action(); return }
+            takePending()
+            softPending = action
+            softItem = player.currentMediaItem?.mediaId
+            softIndex = player.currentMediaItemIndex
+            ramp(0f, minOf(ms, 150)) { takePending(); ramp(1f, ms) }
         }
 
         /**
@@ -653,7 +684,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun seekTo(positionMs: Long) = softly { super.seekTo(positionMs) }
-        override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly { super.seekTo(mediaItemIndex, positionMs) }
+        override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly(floorMs = 120) { super.seekTo(mediaItemIndex, positionMs) }
         override fun seekToNext() = andPlay { softly { super.seekToNext() } }
         override fun seekToNextMediaItem() = andPlay { softly { super.seekToNextMediaItem() } }
         override fun seekToPreviousMediaItem() = andPlay { softly { super.seekToPreviousMediaItem() } }
@@ -662,6 +693,9 @@ class PlaybackService : MediaLibraryService() {
         override fun seekToPrevious() = andPlay {
             softly { if (nori.settings.value.previousAlwaysSkips && hasPreviousMediaItem()) super.seekToPreviousMediaItem() else super.seekToPrevious() }
         }
+
+        /** Stopping drops a switch still waiting out its dip; starting over is not continuing it. */
+        override fun stop() { softPending = null; super.stop() }
     }
 
     /**

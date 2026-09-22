@@ -29,8 +29,8 @@ moving() {
   [ -n "$a" ] && [ -n "$b" ] && [ "$b" -gt "$a" ]
 }
 stopped() { [ "$(track_state)" != "started" ]; }
-# The sink holds the outgoing track's ending and mixes the next one into it, and says so while it does.
-# It starts as the decoder passes the planned point, which is a buffer ahead of what is being heard.
+# The sink holds the outgoing track's ending and mixes the next one into it, and says so while the mix
+# is being heard - not while it is being made, which is a buffer ahead of the ear.
 waitfor_mix() { for _ in $(seq 60); do mixing && return 0; sleep 1; done; return 1; }
 next_track_plays() { # next_track_plays <title it is leaving>
   for _ in $(seq 60); do [ "$(field title)" != "$1" ] && { sleep 3; playing_audio; return; }; sleep 1; done
@@ -110,6 +110,19 @@ dur=$(field durationMs)
 if [ "${dur:-0}" -gt 40000 ]; then
   leaving=$(field title)
   "$app" do "seek $((dur - 24000))" >/dev/null
+  # The bar shows what is heard. The player itself counts the held ending as played the moment it
+  # is decoded (so the next track arrives in time), and the bar used to show that: a jump of the
+  # whole crossfade the moment the hold began, then the next song at 0:00 while this one still
+  # played alone. Now it walks steadily up to the point the mix starts and only then changes song.
+  steady=1; last=""; seen=""
+  for _ in $(seq 8); do
+    t=$(field title); p=$(field positionMs)
+    [ "$t" = "$leaving" ] || break
+    if [ -n "$last" ] && { [ "${p:-0}" -lt "$last" ] || [ $((p - last)) -gt 4000 ]; }; then steady=0; fi
+    last=$p; seen="$seen $p"
+    sleep 1
+  done
+  check "the bar walks steadily through the held ending ($seen)" test "$steady" = 1 -a -n "$last" -a "$last" -gt $((dur - 22000))
   check "the sink reaches the mix" waitfor_mix
   # The whole point, and the thing that was broken: the next track's samples have to arrive while there
   # is still sound in the sink to mix them into. When they were late the crossfade played after a hole
@@ -117,6 +130,32 @@ if [ "${dur:-0}" -gt 40000 ]; then
   check "the next track arrives in time to be mixed" waitfor "mixing: the next track arrived" 60
   check "the ending is not let go for want of it" never "letting the ending play"
   check "the next track plays out of the mix" next_track_plays "$leaving"
+  # A scrub into the mix stays on the song to hear the ending: the tail belongs to the song, so
+  # going there replays it instead of jumping to the next one (eight seconds from the end is
+  # mid-mix for a twelve-second crossfade).
+  "$app" do "playnext $song" >/dev/null
+  # The plan past the new song is remade asynchronously; the seek below needs it there.
+  watch_from_now
+  check "a crossfade is planned past the new song too" waitfor "transition .*: [A-Z_]+ [0-9]+ ms at" 15
+  leaving2=$(field title); d2=$(field durationMs)
+  if [ "${d2:-0}" -gt 60000 ]; then
+    # The arrival below must be this seek's, not the earlier boundary's.
+    watch_from_now
+    "$app" do "seek $((d2 - 8000))" >/dev/null
+    heard=""
+    for _ in $(seq 10); do
+      t=$(field title); p=$(field positionMs)
+      if [ "$t" = "$leaving2" ] && [ "${p:-0}" -ge $((d2 - 8000)) ]; then heard="$t@${p}"; break; fi
+      # Fast decode can finish the pipeline in milliseconds: the item flips while the deep
+      # buffer still plays the tail out. The two checks below prove the mix either way.
+      if [ "$t" != "$leaving2" ] && [ -n "$t" ]; then heard="early-flip:$t@${p}"; break; fi
+      sleep 1
+    done
+    check "a scrub into the mix stays to hear the ending ($heard)" test -n "$heard"
+    # The tail it points at still gets its mix: a hold beginning seconds in still fires.
+    check "the mix still fires after the late seek" waitfor "mixing: the next track arrived" 60
+    check "the next track plays out of that mix" next_track_plays "$leaving2"
+  fi
 fi
 
 watch_from_now

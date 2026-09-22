@@ -123,6 +123,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Burst playback from a deep buffer (CPU asleep ~80 %) | | | | yes | |
 | Crossfade with real overlap | x | fade-out only | | yes | |
 | Crossfade: separate in/out length, curves, "mix only", off for albums in order | x | | | part | part: off inside albums |
+| A scrub into the mix stays on the song to hear the ending, and the mix still fires | | | | yes | |
 | Smart fades (waveform-analysed fade points) | x | | | | ask (cost: decode-ahead analysis per track) |
 | Fade on play / pause / seek / skip | x | x | | yes | done |
 | Speed | x | x | x | yes | |

@@ -150,6 +150,8 @@ pub struct Mixer {
     lp_coef: Coef,
     lp_state: [[[f64; 2]; MAX_CHANNELS]; 2],
     lp_entry: u64,
+    /// Where the sweep's fade-in is measured from: the sweep's start, or a seek that landed inside it.
+    lp_from: u64,
     /// Beat-synced echo on the outgoing deck: delay frames, feedback, wet gain, and the ring per channel.
     echo: Option<(usize, f64, f64)>,
     echo_buf: Vec<f64>,
@@ -176,6 +178,7 @@ impl Mixer {
             lp_coef: Coef::default(),
             lp_state: [[[0.0; 2]; MAX_CHANNELS]; 2],
             lp_entry: 0,
+            lp_from: 0,
             echo: None,
             echo_buf: Vec::new(),
             echo_pos: 0,
@@ -215,6 +218,7 @@ impl Mixer {
         let (ls, le, lf, lt) = (get(param::LP_START), get(param::LP_END), get(param::LP_FROM_HZ), get(param::LP_TO_HZ));
         self.lp = (ls >= 0.0 && le >= ls && lf > 0.0 && lt > 0.0).then(|| (span(ls, le, self.len), lf.min(self.rate * 0.45), lt.min(self.rate * 0.45)));
         self.lp_entry = frames(LP_ENTRY_MS).max(1);
+        self.lp_from = self.lp.map_or(0, |(s, _, _)| s.start);
         // One outgoing beat of delay, capped at a second (about 1.5 MB float at 48 kHz stereo, reused across transitions).
         let (ed, ef, ew) = (get(param::ECHO_DELAY), p.get(param::ECHO_FB).copied().unwrap_or(0.5), p.get(param::ECHO_WET).copied().unwrap_or(-6.0));
         self.echo = (ed >= 1.0).then(|| {
@@ -235,6 +239,20 @@ impl Mixer {
 
     pub fn position(&self) -> u64 {
         self.pos
+    }
+
+    /// Starts the clock `frames` into the transition instead of at its first sample: a listener who
+    /// seeks into the overlap hears the curves where they would have been, not a fresh fade with too
+    /// little tail left to finish it. Filters start clean from here; the sweep fades in from here too.
+    pub fn seek(&mut self, frames: u64) {
+        self.pos = frames.min(self.len);
+        if let Some((span, from, to)) = self.lp {
+            if self.pos >= span.start {
+                let hz = from * (to / from).powf(span.progress(self.pos));
+                self.lp_coef = Coef::low_pass(self.rate, hz);
+                self.lp_from = self.pos;
+            }
+        }
     }
 
     pub fn done(&self) -> bool {
@@ -289,7 +307,7 @@ impl Mixer {
                         let hz = from * (to / from).powf(span.progress(p));
                         self.lp_coef = Coef::low_pass(self.rate, hz);
                     }
-                    ((p - span.start) as f64 / self.lp_entry as f64).min(1.0)
+                    (p.saturating_sub(self.lp_from) as f64 / self.lp_entry as f64).min(1.0)
                 }
                 _ => 0.0,
             };
@@ -375,6 +393,14 @@ pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_configure(env: 
 #[no_mangle]
 pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_position(_: JNIEnv, _: JClass, h: jlong) -> jlong {
     mixer(h).map_or(0, |m| m.lock().position() as jlong)
+}
+
+/// Moves the transition clock to `frames` in; see [Mixer::seek].
+#[no_mangle]
+pub extern "system" fn Java_dev_nori_music_playback_AutoMixMixer_seek(_: JNIEnv, _: JClass, h: jlong, frames: jlong) {
+    if let Some(m) = mixer(h) {
+        m.lock().seek(frames.max(0) as u64);
+    }
 }
 
 /// Mixes `frames` frames of `outgoing[out_pos..]` and `incoming[in_pos..]` into `dest[dest_pos..]` (byte positions;
@@ -506,6 +532,30 @@ mod tests {
         for (u, v) in y.iter().zip(&a) {
             assert!((u - v).abs() < 1e-5, "sin² + cos² of the same signal is the signal");
         }
+    }
+
+    #[test]
+    fn a_seek_into_the_mix_picks_the_curves_up_where_they_would_be() {
+        let mut p = plan();
+        p.fade_curve = FadeCurve::Linear;
+        let ones = vec![1f32; 48000];
+        let zeros = vec![0f32; 48000];
+        // The whole transition, as a listener who played into it hears it.
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        let mut whole = vec![0f32; 48000];
+        m.process_f32(&ones, &zeros, &mut whole);
+        // The same transition entered 300 ms in: what comes out is the tail of the one above.
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        m.seek(14400);
+        assert_eq!(m.position(), 14400);
+        let mut late = vec![0f32; 48000 - 14400];
+        m.process_f32(&ones[14400..], &zeros[14400..], &mut late);
+        for (i, (l, w)) in late.iter().zip(&whole[14400..]).enumerate() {
+            assert!((l - w).abs() < 1e-5, "frame {i}: {l} vs {w}");
+        }
+        assert!(m.done());
     }
 
     #[test]

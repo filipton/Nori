@@ -242,10 +242,9 @@ private fun washOf(bitmap: Bitmap, background: Color, dark: Boolean): Pair<Image
         // shouting out of it.
         px[i] = ColorUtils.blendARGB(ColorUtils.HSLToColor(hsl), background.toArgb(), MUTE)
     }
-    // What the soft bottom of the sleeve averages out to, kept with the picture. The melt is drawn
-    // from these rows, so this is the one colour the band as a whole wears; it is what lets the band
-    // be recoloured to whatever the page is wearing this frame without changing how light it is.
-    // See `PagePalette.meltColour` and `drawSleeveMelt`.
+    // What the soft bottom of the sleeve averages out to, kept with the picture: these are the rows
+    // of the page's wash that show through where the records are rubbed out (`rubOutBottom`), so this
+    // is the one colour the band as a whole wears. See `PagePalette.meltColour`.
     val first = (WASH * (1f - MELT)).toInt().coerceIn(0, WASH - 1)
     var r = 0f; var g = 0f; var b = 0f
     for (y in first until WASH) for (x in 0 until WASH) {

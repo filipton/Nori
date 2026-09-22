@@ -43,7 +43,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     companion object {
         /**
-         * A transition is running right now. Apple's player puts a word in the middle of the seek row
+         * A mix is being heard right now. Apple's player puts a word in the middle of the seek row
          * while one is - theirs reads "Mixing" - and the seek row is the one thing on screen that already
          * ticks, so it can read this without anything new having to watch it. Written on the playback
          * thread, read on the main one; a stale answer for a fraction of a second means nothing here.
@@ -51,8 +51,41 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         @Volatile var mixing = false
             private set
 
+        /**
+         * What is heard while the player's own position runs ahead of the ear: the song whose ending
+         * is held and the place in it, in the song's own time. The player is told the held ending has
+         * played before it has (see [getCurrentPositionUs]); the bar shows this instead. Null whenever
+         * the player's position is what is heard. Written on the playback thread, read on the main one.
+         */
+        @Volatile var heardId: String? = null
+            private set
+        @Volatile var heardUs = 0L
+            private set
+        /**
+         * elapsedRealtime when [heardUs] was read. The player asks for the position only when it has
+         * work to do - with a deep buffer that is once a second or less - and the sound moves on in
+         * between; a reader adds the time since to show it moving.
+         */
+        @Volatile var heardAtMs = 0L
+            private set
+        /**
+         * Where in the held song the ear leaves it for the mix, in the song's own time. A reader that
+         * has run [heardUs] on past this takes the player's own word again rather than waiting for
+         * the next reading to say so.
+         */
+        @Volatile var heardUntilUs = Long.MAX_VALUE
+            private set
+        /** Called on the playback thread when [heardId] appears or goes: the ear has left the player, or caught up with it. */
+        @Volatile var onHeardChanged: (() -> Unit)? = null
+
         /** How little sound may be left in the sink before a held ending is let go rather than mixed. */
         private const val DRY_US = 1_500_000L
+        /**
+         * How young a hold is exempt from that: born with no runway (a seek just landed in the
+         * transition), decode still has to sprint. Normal holds are born with runway to spare,
+         * so this changes nothing for them; a truly starved one is let go when this expires.
+         */
+        private const val HOLD_GRACE_MS = 10_000L
     }
 
     interface Listener {
@@ -77,7 +110,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     private enum class Phase { PASS, HOLD, MIX }
 
-    private class Chunk(val data: ByteBuffer, val ptsUs: Long, val resync: Boolean)
+    /** [measure]: the first chunk of a mix, whose timestamp jump the sink below applies the moment it is offered; see [drain]. */
+    private class Chunk(val data: ByteBuffer, val ptsUs: Long, val resync: Boolean, var measure: Boolean)
 
     private var rate = 0
     private var channels = 0
@@ -88,26 +122,47 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     /** The song whose audio is arriving now, from the last [configure]. */
     private var currentId: String? = null
+    /**
+     * The song actually flowing now, from the last discontinuity - never from decode-ahead. A
+     * configure for the next track arrives while this one still plays, and planning the hold
+     * off that id silently skips the transition (a seek past the planned start does the same).
+     */
+    private var playingId: String? = null
     private var offsetUs = 0L
 
     private var phase = Phase.PASS
-        set(value) { field = value; mixing = value != Phase.PASS }
     private var plan: Plan? = null
     private var planFor: String? = null
     private var tail: ByteBuffer? = null
     /** The output timestamp holding began at: everything from here on is inside this sink, unheard. */
     private var heldFromUs = C.TIME_UNSET
     private var heldAt = 0L
+    /** The song whose ending is held and its stream offset, so the ear's place can be given in the song's own time. */
+    private var heldId: String? = null
+    private var heldOffsetUs = 0L
+    /** How far into the planned transition the hold began: nought unless a seek landed inside it. */
+    private var lateUs = 0L
     /** How much of the outgoing track has been swallowed into the hold, in microseconds. */
     private var heldUs = 0L
     /** The last position given to the player, which may never go backwards. */
     private var reported = Long.MIN_VALUE
+    /**
+     * The mix is stamped in the incoming track's time, and the sink below moves its clock forward by
+     * the difference the moment the first mixed chunk is offered - seconds before that chunk is heard,
+     * with the ending's last unheld stretch still playing out. Until the clock reaches [shiftUntilUs]
+     * (the first mixed sample), what is heard is the clock less this.
+     */
+    private var shiftUs = 0L
+    private var shiftUntilUs = C.TIME_UNSET
     private var tailLen = 0
     private var tailRead = 0
     /** The output timestamp the queued mix runs to, so a cut-short mix resumes the ending after it. */
     private var mixedEndUs = C.TIME_UNSET
+    /** The output timestamp the mix is heard from; [mixing] is true between it and [mixedEndUs]. */
+    private var mixFromUs = C.TIME_UNSET
     private var skipLeft = 0L
     private var resyncNext = false
+    private var measureNext = false
     /** Mixed and stretched audio carries its own continuous clock; real timestamps resume after a resync. */
     private var syntheticPtsUs = C.TIME_UNSET
 
@@ -323,13 +378,25 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                 if (stretch != 0L) { stretchOut(buffer); drain(); return true }
                 val buf = if (converting) toPinned(buffer) else buffer
                 if (converting && buf == null) { drain(); return true }
-                val p = planFor(currentId)
+                if (playingId == null) playingId = currentId
+                var p = planFor(playingId)
+                if (p == null && playingId != currentId) {
+                    // The discontinuity trail went cold (rapid skips stranding a stale id): trust
+                    // decode again. The old code used this id always; any flip staleness it has is
+                    // still bounded by the region check below. Sticks, so this costs one replan.
+                    playingId = currentId
+                    p = planFor(playingId)
+                }
                 val trackPos = presentationTimeUs - offsetUs
                 val frames = buf!!.remaining() / frameBytes
                 val startFrame = if (p == null) Long.MAX_VALUE else (p.outStartUs - trackPos) * rate / 1_000_000
-                // More than a second past the planned start (a late plan, or a seek): leave this transition alone.
-                val skipTransition = startFrame < -rate
+                // Inside the transition but past its start (a seek, or decode already ahead when
+                // the plan arrived): hold from here with what is left instead of leaving it
+                // alone, so the mix still fires at the boundary. Past the planned region there
+                // is nothing to hold any more.
+                val skipTransition = p != null && startFrame < -p.durationUs * rate / 1_000_000
                 if (startFrame >= frames || skipTransition) return pass(buf, presentationTimeUs, converting)
+                val late = startFrame < 0
                 val before = startFrame.coerceAtLeast(0).toInt() * frameBytes
                 if (!converting) feedAnalysis(buf, buf.position(), buf.remaining())
                 if (before > 0) {
@@ -338,13 +405,17 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
                     enqueue(copyOf(head), presentationTimeUs)
                     buf.position(buf.position() + before)
                 }
+                // A seek landed inside the transition: the mix will run from this far in, as it
+                // would have sounded had the song played on into it (see handleDiscontinuity).
+                lateUs = if (late) -startFrame * 1_000_000L / rate else 0L
                 beginHold(p!!)
+                if (late) Log.i("nori", "transition: late hold, ${lateUs / 1000} ms in")
                 heldFromUs = presentationTimeUs + before.toLong() / frameBytes * 1_000_000L / rate
                 heldAt = android.os.SystemClock.elapsedRealtime()
                 val at = super.getCurrentPositionUs(false)
                 val runwayUs = if (at == AudioSink.CURRENT_POSITION_NOT_SET) Long.MAX_VALUE else heldFromUs - at
-                Log.i("nori", "holding the ending, ${runwayUs / 1000} ms of sound still in the sink")
-                if (runwayUs < DRY_US) {
+                Log.i("nori", "holding the ending, ${if (runwayUs == Long.MAX_VALUE) "no" else "${runwayUs / 1000} ms of"} sound still in the sink")
+                if (runwayUs < DRY_US && !late) {
                     // Decode never pulled ahead - a seek just before the boundary, or the next track
                     // still fetching. The dry guard below would let go within milliseconds, so do not
                     // hold at all: the ending plays out exactly as it would have, without the detour.
@@ -400,15 +471,20 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     private fun planFor(id: String?): Plan? {
         if (id == null) return null
-        val again = replanWanted
-        if (planFor != id || again) {
-            replanWanted = false
-            plan = listener.planFor(id)
-            planFor = id
-            plan?.let(::prepare)
-        }
+        // A null is momentary more often than it is an answer (queue surgery still in flight,
+        // analyses landing) - and the next buffer may already see a settled world. So a null is
+        // retried on later buffers instead of silencing the track; throttled, because the
+        // listener does real planning work. A plan sticks until asked again or the track changes.
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (planFor == id && !replanWanted && (plan != null || now - lastNullAt <= 2_000)) return plan
+        replanWanted = false
+        plan = listener.planFor(id)
+        planFor = id
+        if (plan == null) lastNullAt = now
+        plan?.let(::prepare)
         return plan
     }
+    private var lastNullAt = 0L
 
     /**
      * Everything the transition needs, built when the plan is made rather than when it starts. A plan is
@@ -441,9 +517,12 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     }
 
     private fun beginHold(p: Plan) {
+        heldId = playingId ?: currentId
+        heldOffsetUs = offsetUs
         val bytes = (p.durationUs * rate / 1_000_000).toInt() * frameBytes
         tail = tail?.takeIf { it.capacity() >= bytes } ?: ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
-        tail!!.clear().limit(bytes)
+        // Begun late, the hold is what is left of the overlap: past it the plan skips the ending.
+        tail!!.clear().limit(((p.durationUs - lateUs.coerceIn(0L, p.durationUs)) * rate / 1_000_000).toInt() * frameBytes)
         tailLen = 0
         phase = Phase.HOLD
     }
@@ -473,37 +552,50 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             mixSourceId = currentId
             // Both were built when the plan was made; either is still made here if something changed
             // under them (a format switch) since.
+            playingId = p.incomingId
             if (mixer == 0L || mixerFormat != rate * 100 + channels) {
                 if (mixer != 0L) AutoMixMixer.destroy(mixer)
                 mixer = AutoMixMixer.create(rate, channels)
                 mixerFormat = rate * 100 + channels
             }
             AutoMixMixer.configure(mixer, p.mixer)
+            // A hold that began inside the transition (a seek) runs the mix from that point: the
+            // curves as far along as they would be, the incoming track as far in as it would be
+            // (it plays at the mix's tempo, so late wall time is late * ratio of it), and the tempo
+            // held for what is left of the overlap.
+            val stretching = kotlin.math.abs(p.tempoRatio - 1f) > 1e-4f
+            val late = lateUs.coerceIn(0L, p.durationUs)
+            if (late > 0) AutoMixMixer.seek(mixer, late * rate / 1_000_000)
+            val inLateUs = if (stretching) (late * p.tempoRatio).toLong() else late
             // The stretcher works in the incoming domain when the sides disagree (converted after
             // stretching), else in the outgoing one as before; the skip is in the same domain.
             val sRate = if (converting) inRate else rate
             val sCh = if (converting) inChannels else channels
             val sEnc = if (converting) inEncoding else encoding
             val sFrameBytes = if (converting) inFrameBytes else frameBytes
-            if (kotlin.math.abs(p.tempoRatio - 1f) > 1e-4f) {
+            if (stretching) {
                 if (converting && pendingStretch != 0L) { AutoMixStretch.destroy(pendingStretch); pendingStretch = 0L }
                 stretch = if (!converting && pendingStretch != 0L && pendingKeepPitch == p.keepPitch) pendingStretch.also { pendingStretch = 0L }
                 else AutoMixStretch.create(sRate, sCh, p.keepPitch)
                 stretchRate = sRate; stretchCh = sCh; stretchEnc = sEnc; stretchFrameBytes = sFrameBytes
-                AutoMixStretch.configure(stretch, p.tempoRatio, p.durationUs * sRate / 1_000_000, p.rampUs * sRate / 1_000_000)
+                AutoMixStretch.configure(stretch, p.tempoRatio, (p.durationUs - late) * sRate / 1_000_000, p.rampUs * sRate / 1_000_000)
             }
-            Log.i("nori", "mixing: the next track arrived ${android.os.SystemClock.elapsedRealtime() - heldAt} ms into the hold with ${(heldFromUs - super.getCurrentPositionUs(false)) / 1000} ms of sound left")
+            val at = super.getCurrentPositionUs(false)
+            Log.i("nori", "mixing: the next track arrived ${android.os.SystemClock.elapsedRealtime() - heldAt} ms into the hold with ${if (at == AudioSink.CURRENT_POSITION_NOT_SET) "no" else "${(heldFromUs - at) / 1000} ms of"} sound left")
             // The held audio is about to go out as the mix, so it stops counting as played-but-unheard.
             // What was already reported stands until the sound really catches up with it.
             heldUs = 0L
-            skipLeft = p.inSkipUs * sRate / 1_000_000 * sFrameBytes
+            skipLeft = (p.inSkipUs + inLateUs) * sRate / 1_000_000 * sFrameBytes
             tailRead = 0
             mixedEndUs = C.TIME_UNSET
+            mixFromUs = C.TIME_UNSET
             resyncNext = true
+            measureNext = true
             phase = Phase.MIX
         } else {
             abandonTransition()
             // No mix: the new track's buffers flow from here, so its staged format arms now.
+            playingId = currentId
             armStagedFor(currentId)
             mixSourceId = null
             super.handleDiscontinuity()
@@ -655,6 +747,7 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
      * still in the format it was armed for.
      */
     private fun abandonTransition() {
+        measureNext = false
         if (tailLen > 0 && (phase == Phase.HOLD || phase == Phase.MIX)) {
             val from = if (phase == Phase.MIX) tailRead.coerceIn(0, tailLen) else 0
             if (from < tailLen) {
@@ -716,8 +809,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
 
     private fun enqueue(data: ByteBuffer, ptsUs: Long) {
         if (!data.hasRemaining()) return
-        out += Chunk(data, ptsUs, resyncNext)
+        out += Chunk(data, ptsUs, resyncNext, measureNext)
         resyncNext = false
+        measureNext = false
     }
 
     private fun copyOf(src: ByteBuffer): ByteBuffer {
@@ -735,7 +829,17 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         while (true) {
             val c = out.firstOrNull() ?: return true
             if (c.resync && c.data.position() == 0) super.handleDiscontinuity()
-            if (!super.handleBuffer(c.data, c.ptsUs, 1)) return false
+            val before = if (c.measure) super.getCurrentPositionUs(false) else 0L
+            val taken = super.handleBuffer(c.data, c.ptsUs, 1)
+            if (c.measure) {
+                // The sink below moved its clock to this chunk's time as it took it - or refused it
+                // before looking (still draining), in which case the next offer is measured again.
+                val after = super.getCurrentPositionUs(false)
+                val jumped = before != AudioSink.CURRENT_POSITION_NOT_SET && after != AudioSink.CURRENT_POSITION_NOT_SET && kotlin.math.abs(after - before) > 50_000
+                if (jumped) { shiftUs = after - before; shiftUntilUs = c.ptsUs }
+                if (jumped || taken) { mixFromUs = c.ptsUs; c.measure = false }
+            }
+            if (!taken) return false
             out.removeFirst()
             if (pool.size < 32) pool += c.data
         }
@@ -755,20 +859,40 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     override fun getCurrentPositionUs(sourceEnded: Boolean): Long {
         val at = super.getCurrentPositionUs(sourceEnded)
         if (at == AudioSink.CURRENT_POSITION_NOT_SET) return at
-        if (phase == Phase.HOLD && heldFromUs != C.TIME_UNSET && heldFromUs - at < DRY_US) {
+        if (phase == Phase.HOLD && heldFromUs != C.TIME_UNSET && heldFromUs - at < DRY_US &&
+            android.os.SystemClock.elapsedRealtime() - heldAt > HOLD_GRACE_MS) {
             Log.i("nori", "transition: nothing to mix in yet with ${(heldFromUs - at) / 1000} ms of sound left, letting the ending play")
             abandonTransition()
             drain()
         }
         // Held audio has left the output but has not been heard, and this is the only thing the player
-        // asks about how far the track has got - so it is counted as played. The player starts the next
-        // track only once everything of this one has been, and the samples to mix into what is held are
-        // the next track's: without this they arrived after the sink had run dry, and the crossfade
-        // played after a hole as long as itself. That was "the last twelve seconds go silent".
+        // asks about how far the track has got - so it is counted as played. The player reads the next
+        // track only once this one is within ten seconds of its end (ExoPlayer's own rule, not ours),
+        // and the samples to mix into what is held are the next track's: without this they arrived
+        // after the sink had run dry, and the crossfade played after a hole as long as itself. That
+        // was "the last twelve seconds go silent".
         //
         // It is worth exactly the audio in hand, and it is given back: once the mix begins, what is
-        // reported stands still until what is really being heard has caught up with it.
+        // reported stands still until what is really being heard has caught up with it. The bar is
+        // not fooled with it: while the player is ahead of the ear, [heardId] says what plays.
         reported = maxOf(reported, at + heldUs)
+        // The first mixed sample is heard: from here the clock below is the new song's own time.
+        if (shiftUs != 0L && at >= shiftUntilUs) shiftUs = 0L
+        val ear = at - shiftUs
+        val id = heldId
+        val wasHeard = heardId != null
+        if (id != null && reported > ear + 20_000) {
+            heardUs = ear - heldOffsetUs
+            heardUntilUs = if (heldFromUs != C.TIME_UNSET) heldFromUs - heldOffsetUs else Long.MAX_VALUE
+            heardAtMs = android.os.SystemClock.elapsedRealtime()
+            heardId = id
+        } else heardId = null
+        if ((heardId != null) != wasHeard) onHeardChanged?.invoke()
+        // Caught up after the hold: the held song is over with, and a later wobble of the clock
+        // below must not be read as its ending still playing.
+        if (heardId == null && phase == Phase.PASS && shiftUs == 0L) heldId = null
+        if (mixFromUs != C.TIME_UNSET && mixedEndUs != C.TIME_UNSET && at >= mixedEndUs) mixFromUs = C.TIME_UNSET
+        mixing = mixFromUs != C.TIME_UNSET && at >= mixFromUs
         return reported
     }
 
@@ -785,11 +909,14 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         out.clear()
         phase = Phase.PASS
         tailLen = 0; tailRead = 0; skipLeft = 0
-        mixedEndUs = C.TIME_UNSET
+        mixedEndUs = C.TIME_UNSET; mixFromUs = C.TIME_UNSET; mixing = false
         heldFromUs = C.TIME_UNSET; heldUs = 0L; reported = Long.MIN_VALUE
+        heldId = null; lateUs = 0L
+        shiftUs = 0L; shiftUntilUs = C.TIME_UNSET
+        if (heardId != null) { heardId = null; onHeardChanged?.invoke() }
         plan = null; planFor = null
         mixSourceId = null
-        resyncNext = false
+        resyncNext = false; measureNext = false
         syntheticPtsUs = C.TIME_UNSET
         if (stretch != 0L) { AutoMixStretch.destroy(stretch); stretch = 0L }
         stretchRate = 0; stretchCh = 0; stretchEnc = 0; stretchFrameBytes = 0
