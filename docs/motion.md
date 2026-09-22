@@ -193,7 +193,12 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   skeleton, not a spinner.
 - Check: home → tap an album with the network throttled (or a cold server): the card that slides in
   should not be a blank rectangle.
-- Status: **todo**
+- Done as: `Nav.album(id, hint)` keeps the last few tapped `Album`s; `AlbumScreen` draws `HeroPage`
+  from `nav.albumHint(id)` (cover, title, artist, year/count caption) as soon as it is composed, and
+  fills in Play/shuffle/songs when `Load.Ready` lands. Deep links and "Go to album" from a song still
+  have no hint and wait behind `LoadBox`. Call sites that have an `Album` pass it (home, search,
+  library, artist). Artist/playlist pages are the same shape of problem still.
+- Status: **done**
 
 ### 15. Login → app
 

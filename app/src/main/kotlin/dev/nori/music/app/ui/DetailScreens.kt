@@ -45,10 +45,12 @@ import dev.nori.music.app.vm.AlbumViewModel
 import dev.nori.music.app.vm.ArtistViewModel
 import dev.nori.music.app.vm.FolderViewModel
 import dev.nori.music.app.vm.GenreViewModel
+import dev.nori.music.app.vm.Load
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.PlaylistViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.ffi.Album
+import dev.nori.music.ffi.AlbumDetail
 import dev.nori.music.ffi.Song
 
 @Composable
@@ -138,45 +140,125 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     val menu = LocalSongMenu.current
     val nav = LocalNav.current
     val playing = playingId()
-    LoadBox(load) { d ->
-        // An album is short enough to scroll and its running order is the point of it, so the songs
-        // stay exactly as the record has them, grouped by disc and never narrowed.
-        val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
-        HeroPage(
-            coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
-            title = d.album.name,
-            subtitle = d.album.artist,
-            caption = listOfNotNull(
-                d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs",
-                duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
-                "explicit".takeIf { d.album.explicitStatus == "explicit" },
-            ).joinToString(" · "),
-            onSubtitle = d.album.artistId?.let { a -> { nav.artist(a) } },
-            onPlay = { actions.play(d.songs) },
-            onShuffle = { actions.shuffle(d.songs) },
-            actions = {
-                val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
-                CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                    actions.starAlbum(d.album.id, !albumStarred)
-                }
+    // What the row that opened this page already knew: enough for the hero to be there from the first
+    // frame of the slide (PageMotion). Without it the page arrives as a bare card and fills in when
+    // the server answers - see docs/motion.md item 16. A deep link or "Go to album" from a song has
+    // no hint, so those still wait behind LoadBox.
+    val hint = nav.albumHint(id)
+    val detail = (load as? Load.Ready)?.data
+    val album = detail?.album ?: hint
+    if (album == null) {
+        LoadBox(load) { d -> AlbumBody(d, actions, vm, done, selected, menu, playing, nav) }
+        return
+    }
+    val discs = remember(detail) {
+        detail?.songs?.groupBy { it.discNumber.toInt().coerceAtLeast(1) }?.toSortedMap().orEmpty()
+    }
+    HeroPage(
+        coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
+        title = album.name,
+        subtitle = album.artist,
+        caption = if (detail != null) listOfNotNull(
+            album.year.takeIf { it > 0u }?.toString(), "${detail.songs.size} songs",
+            duration(detail.songs.sumOf { it.duration.toLong() }), quality(detail.songs),
+            "explicit".takeIf { album.explicitStatus == "explicit" },
+        ).joinToString(" · ") else listOfNotNull(
+            album.year.takeIf { it > 0u }?.toString(),
+            album.songCount.takeIf { it > 0u }?.let { "$it songs" },
+            album.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
+        ).joinToString(" · "),
+        onSubtitle = album.artistId?.let { a -> { nav.artist(a) } },
+        // Play and shuffle wait for the songs: pressing them with an empty list would queue nothing.
+        onPlay = detail?.let { d -> { actions.play(d.songs) } },
+        onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
+        actions = {
+            val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, album.id, album.starred)
+            CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                actions.starAlbum(album.id, !albumStarred)
+            }
+            if (detail != null) {
                 // Queue and download live behind the menu: four controls on one line squeeze the Play
                 // pill until its own label no longer fits.
-                MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
-            },
-        ) {
-            if (d.album.isExternal || d.album.id.startsWith("pl-")) item(key = "header") {
-                TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                    Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
+                MoreCircle(listOf("Add to queue" to { actions.enqueue(detail.songs) }, downloadEntry(detail.songs, done, actions)))
+            }
+        },
+    ) {
+        when {
+            detail != null -> {
+                if (album.isExternal || album.id.startsWith("pl-")) item(key = "header") {
+                    TextButton({ actions.addToLibrary(album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
+                        Text("Add the whole ${if (album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(album.id) ?: "provider"})")
+                    }
+                }
+                discs.forEach { (disc, tracks) ->
+                    if (discs.size > 1) item(key = "disc$disc") {
+                        val title = detail.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
+                        SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
+                    }
+                    // Tapping plays the whole album from that track, not just its disc.
+                    songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = detail.songs, pageArtist = album.artist)
                 }
             }
-            discs.forEach { (disc, tracks) ->
-                if (discs.size > 1) item(key = "disc$disc") {
-                    val title = d.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                    SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-                }
-                // Tapping plays the whole album from that track, not just its disc.
-                songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs, pageArtist = d.album.artist)
+            load is Load.Failed -> item(key = "fail") {
+                Text(
+                    (load as Load.Failed).message,
+                    Modifier.fillMaxWidth().padding(Space.gutter),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
             }
+            // The hero is already the page; a spinner under it would be a second thing to look at
+            // while the songs are on a short wire. Empty until they land.
+            else -> Unit
+        }
+    }
+}
+
+@Composable
+private fun AlbumBody(
+    d: AlbumDetail,
+    actions: ActionsViewModel,
+    vm: AlbumViewModel,
+    done: Set<String>,
+    selected: Set<String>,
+    menu: (Song) -> Unit,
+    playing: String?,
+    nav: Nav,
+) {
+    // An album is short enough to scroll and its running order is the point of it, so the songs
+    // stay exactly as the record has them, grouped by disc and never narrowed.
+    val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
+    HeroPage(
+        coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
+        title = d.album.name,
+        subtitle = d.album.artist,
+        caption = listOfNotNull(
+            d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs",
+            duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
+            "explicit".takeIf { d.album.explicitStatus == "explicit" },
+        ).joinToString(" · "),
+        onSubtitle = d.album.artistId?.let { a -> { nav.artist(a) } },
+        onPlay = { actions.play(d.songs) },
+        onShuffle = { actions.shuffle(d.songs) },
+        actions = {
+            val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
+            CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                actions.starAlbum(d.album.id, !albumStarred)
+            }
+            MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
+        },
+    ) {
+        if (d.album.isExternal || d.album.id.startsWith("pl-")) item(key = "header") {
+            TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
+                Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
+            }
+        }
+        discs.forEach { (disc, tracks) ->
+            if (discs.size > 1) item(key = "disc$disc") {
+                val title = d.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
+                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
+            }
+            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs, pageArtist = d.album.artist)
         }
     }
 }
@@ -235,7 +317,7 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
                 item(key = "g-$group") {
                     SectionTitle(if (group.endsWith("s")) group else "${group}s")
                     LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id) }) }
+                        items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
                     }
                 }
             }

@@ -56,7 +56,23 @@ private fun Inset(content: @Composable () -> Unit) = androidx.compose.foundation
  */
 class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
     fun go(route: String) { if (sheet.isOpen) sheet.close(); c.navigate(route) }
-    fun album(id: String) = go("album/${Uri.encode(id)}")
+
+    /**
+     * What the row that opened an album already knew about it - name, artist, cover - kept for the page
+     * to draw its header from while the album itself is on the way. The page slides in (PageMotion)
+     * the moment it is asked for, and without this it slid in as a bare card and filled in a few frames
+     * later; with it the header is there from the first frame and only the songs arrive. The last few
+     * are kept, so going back and forward between albums does not lose them.
+     */
+    private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.Album>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Album>?) = size > 8
+    }
+    fun albumHint(id: String): dev.nori.music.ffi.Album? = albums[id]
+
+    fun album(id: String, hint: dev.nori.music.ffi.Album? = null) {
+        if (hint != null) albums[id] = hint
+        go("album/${Uri.encode(id)}")
+    }
     fun artist(id: String) = go("artist/${Uri.encode(id)}")
     fun playlist(id: String) = go("playlist/${Uri.encode(id)}")
     fun genre(name: String) = go("genre/${Uri.encode(name)}")
