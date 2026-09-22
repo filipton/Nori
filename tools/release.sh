@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# Builds a release: a signed APK, checksums and a summary, ready to put on GitHub.
+# Makes a release: a signed APK, checksums and notes, put on GitHub.
 #
-#   tools/release.sh                    one APK for phones and emulators -> build/release-<version>/
+#   tools/release.sh                    the guided release (below)
+#   tools/release.sh --build            only build, into build/release-<version>/, nothing leaves the machine
+#   tools/release.sh --publish          build this version and publish it, no questions (for scripts)
+#   tools/release.sh --live             with --publish: published rather than a draft
 #   tools/release.sh --abi arm64-v8a    phones only: about half the size
 #   tools/release.sh --no-test          skip cargo test first
-#   tools/release.sh --publish          tag, push and put it on GitHub as a draft release
-#   tools/release.sh --publish --live   ... published rather than a draft
 #
-# The steps of a release, in order:
-#   tools/bump-version.sh 0.3.3                      the version everywhere it is written
-#   tools/changelog.py --update                      commits since the last tag into [Unreleased]
-#   (read CHANGELOG.md, edit what reads badly)
-#   tools/changelog.py --release 0.3.3               [Unreleased] becomes [0.3.3] - <date>
-#   git commit -am "build: release 0.3.3"
-#   tools/release.sh --publish
+# The guided release shows the latest version on GitHub and the one in the code, asks for the new
+# version, then does every step itself: tools/bump-version.sh, tools/changelog.py --update and
+# --release, shows the notes (and opens $EDITOR on CHANGELOG.md if you want to reword them), commits
+# "build: release <version>", builds, tags, pushes and creates the GitHub release - a draft or live,
+# as you answer. Saying no to any question puts every file back as it was. If the build fails after
+# the commit, run it again: a version that is in the code but not yet on GitHub is offered first, and
+# its changelog section is kept.
 #
 # By default the APK carries the Rust core for both 64-bit ABIs, so nobody has to choose: Android
 # installs the slice that matches. arm64-v8a is every phone of the last decade, x86_64 is emulators
@@ -32,7 +33,7 @@
 # release will go on. Keep a copy somewhere safe. The certificate is printed rather than assumed, so
 # compare it with the last release before uploading.
 #
-# --publish is the only part that leaves this machine. It refuses to run from a dirty tree, takes the
+# Publishing is the only part that leaves this machine. It refuses to run from a dirty tree, takes the
 # release notes from the CHANGELOG section for this version, tags the commit, pushes it, and attaches
 # the files to a GitHub release - a draft, so nothing is public until you press publish. --live skips
 # the draft.
@@ -42,12 +43,14 @@ cd "$(dirname "$0")/.."
 ABI=arm64-v8a,x86_64
 RUN_TESTS=1
 PUBLISH=0
+GUIDED=1
 DRAFT=--draft
 while [ $# -gt 0 ]; do
   case "$1" in
     --abi) ABI="$2"; shift ;;
     --no-test) RUN_TESTS=0 ;;
-    --publish) PUBLISH=1 ;;
+    --build) GUIDED=0 ;;
+    --publish) PUBLISH=1; GUIDED=0 ;;
     --live) DRAFT="" ;;
     -h|--help) sed -n 2,39p "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -56,8 +59,70 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "$@" >&2; exit 1; }
+code_version() { sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1; }
+# a > b, as versions (0.3.10 is after 0.3.9)
+newer() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
 
-version=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+# --- the guided release ------------------------------------------------------------
+if [ "$GUIDED" = 1 ]; then
+  [ -t 0 ] || die "the guided release asks questions: run it in a terminal, or use --build / --publish"
+  command -v gh >/dev/null || die "releasing needs the GitHub CLI (gh) on PATH"
+  gh auth status >/dev/null 2>&1 || die "gh is not logged in: run 'gh auth login'"
+  [ -z "$(git status --porcelain)" ] || die "commit or stash your changes first: the release commit holds only the release"
+
+  current=$(code_version)
+  latest=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // ""' 2>/dev/null || true)
+  latest=${latest#v}
+  echo "latest release on GitHub:  ${latest:-none yet}"
+  echo "version in the code:       $current"
+  # A version already in the code but not yet released is what a failed or first run left behind:
+  # offer that. Otherwise the next patch after whichever of the two is further on.
+  if ! gh release view "v$current" >/dev/null 2>&1 && { [ -z "$latest" ] || newer "$current" "$latest"; }; then
+    suggest=$current
+  else
+    base=$current; [ -n "$latest" ] && newer "$latest" "$base" && base=$latest
+    IFS=. read -r ma mi pa <<< "$base"; suggest="$ma.$mi.$((pa + 1))"
+  fi
+  read -rp "new version [$suggest]: " new
+  new=${new:-$suggest}
+  [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a version: $new (want major.minor.patch)"
+  [ -z "$latest" ] || newer "$new" "$latest" || die "$new is not after the latest release, $latest"
+  ! gh release view "v$new" >/dev/null 2>&1 || die "a release v$new already exists on GitHub"
+
+  # From here on files change. Until the commit, any way out puts them back.
+  committed=0
+  undo() { if [ "$committed" = 0 ]; then git checkout -q -- . && echo "stopped: every file is as it was."; fi; }
+  trap undo EXIT
+  [ "$new" = "$current" ] || tools/bump-version.sh "$new"
+  if ! tools/changelog.py --notes "$new" >/dev/null 2>&1; then
+    tools/changelog.py --update
+    tools/changelog.py --release "$new"
+  fi
+  echo
+  echo "---- release notes for $new ----"
+  tools/changelog.py --notes "$new"
+  echo "--------------------------------"
+  read -rp "edit them first? [y/N] " a
+  if [[ "$a" =~ ^[Yy] ]]; then
+    "${EDITOR:-nano}" CHANGELOG.md
+    tools/changelog.py --notes "$new" >/dev/null || die "CHANGELOG.md lost its [$new] section"
+  fi
+  read -rp "publish $new as a (d)raft, (l)ive, or (s)top? [d/l/s] " a
+  case "$a" in
+    l|L) DRAFT="" ;;
+    d|D|"") DRAFT=--draft ;;
+    *) exit 0 ;;
+  esac
+  if [ -n "$(git status --porcelain)" ]; then
+    git commit -qam "build: release $new"
+    echo "committed: build: release $new"
+  fi
+  committed=1
+  trap - EXIT
+  PUBLISH=1
+fi
+
+version=$(code_version)
 commit=$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then dirty=" (dirty)"; else dirty=""; fi
 
@@ -67,7 +132,7 @@ if [ "$PUBLISH" = 1 ]; then
   gh auth status >/dev/null 2>&1 || die "gh is not logged in: run 'gh auth login'"
   git remote get-url origin >/dev/null 2>&1 || die "this repository has no 'origin' remote to publish to"
   [ -z "$dirty" ] || die "refusing to publish from a dirty tree: commit or stash first"
-  [ -f keystore.properties ] || die "no keystore.properties: run tools/release.sh once without --publish to create the key, and back it up"
+  [ -f keystore.properties ] || die "no keystore.properties: run tools/release.sh --build once to create the key, and back it up"
   ./tools/changelog.py --notes "$version" >/dev/null ||
     die "CHANGELOG.md has no section for $version.
 write one, or generate it:  tools/changelog.py --update && tools/changelog.py --release $version"
@@ -155,7 +220,7 @@ echo "everything to upload is in $out/"
 
 if [ "$PUBLISH" != 1 ]; then
   echo
-  echo "to publish it:  tools/release.sh --publish"
+  echo "to release it:  tools/release.sh"
   exit 0
 fi
 
