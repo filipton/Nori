@@ -6,6 +6,23 @@ hand. Versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-22
+
+### Added
+
+- Favourite messages replace each other at once and can be switched off
+- Automix beat-matches band-played songs on their intro and outro grids
+- About page with build details and third-party licences
+
+### Fixed
+
+- No dropout at the end of an AutoMix, and the bar moves to the next song as soon as it is heard
+- Light and dark covers keep their own colour, and a big light strip at the bottom gets a light page
+- The page moves to the next song when its mix is heard and never flips back
+- Light pages keep the cover's own lightness instead of fading to white
+- A song skipped to at another sample rate is converted instead of stuttering
+- Taps on the full-screen player no longer reach the page underneath
+
 ## [0.3.3] - 2026-09-22
 
 ### Added

@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "norimusic"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "jni",
  "md-5",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "uniffi",
 ]
