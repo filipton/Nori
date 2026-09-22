@@ -67,14 +67,28 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
     private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.Album>() {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Album>?) = size > 8
     }
+    private val artists = object : LinkedHashMap<String, dev.nori.music.ffi.Artist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Artist>?) = size > 8
+    }
+    private val playlists = object : LinkedHashMap<String, dev.nori.music.ffi.Playlist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Playlist>?) = size > 8
+    }
     fun albumHint(id: String): dev.nori.music.ffi.Album? = albums[id]
+    fun artistHint(id: String): dev.nori.music.ffi.Artist? = artists[id]
+    fun playlistHint(id: String): dev.nori.music.ffi.Playlist? = playlists[id]
 
     fun album(id: String, hint: dev.nori.music.ffi.Album? = null) {
         if (hint != null) albums[id] = hint
         go("album/${Uri.encode(id)}")
     }
-    fun artist(id: String) = go("artist/${Uri.encode(id)}")
-    fun playlist(id: String) = go("playlist/${Uri.encode(id)}")
+    fun artist(id: String, hint: dev.nori.music.ffi.Artist? = null) {
+        if (hint != null) artists[id] = hint
+        go("artist/${Uri.encode(id)}")
+    }
+    fun playlist(id: String, hint: dev.nori.music.ffi.Playlist? = null) {
+        if (hint != null) playlists[id] = hint
+        go("playlist/${Uri.encode(id)}")
+    }
     fun genre(name: String) = go("genre/${Uri.encode(name)}")
     fun folder(id: String) = go("folder/${Uri.encode(id)}")
     fun decade(year: Int) = go("decade/$year")
@@ -139,7 +153,18 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     androidx.compose.runtime.SideEffect { AppMotion.force = prefs.ignoreSystemMotion; AppMotion.reduce = prefs.reduceMotion }
     NoriTheme(prefs) {
-        if (!prefs.loggedIn) { LoginScreen(settings); return@NoriTheme }
+        // Sign-in used to cut straight to the app. One short fade is enough: the screens are different
+        // enough that a direction would invent a relationship they do not have.
+        val plain = reduceMotion()
+        androidx.compose.animation.Crossfade(
+            targetState = prefs.loggedIn,
+            animationSpec = if (plain) androidx.compose.animation.core.snap() else androidx.compose.animation.core.tween(280),
+            label = "session",
+        ) { loggedIn ->
+        if (!loggedIn) {
+            LoginScreen(settings)
+            return@Crossfade
+        }
 
         val controller = rememberNavController()
         val sheetScope = androidx.compose.runtime.rememberCoroutineScope()
@@ -312,6 +337,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             SheetBack(sheet)
             }
             menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer }) }
+        }
         }
     }
 }

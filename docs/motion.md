@@ -197,14 +197,18 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   from `nav.albumHint(id)` (cover, title, artist, year/count caption) as soon as it is composed, and
   fills in Play/shuffle/songs when `Load.Ready` lands. Deep links and "Go to album" from a song still
   have no hint and wait behind `LoadBox`. Call sites that have an `Album` pass it (home, search,
-  library, artist). Artist/playlist pages are the same shape of problem still.
+  library, artist). The same pattern is on artists and playlists (`Nav.artist` / `Nav.playlist`,
+  `ArtistScreen` / `PlaylistScreen`); song-menu "Go to artist" passes a stub with the name it already
+  knows.
 - Status: **done**
 
 ### 15. Login → app
 
 - Now: `App` composes `LoginScreen` or the app; the change is a cut.
 - Should: a fade would do; once, on sign-in. Low priority.
-- Status: **todo**
+- Done as: `Crossfade(prefs.loggedIn, …)` around the login and the signed-in tree, 280 ms (snap when
+  reduce-motion). No direction - the two screens are unrelated.
+- Status: **done**
 
 ## Decisions and traps
 

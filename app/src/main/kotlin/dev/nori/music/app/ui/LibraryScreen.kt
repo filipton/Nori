@@ -175,7 +175,7 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
                 LazyColumn(Modifier.weight(1f), state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                     items(artists, key = { it.id }, contentType = { "artist" }) { a ->
                         Column {
-                            Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id) }.padding(horizontal = Space.gutter, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Row(Modifier.fillMaxWidth().clickable { nav.artist(a.id, a) }.padding(horizontal = Space.gutter, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp, radius = 24.dp)
                                 Column(Modifier.padding(start = 12.dp)) {
                                     Text(a.name, style = MaterialTheme.typography.bodyLarge)
@@ -275,7 +275,7 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
             if (playlists.isEmpty()) item { EmptyNote("No playlists yet") }
             items(playlists, key = { it.id }) { p ->
                 NavRow(
-                    p.name, { nav.playlist(p.id) },
+                    p.name, { nav.playlist(p.id, p) },
                     subtitle = "${p.songCount} songs · ${duration(p.duration.toLong())}",
                     leading = { Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp) },
                     action = { IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Delete, "Delete", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
@@ -307,7 +307,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
             }
             items(s.artists, key = { "ar" + it.id }) { a ->
                 NavRow(
-                    a.name, { nav.artist(a.id) }, chevron = true,
+                    a.name, { nav.artist(a.id, a) }, chevron = true,
                     leading = { Cover(vm.cover(a.coverArt, CoverSize.ROW), 44.dp, radius = 22.dp) },
                 )
             }

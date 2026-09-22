@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.AlbumViewModel
+import dev.nori.music.app.vm.ArtistUi
 import dev.nori.music.app.vm.ArtistViewModel
 import dev.nori.music.app.vm.FolderViewModel
 import dev.nori.music.app.vm.GenreViewModel
@@ -51,7 +52,10 @@ import dev.nori.music.app.vm.PlaylistViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.ffi.Album
 import dev.nori.music.ffi.AlbumDetail
+import dev.nori.music.ffi.Artist
+import dev.nori.music.ffi.PlaylistDetail
 import dev.nori.music.ffi.Song
+import dev.nori.music.settings.Prefs
 
 @Composable
 private fun Header(title: String, subtitle: String, coverUrl: String?, actions: @Composable () -> Unit = {}) {
@@ -167,7 +171,9 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             album.songCount.takeIf { it > 0u }?.let { "$it songs" },
             album.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
         ).joinToString(" · "),
-        onSubtitle = album.artistId?.let { a -> { nav.artist(a) } },
+        onSubtitle = album.artistId?.let { a ->
+            { nav.artist(a, Artist(a, album.artist, album.coverArt, null, 0u, false, false)) }
+        },
         // Play and shuffle wait for the songs: pressing them with an empty list would queue nothing.
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
@@ -237,7 +243,9 @@ private fun AlbumBody(
             duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
             "explicit".takeIf { d.album.explicitStatus == "explicit" },
         ).joinToString(" · "),
-        onSubtitle = d.album.artistId?.let { a -> { nav.artist(a) } },
+        onSubtitle = d.album.artistId?.let { a ->
+            { nav.artist(a, Artist(a, d.album.artist, d.album.coverArt, null, 0u, false, false)) }
+        },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
         actions = {
@@ -285,49 +293,138 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         AlertDialog({ leaving = null }, title = { Text("Open in browser?") }, text = { Text(url) },
             confirmButton = { TextButton({ runCatching { uri.openUri(url) }; leaving = null }) { Text("Open") } }, dismissButton = { TextButton({ leaving = null }) { Text("Cancel") } })
     }
-    LoadBox(load) { ui ->
-        val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
-        HeroPage(
-            coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
-            title = ui.detail.artist.name,
-            caption = "${ui.detail.albums.size} releases",
-            onPlay = { actions.playArtist(ui.detail.albums) },
-            onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
-            actions = {
-                val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
-                CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
-                    actions.starArtist(ui.detail.artist.id, !artistStarred)
-                }
+    val hint = nav.artistHint(id)
+    val ui = (load as? Load.Ready)?.data
+    val artist = ui?.detail?.artist ?: hint
+    if (artist == null) {
+        LoadBox(load) { ready -> ArtistBody(ready, actions, vm, done, selected, menu, playing, nav) { leaving = it } }
+        return
+    }
+    val groups = remember(ui?.detail) {
+        ui?.detail?.albums?.sortedByDescending { it.year }?.groupBy { it.group() }
+            ?.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } })
+            .orEmpty()
+    }
+    HeroPage(
+        coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
+        title = artist.name,
+        caption = if (ui != null) "${ui.detail.albums.size} releases"
+            else artist.albumCount.takeIf { it > 0u }?.let { "$it releases" }.orEmpty(),
+        onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
+        onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
+        actions = {
+            val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
+            CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                actions.starArtist(artist.id, !artistStarred)
+            }
+            if (ui != null) {
                 MoreCircle(
                     listOf(
                         "Add to queue" to { actions.queueArtist(ui.detail.albums) },
                         "Download everything" to { actions.downloadArtist(ui.detail.albums) },
                     ),
                 )
-            },
-        ) {
-            item(key = "header") {
-                ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                Row(Modifier.padding(horizontal = 12.dp)) {
-                    ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
-                    ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
-                }
             }
-            groups.forEach { (group, albums) ->
-                item(key = "g-$group") {
-                    SectionTitle(if (group.endsWith("s")) group else "${group}s")
-                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
+        },
+    ) {
+        when {
+            ui != null -> {
+                item(key = "header") {
+                    ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    Row(Modifier.padding(horizontal = 12.dp)) {
+                        ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
+                        ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
+                    }
+                }
+                groups.forEach { (group, albums) ->
+                    item(key = "g-$group") {
+                        SectionTitle(if (group.endsWith("s")) group else "${group}s")
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
+                        }
+                    }
+                }
+                if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
+                songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
+                ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
+                    item(key = "similar") {
+                        SectionTitle("Similar artists")
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(similar, key = { it.id }) { a ->
+                                Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
                     }
                 }
             }
-            if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
-            songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
-            ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
-                item(key = "similar") {
-                    SectionTitle("Similar artists")
-                    LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(similar, key = { it.id }) { a -> Text(a.name, Modifier.clickable { nav.artist(a.id) }.padding(8.dp), color = MaterialTheme.colorScheme.primary) }
+            load is Load.Failed -> item(key = "fail") {
+                Text(
+                    (load as Load.Failed).message,
+                    Modifier.fillMaxWidth().padding(Space.gutter),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+            else -> Unit
+        }
+    }
+}
+
+@Composable
+private fun ArtistBody(
+    ui: ArtistUi,
+    actions: ActionsViewModel,
+    vm: ArtistViewModel,
+    done: Set<String>,
+    selected: Set<String>,
+    menu: (Song) -> Unit,
+    playing: String?,
+    nav: Nav,
+    leave: (String) -> Unit,
+) {
+    val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
+    HeroPage(
+        coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
+        title = ui.detail.artist.name,
+        caption = "${ui.detail.albums.size} releases",
+        onPlay = { actions.playArtist(ui.detail.albums) },
+        onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
+        actions = {
+            val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
+            CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
+                actions.starArtist(ui.detail.artist.id, !artistStarred)
+            }
+            MoreCircle(
+                listOf(
+                    "Add to queue" to { actions.queueArtist(ui.detail.albums) },
+                    "Download everything" to { actions.downloadArtist(ui.detail.albums) },
+                ),
+            )
+        },
+    ) {
+        item(key = "header") {
+            ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Row(Modifier.padding(horizontal = 12.dp)) {
+                ui.info?.lastFmUrl?.let { u -> TextButton({ leave(u) }) { Text("last.fm") } }
+                ui.info?.musicBrainzId?.let { m -> TextButton({ leave("https://musicbrainz.org/artist/$m") }) { Text("MusicBrainz") } }
+            }
+        }
+        groups.forEach { (group, albums) ->
+            item(key = "g-$group") {
+                SectionTitle(if (group.endsWith("s")) group else "${group}s")
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
+                }
+            }
+        }
+        if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
+        songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
+        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
+            item(key = "similar") {
+                SectionTitle("Similar artists")
+                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    items(similar, key = { it.id }) { a ->
+                        Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
@@ -347,41 +444,108 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
     val playing = playingId()
     var filter by remember { mutableStateOf("") }
     val context = androidx.compose.ui.platform.LocalContext.current
-    val current = (load as? dev.nori.music.app.vm.Load.Ready)?.data
+    val nav = LocalNav.current
+    val detail = (load as? Load.Ready)?.data
+    val hint = nav.playlistHint(id)
+    val playlist = detail?.playlist ?: hint
     val exportM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("audio/x-mpegurl")) { uri ->
-        if (uri != null && current != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(current.playlist.name, current.songs).toByteArray()) } }
+        if (uri != null && detail != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(detail.playlist.name, detail.songs).toByteArray()) } }
     }
-    LoadBox(load) { d ->
-        val shown = remember(d, filter) { d.songs.matching(filter) }
-        HeroPage(
-            coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
-            title = d.playlist.name,
-            subtitle = d.playlist.comment?.ifEmpty { null },
-            caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
-            onPlay = { actions.play(d.songs) },
-            onShuffle = { actions.shuffle(d.songs) },
-            actions = {
-                val pinned = id in prefs.pinnedPlaylists
-                // A favourite, drawn and named as every other favourite in the app is: a heart, filled
-                // when it is one. It was a pin with one look for both states, so there was no telling
-                // from the page whether this playlist was on the home page or not. The server has no
-                // way to star a playlist, so it is kept on this phone, and the home page's shelf of
-                // them reads it.
-                CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
-                    settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
-                }
+    if (playlist == null) {
+        LoadBox(load) { d -> PlaylistBody(d, id, actions, vm, settings, prefs, done, selected, menu, playing, filter, { filter = it }, { exportM3u.launch("${d.playlist.name}.m3u8") }) }
+        return
+    }
+    val shown = remember(detail, filter) { detail?.songs?.matching(filter).orEmpty() }
+    HeroPage(
+        coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
+        title = playlist.name,
+        subtitle = playlist.comment?.ifEmpty { null },
+        caption = if (detail != null) "${detail.songs.size} songs · ${duration(detail.songs.sumOf { it.duration.toLong() })}"
+            else listOfNotNull(
+                playlist.songCount.takeIf { it > 0u }?.let { "$it songs" },
+                playlist.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
+            ).joinToString(" · "),
+        onPlay = detail?.let { d -> { actions.play(d.songs) } },
+        onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
+        actions = {
+            val pinned = id in prefs.pinnedPlaylists
+            // A favourite, drawn and named as every other favourite in the app is: a heart, filled
+            // when it is one. It was a pin with one look for both states, so there was no telling
+            // from the page whether this playlist was on the home page or not. The server has no
+            // way to star a playlist, so it is kept on this phone, and the home page's shelf of
+            // them reads it.
+            CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
+                settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
+            }
+            if (detail != null) {
                 MoreCircle(
                     listOf(
-                        "Add to queue" to { actions.enqueue(d.songs) },
-                        downloadEntry(d.songs, done, actions),
-                        "Export M3U" to { exportM3u.launch("${d.playlist.name}.m3u8") },
+                        "Add to queue" to { actions.enqueue(detail.songs) },
+                        downloadEntry(detail.songs, done, actions),
+                        "Export M3U" to { exportM3u.launch("${playlist.name}.m3u8") },
                     ),
                 )
-            },
-        ) {
-            item(key = "header") { FilterField(d.songs.size, filter) { filter = it } }
-            songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+            }
+        },
+    ) {
+        when {
+            detail != null -> {
+                item(key = "header") { FilterField(detail.songs.size, filter) { filter = it } }
+                songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+            }
+            load is Load.Failed -> item(key = "fail") {
+                Text(
+                    (load as Load.Failed).message,
+                    Modifier.fillMaxWidth().padding(Space.gutter),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                )
+            }
+            else -> Unit
         }
+    }
+}
+
+@Composable
+private fun PlaylistBody(
+    d: PlaylistDetail,
+    id: String,
+    actions: ActionsViewModel,
+    vm: PlaylistViewModel,
+    settings: SettingsViewModel,
+    prefs: Prefs,
+    done: Set<String>,
+    selected: Set<String>,
+    menu: (Song) -> Unit,
+    playing: String?,
+    filter: String,
+    onFilter: (String) -> Unit,
+    onExport: () -> Unit,
+) {
+    val shown = remember(d, filter) { d.songs.matching(filter) }
+    HeroPage(
+        coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
+        title = d.playlist.name,
+        subtitle = d.playlist.comment?.ifEmpty { null },
+        caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
+        onPlay = { actions.play(d.songs) },
+        onShuffle = { actions.shuffle(d.songs) },
+        actions = {
+            val pinned = id in prefs.pinnedPlaylists
+            CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
+                settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
+            }
+            MoreCircle(
+                listOf(
+                    "Add to queue" to { actions.enqueue(d.songs) },
+                    downloadEntry(d.songs, done, actions),
+                    "Export M3U" to onExport,
+                ),
+            )
+        },
+    ) {
+        item(key = "header") { FilterField(d.songs.size, filter) { onFilter(it) } }
+        songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }
 

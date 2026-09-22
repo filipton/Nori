@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import dev.nori.music.app.vm.ActionsViewModel
+import dev.nori.music.ffi.Artist
 import dev.nori.music.ffi.Playlist
 import dev.nori.music.ffi.Song
 
@@ -142,8 +143,16 @@ fun SongMenu(
             else if (song.id in downloads.pendingIds) Item("Stop download", Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
             else Item("Download", Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
             song.albumId?.let { id -> Item("Go to album", Icons.Filled.Album) { nav.album(id); onDismiss() } }
-            if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a -> Item("Go to ${a.name}", Icons.Filled.Person) { nav.artist(a.id); onDismiss() } }
-            else song.artistId?.let { id -> Item("Go to artist", Icons.Filled.Person) { nav.artist(id); onDismiss() } }
+            if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a ->
+                Item("Go to ${a.name}", Icons.Filled.Person) {
+                    nav.artist(a.id, Artist(a.id, a.name, null, null, 0u, false, false)); onDismiss()
+                }
+            }
+            else song.artistId?.let { id ->
+                Item("Go to artist", Icons.Filled.Person) {
+                    nav.artist(id, Artist(id, song.artist, song.coverArt, null, 0u, false, false)); onDismiss()
+                }
+            }
             if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})", Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
             player?.let { Item("Sleep timer…", Icons.Filled.Bedtime) { sleeping = true } }
             Hairline(startIndent = Space.gutter)
