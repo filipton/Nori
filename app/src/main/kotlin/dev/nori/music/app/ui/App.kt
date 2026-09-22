@@ -420,19 +420,21 @@ private fun androidx.navigation.NavGraphBuilder.page(
  * stack a page is on during a change is written here, where the direction is known, and read there.
  */
 private object PageMotion {
-    /** How long a push or a pop takes on its own. The gesture sets its own pace. */
-    // 380 ms with a long ease-out made button-back feel stuck: Compose also spends ~100 ms
-    // composing the page underneath before the slide starts (docs/motion.md). 260 + a sharper
-    // settle keeps the stack feel without the crawl at the end.
-    const val MS = 260
+    /** How long a button push or pop takes. The gesture sets its own pace while the finger is down. */
+    const val MS = 200
+    /**
+     * After the back gesture lets go (finish or cancel): only the leftover distance runs, and it
+     * should be gone almost at once. Reusing [MS] made a half-done swipe still coast for a beat.
+     */
+    private const val GESTURE_MS = 140
     /** The share of the width the page underneath moves. */
     const val UNDER = 3
     /** How dark the page underneath goes at the far end of its travel. */
     const val SCRIM = 0.28f
     /** A tab change: a cross-fade this long. */
-    private const val TAB_MS = 120
+    private const val TAB_MS = 100
 
-    /** Sharp settle: most of the travel early, a short ease into place - not a long coast. */
+    /** Sharp settle for a tap: travel early, short ease into place. */
     val Settle = androidx.compose.animation.core.CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
     private val roots = setOf("home", "search", "library", "settings")
@@ -452,7 +454,7 @@ private object PageMotion {
         initialState.destination.route in roots && targetState.destination.route in roots
 
     private fun ease(scrubbed: Boolean): androidx.compose.animation.core.FiniteAnimationSpec<androidx.compose.ui.unit.IntOffset> =
-        if (scrubbed) androidx.compose.animation.core.tween(MS, easing = androidx.compose.animation.core.LinearEasing)
+        if (scrubbed) androidx.compose.animation.core.tween(GESTURE_MS, easing = androidx.compose.animation.core.LinearEasing)
         else androidx.compose.animation.core.tween(MS, easing = Settle)
 
     private fun fadeIn(ms: Int) = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(ms))
@@ -497,6 +499,12 @@ private object PageMotion {
         state == androidx.compose.animation.EnterExitState.PreEnter && pop -> SCRIM
         else -> 0f
     }
+
+    fun dimSpec(plain: Boolean, scrubbed: Boolean): androidx.compose.animation.core.FiniteAnimationSpec<Float> = when {
+        plain -> androidx.compose.animation.core.tween(90)
+        scrubbed -> androidx.compose.animation.core.tween(GESTURE_MS, easing = androidx.compose.animation.core.LinearEasing)
+        else -> androidx.compose.animation.core.tween(MS, easing = Settle)
+    }
 }
 
 /**
@@ -512,11 +520,7 @@ private object PageMotion {
 private fun androidx.compose.animation.AnimatedVisibilityScope.Page(content: @Composable () -> Unit) {
     val plain = reduceMotion()
     val dim by transition.animateFloat(
-        transitionSpec = {
-            if (plain) androidx.compose.animation.core.tween(90)
-            else if (PageMotion.scrubbed) androidx.compose.animation.core.tween(PageMotion.MS, easing = androidx.compose.animation.core.LinearEasing)
-            else androidx.compose.animation.core.tween(PageMotion.MS, easing = PageMotion.Settle)
-        },
+        transitionSpec = { PageMotion.dimSpec(plain, PageMotion.scrubbed) },
         label = "dim",
     ) { state -> PageMotion.dim(state, PageMotion.pop) }
     val background = MaterialTheme.colorScheme.background

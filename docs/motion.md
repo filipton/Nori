@@ -44,7 +44,7 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - Check: home → tap an album → back button. Both pages must stay opaque throughout; the album must
   arrive from the right, not from above; the home page must be visibly *under* it, shifted, and come
   back to place on pop.
-- Done as: `PageMotion` (push/pop slides, 260 ms, sharp `Settle` ease; tab roots cross-fade) and `Page`
+- Done as: `PageMotion` (push/pop slides, 200 ms tap / 140 ms gesture finish, sharp `Settle` ease; tab roots cross-fade) and `Page`
   (paints the page's background while it moves, and the scrim on the page underneath, as a child of
   the page's own transition so the gesture scrubs it). Every route goes through `page(route)`.
   Two things the old fades had been hiding had to go with it: the home page replayed its sections'
@@ -66,8 +66,9 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   back. Nothing fades.
 - Check: album → swipe from the left edge slowly and hold: the album should sit part way off to the
   right with home visible and shifted under it. Release: it completes. Swipe and swipe back: cancels.
-- Done as: the pop of item 1 with `LinearEasing` (`PageMotion.popEnter/popExit(scrubbed = true)`);
-  `PageMotion.scrubbed` tells `Page` to run the scrim linear too.
+- Done as: the pop of item 1 with `LinearEasing` over 140 ms (`PageMotion.popEnter/popExit(scrubbed = true)`);
+  `PageMotion.scrubbed` tells `Page` to run the scrim linear too. Finger scrub seeks; 140 ms is only
+  the leftover after release / cancel.
 - Status: **done**
 
 ### 3. Tab switches — `Nav.tab`, same `NavHost` transitions
