@@ -16,6 +16,24 @@ android {
         versionName = "0.3.3"
         versionCode = 303
         ndk { abiFilters += (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",") }
+        // What About can say about this build beyond a version number: the commit it was cut from, and
+        // the versions of what it is built on - the Rust crates read from Cargo.lock, the Android ones
+        // from the version catalog - so they cannot drift from what was actually linked.
+        val gitSha = providers.exec {
+            workingDir = rootProject.projectDir
+            commandLine("git", "rev-parse", "--short=10", "HEAD")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map { it.trim() }.getOrElse("")
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        val lock = rootProject.file("Cargo.lock").takeIf { it.exists() }?.readText().orEmpty()
+        fun locked(crate: String): String =
+            Regex("name = \"" + Regex.escape(crate) + "\"\nversion = \"([^\"]+)\"").find(lock)?.groupValues?.get(1) ?: ""
+        val rust = listOf("uniffi", "rusqlite", "rustfft", "signalsmith-stretch", "serde", "jni")
+            .joinToString(";") { "$it=${locked(it)}" }
+        val catalog = rootProject.file("gradle/libs.versions.toml").takeIf { it.exists() }?.readText().orEmpty()
+        fun cat(key: String): String = Regex("(?m)^" + Regex.escape(key) + "\\s*=\\s*\"([^\"]+)\"").find(catalog)?.groupValues?.get(1) ?: ""
+        val android = listOf("media3", "composeBom", "coil", "okhttp").joinToString(";") { "$it=${cat(it)}" }
+        buildConfigField("String", "CORE_VERSIONS", "\"$rust;$android\"")
     }
 
     // Release signing: keystore.properties in the repo root (tools/release.sh creates one, with
@@ -53,7 +71,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"

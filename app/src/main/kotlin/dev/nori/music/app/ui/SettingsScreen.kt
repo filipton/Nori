@@ -19,6 +19,7 @@ import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Dns
 import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyColumn
@@ -160,6 +161,12 @@ private val groups = listOf(
     Group("lyrics", "Lyrics", Icons.Outlined.Lyrics, "Display and sources"),
     Group("library", "Library", Icons.Outlined.LibraryMusic, "Gestures, search, history"),
     Group("data", "Downloads and storage", Icons.Outlined.CloudDownload, "Quality, downloads, space"),
+    Group("about", "About", Icons.Outlined.Info, "Version, build, licences"),
+)
+
+/** Pages reached from inside another page rather than from the list: About's licences. */
+private val subpages = listOf(
+    Group("licences", "Licences", Icons.Outlined.Info, "What this app is made of"),
 )
 
 /** One searchable row: which page it lives on, its title, and the words under it. */
@@ -239,6 +246,7 @@ private val index = listOf(
     Entry("data", "Stored on this phone", "Streamed music, covers, downloads and the library"),
     Entry("data", "Streamed music", "Clear the streamed music. Downloads stay"),
     Entry("data", "Covers", "Clear the covers. They are fetched again when needed"),
+    Entry("about", "Licences", "Open source libraries, fonts and data, and their terms"),
     Entry("servers", "Music folder", ""),
     Entry("servers", "Bitrate limit on the second address", ""),
 )
@@ -354,7 +362,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
 @Composable
 fun SettingsGroupScreen(vm: SettingsViewModel, id: String, highlight: String = "") {
     val nav = LocalNav.current
-    val group = groups.firstOrNull { it.id == id } ?: return
+    val group = (groups + subpages).firstOrNull { it.id == id } ?: return
     val scroll = rememberScrollState()
     var target by remember { mutableIntStateOf(-1) }
     LaunchedEffect(target) { if (target >= 0) scroll.animateScrollTo((scroll.value + target - 400).coerceAtLeast(0)) }
@@ -580,6 +588,8 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 StorageRows(vm)
             }
         }
+        "about" -> AboutContent({ title, content -> Section(title, content) }) { nav.settingsGroup("licences") }
+        "licences" -> LicencesContent { title, content -> Section(title, content) }
         "servers" -> {
             Section("Accounts") {
                 p.servers.forEach { server ->
