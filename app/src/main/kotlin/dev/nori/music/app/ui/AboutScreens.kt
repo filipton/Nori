@@ -56,6 +56,7 @@ internal fun AboutContent(section: @Composable (String, @Composable ColumnScope.
         InfoRow("Interface", facts.ui)
     }
     section("Open source") {
+        InfoRow("Nori is free software", "MIT licence  ·  Copyright (c) 2026 filipton", end = "MIT")
         InfoRow("Licences", "The libraries, fonts and data this app is made of, and their terms", onClick = openLicences)
     }
 }

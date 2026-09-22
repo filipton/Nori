@@ -136,3 +136,9 @@ touches networking, media3 or the FFI.
 Provider items (`ext-…`) show a cloud icon and are never indexed or
 auto-queued — streaming one makes the proxy download it first. A search
 tap plays that one song only, for the same reason.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+Third-party licenses are listed in the app under Settings, About, Licences, and in [NOTICE](NOTICE).
