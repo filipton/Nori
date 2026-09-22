@@ -193,6 +193,7 @@ private val index = listOf(
     Entry("playing", "Skip silence", "Cuts quiet gaps inside and between songs"),
     Entry("playing", "Previous goes back a song", "Instead of starting the song again"),
     Entry("playing", "Skip songs that will not play", "Up to three in a row, then it stops"),
+    Entry("playing", "Play downloads when offline", "Keep going from downloads until the server is back"),
     Entry("playing", "Skip explicit songs", "Songs your server marks explicit"),
     Entry("playing", "Keep playing when the queue ends", "More music is added so it never stops"),
     Entry("playing", "Carry on with", "Songs, or a whole album at a time"),
@@ -423,6 +424,11 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
             Toggle("Skip silence", "Cuts quiet gaps inside and between songs.", p.skipSilence, enabled = live) { on -> vm.update { it.copy(skipSilence = on) } }
             Toggle("Previous goes back a song", "Instead of starting the song you are on again.", p.previousAlwaysSkips) { on -> vm.update { it.copy(previousAlwaysSkips = on) } }
             Toggle("Skip songs that will not play", "Up to three in a row, then it stops.", p.skipOnError) { on -> vm.update { it.copy(skipOnError = on) } }
+            Toggle(
+                "Play downloads when offline",
+                "If the next song is not on this phone and the server is gone, keep going from your downloads until you are back online.",
+                p.bridgeOffline,
+            ) { on -> vm.update { it.copy(bridgeOffline = on) } }
             Toggle("Skip explicit songs", "Songs your server marks explicit.", p.skipExplicit) { on -> vm.update { it.copy(skipExplicit = on) } }
             Toggle("Keep playing when the queue ends", "More music is added, so it never stops on its own.", p.autoFill) { on -> vm.update { it.copy(autoFill = on) } }
             // What arrives and what it is chosen by are two separate questions, so they are two rows:

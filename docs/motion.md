@@ -210,6 +210,21 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   reduce-motion). No direction - the two screens are unrelated.
 - Status: **done**
 
+### 17. Audit: nothing appears on one frame — hinted detail pages + player title
+
+- Found (record tiles of home → album): with item 16 the hero is there from the slide, but
+  Play / Shuffle / ⋯ still landed by replacing the heart-only row, and the tracklist appeared fully
+  opaque on one frame once the server answered. Player title / artist / album also swapped hard
+  when the song changed while the sleeve was still moving.
+- Fixed: `HeroPage.awaitingPlay` keeps the transport row (disabled) and a 46 dp slot for ⋯ while
+  the detail is on the wire; album / artist / playlist pass it from the hint path. Body content
+  under the hero fades and rises once via `Arrive` (300 ms). Player title block cross-fades on
+  song id (220 / 160 ms).
+- Left: page content that is composed late mid-slide (Compose Navigation), player sheet contents
+  that are already on the rising surface, Cover Coil crossfade, loaders, lyrics, downloads,
+  switches, seek / volume - already eased or intentional snaps under `reduceMotion`.
+- Status: **done**
+
 ## Decisions and traps
 
 - The owner rejected a sideways slide once because the pages faded while they slid, which read as

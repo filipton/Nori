@@ -158,3 +158,25 @@ Beat times are not stored. The grid is rebuilt as `offset + n·60/bpm`. For trac
 - Loudness matching.
 - Analyse library only on charger + Wi-Fi (default on).
 - Per-track exclusion ("never mix this track").
+
+## 6. Competitive audit (2026) and what we ship
+
+| Capability | Apple Music AutoMix | DJ.Studio Harmonize | Symfonium / Plexamp | **nori** |
+|---|---|---|---|---|
+| Beat match + time-stretch | yes (catalogue AI) | yes (offline edit) | no / MixRamp only | **yes, on-device** |
+| Bass swap | not documented | yes | no | **yes** |
+| LPF / filter sweep | yes (iOS 26 “underwater”; iOS 27 softer) | yes + HPF presets | no | **yes; Camelot-softened** |
+| Echo-out for clashes | simple fade fallback | yes | no | **yes** |
+| Camelot-aware length | inferred (key+tempo) | yes (bars 4–32) | no | **yes (≤1 long, 2 short, ≥4 echo)** |
+| Loudness match | yes (catalogue) | yes | MixRamp / RG | **LUFS when RG off** |
+| Max skip bound | criticised (≤1 min) | n/a (edit) | n/a | **15 s hard cap** |
+| Album-in-order gapless | yes | n/a | yes | **yes** |
+| Works on self-hosted library | **no** (catalogue only) | yes (files) | yes | **yes** |
+| Hi-res / USB DAC path | blocked on hi-res | n/a | varies | **offload-aware** |
+| Intro/outro loop remix | **iOS 27** | loop effects | no | **outro loop remix** (intro live-loop deferred) |
+| Reorder playlist by key | no (queue respected) | **yes (Harmonize)** | no | **no** (by design: library player) |
+| Stem separation | no | optional | no | **no** (battery) |
+| Tag BPM half/double prior | inferred | yes | n/a | **yes** |
+| DJ filter-open (HPF) | soft in iOS 27 | yes | no | **yes** (Camelot stretch pairs) |
+
+**Verdict.** For a library player that respects queue order, we match or beat Apple on self-hosted music: on-device analysis, bass swap, clash echo-out, MixRamp fallback, hard skip cap, Camelot-scaled length/filters, LUFS match, tag-BPM octave correction, and outro loop remix when the ending is too short for the target overlap. Still behind Apple’s catalogue intro looping (needs a second decode source) and DJ.Studio’s playlist reordering — deliberate non-goals for a queue-respecting library client.

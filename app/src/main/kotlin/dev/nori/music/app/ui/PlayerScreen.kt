@@ -490,34 +490,54 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(
-                            state.current?.title ?: state.radio ?: "Nothing playing",
-                            Modifier.readable(), style = MaterialTheme.typography.titleLarge,
-                            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
-                        )
-                        // Artist and album, each on its own line and each a way there. On one line they
-                        // ran two ellipses into each other as soon as the album had a long name, which
-                        // is why the album used to be on the ⋯ menu and nowhere else.
-                        //
-                        // Apple holds these lines back from the title rather than colouring them: a
-                        // saturated accent here is the one thing that made the screen read as Material.
-                        Text(
-                            state.current?.artist ?: "",
-                            Modifier.clickable(enabled = state.current?.artistId != null) {
-                                state.current?.artistId?.let(nav::artist)
+                        // Title and artist change with the record; a hard swap while the sleeve is still
+                        // sliding reads as a pop. Cross-fade the block on the song id.
+                        val meta = playerTitleMeta(state.current, state.radio)
+                        androidx.compose.animation.AnimatedContent(
+                            targetState = meta,
+                            transitionSpec = {
+                                if (AppMotion.reduce) {
+                                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.snap()) togetherWith
+                                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.snap())
+                                } else {
+                                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(220)) togetherWith
+                                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(160))
+                                }
                             },
-                            style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        )
-                        state.current?.album?.takeIf { it.isNotEmpty() }?.let { album ->
-                            Text(
-                                album,
-                                Modifier.clickable(enabled = state.current?.albumId != null) {
-                                    state.current?.albumId?.let(nav::album)
-                                },
-                                style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface.copy(alpha = 0.45f),
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
+                            contentKey = { it.key },
+                            label = "player title",
+                        ) { m ->
+                            Column {
+                                Text(
+                                    m.title,
+                                    Modifier.readable(), style = MaterialTheme.typography.titleLarge,
+                                    maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                                )
+                                // Artist and album, each on its own line and each a way there. On one line they
+                                // ran two ellipses into each other as soon as the album had a long name, which
+                                // is why the album used to be on the ⋯ menu and nowhere else.
+                                //
+                                // Apple holds these lines back from the title rather than colouring them: a
+                                // saturated accent here is the one thing that made the screen read as Material.
+                                Text(
+                                    m.artist,
+                                    Modifier.clickable(enabled = m.artistId != null) {
+                                        m.artistId?.let(nav::artist)
+                                    },
+                                    style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                                m.album.takeIf { it.isNotEmpty() }?.let { album ->
+                                    Text(
+                                        album,
+                                        Modifier.clickable(enabled = m.albumId != null) {
+                                            m.albumId?.let(nav::album)
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface.copy(alpha = 0.45f),
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
                         }
                     }
                     state.current?.let { s ->
@@ -535,6 +555,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
+                if (state.bridging) Text(
+                    "Playing downloads until you’re online",
+                    Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 2.dp),
+                    color = scheme.onSurface.copy(alpha = 0.55f),
+                    style = MaterialTheme.typography.bodySmall,
+                )
 
                 Box(kept("seek")) { SeekBar(vm, state.playing, state.durationMs) }
 
@@ -580,6 +606,15 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         }
     }
 }
+
+private data class PlayerTitleMeta(
+    val key: String?, val title: String, val artist: String, val album: String,
+    val artistId: String?, val albumId: String?,
+)
+
+private fun playerTitleMeta(song: dev.nori.music.ffi.Song?, radio: String?) = song?.let {
+    PlayerTitleMeta(it.id, it.title, it.artist, it.album.orEmpty(), it.artistId, it.albumId)
+} ?: PlayerTitleMeta(null, radio ?: "Nothing playing", "", "", null, null)
 
 /**
  * Width over height of the player's sleeve. Album art is square - Apple's too - so theirs is the

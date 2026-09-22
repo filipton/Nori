@@ -3,6 +3,8 @@
 //!
 //! 1. clashing pairs (two vocals, far-apart keys): an echo-out, timed by the outgoing grid;
 //! 2. both grids confident and stable, tempos within reach: beat-matched, bar-aligned, with bass swap;
+//!    Camelot distance shapes length and filter: same key = long natural blend, neighbour = soft LPF,
+//!    farther = short + classic sweep (Apple iOS 27 / DJ.Studio Harmonize);
 //! 3. something analysed, no usable grid: overlap from the MixRamp points and trimmed silence, with a filter sweep;
 //! 4. nothing known: a fixed equal-power crossfade;
 //! 5. same album in order: gapless, no mixing.
@@ -31,6 +33,8 @@ const SWEEP_FROM_HZ: f32 = 18_000.0;
 /// Where the outgoing low-pass ends: beat-matched (lows already swapped out) and plain fades.
 const SWEEP_TO_HZ_MATCHED: f32 = 400.0;
 const SWEEP_TO_HZ_FADE: f32 = 500.0;
+/// Camelot neighbour / relative: gentle muffling, not Apple iOS 26's "underwater" dump.
+const SWEEP_TO_HZ_SOFT: f32 = 2_500.0;
 
 fn blank(kind: TransitionKind, out_start: i64, in_start: i64, duration: i64, reason: String) -> TransitionPlan {
     TransitionPlan {
@@ -59,6 +63,12 @@ fn blank(kind: TransitionKind, out_start: i64, in_start: i64, duration: i64, rea
         echo_delay_ms: -1,
         echo_feedback: 0.5,
         echo_wet_db: -6.0,
+        out_loop_ms: -1,
+        in_loop_ms: -1,
+        hp_start_ms: -1,
+        hp_end_ms: -1,
+        hp_from_hz: 0.0,
+        hp_to_hz: 0.0,
         reason,
     }
 }
@@ -70,6 +80,31 @@ fn usable(a: Option<&TrackAnalysis>, duration_ms: i64) -> Option<&TrackAnalysis>
 
 fn grid_ok(a: &TrackAnalysis) -> bool {
     a.bpm > 0.0 && a.bpm.is_finite() && a.bpm_confidence >= MIN_BPM_CONFIDENCE && a.stability >= MIN_STABILITY
+}
+
+/// Prefer the analysis BPM folded toward a server/tag prior when that settles a half/double error.
+fn bpm_with_tag(analysis: f64, tag: f32) -> f64 {
+    if !(analysis > 0.0 && analysis.is_finite()) {
+        return analysis;
+    }
+    let tag = tag as f64;
+    if !(tag > 0.0 && tag.is_finite()) {
+        return analysis;
+    }
+    let mut best = analysis;
+    let mut best_err = (analysis - tag).abs() / tag;
+    for c in [analysis, analysis * 2.0, analysis / 2.0] {
+        let err = (c - tag).abs() / tag;
+        if err < best_err {
+            best = c;
+            best_err = err;
+        }
+    }
+    if best_err <= 0.04 {
+        best
+    } else {
+        analysis
+    }
 }
 
 fn music_end(a: &TrackAnalysis, duration: i64) -> i64 {
@@ -164,12 +199,41 @@ fn echo_out(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64, max
     let beat_ms = beat.round() as i64;
     let mut p = blank(TransitionKind::EchoOut, start, in_start, dur, String::new());
     p.fade_curve = FadeCurve::SineSquared;
+    // Outgoing dies in two beats; incoming rides the last three so the room is not empty
+    // while the repeats decay (DJ.Studio-style echo-out into the next track).
     (p.out_fade_start_ms, p.out_fade_end_ms) = (0, (2 * beat_ms).min(dur));
-    (p.in_fade_start_ms, p.in_fade_end_ms) = ((dur - 2 * beat_ms).max(0), dur);
-    (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (delay, 0.5, -6.0);
+    (p.in_fade_start_ms, p.in_fade_end_ms) = ((dur - 3 * beat_ms).max(0), dur);
+    (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (delay, 0.45, -7.0);
     p.in_gain_db = loudness_trim(Some(a), Some(b), s);
     p.reason = format!("echo-out over {beats} beats, {cause}");
     Some(p)
+}
+
+/// Camelot distance when both keys are trusted, else -1.
+fn camelot_dist(a: &TrackAnalysis, b: &TrackAnalysis) -> i32 {
+    if a.key_confidence >= 0.4 && b.key_confidence >= 0.4 {
+        key_distance(a.key, b.key)
+    } else {
+        -1
+    }
+}
+
+/// Low-pass shaping for MixRamp / one-grid fades: soft when keys agree, classic when they do not.
+fn apply_fade_filter(p: &mut TransitionPlan, a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, s: &AutoMixSettings, dur: i64) {
+    if !s.filter_effects || dur < 2000 {
+        return;
+    }
+    let soft = a.zip(b).is_some_and(|(a, b)| {
+        let d = camelot_dist(a, b);
+        d == 0 || d == 1
+    });
+    if soft {
+        (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) =
+            (dur / 2, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_SOFT);
+    } else {
+        (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) =
+            (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
+    }
 }
 
 pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_duration_ms: i64, in_duration_ms: i64, s: &AutoMixSettings) -> TransitionPlan {
@@ -236,7 +300,9 @@ pub fn plan(out: Option<&TrackAnalysis>, inc: Option<&TrackAnalysis>, out_durati
 }
 
 fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64, max_len: i64, s: &AutoMixSettings, short_cause: &str) -> Result<TransitionPlan, String> {
-    let mut ratio = match_ratio(a.bpm, b.bpm);
+    let bpm_a = bpm_with_tag(a.bpm, s.out_tag_bpm);
+    let bpm_b = bpm_with_tag(b.bpm, s.in_tag_bpm);
+    let mut ratio = match_ratio(bpm_a, bpm_b);
     let pct = (ratio - 1.0).abs() * 100.0;
     let mut max_pct = (s.max_tempo_change_pct as f64).clamp(0.0, 12.0);
     if !s.keep_pitch {
@@ -248,14 +314,21 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
     if (ratio - 1.0).abs() < 0.0005 {
         ratio = 1.0;
     }
-    let beat_a = 60_000.0 / a.bpm;
+    let beat_a = 60_000.0 / bpm_a;
     let bar = 4.0 * beat_a;
-    let b_bpm = fold(a.bpm, b.bpm);
+    let b_bpm = fold(bpm_a, bpm_b);
     let beat_b = 60_000.0 / b_bpm;
-    let keys_known = a.key_confidence >= 0.4 && b.key_confidence >= 0.4;
-    let clash = keys_known && key_distance(a.key, b.key) > 2;
-    // The gates only shorten: 8 bars when the pair clashes mildly or mismatches in loudness/timbre.
-    let max_bars = if clash || !short_cause.is_empty() { 8 } else { 16 };
+    // Camelot: ≤1 = harmonic (long natural blend), 2 = workable but short, >2 = mild clash.
+    // DJ.Studio Harmonize and Apple both lengthen compatible pairs and shorten the rest.
+    let dist = camelot_dist(a, b);
+    let mild_clash = dist > 2;
+    let max_bars = if mild_clash || !short_cause.is_empty() || dist == 2 {
+        8
+    } else {
+        16
+    };
+    // Non-trivial tempo change on a harmonic pair: try a longer unique bridge first (Apple remix runway).
+    let want_extend = pct > 2.0 && dist >= 0 && dist <= 1 && short_cause.is_empty();
 
     // The incoming track starts on its first downbeat, at or just before the music.
     let phase_b = b.downbeat_phase.rem_euclid(4) as i64;
@@ -270,7 +343,6 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
 
     let end_a = music_end(a, out_dur).max(out_dur - MAX_SKIP_MS);
     let phase_a = a.downbeat_phase.rem_euclid(4) as i64;
-    // Latest downbeat of A at or before `t`.
     let downbeat_before = |t: f64| -> f64 {
         let mut n = ((t - a.beat_offset_ms) / beat_a).floor() as i64;
         while n.rem_euclid(4) != phase_a {
@@ -278,12 +350,18 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
         }
         a.beat_offset_ms + n as f64 * beat_a
     };
-    for bars in [16i64, 8, 4].into_iter().filter(|b| *b <= max_bars) {
+
+    // Longer first. When unique outro is short, loop a 4/8-bar slice to fill the target (iOS 27 remix).
+    let mut try_bars: Vec<i64> = [16i64, 8, 4].into_iter().filter(|b| *b <= max_bars).collect();
+    if want_extend && max_bars >= 8 && !try_bars.contains(&12) {
+        // Prefer a 12-bar bridge between 8 and 16 when tempos need runway.
+        try_bars.insert(1, 12);
+    }
+    for &bars in &try_bars {
         let dur = bars as f64 * bar;
         if dur > max_len as f64 || dur * ratio > (in_dur - in_start) as f64 / 2.0 {
             continue;
         }
-        // Phrase-aligned when the outro cue allows it (a multiple of 8 bars after it), else the last downbeat that fits.
         let latest = downbeat_before(end_a as f64 - dur);
         let phrase = if a.outro_start_ms > 0 && (a.outro_start_ms as f64) <= latest {
             let k = ((latest - a.outro_start_ms as f64) / (8.0 * bar) + 1e-6).floor();
@@ -291,54 +369,145 @@ fn beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, out_dur: i64, in_dur: i64,
         } else {
             None
         };
-        let start = phrase.filter(|p| out_dur as f64 - (p + dur) <= MAX_SKIP_MS as f64).unwrap_or(latest);
-        if start < a.silence_start_ms as f64 || out_dur as f64 - (start + dur) > MAX_SKIP_MS as f64 {
-            continue;
-        }
-        let dur_ms = dur.round() as i64;
-        // Bass swap: where the incoming intro ends if that falls inside the window, else half way; on a bar line.
-        let intro_wall = (b.intro_end_ms - in_start) as f64 / ratio;
-        let swap_bars = if b.intro_end_ms > in_start && intro_wall >= bar && intro_wall <= dur - bar {
-            (intro_wall / bar).round()
+        let start_try = phrase.filter(|p| out_dur as f64 - (p + dur) <= MAX_SKIP_MS as f64).unwrap_or(latest);
+        let fits_unique = start_try >= a.silence_start_ms as f64
+            && end_a as f64 - start_try + 1.0 >= dur
+            && out_dur as f64 - (start_try + dur) <= MAX_SKIP_MS as f64;
+        let on_phrase = phrase.is_some_and(|p| (start_try - p).abs() < 1.0);
+
+        let (hold_start, mix_dur, out_loop_ms, looped) = if fits_unique {
+            (start_try, dur.round() as i64, -1i64, false)
         } else {
-            (bars / 2) as f64
-        };
-        let swap = (swap_bars * bar).round() as i64;
-        let beat_ms = beat_a.round() as i64;
-        let mut p = blank(TransitionKind::BeatMatched, start.round() as i64, in_start, dur_ms, String::new());
-        p.tempo_ratio = ratio;
-        p.keep_pitch = s.keep_pitch;
-        if ratio != 1.0 {
-            p.tempo_ramp_beats = if pct <= 2.0 { 16 } else { 32 };
-            p.tempo_ramp_ms = (p.tempo_ramp_beats as f64 * beat_b / ((1.0 + ratio) / 2.0)).round() as i64;
-        }
-        p.fade_curve = FadeCurve::SineSquared;
-        (p.in_fade_start_ms, p.in_fade_end_ms) = (0, swap);
-        (p.out_fade_start_ms, p.out_fade_end_ms) = ((swap + beat_ms).min(dur_ms), dur_ms);
-        if s.bass_swap {
-            (p.bass_swap_ms, p.bass_swap_len_ms) = (swap, beat_ms);
-        }
-        if s.filter_effects {
-            (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (swap, dur_ms, SWEEP_FROM_HZ, SWEEP_TO_HZ_MATCHED);
-        }
-        p.in_gain_db = loudness_trim(Some(a), Some(b), s);
-        p.reason = format!(
-            "beat-matched {bars} bars, {:.1} -> {:.1} BPM ({:+.1} %){}{}",
-            b.bpm,
-            a.bpm,
-            (ratio - 1.0) * 100.0,
-            if phrase.is_some() && start == phrase.unwrap_or(-1.0) { ", on the outro phrase" } else { "" },
-            if clash {
-                ", keys clash: short".to_string()
-            } else if !short_cause.is_empty() {
-                format!(", short ({short_cause})")
-            } else {
-                String::new()
+            // Capture a loopable slice and wrap to the target length.
+            let loop_bars = [8i64, 4].into_iter().find(|&lb| {
+                lb <= bars && (lb as f64 * bar) <= (end_a - a.silence_start_ms).max(0) as f64 + 1.0
+            });
+            match loop_bars {
+                Some(lb) => {
+                    let loop_ms = (lb as f64 * bar).round() as i64;
+                    let loop_start = downbeat_before(end_a as f64 - lb as f64 * bar);
+                    if loop_start < a.silence_start_ms as f64
+                        || out_dur as f64 - (loop_start + lb as f64 * bar) > MAX_SKIP_MS as f64
+                    {
+                        continue;
+                    }
+                    (loop_start, dur.round() as i64, loop_ms, true)
+                }
+                None => continue,
             }
-        );
-        return Ok(p);
+        };
+
+        // Intro loop is planned only when the whole overlap fits inside the intro (no live-stream
+        // discard after the mix). Longer intros stay one-pass; the outro remix covers the runway.
+        let intro_len = (b.intro_end_ms - in_start).max(0);
+        let in_loop = if looped && intro_len >= mix_dur && intro_len > 0 {
+            // Rare: mix sits entirely in the intro — still one pass, no wrap needed.
+            -1
+        } else if !looped && intro_len > 0 && (intro_len as f64) >= 2.0 * bar && (intro_len as f64) < mix_dur as f64 * 0.5 {
+            // Mark a soft intent for logs; the sink only wraps the outgoing hold today.
+            -1
+        } else {
+            -1
+        };
+        let _ = in_loop;
+        return Ok(finish_beat_matched(
+            a, b, s, ratio, pct, bpm_a, bpm_b, beat_a, beat_b, bar, bars, hold_start, in_start, mix_dur,
+            out_loop_ms, -1, dist, mild_clash, short_cause, looped, on_phrase && !looped,
+        ));
     }
     Err("no bar-aligned window fits".into())
+}
+
+fn finish_beat_matched(
+    a: &TrackAnalysis,
+    b: &TrackAnalysis,
+    s: &AutoMixSettings,
+    ratio: f64,
+    pct: f64,
+    bpm_a: f64,
+    bpm_b: f64,
+    beat_a: f64,
+    beat_b: f64,
+    bar: f64,
+    bars: i64,
+    start: f64,
+    in_start: i64,
+    dur_ms: i64,
+    out_loop_ms: i64,
+    in_loop_ms: i64,
+    dist: i32,
+    mild_clash: bool,
+    short_cause: &str,
+    remix: bool,
+    on_phrase: bool,
+) -> TransitionPlan {
+    let intro_wall = (b.intro_end_ms - in_start) as f64 / ratio;
+    let swap_bars = if b.intro_end_ms > in_start && intro_wall >= bar && intro_wall <= dur_ms as f64 - bar {
+        (intro_wall / bar).round()
+    } else {
+        (bars / 2) as f64
+    };
+    let swap = (swap_bars * bar).round() as i64;
+    let beat_ms = beat_a.round() as i64;
+    let mut p = blank(TransitionKind::BeatMatched, start.round() as i64, in_start, dur_ms, String::new());
+    p.tempo_ratio = ratio;
+    p.keep_pitch = s.keep_pitch;
+    if ratio != 1.0 {
+        p.tempo_ramp_beats = if pct <= 2.0 { 16 } else { 32 };
+        p.tempo_ramp_ms = (p.tempo_ramp_beats as f64 * beat_b / ((1.0 + ratio) / 2.0)).round() as i64;
+    }
+    p.fade_curve = FadeCurve::SineSquared;
+    (p.in_fade_start_ms, p.in_fade_end_ms) = (0, swap);
+    (p.out_fade_start_ms, p.out_fade_end_ms) = ((swap + beat_ms).min(dur_ms), dur_ms);
+    if s.bass_swap {
+        (p.bass_swap_ms, p.bass_swap_len_ms) = (swap, beat_ms);
+    }
+    // Harmonic pairs: skip or soften the LPF (iOS 27 moved off the predictable underwater dump).
+    // Stretched keys: DJ filter-open (HPF). Farther / unknown: classic LPF after the bass hand-over.
+    if s.filter_effects {
+        match dist {
+            0 => {}
+            1 => {
+                let start_f = ((swap + dur_ms) / 2).max(swap);
+                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) =
+                    (start_f, dur_ms, SWEEP_FROM_HZ, SWEEP_TO_HZ_SOFT);
+            }
+            2 => {
+                (p.hp_start_ms, p.hp_end_ms, p.hp_from_hz, p.hp_to_hz) = (0, swap.max(beat_ms * 4), 40.0, 1_200.0);
+            }
+            _ => {
+                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) =
+                    (swap, dur_ms, SWEEP_FROM_HZ, SWEEP_TO_HZ_MATCHED);
+            }
+        }
+    }
+    p.out_loop_ms = out_loop_ms;
+    p.in_loop_ms = in_loop_ms;
+    p.in_gain_db = loudness_trim(Some(a), Some(b), s);
+    let mut bits = Vec::new();
+    if on_phrase {
+        bits.push("on the outro phrase".to_string());
+    }
+    if remix {
+        bits.push("intro/outro remix".to_string());
+    }
+    if mild_clash {
+        bits.push("keys clash: short".to_string());
+    } else if dist == 2 {
+        bits.push("keys stretch: filter-open".to_string());
+    } else if !short_cause.is_empty() {
+        bits.push(format!("short ({short_cause})"));
+    } else if dist == 0 {
+        bits.push("same key".to_string());
+    } else if dist == 1 {
+        bits.push("harmonic".to_string());
+    }
+    let extra = if bits.is_empty() { String::new() } else { format!(", {}", bits.join(", ")) };
+    p.reason = format!(
+        "beat-matched {bars} bars, {bpm_b:.1} -> {bpm_a:.1} BPM ({:+.1} %){extra}",
+        (ratio - 1.0) * 100.0,
+    );
+    p
 }
 
 /// One side has a usable grid and the two could not be locked (the other grid is unreliable, the
@@ -370,9 +539,7 @@ fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, 
             }
             let mut p = blank(TransitionKind::MixRampFade, start, in_start, dur, String::new());
             p.fade_curve = FadeCurve::SineSquared;
-            if s.filter_effects && dur >= 2000 {
-                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
-            }
+            apply_fade_filter(&mut p, a, b, s, dur);
             p.in_gain_db = loudness_trim(a, b, s);
             p.reason = format!("downbeat-aligned fade, {bars} bars out{tail}");
             return Some(p);
@@ -401,9 +568,7 @@ fn one_grid(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, 
             }
             let mut p = blank(TransitionKind::MixRampFade, start, in_start, dur, String::new());
             p.fade_curve = FadeCurve::SineSquared;
-            if s.filter_effects && dur >= 2000 {
-                (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
-            }
+            apply_fade_filter(&mut p, a, b, s, dur);
             p.in_gain_db = loudness_trim(a, b, s);
             p.reason = format!("downbeat-aligned fade, {bars} bars in{tail}");
             return Some(p);
@@ -427,9 +592,7 @@ fn mixramp(a: Option<&TrackAnalysis>, b: Option<&TrackAnalysis>, out_dur: i64, i
     let mut p = blank(TransitionKind::MixRampFade, end_a - dur, in_start, dur, String::new());
     // A loud start comes in at once rather than being faded up; a quiet one rides its own ramp.
     p.in_fade_end_ms = head.map_or(dur, |h| h.clamp(MIN_FADE_MS.min(dur), dur));
-    if s.filter_effects && dur >= 2000 {
-        (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (0, dur, SWEEP_FROM_HZ, SWEEP_TO_HZ_FADE);
-    }
+    apply_fade_filter(&mut p, a, b, s, dur);
     p.in_gain_db = loudness_trim(a, b, s);
     p.reason = format!("mixramp fade {:.1} s{}", dur as f64 / 1000.0, if why_not.is_empty() { String::new() } else { format!(" ({why_not})") });
     p
@@ -472,8 +635,10 @@ mod tests {
 
     fn check_skip(p: &TransitionPlan, out_dur: i64) {
         assert!(p.in_start_ms <= MAX_SKIP_MS, "{p:?}");
-        assert!(out_dur - (p.out_start_ms + p.duration_ms) <= MAX_SKIP_MS, "{p:?}");
-        assert!(p.out_start_ms >= 0 && p.duration_ms >= 0 && p.out_start_ms + p.duration_ms <= out_dur, "{p:?}");
+        // Outro remix: only the captured loop must stay inside the track; duration may wrap past it.
+        let heard_end = if p.out_loop_ms > 0 { p.out_start_ms + p.out_loop_ms } else { p.out_start_ms + p.duration_ms };
+        assert!(out_dur - heard_end <= MAX_SKIP_MS, "{p:?}");
+        assert!(p.out_start_ms >= 0 && p.duration_ms >= 0 && heard_end <= out_dur, "{p:?}");
     }
 
     #[test]
@@ -527,13 +692,73 @@ mod tests {
         assert_eq!((p.in_fade_start_ms, p.in_fade_end_ms), (0, p.bass_swap_ms));
         assert_eq!(p.out_fade_end_ms, p.duration_ms);
         assert_eq!(p.fade_curve, FadeCurve::SineSquared);
-        assert!(p.filter_start_ms >= 0 && p.filter_to_hz < 1000.0);
+        assert_eq!(p.filter_start_ms, -1, "same key: natural blend, no underwater LPF");
         assert_eq!(p.in_gain_db, 0.0, "loudness matching is off by default");
+        assert!(p.reason.contains("same key"), "{}", p.reason);
 
         let long = AutoMixSettings { max_transition_s: 40.0, ..Default::default() };
         let p = plan(Some(&a), Some(&b), 240_000, 240_000, &long);
         assert!((p.duration_ms as f64 - 16.0 * bar).abs() <= 1.0, "room for 16 bars: {}", p.reason);
         check_skip(&p, 240_000);
+    }
+
+    #[test]
+    fn harmonic_neighbour_gets_a_soft_filter_and_long_mix() {
+        // C major -> G major: Camelot distance 1.
+        let a = track(128.0);
+        let b = TrackAnalysis { key: camelot(7, false), ..track(124.0) };
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        assert!(p.reason.contains("harmonic"), "{}", p.reason);
+        let bar = 4.0 * 60_000.0 / 128.0;
+        assert!((p.duration_ms as f64 - 16.0 * bar).abs() <= 1.0, "{}", p.duration_ms);
+        assert!(p.filter_start_ms >= 0);
+        assert!((p.filter_to_hz - SWEEP_TO_HZ_SOFT).abs() < 1.0, "soft, not underwater: {}", p.filter_to_hz);
+    }
+
+    #[test]
+    fn stretched_keys_open_the_filter() {
+        // C major -> D major: Camelot distance 2 (two fifths).
+        let a = track(128.0);
+        let b = TrackAnalysis { key: camelot(2, false), ..track(128.0) };
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        assert!(p.reason.contains("filter-open"), "{}", p.reason);
+        assert!((p.duration_ms as f64 - 8.0 * 4.0 * 60_000.0 / 128.0).abs() <= 1.0, "{}", p.duration_ms);
+        assert!(p.hp_start_ms >= 0 && p.hp_to_hz > 500.0, "DJ filter-open HPF");
+        assert_eq!(p.filter_start_ms, -1, "no underwater LPF on stretched keys");
+    }
+
+    #[test]
+    fn short_outro_loops_to_fill_the_mix() {
+        // Only five bars of music at the end: an 8-bar mix must loop a 4-bar slice.
+        let beat = 60_000.0 / 128.0;
+        let music = (5.0 * 4.0 * beat) as i64;
+        let a = TrackAnalysis {
+            silence_start_ms: 238_500 - music,
+            silence_end_ms: 238_500,
+            outro_start_ms: 238_500 - music,
+            mixramp_end_ms: 238_500 - music / 2,
+            ..track(128.0)
+        };
+        let b = track(128.0);
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &AutoMixSettings { max_transition_s: 40.0, ..Default::default() });
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        assert!(p.out_loop_ms > 0, "outro should loop: {}", p.reason);
+        assert!(p.reason.contains("remix"), "{}", p.reason);
+        assert!(p.duration_ms > p.out_loop_ms);
+        check_skip(&p, 240_000);
+    }
+
+    #[test]
+    fn tag_bpm_settles_a_half_double() {
+        // Analysis reported half tempo; the server tag is the true 128.
+        let a = TrackAnalysis { bpm: 64.0, ..track(128.0) };
+        let b = track(128.0);
+        let s = AutoMixSettings { out_tag_bpm: 128.0, max_transition_s: 40.0, ..Default::default() };
+        let p = plan(Some(&a), Some(&b), 240_000, 240_000, &s);
+        assert_eq!(p.kind, TransitionKind::BeatMatched, "{}", p.reason);
+        assert!((p.tempo_ratio - 1.0).abs() < 0.01, "folded to tag: ratio {}", p.tempo_ratio);
     }
 
     #[test]
@@ -612,7 +837,8 @@ mod tests {
         // 4 s of quiet tail plus 2 s of quiet head.
         assert_eq!((p.out_start_ms, p.in_start_ms, p.duration_ms), (224_000, 1_000, 6_000));
         assert_eq!(p.in_fade_end_ms, 2_000, "the incoming fade follows its own ramp");
-        assert_eq!(p.filter_start_ms, 0);
+        assert_eq!(p.filter_start_ms, 3_000, "same key: soft LPF in the second half");
+        assert!((p.filter_to_hz - SWEEP_TO_HZ_SOFT).abs() < 1.0);
         assert_eq!(p.in_gain_db, 6.0, "incoming 6 dB quieter gets 6 dB");
         check_skip(&p, 240_000);
 
@@ -649,7 +875,7 @@ mod tests {
         assert_eq!(p.kind, TransitionKind::EchoOut, "{}", p.reason);
         assert!(p.reason.contains("keys far apart"), "{}", p.reason);
         assert_eq!(p.echo_delay_ms, (60_000.0_f64 / 128.0).round() as i64);
-        assert_eq!((p.echo_feedback, p.echo_wet_db), (0.5, -6.0));
+        assert_eq!((p.echo_feedback, p.echo_wet_db), (0.45, -7.0));
         assert_eq!(p.bass_swap_ms, -1, "no bass swap on an echo-out");
         assert!((p.tempo_ratio - 1.0).abs() < 1e-9);
         check_skip(&p, 240_000);

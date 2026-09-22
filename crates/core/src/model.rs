@@ -513,6 +513,10 @@ pub struct AutoMixSettings {
     pub same_album_in_order: bool,
     /// Trim the incoming track to the outgoing one's loudness. Leave off when ReplayGain already levels both.
     pub match_loudness: bool,
+    /// Server/tag BPM for the outgoing track (0 unknown). Settles half/double errors against the analysis.
+    pub out_tag_bpm: f32,
+    /// Server/tag BPM for the incoming track (0 unknown).
+    pub in_tag_bpm: f32,
 }
 
 impl Default for AutoMixSettings {
@@ -527,6 +531,8 @@ impl Default for AutoMixSettings {
             keep_pitch: true,
             same_album_in_order: false,
             match_loudness: false,
+            out_tag_bpm: 0.0,
+            in_tag_bpm: 0.0,
         }
     }
 }
@@ -599,6 +605,17 @@ pub struct TransitionPlan {
     pub echo_delay_ms: i64,
     pub echo_feedback: f32,
     pub echo_wet_db: f32,
+    /// Outro remix: hold captures this many ms and the mixer reads it with wrap for `duration_ms`.
+    /// `-1` means capture the full duration with no loop (Apple iOS 27-style intro/outro extend).
+    pub out_loop_ms: i64,
+    /// Intro remix: after `in_start_ms`, the first this many ms of the incoming track is looped for the
+    /// rest of the overlap. `-1` means play the incoming stream straight through.
+    pub in_loop_ms: i64,
+    /// High-pass sweep on the outgoing track (DJ "filter open"), `-1` when off.
+    pub hp_start_ms: i64,
+    pub hp_end_ms: i64,
+    pub hp_from_hz: f32,
+    pub hp_to_hz: f32,
     /// Why this plan, for logs.
     pub reason: String,
 }

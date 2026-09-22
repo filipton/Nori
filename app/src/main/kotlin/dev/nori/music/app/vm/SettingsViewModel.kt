@@ -191,6 +191,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
                 "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
                 "autoFill" -> it.copy(autoFill = on)
+                "bridgeOffline" -> it.copy(bridgeOffline = on)
                 "autoFillKind" -> dev.nori.music.settings.AutoFillKind.entries.firstOrNull { k -> k.name.equals(value, true) }?.let { k -> it.copy(autoFillKind = k) }
                 "autoFillBasis" -> dev.nori.music.settings.AutoFillBasis.entries.firstOrNull { b -> b.name.equals(value, true) }?.let { b -> it.copy(autoFillBasis = b) }
                 "autoEqAuto" -> it.copy(autoEqAuto = on)

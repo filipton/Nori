@@ -46,7 +46,12 @@ pub mod param {
     pub const ECHO_DELAY: usize = 15;
     pub const ECHO_FB: usize = 16;
     pub const ECHO_WET: usize = 17;
-    pub const COUNT: usize = 18;
+    /// High-pass sweep on the outgoing deck (DJ filter-open). Start -1 means off.
+    pub const HP_START: usize = 18;
+    pub const HP_END: usize = 19;
+    pub const HP_FROM_HZ: usize = 20;
+    pub const HP_TO_HZ: usize = 21;
+    pub const COUNT: usize = 22;
 }
 
 /// The plan as the flat array the mixer takes.
@@ -70,6 +75,10 @@ pub fn params(plan: &TransitionPlan) -> Vec<f32> {
     p[param::ECHO_DELAY] = plan.echo_delay_ms as f32;
     p[param::ECHO_FB] = plan.echo_feedback;
     p[param::ECHO_WET] = plan.echo_wet_db;
+    p[param::HP_START] = plan.hp_start_ms as f32;
+    p[param::HP_END] = plan.hp_end_ms as f32;
+    p[param::HP_FROM_HZ] = plan.hp_from_hz;
+    p[param::HP_TO_HZ] = plan.hp_to_hz;
     p
 }
 
@@ -146,6 +155,11 @@ pub struct Mixer {
     hp: Coef,
     /// Two cascaded sections per deck per channel: [deck][section][channel].
     hp_state: [[[[f64; 2]; MAX_CHANNELS]; 2]; 2],
+    /// DJ filter-open: high-pass sweep on the outgoing deck only (separate from the bass-swap HP).
+    hp_sweep: Option<(Span, f64, f64)>,
+    hp_sweep_coef: Coef,
+    hp_sweep_state: [[[f64; 2]; MAX_CHANNELS]; 2],
+    hp_sweep_from: u64,
     lp: Option<(Span, f64, f64)>,
     lp_coef: Coef,
     lp_state: [[[f64; 2]; MAX_CHANNELS]; 2],
@@ -174,6 +188,10 @@ impl Mixer {
             swap: None,
             hp: Coef::default(),
             hp_state: [[[[0.0; 2]; MAX_CHANNELS]; 2]; 2],
+            hp_sweep: None,
+            hp_sweep_coef: Coef::default(),
+            hp_sweep_state: [[[0.0; 2]; MAX_CHANNELS]; 2],
+            hp_sweep_from: 0,
             lp: None,
             lp_coef: Coef::default(),
             lp_state: [[[0.0; 2]; MAX_CHANNELS]; 2],
@@ -215,6 +233,14 @@ impl Mixer {
         let (ss, sl) = (get(param::SWAP_START), get(param::SWAP_LEN));
         self.swap = (ss >= 0.0).then(|| Span { start: frames(ss).min(self.len), end: (frames(ss) + frames(sl.max(1.0))).min(self.len.max(1)) });
         self.hp = Coef::high_pass(self.rate, if get(param::BASS_CUT_HZ) > 0.0 { get(param::BASS_CUT_HZ) } else { 180.0 });
+        let (hs, he, hf, ht) = (get(param::HP_START), get(param::HP_END), get(param::HP_FROM_HZ), get(param::HP_TO_HZ));
+        self.hp_sweep = (hs >= 0.0 && he >= hs && hf > 0.0 && ht > 0.0).then(|| {
+            (span(hs, he, self.len), hf.min(self.rate * 0.45), ht.min(self.rate * 0.45))
+        });
+        self.hp_sweep_from = self.hp_sweep.map_or(0, |(s, _, _)| s.start);
+        if let Some((_, from, _)) = self.hp_sweep {
+            self.hp_sweep_coef = Coef::high_pass(self.rate, from);
+        }
         let (ls, le, lf, lt) = (get(param::LP_START), get(param::LP_END), get(param::LP_FROM_HZ), get(param::LP_TO_HZ));
         self.lp = (ls >= 0.0 && le >= ls && lf > 0.0 && lt > 0.0).then(|| (span(ls, le, self.len), lf.min(self.rate * 0.45), lt.min(self.rate * 0.45)));
         self.lp_entry = frames(LP_ENTRY_MS).max(1);
@@ -234,6 +260,7 @@ impl Mixer {
             self.echo_pos = 0;
         }
         self.hp_state = [[[[0.0; 2]; MAX_CHANNELS]; 2]; 2];
+        self.hp_sweep_state = [[[0.0; 2]; MAX_CHANNELS]; 2];
         self.lp_state = [[[0.0; 2]; MAX_CHANNELS]; 2];
     }
 
@@ -251,6 +278,13 @@ impl Mixer {
                 let hz = from * (to / from).powf(span.progress(self.pos));
                 self.lp_coef = Coef::low_pass(self.rate, hz);
                 self.lp_from = self.pos;
+            }
+        }
+        if let Some((span, from, to)) = self.hp_sweep {
+            if self.pos >= span.start {
+                let hz = from * (to / from).powf(span.progress(self.pos));
+                self.hp_sweep_coef = Coef::high_pass(self.rate, hz);
+                self.hp_sweep_from = self.pos;
             }
         }
     }
@@ -311,8 +345,23 @@ impl Mixer {
                 }
                 _ => 0.0,
             };
+            let hp_wet = match self.hp_sweep {
+                Some((span, from, to)) if p >= span.start => {
+                    if (p - span.start) % LP_STEP == 0 {
+                        let hz = from * (to / from).powf(span.progress(p));
+                        self.hp_sweep_coef = Coef::high_pass(self.rate, hz);
+                    }
+                    (p.saturating_sub(self.hp_sweep_from) as f64 / self.lp_entry as f64).min(1.0)
+                }
+                _ => 0.0,
+            };
             for c in 0..ch {
                 let mut o = xo[c];
+                if hp_wet > 0.0 {
+                    let h = self.hp_sweep_coef.run(&mut self.hp_sweep_state[0][c], o);
+                    let h = self.hp_sweep_coef.run(&mut self.hp_sweep_state[1][c], h);
+                    o = o * (1.0 - hp_wet) + h * hp_wet;
+                }
                 if lp_wet > 0.0 {
                     let l = self.lp_coef.run(&mut self.lp_state[0][c], o);
                     let l = self.lp_coef.run(&mut self.lp_state[1][c], l);
@@ -483,6 +532,12 @@ mod tests {
             echo_delay_ms: -1,
             echo_feedback: 0.5,
             echo_wet_db: -6.0,
+            out_loop_ms: -1,
+            in_loop_ms: -1,
+            hp_start_ms: -1,
+            hp_end_ms: -1,
+            hp_from_hz: 0.0,
+            hp_to_hz: 0.0,
             reason: String::new(),
         }
     }

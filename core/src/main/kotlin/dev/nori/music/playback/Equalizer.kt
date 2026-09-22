@@ -25,10 +25,11 @@ internal object Dsp {
 }
 
 /**
- * The sample-domain chain: pre-amp, parametric equalizer, crossfeed. While [enabled] is false the
- * processor reports itself inactive and media3 leaves it out of the chain entirely, which is also
- * what lets playback stay offloaded. Flipping [enabled] takes effect the next time the sink is
- * configured; the service re-prepares the player to force that. Changing the curve is live.
+ * The sample-domain chain: pre-amp, parametric equalizer, crossfeed, balance, mono, limiter.
+ * While [enabled] is false the processor reports itself inactive and media3 leaves it out of the
+ * chain entirely, which is what lets playback stay offloaded. The service keeps [enabled] true on
+ * every PCM path (even with a flat curve) so toggling EQ or moving a band is live — no sink
+ * rebuild, no gap. Flipping [enabled] itself still waits for the next sink configuration.
  */
 @UnstableApi
 class Equalizer : BaseAudioProcessor() {

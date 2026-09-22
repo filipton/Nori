@@ -2,11 +2,14 @@ package dev.nori.music.app.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -175,6 +178,8 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             { nav.artist(a, Artist(a, album.artist, album.coverArt, null, 0u, false, false)) }
         },
         // Play and shuffle wait for the songs: pressing them with an empty list would queue nothing.
+        // The row itself is reserved ([awaitingPlay]) so the page does not reflow when they land.
+        awaitingPlay = detail == null && load !is Load.Failed,
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         actions = {
@@ -182,27 +187,48 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             CircleButton(if (albumStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
                 actions.starAlbum(album.id, !albumStarred)
             }
-            if (detail != null) {
-                // Queue and download live behind the menu: four controls on one line squeeze the Play
-                // pill until its own label no longer fits.
-                MoreCircle(listOf("Add to queue" to { actions.enqueue(detail.songs) }, downloadEntry(detail.songs, done, actions)))
+            // Fixed 46 dp slot: More fades in when the songs land so the Play pill never shifts.
+            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = detail != null,
+                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
+                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
+                ) {
+                    MoreCircle(listOf("Add to queue" to { actions.enqueue(detail!!.songs) }, downloadEntry(detail!!.songs, done, actions)))
+                }
             }
         },
     ) {
         when {
-            detail != null -> {
-                if (album.isExternal || album.id.startsWith("pl-")) item(key = "header") {
-                    TextButton({ actions.addToLibrary(album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                        Text("Add the whole ${if (album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(album.id) ?: "provider"})")
+            detail != null -> item(key = "body") {
+                Arrive {
+                    Column {
+                        if (album.isExternal || album.id.startsWith("pl-")) {
+                            TextButton({ actions.addToLibrary(album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
+                                Text("Add the whole ${if (album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(album.id) ?: "provider"})")
+                            }
+                        }
+                        discs.forEach { (disc, tracks) ->
+                            if (discs.size > 1) {
+                                val title = detail.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
+                                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
+                            }
+                            val (onRight, onLeft) = actions.swipes
+                            tracks.forEachIndexed { i, s ->
+                                SongRow(
+                                    s, null,
+                                    onClick = { actions.tap(detail.songs, detail.songs.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) },
+                                    onMenu = { menu(s) },
+                                    number = s.track.toInt(), playing = s.id == playing, downloaded = s.id in done,
+                                    selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
+                                    swipeRight = rowSwipe(onRight, s, actions),
+                                    swipeLeft = rowSwipe(onLeft, s, actions),
+                                    divider = i < tracks.lastIndex,
+                                    showArtist = !s.artist.equals(album.artist, ignoreCase = true),
+                                )
+                            }
+                        }
                     }
-                }
-                discs.forEach { (disc, tracks) ->
-                    if (discs.size > 1) item(key = "disc$disc") {
-                        val title = detail.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                        SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-                    }
-                    // Tapping plays the whole album from that track, not just its disc.
-                    songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = detail.songs, pageArtist = album.artist)
                 }
             }
             load is Load.Failed -> item(key = "fail") {
@@ -312,46 +338,63 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             else artist.albumCount.takeIf { it > 0u }?.let { "$it releases" }.orEmpty(),
         onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
         onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
+        awaitingPlay = ui == null && load !is Load.Failed,
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
             CircleButton(if (artistStarred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite") {
                 actions.starArtist(artist.id, !artistStarred)
             }
-            if (ui != null) {
-                MoreCircle(
-                    listOf(
-                        "Add to queue" to { actions.queueArtist(ui.detail.albums) },
-                        "Download everything" to { actions.downloadArtist(ui.detail.albums) },
-                    ),
-                )
+            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = ui != null,
+                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
+                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
+                ) {
+                    MoreCircle(
+                        listOf(
+                            "Add to queue" to { actions.queueArtist(ui!!.detail.albums) },
+                            "Download everything" to { actions.downloadArtist(ui!!.detail.albums) },
+                        ),
+                    )
+                }
             }
         },
     ) {
         when {
-            ui != null -> {
-                item(key = "header") {
-                    ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                    Row(Modifier.padding(horizontal = 12.dp)) {
-                        ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
-                        ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
-                    }
-                }
-                groups.forEach { (group, albums) ->
-                    item(key = "g-$group") {
-                        SectionTitle(if (group.endsWith("s")) group else "${group}s")
-                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
+            ui != null -> item(key = "body") {
+                Arrive {
+                    Column {
+                        ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        Row(Modifier.padding(horizontal = 12.dp)) {
+                            ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
+                            ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
                         }
-                    }
-                }
-                if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
-                songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
-                ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
-                    item(key = "similar") {
-                        SectionTitle("Similar artists")
-                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            items(similar, key = { it.id }) { a ->
-                                Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
+                        groups.forEach { (group, albums) ->
+                            SectionTitle(if (group.endsWith("s")) group else "${group}s")
+                            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
+                            }
+                        }
+                        if (ui.top.isNotEmpty()) {
+                            SectionTitle("Top songs")
+                            val (onRight, onLeft) = actions.swipes
+                            ui.top.forEachIndexed { i, s ->
+                                SongRow(
+                                    s, vm.cover(s.coverArt, CoverSize.ROW),
+                                    onClick = { actions.tap(ui.top, i) }, onMenu = { menu(s) },
+                                    playing = s.id == playing, downloaded = s.id in done,
+                                    selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
+                                    swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
+                                    divider = i < ui.top.lastIndex,
+                                )
+                            }
+                        }
+                        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
+                            SectionTitle("Similar artists")
+                            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                items(similar, key = { it.id }) { a ->
+                                    Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
+                                }
                             }
                         }
                     }
@@ -467,6 +510,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             ).joinToString(" · "),
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
+        awaitingPlay = detail == null && load !is Load.Failed,
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             // A favourite, drawn and named as every other favourite in the app is: a heart, filled
@@ -477,21 +521,42 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             CircleButton(if (pinned) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, if (pinned) "Remove from favourites" else "Favourite") {
                 settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }
             }
-            if (detail != null) {
-                MoreCircle(
-                    listOf(
-                        "Add to queue" to { actions.enqueue(detail.songs) },
-                        downloadEntry(detail.songs, done, actions),
-                        "Export M3U" to { exportM3u.launch("${playlist.name}.m3u8") },
-                    ),
-                )
+            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = detail != null,
+                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
+                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
+                ) {
+                    MoreCircle(
+                        listOf(
+                            "Add to queue" to { actions.enqueue(detail!!.songs) },
+                            downloadEntry(detail!!.songs, done, actions),
+                            "Export M3U" to { exportM3u.launch("${playlist.name}.m3u8") },
+                        ),
+                    )
+                }
             }
         },
     ) {
         when {
-            detail != null -> {
-                item(key = "header") { FilterField(detail.songs.size, filter) { filter = it } }
-                songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+            detail != null -> item(key = "body") {
+                Arrive {
+                    Column {
+                        FilterField(detail.songs.size, filter) { filter = it }
+                        val (onRight, onLeft) = actions.swipes
+                        shown.forEachIndexed { i, s ->
+                            SongRow(
+                                s, vm.cover(s.coverArt, CoverSize.ROW),
+                                onClick = { actions.tap(detail.songs, detail.songs.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) },
+                                onMenu = { menu(s) },
+                                playing = s.id == playing, downloaded = s.id in done,
+                                selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
+                                swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
+                                divider = i < shown.lastIndex,
+                            )
+                        }
+                    }
+                }
             }
             load is Load.Failed -> item(key = "fail") {
                 Text(

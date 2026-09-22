@@ -44,6 +44,11 @@ data class PlayerState(
     /** elapsedRealtime at which playback will pause, or 0. */
     val sleepAt: Long = 0,
     val sleepAtEndOfTrack: Boolean = false,
+    /**
+     * Playing from downloads while the server is unreachable; the original queue is parked after the
+     * bridge block and comes back when the network does.
+     */
+    val bridging: Boolean = false,
 ) {
     val current: Song? get() = queue.getOrNull(index)
 }
@@ -198,6 +203,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             durationMs = if (heardIndex != null) queue[heardIndex].duration.toLong() * 1000
                 else p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
+            bridging = item?.isBridgeItem() == true ||
+                (0 until p.mediaItemCount).any { p.getMediaItemAt(it).isBridgeItem() },
         )
     }
 
@@ -249,7 +256,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     /** Also prepares a queue that was restored but never loaded. */
     fun toggle() = with { Util.handlePlayPauseButtonAction(it) }
-    fun next() = with { forget(); it.seekToNextMediaItem() }
+    fun next() = with { c ->
+        forget()
+        if (c.hasNextMediaItem()) c.seekToNextMediaItem()
+        else c.sendCustomCommand(SessionCommand(PlaybackService.CMD_FILL_NEXT, Bundle.EMPTY), Bundle.EMPTY)
+    }
     /**
      * A rewind is a seek to the top, not a skip: on a queue restored but never prepared the
      * controller drops a bare seekToPrevious without a word, and the song then starts from where

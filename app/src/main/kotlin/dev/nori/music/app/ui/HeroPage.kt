@@ -63,6 +63,12 @@ fun HeroPage(
     onSubtitle: (() -> Unit)? = null,
     onPlay: (() -> Unit)? = null,
     onShuffle: (() -> Unit)? = null,
+    /**
+     * Keep the Shuffle + Play row even while [onPlay] / [onShuffle] are still null (hinted album /
+     * artist / playlist pages waiting on the server). Without this the row jumps from heart-only to
+     * transport when the detail lands - a one-frame pop.
+     */
+    awaitingPlay: Boolean = false,
     /** Icon buttons on the line with the pills: favourite, queue, download. */
     actions: @Composable RowScope.() -> Unit = {},
     /**
@@ -152,13 +158,20 @@ fun HeroPage(
 
                         // Apple's arrangement: shuffle in a circle on the left, one wide Play pill in the
                         // middle, and the page's other action in a circle on the right. Two equal pills
-                        // side by side give the page two things to look at instead of one.
-                        if (onPlay != null || onShuffle != null) Row(
+                        // side by side give the page two things to look at instead of one. The row is
+                        // reserved while [awaitingPlay] so the layout does not jump when the taps land.
+                        if (awaitingPlay || onPlay != null || onShuffle != null) Row(
                             Modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.gutter, top = 16.dp),
                             Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
                         ) {
-                            if (onShuffle != null) CircleButton(Icons.Filled.Shuffle, "Shuffle", onClick = onShuffle)
-                            if (onPlay != null) PillButton("Play", Icons.Filled.PlayArrow, onPlay, Modifier.weight(1f), prominent = true)
+                            CircleButton(
+                                Icons.Filled.Shuffle, "Shuffle",
+                                enabled = onShuffle != null, onClick = onShuffle ?: {},
+                            )
+                            PillButton(
+                                "Play", Icons.Filled.PlayArrow, onPlay ?: {}, Modifier.weight(1f),
+                                prominent = true, enabled = onPlay != null,
+                            )
                             actions()
                         } else Row(
                             Modifier.fillMaxWidth().padding(start = Space.tight, end = Space.tight, top = 2.dp),

@@ -157,6 +157,12 @@ data class Prefs(
     val scrobble: Boolean = true,
     /** When the last queued song starts, keep the music going past the end of the queue. */
     val autoFill: Boolean = true,
+    /**
+     * Server gone mid-evening and the next song is not downloaded: keep playing from full downloads
+     * until the network is back, then resume the parked queue. Off by default; costs nothing until it
+     * engages (no network listener until then).
+     */
+    val bridgeOffline: Boolean = false,
     /** Songs, or one whole album at a time, queued in its own order. */
     val autoFillKind: AutoFillKind = AutoFillKind.SONGS,
     /** What the next songs are chosen by: what the server thinks is similar, or the artist, genre or decade. */
@@ -364,6 +370,7 @@ class Settings(context: Context) {
             hiRes = sp.getBoolean("hiRes", false),
             scrobble = sp.getBoolean("scrobble", true),
             autoFill = sp.getBoolean("autoFill", true),
+            bridgeOffline = sp.getBoolean("bridgeOffline", false),
             autoFillKind = AutoFillKind.entries.getOrElse(sp.getInt("autoFillKind", 0)) { d.autoFillKind },
             autoFillBasis = AutoFillBasis.entries.getOrElse(sp.getInt("autoFillBasis", 0)) { d.autoFillBasis },
             eqEnabled = sp.getBoolean("eqEnabled", false),
@@ -406,6 +413,7 @@ class Settings(context: Context) {
         putBoolean("previousAlwaysSkips", p.previousAlwaysSkips); putInt("precacheWifi", p.precacheWifi); putInt("precacheMobile", p.precacheMobile)
         putBoolean("skipOnError", p.skipOnError); putBoolean("crossfadeKeepAlbums", p.crossfadeKeepAlbums)
         putBoolean("offload", p.offload); putBoolean("bitPerfect", p.bitPerfect); putBoolean("scrobble", p.scrobble); putBoolean("hiRes", p.hiRes); putBoolean("autoFill", p.autoFill)
+        putBoolean("bridgeOffline", p.bridgeOffline)
         putInt("autoFillKind", p.autoFillKind.ordinal); putInt("autoFillBasis", p.autoFillBasis.ordinal)
         putBoolean("eqEnabled", p.eqEnabled); putString("eqBands", Band.encode(p.eqBands))
         if (p.eqPreampDb == null) remove("eqPreampDb") else putFloat("eqPreampDb", p.eqPreampDb)

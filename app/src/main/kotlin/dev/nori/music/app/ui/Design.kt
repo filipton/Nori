@@ -708,10 +708,15 @@ fun ActionRow(title: String, icon: ImageVector, onClick: () -> Unit, divider: Bo
 
 /** A round, softly filled button: the small actions either side of a page's Play pill. */
 @Composable
-fun CircleButton(icon: ImageVector, description: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun CircleButton(
+    icon: ImageVector, description: String, modifier: Modifier = Modifier,
+    enabled: Boolean = true, onClick: () -> Unit,
+) {
     val scheme = MaterialTheme.colorScheme
+    // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
+    // absent on a dark page, so the row still "popped" when Play became tappable.
     Surface(
-        onClick = onClick, shape = androidx.compose.foundation.shape.CircleShape,
+        onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
         color = scheme.onSurface.copy(alpha = 0.12f).over(scheme.background), contentColor = scheme.primary,
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp)) } }

@@ -5,13 +5,13 @@ same tracks, media volume 0, screen off, no touches. Nori is the **release**
 build throughout; the other three are Play releases. Full per-thread outputs
 and profiles: [perf-shootout.md](perf-shootout.md).
 
-| Metric | **Nori 0.2.0** | Symfonium 15.0.1 | musly 2.0.2 | Navic alpha55 |
+| Metric | **Nori 0.3.0** | Symfonium 15.0.1 | musly 2.0.2 | Navic alpha55 |
 |---|---|---|---|---|
 | Cold start | **~280 ms** | ~390 ms | ~760 ms | ~570 ms |
-| MP3 CPU | **1.18%** | 6.66% | 2.78% | 2.78% |
-| MP3 wakeups | **375/s** | 1747/s | 533/s | 434/s |
-| MP3 quiet | **76/90** | 1/90 | 0/90 | 1/90 |
-| MP3 memory | **108 MB** | 117 MB | 152 MB | 140 MB |
+| MP3 CPU | **1.26%** | 10.7% | 4.01% | 3.10% |
+| MP3 wakeups | **372/s** | 2050/s | 569/s | 465/s |
+| MP3 quiet | **75/90** | 1/90 | 0/90 | 1/90 |
+| MP3 memory | **119 MB** | 124 MB | 142 MB | 124 MB |
 | FLAC CPU | **1.24%** | 7.41% | 3.76% | 4.44% |
 | FLAC wakeups | **408/s** | 1955/s | 581/s | 625/s |
 | FLAC quiet | **75/90** | 0/90 | 0/90 | 0/90 |
@@ -34,11 +34,18 @@ paused rows are settled background windows.
 
 Notes:
 
+- MP3 rows re-measured 2026-09-22 (release Nori, EQ off, Noise 1, volume 0,
+  screen off). FLAC / EQ / mix / paused / cold-start rows are from 2026-09-21.
+- Symfonium MP3 is the mean of two consecutive windows (10.20% and 11.25%);
+  both are well above the 6.66% reading from the day before on the same
+  track — thread shape is unchanged (ExoPlayer:Playb + AudioEngine + four
+  BG workers), so the install is simply hotter right now, not a different
+  pathology.
 - musly has no equalizer; its EQ column is a stock re-run. That is a feature
   gap, not a win.
 - Navic has no transition feature; its 0.60% mix row is stock gapless play.
 - Symfonium skips crossfade on sequential albums, so its mix row uses a manual
-  queue; its 6.66%→1.83% queue-shape difference is unexplained.
+  queue; its older 6.66%→1.83% queue-shape difference is unexplained.
 - Paused windows: Nori 90 s, the rest 30 s — quiet counts are not directly
   comparable, CPU and memory are. Nori's 0.01% is one 10 ms ExoPlayer tick in
   a 3× longer window.

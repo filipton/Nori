@@ -16,6 +16,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import coil3.request.crossfade
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -493,6 +494,30 @@ fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, mo
 
 @Composable
 fun SectionTitle(text: String, modifier: Modifier = Modifier) = SectionHeader(text, modifier)
+
+/**
+ * Content that was not on the page at first (songs under a hero hint) fades and rises once.
+ * [AnimatedVisibility] from a remembered false→true is deliberate: LazyList `animateItem` only
+ * eases items added to an already-drawn list, and a bulk fill-in still read as a one-frame pop.
+ */
+@Composable
+fun Arrive(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    var shown by remember { mutableStateOf(AppMotion.reduce) }
+    LaunchedEffect(Unit) { shown = true }
+    androidx.compose.animation.AnimatedVisibility(
+        visible = shown,
+        modifier = modifier,
+        enter = if (AppMotion.reduce) {
+            androidx.compose.animation.fadeIn(androidx.compose.animation.core.snap())
+        } else {
+            androidx.compose.animation.fadeIn(tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing)) +
+                androidx.compose.animation.slideInVertically(
+                    tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                ) { (it * 0.06f).toInt() }
+        },
+        exit = androidx.compose.animation.ExitTransition.None,
+    ) { content() }
+}
 
 @Composable
 fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {

@@ -1,10 +1,10 @@
 # Feature checklist
 
-Every distinct feature found in Symfonium (S), Musly (M) and Navic (N), merged. The raw, sourced
-inventories are in `docs/research/` (Symfonium: all 67 release posts, the docs site, the Play listing
-and the APK's strings; Musly: changelog, 892 l10n keys, source at v2.0.2; Navic: releases alpha19-55,
-836 commits, source). Provider-specific items that cannot apply to a Subsonic server (Plex auth,
-Jellyfin Quick Connect, ...) are left in the raw files.
+Living inventory for **Nori 0.3.0**. Every distinct feature found in Symfonium (S), Musly (M) and
+Navic (N), merged. The raw, sourced inventories are in `docs/research/` (Symfonium: all 67 release
+posts, the docs site, the Play listing and the APK's strings; Musly: changelog, 892 l10n keys,
+source at v2.0.2; Navic: releases alpha19-55, 836 commits, source). Provider-specific items that
+cannot apply to a Subsonic server (Plex auth, Jellyfin Quick Connect, ...) are left in the raw files.
 
 nori column: `yes` have it, `part` partly. Plan column: **add** = clean win, will be built;
 **ask** = costs battery/CPU, a dependency, privacy or a lot of scope, the owner decides;
@@ -238,6 +238,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Storage screen: sizes, clear image cache / stream cache / downloads / index / pending | x | x | x | sizes, clears stream + covers | clear downloads and the index from here |
 | Image cache: Wi-Fi-only, size, cover quality setting | x | x | x | fixed | add |
 | Offline mode: auto / forced / "metered counts as offline"; hide unavailable | x | x | x | implicit | add |
+| Bridge with downloads while offline (park online queue, resume when back) | | | | yes | done: Prefs `bridgeOffline` (off by default); network errors jump to a download still in the queue or park the rest and play smart picks from full downloads; network callback only while bridging |
 | Offline write queue (stars, ratings, plays, playlist edits) | x | scrobbles | x | yes | |
 
 ## Lyrics
@@ -319,7 +320,7 @@ The owner asked for these explicitly; they override the "UI later" note below.
 - Automatic synced lyrics for songs without an LRC -> done: server first, then LRCLIB (synced preferred, duration-matched,
   hits kept, misses retried weekly, failures never cached). LyricsPlus mirrors (Navic's karaoke source) were all
   down on 2026-09-18, so not shipped; the provider layer takes more sources.
-- Apple Music AutoMix-style transitions with BPM/beat matching -> researched (docs/research/automix.md), being built.
+- Apple Music AutoMix-style transitions with BPM/beat matching -> **done** (on-device analysis, Camelot-aware length/filters, outro loop remix, bass swap, echo-out, LUFS match; see docs/research/automix.md).
 - Material You, AMOLED, adjustable -> done: wallpaper colours, accent colours, theme mode, true-black mode.
 - The owner's friend: "take it from Apple, the album cover spills into the page; but no forced liquid glass" -> done:
   album, artist and playlist pages open with the cover edge to edge under the status bar, melting into a colour taken

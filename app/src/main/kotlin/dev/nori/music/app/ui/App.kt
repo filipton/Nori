@@ -219,7 +219,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     st.order.drop(st.order.indexOf(st.index) + 1).take(8).let { up ->
                         """"upNext":"${up.joinToString(" ") { st.queue[it].id }}","upNextQueued":"${up.joinToString(" ") { if (it in st.queued) "1" else "0" }}","shuffle":${st.shuffle},"""
                     } +
-                    """"error":"${st.error.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
+                    """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.nori.music.playback.Equalizer.active != null},"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     """"mixing":${dev.nori.music.playback.TransitionSink.mixing},""" +

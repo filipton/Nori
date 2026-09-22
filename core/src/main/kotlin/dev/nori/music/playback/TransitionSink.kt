@@ -106,6 +106,10 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         val tempoRatio: Float,
         val keepPitch: Boolean,
         val rampUs: Long,
+        /** Capture this many µs of outgoing audio and wrap for [durationUs]; 0 = capture the full duration. */
+        val outLoopUs: Long = 0L,
+        /** After the skip, loop the first this many µs of the incoming track for the rest of the mix; 0 = off. */
+        val inLoopUs: Long = 0L,
     )
 
     private enum class Phase { PASS, HOLD, MIX }
@@ -165,6 +169,10 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var measureNext = false
     /** Mixed and stretched audio carries its own continuous clock; real timestamps resume after a resync. */
     private var syntheticPtsUs = C.TIME_UNSET
+    /** Mix-time frame cursor when the outgoing hold is looped for longer than it was captured. */
+    private var mixOutFrame = 0
+    private var mixOutFrames = 0
+    private var outLoopFrames = 0
 
     private var mixer = 0L
     private var mixerFormat = 0
@@ -178,6 +186,8 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private var pendingStretch = 0L
     private var pendingKeepPitch = false
     private var scratch: ByteBuffer? = null
+    /** Scratch for outro-loop gather; must not alias [scratch] (the stretcher's output). */
+    private var loopScratch: ByteBuffer? = null
 
     private var analyzer = 0L
     private var analyzerFor: String? = null
@@ -519,10 +529,13 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
     private fun beginHold(p: Plan) {
         heldId = playingId ?: currentId
         heldOffsetUs = offsetUs
-        val bytes = (p.durationUs * rate / 1_000_000).toInt() * frameBytes
+        // Outro remix: only the loop slice is captured; the mix reads it with wrap for the full duration.
+        val holdUs = if (p.outLoopUs > 0) p.outLoopUs else p.durationUs
+        val bytes = (holdUs * rate / 1_000_000).toInt() * frameBytes
         tail = tail?.takeIf { it.capacity() >= bytes } ?: ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder())
         // Begun late, the hold is what is left of the overlap: past it the plan skips the ending.
-        tail!!.clear().limit(((p.durationUs - lateUs.coerceIn(0L, p.durationUs)) * rate / 1_000_000).toInt() * frameBytes)
+        val lateHold = if (p.outLoopUs > 0) 0L else lateUs.coerceIn(0L, p.durationUs)
+        tail!!.clear().limit(((holdUs - lateHold).coerceAtLeast(0L) * rate / 1_000_000).toInt() * frameBytes)
         tailLen = 0
         phase = Phase.HOLD
     }
@@ -587,6 +600,9 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
             heldUs = 0L
             skipLeft = (p.inSkipUs + inLateUs) * sRate / 1_000_000 * sFrameBytes
             tailRead = 0
+            mixOutFrame = 0
+            mixOutFrames = ((p.durationUs - late) * rate / 1_000_000).toInt()
+            outLoopFrames = if (p.outLoopUs > 0) (p.outLoopUs * rate / 1_000_000).toInt().coerceAtLeast(1) else 0
             mixedEndUs = C.TIME_UNSET
             mixFromUs = C.TIME_UNSET
             resyncNext = true
@@ -617,27 +633,76 @@ class TransitionSink(sink: AudioSink, private val listener: Listener) : Forwardi
         val stretchedBuf = if (stretch != 0L) stretched(buffer) ?: return else buffer
         val src = if (converting) converted(stretchedBuf) ?: return else stretchedBuf
         val t = tail!!
-        val frames = minOf(src.remaining(), tailLen - tailRead) / frameBytes
+        val remaining = if (outLoopFrames > 0) (mixOutFrames - mixOutFrame).coerceAtLeast(0) else Int.MAX_VALUE
+        val frames = minOf(src.remaining() / frameBytes, remaining, if (outLoopFrames > 0) remaining else (tailLen - tailRead) / frameBytes)
         if (frames > 0) {
-            AutoMixMixer.process(mixer, t, tailRead, src, src.position(), t, tailRead, frames, encoding)
-            val mixed = t.duplicate().order(ByteOrder.nativeOrder())
-            mixed.limit(tailRead + frames * frameBytes).position(tailRead)
-            val at = stamp(ptsUs, frames)
-            enqueue(copyOf(mixed), at)
-            mixedEndUs = at + frames * 1_000_000L / rate
-            tailRead += frames * frameBytes
+            if (outLoopFrames > 0) {
+                val holdFrames = (tailLen / frameBytes).coerceAtLeast(1)
+                val outChunk = scratchFor(frames * frameBytes)
+                wrapOut(t, holdFrames, outLoopFrames, mixOutFrame, outChunk, frames)
+                AutoMixMixer.process(mixer, outChunk, 0, src, src.position(), outChunk, 0, frames, encoding)
+                outChunk.clear().limit(frames * frameBytes)
+                val at = stamp(ptsUs, frames)
+                enqueue(copyOf(outChunk), at)
+                mixedEndUs = at + frames * 1_000_000L / rate
+                mixOutFrame += frames
+            } else {
+                AutoMixMixer.process(mixer, t, tailRead, src, src.position(), t, tailRead, frames, encoding)
+                val mixed = t.duplicate().order(ByteOrder.nativeOrder())
+                mixed.limit(tailRead + frames * frameBytes).position(tailRead)
+                val at = stamp(ptsUs, frames)
+                enqueue(copyOf(mixed), at)
+                mixedEndUs = at + frames * 1_000_000L / rate
+                tailRead += frames * frameBytes
+            }
             src.position(src.position() + frames * frameBytes)
         }
-        if (src.hasRemaining()) {
+        if (src.hasRemaining() && outLoopFrames <= 0) {
             val rest = src.remaining() / frameBytes
             val at = stamp(ptsUs, rest)
             enqueue(copyOf(src), at)
             mixedEndUs = at + rest * 1_000_000L / rate
         }
-        if (tailRead >= tailLen) {
+        if ((outLoopFrames > 0 && mixOutFrame >= mixOutFrames) || (outLoopFrames <= 0 && tailRead >= tailLen)) {
             phase = Phase.PASS
             finishConversion()
         }
+    }
+
+    private fun scratchFor(bytes: Int): ByteBuffer {
+        val s = loopScratch?.takeIf { it.capacity() >= bytes }
+            ?: ByteBuffer.allocateDirect(bytes.coerceAtLeast(16384)).order(ByteOrder.nativeOrder()).also { loopScratch = it }
+        s.clear().limit(bytes)
+        return s
+    }
+
+    /**
+     * Outgoing wrap: when the hold is exactly the loop slice every frame wraps; otherwise frames before
+     * the loop region play once and the last [loopFrames] repeat (outro remix). Copies in contiguous
+     * runs so a long wrap is a few memcpy calls, not one per frame.
+     */
+    private fun wrapOut(hold: ByteBuffer, holdFrames: Int, loopFrames: Int, fromFrame: Int, dst: ByteBuffer, frames: Int) {
+        val loop = loopFrames.coerceIn(1, holdFrames)
+        val prefix = (holdFrames - loop).coerceAtLeast(0)
+        var i = 0
+        while (i < frames) {
+            val f = fromFrame + i
+            val srcFrame = if (f < prefix) f else prefix + ((f - prefix) % loop)
+            // How many contiguous frames we can take before the next wrap or the end of this chunk.
+            val run = if (f < prefix) {
+                minOf(frames - i, prefix - f)
+            } else {
+                minOf(frames - i, loop - ((f - prefix) % loop))
+            }
+            val srcPos = srcFrame * frameBytes
+            val n = run * frameBytes
+            val slice = hold.duplicate().order(ByteOrder.nativeOrder())
+            slice.position(srcPos).limit(srcPos + n)
+            dst.position(i * frameBytes)
+            dst.put(slice)
+            i += run
+        }
+        dst.clear().limit(frames * frameBytes)
     }
 
     /**
