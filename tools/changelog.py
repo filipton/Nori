@@ -34,10 +34,10 @@ SECTIONS = [
     ("Changed", {"refactor"}),
     ("Fixed", {"fix"}),
     ("Performance", {"perf"}),
-    ("Build", {"build"}),
-    ("Documentation", {"docs"}),
 ]
-SKIP = {"test", "chore", "wip", "merge"}
+# `build` and `docs` are about the repository here - release tooling, measurements, notes for whoever
+# works on it next - not about the app someone installs, so they stay out of the release notes too.
+SKIP = {"test", "chore", "wip", "merge", "build", "docs"}
 
 SUBJECT = re.compile(r"^(?P<type>[a-z]+)(?:\((?P<scope>[^)]*)\))?(?P<bang>!)?: (?P<desc>.+)$")
 # Our own trailers, which are about how a commit was made rather than what it did.
@@ -52,7 +52,11 @@ def last_tag() -> str | None:
     try:
         return run("describe", "--tags", "--abbrev=0").strip() or None
     except subprocess.CalledProcessError:
-        return None  # no tags yet: the range is the whole history
+        pass
+    # No tags yet: the last release commit is where the previous release was cut, so the range starts
+    # there rather than at the first commit ever made.
+    found = run("log", "-1", "--format=%H", "--extended-regexp", r"--grep=^build: release [0-9]+\.[0-9]+\.[0-9]+$").strip()
+    return found or None
 
 
 def commits(since: str | None):
