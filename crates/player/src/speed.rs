@@ -9,6 +9,23 @@ use crate::sonic::Sonic;
 const MIN_BYTES_FOR_DURATION_SCALING: u64 = 1024;
 const CLOSE_THRESHOLD: f32 = 0.0001;
 
+/// Whether speed and pitch change the sound at all: at 1x and pitch 1 (within float noise) the stage
+/// stays out of the chain, as media3's own does.
+pub fn speed_active(speed: f32, pitch: f32) -> bool {
+    (speed - 1.0).abs() >= CLOSE_THRESHOLD || (pitch - 1.0).abs() >= CLOSE_THRESHOLD
+}
+
+/// The media time `playout_us` of output stands for at the nominal `speed`, before any output has been
+/// counted (or with no stage at all).
+pub fn nominal_media_us(speed: f32, playout_us: i64) -> i64 {
+    (speed as f64 * playout_us as f64) as i64
+}
+
+/// How long `media_us` of the song takes to play at the nominal `speed`.
+pub fn nominal_playout_us(speed: f32, media_us: i64) -> i64 {
+    (media_us as f64 / speed as f64) as i64
+}
+
 enum Engine {
     Short(Sonic<i16>),
     Float(Sonic<f32>),
@@ -53,7 +70,7 @@ impl SpeedPitch {
     }
 
     pub fn active(&self) -> bool {
-        (self.speed - 1.0).abs() >= CLOSE_THRESHOLD || (self.pitch - 1.0).abs() >= CLOSE_THRESHOLD
+        speed_active(self.speed, self.pitch)
     }
 
     /// A new stream (a seek, or new parameters): a fresh engine at the current settings.
@@ -129,7 +146,7 @@ impl SpeedPitch {
         if self.output_bytes >= MIN_BYTES_FOR_DURATION_SCALING {
             (playout_us as i128 * self.processed_input_bytes() as i128 / self.output_bytes as i128) as i64
         } else {
-            (self.speed as f64 * playout_us as f64) as i64
+            nominal_media_us(self.speed, playout_us)
         }
     }
 
@@ -139,7 +156,7 @@ impl SpeedPitch {
         if self.output_bytes >= MIN_BYTES_FOR_DURATION_SCALING && processed > 0 {
             (media_us as i128 * self.output_bytes as i128 / processed as i128) as i64
         } else {
-            (media_us as f64 / self.speed as f64) as i64
+            nominal_playout_us(self.speed, media_us)
         }
     }
 }
@@ -147,6 +164,18 @@ impl SpeedPitch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_stage_is_in_the_chain_only_when_it_changes_the_sound() {
+        assert!(!speed_active(1.0, 1.0));
+        assert!(!speed_active(1.00005, 0.99995), "float noise");
+        assert!(speed_active(1.25, 1.0));
+        assert!(speed_active(1.0, 0.9));
+        assert!(speed_active(1.0001, 1.0), "the threshold itself counts");
+        assert_eq!(nominal_media_us(1.5, 1_000_000), 1_500_000);
+        assert_eq!(nominal_playout_us(2.0, 1_000_000), 500_000);
+        assert_eq!(nominal_playout_us(1.0, 7), 7);
+    }
 
     fn sine(secs: f64, hz: f64) -> Vec<u8> {
         (0..(44100.0 * secs) as usize)

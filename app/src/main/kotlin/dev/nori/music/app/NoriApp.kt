@@ -37,11 +37,11 @@ class NoriApp : Application(), SingletonImageLoader.Factory {
         dev.nori.music.ffi.fmtSetLocale(symbols.decimalSeparator.toString(), symbols.groupingSeparator.toString())
     }
 
-    /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. */
+    /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. How much it keeps is the core's (`cover_rules`). */
     override fun newImageLoader(context: PlatformContext): ImageLoader = ImageLoader.Builder(context)
         .components { add(OkHttpNetworkFetcherFactory(callFactory = { Nori.get(this@NoriApp).http.callFactory })) }
-        .memoryCache { MemoryCache.Builder().maxSizePercent(context, 0.15).build() }
-        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers").toOkioPath()).maxSizeBytes(256L * 1024 * 1024).build() }
+        .memoryCache { MemoryCache.Builder().maxSizePercent(context, dev.nori.music.data.Covers.rules.memoryShare).build() }
+        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers").toOkioPath()).maxSizeBytes(dev.nori.music.data.Covers.rules.diskBytes.toLong()).build() }
         .crossfade(false)
         // Covers have no alpha: 16-bit bitmaps halve decode memory, so twice as many stay in the memory cache.
         .allowRgb565(true)

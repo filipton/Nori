@@ -5,6 +5,7 @@
 //! it here, without the player's list crossing over.
 
 use nori_player::playlist::{Hand, Playlist, Splice};
+use nori_player::queue::Onto;
 use parking_lot::Mutex;
 
 use crate::queue;
@@ -73,13 +74,16 @@ pub fn playlist_unbridge() -> Option<QueueEdit> {
 /// Whether the offline bridge is playing, and whether it has run out before the parked song.
 #[uniffi::export]
 pub fn playlist_bridge_state() -> BridgeState {
-    with(|p| BridgeState { bridging: p.bridging(), next_is_parked: p.next_is_parked() })
+    with(|p| BridgeState { bridging: p.bridging(), next_is_parked: p.next_is_parked(), parked: p.parked_id().map(str::to_string), current: p.current_id().map(str::to_string) })
 }
 
-#[derive(Debug, Clone, Copy, uniffi::Record)]
+#[derive(Debug, Clone, uniffi::Record)]
 pub struct BridgeState {
     pub bridging: bool,
     pub next_is_parked: bool,
+    /// The song the queue picks up at once the server is back, and the one playing.
+    pub parked: Option<String>,
+    pub current: Option<String>,
 }
 
 /// A new queue (`start` -1: wherever shuffle starts).
@@ -94,19 +98,19 @@ pub fn playlist_set_ordered(ids: Vec<String>) -> QueueChange {
     edit(|p| p.set_ordered(ids))
 }
 
-/// Play next (`last` false) or Add to queue.
-#[uniffi::export]
-pub fn playlist_add(ids: Vec<String>, last: bool) -> QueueChange {
-    edit(|p| Some(p.add(ids, if last { Hand::Last } else { Hand::Next })))
+#[uniffi::remote(Enum)]
+pub enum Hand {
+    No,
+    Next,
+    Last,
+    Bridge,
 }
 
-/// A controller's own insert at `at`.
+/// Songs a controller adds at `at`, each marked with how it came (`hands`, one per song: Play next, Add
+/// to queue, or neither). Where they go is `nori_player::playlist::Playlist::take`'s call.
 #[uniffi::export]
-pub fn playlist_insert(at: u32, ids: Vec<String>) -> QueueChange {
-    edit(|p| {
-        p.insert(at as usize, ids, Hand::No);
-        Some((at as usize).min(p.len()))
-    })
+pub fn playlist_take(at: u32, ids: Vec<String>, hands: Vec<Hand>) -> QueueChange {
+    edit(|p| Some(p.take(at as usize, ids, &hands)))
 }
 
 #[uniffi::export]
@@ -133,6 +137,20 @@ pub fn playlist_shuffle(on: bool) -> QueueChange {
     })
 }
 
+/// The user asked for shuffle on or off (a plain Play, Shuffle, the shuffle button): shown so at once,
+/// before the queue's own change arrives, which then says the same.
+#[uniffi::export]
+pub fn playlist_show_shuffle(on: bool) {
+    LIST.lock().show_shuffle(on);
+}
+
+/// Whether shuffle is shown as on: the queue is shuffled, or was put in a shuffled order before it was
+/// queued (a weighted shuffle), and the user has not turned it off since.
+#[uniffi::export]
+pub fn playlist_shuffle_shown() -> bool {
+    with(|p| p.lit())
+}
+
 #[uniffi::export]
 pub fn playlist_repeat(mode: u8) {
     LIST.lock().set_repeat(mode);
@@ -144,6 +162,29 @@ pub fn playlist_moved_to(index: i32) {
     if let Ok(i) = usize::try_from(index) {
         LIST.lock().moved_to(i);
     }
+}
+
+#[uniffi::remote(Enum)]
+pub enum Onto {
+    Skip,
+    Loop,
+    Song,
+}
+
+/// The player moved onto `index` (-1: onto nothing), `looped` by its own repeat. What that means is
+/// `nori_player::queue::arrival`'s call over this queue and the user's "skip explicit songs"; a new song
+/// also breaks a run of songs that would not play.
+#[uniffi::export]
+pub fn playlist_transition(index: i32, looped: bool) -> Onto {
+    playlist_moved_to(index);
+    let skip_explicit = crate::rules::prefs(|p| p.skip_explicit);
+    let (current, has_next) = with(|p| (p.current_id().map(str::to_string), p.next().is_some()));
+    let explicit = current.clone().is_some_and(|id| queue::queue_flags(id) & queue::EXPLICIT != 0);
+    let a = nori_player::queue::arrival(current.is_some(), skip_explicit, explicit, has_next, looped);
+    if a == Onto::Song {
+        crate::rules::song_started();
+    }
+    a
 }
 
 /// The player's list after it changed, checked against this one. Every change is meant to be made here
@@ -279,6 +320,16 @@ impl Core {
     }
 }
 
+/// The queue to hand the server (its "play queue", for picking up on another device): the songs, radio
+/// streams left out, and only while the user lets plays be sent to the server at all.
+#[uniffi::export]
+pub fn playlist_to_push() -> Vec<String> {
+    if !crate::rules::prefs(|p| p.scrobble) {
+        return Vec::new();
+    }
+    with(|p| p.ids().iter().filter(|id| !id.starts_with(queue::RADIO_PREFIX)).cloned().collect())
+}
+
 /// The ids queued, and the current one, for autofill.
 pub(crate) fn snapshot() -> (Option<String>, Vec<String>) {
     with(|p| (p.current_id().map(str::to_string), p.ids().to_vec()))
@@ -326,11 +377,36 @@ pub(crate) mod tests {
     #[test]
     fn edits_say_where_the_songs_went() {
         let _g = hold(&["e1", "e2", "e3"], 0);
-        assert_eq!(playlist_add(ids(&["n"]), false), QueueChange { at: 1, order: None });
+        assert_eq!(playlist_take(9, ids(&["n"]), vec![Hand::Next]), QueueChange { at: 1, order: None });
+        assert_eq!(playlist_take(9, ids(&["i"]), vec![Hand::No]).at, 4, "a controller's own insert, clamped to the end");
         let c = playlist_shuffle(true);
         assert_eq!(c.order.as_ref().unwrap()[..2], [0, 1], "the current song, then the one added by hand");
         let v = playlist_view();
         assert_eq!((v.index, v.queued.as_slice(), v.shuffle), (0, &[1u32][..], true));
         assert_eq!(v.songs[1].id, "n");
+    }
+
+    #[test]
+    fn shuffle_is_shown_as_asked_until_turned_off() {
+        let _g = hold(&["s1", "s2"], 0);
+        assert!(!playlist_shuffle_shown());
+        playlist_show_shuffle(true);
+        assert!(playlist_shuffle_shown(), "at once, before the queue changes");
+        playlist_set_ordered(ids(&["s2", "s1"]));
+        assert!(playlist_shuffle_shown(), "a weighted shuffle stays lit");
+        playlist_take(0, ids(&["s3"]), vec![Hand::Last]);
+        assert!(playlist_shuffle_shown());
+        playlist_show_shuffle(false);
+        playlist_shuffle(false);
+        assert!(!playlist_shuffle_shown());
+    }
+
+    #[test]
+    fn arriving_on_a_song() {
+        let _g = hold(&["t1", "t2", "radio:9"], 0);
+        assert_eq!(playlist_transition(1, false), Onto::Song);
+        assert_eq!(playlist_bridge_state().current.as_deref(), Some("t2"));
+        assert_eq!(playlist_transition(1, true), Onto::Loop);
+        assert_eq!(playlist_to_push(), ids(&["t1", "t2"]), "radio streams are not handed to the server");
     }
 }

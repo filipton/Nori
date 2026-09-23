@@ -89,8 +89,28 @@ pub fn precache_range(count: usize, mixing: bool, shuffling: bool) -> Option<(us
     (last >= first).then_some((first, last))
 }
 
+/// Whether songs meet in a mix, for [`precache_range`]: a crossfade or AutoMix is on and the output
+/// allows touching the samples at all.
+pub fn mixing(transitions_off: bool, crossfade_s: i32, auto_mix: bool) -> bool {
+    !transitions_off && (crossfade_s > 0 || auto_mix)
+}
+
+/// How many songs are fetched ahead: the user's setting for the network the phone is on.
+pub fn precache_count(metered: bool, wifi: i32, mobile: i32) -> usize {
+    (if metered { mobile } else { wifi }).max(0) as usize
+}
+
 /// How many of the songs coming up (0 = the one playing) are measured ahead for AutoMix.
 pub const MEASURE_AHEAD: usize = 3;
+
+/// How many songs coming up are measured ahead: none while AutoMix is off (nothing plans from them).
+pub fn measure_ahead(auto_mix: bool) -> usize {
+    if auto_mix {
+        MEASURE_AHEAD
+    } else {
+        0
+    }
+}
 
 /// A song would not play.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +144,138 @@ pub fn on_error(kind: PlaybackError, offload_refused: bool, bridge: bool, skip_o
         PlaybackError::Network if bridge => OnError::Bridge,
         _ if skip_on_error && has_next && errors_in_a_row < 3 => OnError::Skip,
         _ => OnError::Stop,
+    }
+}
+
+/// The run of songs that would not play. Only [`on_error`] and a failed bridge skip, and they count; a
+/// song that starts, or a bridge that took over, breaks the run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ErrorRun {
+    in_a_row: u32,
+}
+
+impl ErrorRun {
+    pub const fn new() -> Self {
+        ErrorRun { in_a_row: 0 }
+    }
+
+    /// A song would not play: [`on_error`] with the run so far, counted when it skips.
+    pub fn failed(&mut self, kind: PlaybackError, offload_refused: bool, bridge: bool, skip_on_error: bool, has_next: bool) -> OnError {
+        let d = on_error(kind, offload_refused, bridge, skip_on_error, has_next, self.in_a_row);
+        if d == OnError::Skip {
+            self.in_a_row += 1;
+        }
+        d
+    }
+
+    /// The offline bridge could not take a network failure over: skipped like any other, same limit.
+    pub fn bridge_failed(&mut self, skip_on_error: bool, has_next: bool) -> bool {
+        let skip = on_error(PlaybackError::Other, true, false, skip_on_error, has_next, self.in_a_row) == OnError::Skip;
+        if skip {
+            self.in_a_row += 1;
+        }
+        skip
+    }
+
+    /// A song started, or the bridge took over: the run is broken.
+    pub fn played(&mut self) {
+        self.in_a_row = 0;
+    }
+
+    pub fn in_a_row(&self) -> u32 {
+        self.in_a_row
+    }
+}
+
+/// Keeping the music going past the end of the queue. A fetch starts when the last song is reached *or*
+/// when only one still follows - that one-ahead start is what stops a fast next from hitting a wall while
+/// similar songs are still on the wire - and only one is on the wire at a time. A next pressed with
+/// nothing after is remembered, and taken when the songs land, unless the user has moved on since.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Refill {
+    in_flight: bool,
+    /// The song a next was pressed on with nothing after it.
+    pending_from: Option<String>,
+}
+
+/// Whether a queue may be refilled at all: a song is playing and not a radio stream, repeat is off (a
+/// repeating queue has no end) and the user has the setting on.
+pub fn refillable(song: bool, radio: bool, repeat: u8, setting: bool) -> bool {
+    song && !radio && repeat == crate::playlist::REPEAT_OFF && setting
+}
+
+impl Refill {
+    pub const fn new() -> Self {
+        Refill { in_flight: false, pending_from: None }
+    }
+
+    /// The queue moved (or a next was pressed): whether to start fetching now, `after` songs still
+    /// following the current one. A true answer means a fetch is on the wire until [`Refill::arrived`].
+    pub fn start(&mut self, refillable: bool, after: usize) -> bool {
+        if !refillable || after > 1 || self.in_flight {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    /// Next pressed on `current`: true to skip at once. With nothing after, the press is remembered -
+    /// only while the queue can be refilled at all (repeat off, setting on) - and the caller starts a fetch.
+    pub fn next(&mut self, has_next: bool, can_refill: bool, current: Option<&str>) -> bool {
+        if has_next {
+            self.pending_from = None;
+            return true;
+        }
+        if can_refill {
+            self.pending_from = current.map(str::to_string);
+        }
+        false
+    }
+
+    /// The fetch came back with `count` songs while `after` songs follow the current one: whether they go
+    /// in. They do not when there are none, or when the queue was given songs from elsewhere meanwhile;
+    /// the fetch is then over, and so is a waiting next.
+    pub fn arrived(&mut self, count: usize, after: usize) -> bool {
+        let keep = count > 0 && after <= 1;
+        if !keep {
+            self.pending_from = None;
+            self.in_flight = false;
+        }
+        keep
+    }
+
+    /// The songs that arrived are in the queue: whether to take the waiting next now, which it is only
+    /// if the user is still on the song it was pressed on and there is somewhere to go.
+    pub fn landed(&mut self, current: Option<&str>, has_next: bool) -> bool {
+        self.in_flight = false;
+        let still = self.pending_from.take().is_some_and(|p| Some(p.as_str()) == current);
+        still && has_next
+    }
+
+    pub fn in_flight(&self) -> bool {
+        self.in_flight
+    }
+}
+
+/// What a song the player has just arrived on means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Onto {
+    /// An explicit song with the user's setting to skip them, and somewhere to go: straight on.
+    Skip,
+    /// The same song again under repeat: counted as a play again, nothing else changes.
+    Loop,
+    /// A new song: its gain, its place saved, what comes after it fetched and refilled.
+    Song,
+}
+
+/// The player moved onto a song (`song` false: onto nothing). `looped` is the player's own repeat.
+pub fn arrival(song: bool, skip_explicit: bool, explicit: bool, has_next: bool, looped: bool) -> Onto {
+    if song && skip_explicit && explicit && has_next {
+        Onto::Skip
+    } else if song && looped {
+        Onto::Loop
+    } else {
+        Onto::Song
     }
 }
 
@@ -197,6 +349,106 @@ mod tests {
         assert_eq!(on_error(PlaybackError::Other, false, true, true, true, 2), OnError::Skip);
         assert_eq!(on_error(PlaybackError::Other, false, true, true, true, 3), OnError::Stop);
         assert_eq!(on_error(PlaybackError::Other, false, false, false, true, 0), OnError::Stop);
+    }
+
+    #[test]
+    fn the_error_run_counts_skips_and_breaks_on_a_song() {
+        let mut r = ErrorRun::new();
+        for _ in 0..3 {
+            assert_eq!(r.failed(PlaybackError::Other, false, false, true, true), OnError::Skip);
+        }
+        assert_eq!(r.failed(PlaybackError::Other, false, false, true, true), OnError::Stop, "three in a row, then it stops");
+        assert_eq!(r.in_a_row(), 3);
+        r.played();
+        assert_eq!(r.failed(PlaybackError::Network, false, true, true, true), OnError::Bridge);
+        assert_eq!(r.in_a_row(), 0, "handing to the bridge is not a skip");
+        assert!(r.bridge_failed(true, true));
+        assert!(!r.bridge_failed(false, true), "skip on error off");
+        assert!(!r.bridge_failed(true, false), "nothing after");
+        assert!(r.bridge_failed(true, true) && r.bridge_failed(true, true));
+        assert!(!r.bridge_failed(true, true), "the bridge's skips count toward the same three");
+        assert_eq!(r.failed(PlaybackError::Output, false, false, true, true), OnError::GiveUpOffload);
+        assert_eq!(r.in_a_row(), 3);
+    }
+
+    #[test]
+    fn what_is_fetched_and_measured_follows_the_settings() {
+        assert!(mixing(false, 4, false) && mixing(false, 0, true));
+        assert!(!mixing(false, 0, false), "no transition");
+        assert!(!mixing(true, 4, true), "the output forbids it");
+        assert_eq!((precache_count(true, 3, 1), precache_count(false, 3, 1), precache_count(false, -1, 1)), (1, 3, 0));
+        assert_eq!((measure_ahead(true), measure_ahead(false)), (3, 0));
+    }
+
+    #[test]
+    fn an_explicit_song_is_skipped_only_with_somewhere_to_go() {
+        assert_eq!(arrival(true, true, true, true, false), Onto::Skip);
+        assert_eq!(arrival(true, true, true, true, true), Onto::Skip, "even looping: the setting wins");
+        assert_eq!(arrival(true, true, true, false, false), Onto::Song, "the last song plays");
+        assert_eq!(arrival(true, false, true, true, false), Onto::Song, "setting off");
+        assert_eq!(arrival(true, true, false, true, false), Onto::Song);
+        assert_eq!(arrival(true, false, false, true, true), Onto::Loop);
+        assert_eq!(arrival(false, true, true, true, true), Onto::Song, "onto nothing");
+    }
+
+    #[test]
+    fn refilling_starts_one_ahead_and_once() {
+        assert!(refillable(true, false, 0, true));
+        assert!(!refillable(false, false, 0, true), "nothing playing");
+        assert!(!refillable(true, true, 0, true), "a radio stream");
+        assert!(!refillable(true, false, 2, true), "repeat all");
+        assert!(!refillable(true, false, 1, true), "repeat one");
+        assert!(!refillable(true, false, 0, false), "setting off");
+        let mut f = Refill::new();
+        assert!(!f.start(true, 2), "plenty left");
+        assert!(!f.start(false, 0), "not refillable");
+        assert!(f.start(true, 1), "one left: fetch now");
+        assert!(!f.start(true, 0), "already on the wire");
+        assert!(f.arrived(5, 1));
+        assert!(!f.landed(Some("a"), true), "no next was waiting");
+        assert!(!f.in_flight());
+        assert!(f.start(true, 0));
+        assert!(!f.arrived(0, 0), "nothing came");
+        assert!(f.start(true, 0), "and the next move may try again");
+        assert!(!f.arrived(3, 2), "the queue was filled meanwhile");
+    }
+
+    #[test]
+    fn a_next_at_the_end_is_taken_when_the_songs_land() {
+        let mut f = Refill::new();
+        assert!(!f.next(false, true, Some("last")));
+        assert!(f.start(true, 0));
+        assert!(f.arrived(3, 0));
+        assert!(f.landed(Some("last"), true));
+        // Moved on meanwhile (previous, a jump): the press is dropped.
+        assert!(!f.next(false, true, Some("last")));
+        assert!(f.start(true, 0));
+        assert!(f.arrived(3, 0));
+        assert!(!f.landed(Some("other"), true));
+        // A press while a fetch is out waits for it; a press with a song after clears the waiting one.
+        assert!(f.start(true, 1));
+        assert!(!f.next(false, true, Some("x")));
+        assert!(!f.start(true, 0), "one on the wire");
+        assert!(f.next(true, true, Some("x")), "there is a next now");
+        assert!(f.arrived(2, 1));
+        assert!(!f.landed(Some("x"), true), "that press was already taken");
+        // A queue that cannot be refilled remembers nothing.
+        assert!(!f.next(false, false, Some("r")));
+        assert!(f.start(true, 0));
+        assert!(f.arrived(1, 0));
+        assert!(!f.landed(Some("r"), true));
+        // Nothing came: the waiting next goes with the fetch.
+        assert!(!f.next(false, true, Some("y")));
+        assert!(f.start(true, 0));
+        assert!(!f.arrived(0, 0));
+        assert!(f.start(true, 0));
+        assert!(f.arrived(1, 0));
+        assert!(!f.landed(Some("y"), true));
+        // Landed with nowhere to go (the songs went in but the player cannot step): no skip.
+        assert!(!f.next(false, true, Some("z")));
+        assert!(f.start(true, 0));
+        assert!(f.arrived(1, 0));
+        assert!(!f.landed(Some("z"), false));
     }
 
     #[test]

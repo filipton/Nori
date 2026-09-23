@@ -9,7 +9,7 @@ use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use nori_player::pcm::Encoding;
 use nori_player::silence::SilenceSkipper;
-use nori_player::speed::SpeedPitch;
+use nori_player::speed::{nominal_media_us, nominal_playout_us, speed_active, SpeedPitch};
 use parking_lot::Mutex;
 
 const PCM_FLOAT: jint = 4; // C.ENCODING_PCM_FLOAT
@@ -128,26 +128,43 @@ pub extern "system" fn Java_dev_nori_music_playback_Stages_output<'e>(mut env: J
     unsafe { env.new_direct_byte_buffer(p, cap) }.map(JObject::from).unwrap_or(JObject::null())
 }
 
+/// The media time `playout_us` of output stands for: the stage's own books, or, with no stage made yet
+/// (`handle` 0), the nominal `speed`. Asked whenever the player works out its position.
 #[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Stages_mediaDurationUs(_: JNIEnv, _: JClass, handle: jlong, playout_us: jlong) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_Stages_mediaDurationUs(_: JNIEnv, _: JClass, handle: jlong, speed: f32, playout_us: jlong) -> jlong {
     match stage(handle).map(|s| s.lock()) {
         Some(s) => match &s.kind {
             Kind::Speed(p) => p.media_duration_us(playout_us),
             Kind::Silence(_) => playout_us,
         },
-        None => playout_us,
+        None => nominal_media_us(speed, playout_us),
     }
 }
 
+/// How long `media_us` of the song plays for; see [`Java_dev_nori_music_playback_Stages_mediaDurationUs`].
 #[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Stages_playoutDurationUs(_: JNIEnv, _: JClass, handle: jlong, media_us: jlong) -> jlong {
+pub extern "system" fn Java_dev_nori_music_playback_Stages_playoutDurationUs(_: JNIEnv, _: JClass, handle: jlong, speed: f32, media_us: jlong) -> jlong {
     match stage(handle).map(|s| s.lock()) {
         Some(s) => match &s.kind {
             Kind::Speed(p) => p.playout_duration_us(media_us),
             Kind::Silence(_) => media_us,
         },
-        None => media_us,
+        None => nominal_playout_us(speed, media_us),
     }
+}
+
+/// Whether speed and pitch change the sound at all, so the stage joins the chain (`nori_player::speed`).
+#[no_mangle]
+pub extern "system" fn Java_dev_nori_music_playback_Stages_speedActive(_: JNIEnv, _: JClass, speed: f32, pitch: f32) -> jboolean {
+    speed_active(speed, pitch) as jboolean
+}
+
+/// One tick of a volume fade (`nori_player::transport::fade_step`): the volume's bits in the low 32, and
+/// bit 32 set when the fade is over. Asked every 16 ms while a fade runs, so primitives only.
+#[no_mangle]
+pub extern "system" fn Java_dev_nori_music_playback_Stages_fadeStep(_: JNIEnv, _: JClass, from: f32, to: f32, start_ms: jlong, now_ms: jlong, ms: jint) -> jlong {
+    let (v, done) = nori_player::transport::fade_step(from, to, start_ms, now_ms, ms);
+    (v.to_bits() as jlong) | ((done as jlong) << 32)
 }
 
 #[no_mangle]

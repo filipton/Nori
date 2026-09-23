@@ -204,6 +204,88 @@ pub fn smart_edit_schema() -> SmartSchema {
     SmartSchema { texts, numbers, dates, flags, flag_ops: owned(&FLAG_OPS), sorts, ops }
 }
 
+/// The draft the editor opens with: `playlist`'s own when this editor can show it (a built-in one as a
+/// copy, with no id, so saving makes a playlist of the user's own), otherwise a new one.
+#[uniffi::export]
+pub fn smart_edit_open(playlist: Option<SmartPlaylist>) -> SmartEdit {
+    let Some(mut e) = playlist.as_ref().and_then(read) else { return smart_edit_new() };
+    if e.id.starts_with("default-") {
+        e.id = String::new();
+    }
+    e
+}
+
+/// Rule `at` now compares `field`: its operator goes back to that field's first, since the old one may
+/// not apply.
+#[uniffi::export]
+pub fn smart_edit_field(mut edit: SmartEdit, at: u32, field: String) -> SmartEdit {
+    let schema = smart_edit_schema();
+    if let Some(r) = edit.rules.get_mut(at as usize) {
+        r.op = schema.ops.get(&field).and_then(|o| o.first()).cloned().unwrap_or_else(|| FLAG_OPS[0].into());
+        r.field = field;
+    }
+    edit
+}
+
+/// The operators rule `field` offers.
+#[uniffi::export]
+pub fn smart_edit_ops(field: String) -> Vec<String> {
+    smart_edit_schema().ops.remove(&field).unwrap_or_else(|| FLAG_OPS.map(String::from).to_vec())
+}
+
+/// Every field, in the order the editor lists them.
+#[uniffi::export]
+pub fn smart_edit_fields() -> Vec<String> {
+    let s = smart_edit_schema();
+    s.texts.into_iter().chain(s.numbers).chain(s.dates).chain(s.flags).collect()
+}
+
+/// Rule `at` taken away; the form always keeps one rule to fill in.
+#[uniffi::export]
+pub fn smart_edit_remove(mut edit: SmartEdit, at: u32) -> SmartEdit {
+    if (at as usize) < edit.rules.len() {
+        edit.rules.remove(at as usize);
+    }
+    if edit.rules.is_empty() {
+        edit.rules.push(default_rule());
+    }
+    edit
+}
+
+/// A new empty rule at the end.
+#[uniffi::export]
+pub fn smart_edit_add(mut edit: SmartEdit) -> SmartEdit {
+    edit.rules.push(default_rule());
+    edit
+}
+
+/// What the value field of a rule with operator `op` says while empty; None when the operator takes no
+/// value, and there is no field.
+#[uniffi::export]
+pub fn smart_value_hint(op: String) -> Option<String> {
+    if FLAG_OPS.contains(&op.as_str()) {
+        None
+    } else if op == "between" {
+        Some("from to".into())
+    } else if op.ends_with("Days") {
+        Some("days".into())
+    } else {
+        Some("value".into())
+    }
+}
+
+/// The limit as typed: a number, or none (0) for anything else.
+#[uniffi::export]
+pub fn smart_limit_typed(text: String) -> i32 {
+    text.parse().unwrap_or(0)
+}
+
+/// The limit as the field shows it: empty for none.
+#[uniffi::export]
+pub fn smart_limit_text(limit: i32) -> String {
+    if limit > 0 { limit.to_string() } else { String::new() }
+}
+
 /// The definition the draft stands for.
 #[uniffi::export]
 pub fn smart_edit_json(edit: SmartEdit) -> String {
@@ -237,6 +319,24 @@ mod tests {
 
     fn rule(field: &str, op: &str, value: &str) -> SmartEditRule {
         SmartEditRule { field: field.into(), op: op.into(), value: value.into() }
+    }
+
+    #[test]
+    fn the_forms_own_rules() {
+        let new = smart_edit_open(None);
+        assert_eq!((new.rules.len(), new.sort_field.as_str(), new.limit, new.all), (1, "random", 100, true));
+        let year = smart_edit_field(new.clone(), 0, "year".into());
+        assert_eq!((year.rules[0].field.as_str(), year.rules[0].op.as_str()), ("year", "is"));
+        let empty = smart_edit_remove(new.clone(), 0);
+        assert_eq!(empty.rules, vec![rule("genre", "contains", "")]);
+        assert_eq!(smart_edit_add(new).rules.len(), 2);
+        assert_eq!(smart_value_hint("isTrue".into()), None);
+        assert_eq!(smart_value_hint("between".into()).as_deref(), Some("from to"));
+        assert_eq!(smart_value_hint("withinDays".into()).as_deref(), Some("days"));
+        assert_eq!(smart_value_hint("is".into()).as_deref(), Some("value"));
+        assert_eq!((smart_limit_typed("25".into()), smart_limit_typed("x".into())), (25, 0));
+        assert_eq!((smart_limit_text(0), smart_limit_text(7)), (String::new(), "7".to_string()));
+        assert_eq!(smart_edit_fields().first().map(String::as_str), smart_edit_schema().texts.first().map(String::as_str));
     }
 
     fn edit(rules: Vec<SmartEditRule>) -> SmartEdit {

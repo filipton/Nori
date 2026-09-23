@@ -292,7 +292,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 // Nothing left: the service is on its way out, and the batch's own summary (its own id,
                 // so stopping the service does not take it) says how it went. No bar here.
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle("Downloads complete")
+                .setContentTitle(noticeWords.complete)
                 .setContentIntent(openDownloads(context))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
@@ -306,7 +306,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             .setContentText(DownloadsJni.noticeText().ifEmpty { null })
             .setProgress(1000, DownloadsJni.noticePermille(), false)
             .setContentIntent(openDownloads(context))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Cancel", cancelIntent(context))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, noticeWords.cancel, cancelIntent(context))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
@@ -316,6 +316,8 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     private var lastProgress: Notification? = null
+    /** The notification's fixed words, the core's (`words_download_notice`). */
+    private val noticeWords by lazy { dev.nori.music.ffi.wordsDownloadNotice() }
     private var complete: Notification? = null
 
     /**
@@ -336,7 +338,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
             .setAutoCancel(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
-        if (!failed) b.setTimeoutAfter(8_000)
+        if (!failed) b.setTimeoutAfter(noticeWords.resultTimeoutMs)
         runCatching { nm.notify(DOWNLOAD_RESULT_NOTIFICATION, b.build()) }
     }
 

@@ -59,6 +59,19 @@ impl Client {
         format!("{id}:{}{}", q.bit_rate, q.format)
     }
 
+    /// The URL and cache key to open `id` from now: a finished download is the permanent copy (`downloaded`),
+    /// fetched at the download quality; anything else streams at the quality for the network the phone is
+    /// on (`metered`). The qualities are the user's settings.
+    pub fn resolve(&self, id: String, downloaded: bool, metered: bool) -> StreamTarget {
+        let q = |s: &crate::settings::SavedQuality| StreamQuality { bit_rate: s.bit_rate.max(0) as u32, format: s.format.clone() };
+        let (wifi, mobile, download) = crate::rules::prefs(|p| (q(&p.wifi), q(&p.mobile), q(&p.download)));
+        if downloaded {
+            self.download_target(id, download)
+        } else {
+            self.stream_target(id, metered, wifi, mobile)
+        }
+    }
+
     /// The URL and cache key a download of `id` is fetched and kept under.
     pub fn download_target(&self, id: String, quality: StreamQuality) -> StreamTarget {
         let key = download_key(id.clone());
@@ -92,6 +105,15 @@ mod tests {
         assert!(t.url.starts_with("https://wan.example/rest/stream?") && t.url.ends_with("&id=s1&maxBitRate=128&format=opus&estimateContentLength=true"));
         assert_eq!(c.stream_key("s1".into(), false, q(96, "mp3"), q(0, "")), "s1:96mp3", "already under the cap");
         assert_eq!(c.stream_key("s1".into(), false, q(320, "mp3"), q(0, "")), "s1:128mp3");
+    }
+
+    #[test]
+    fn a_download_opens_as_itself_and_anything_else_streams() {
+        let (c, _) = client(NetProfile { url: "h".into(), ..Default::default() });
+        assert_eq!(c.resolve("s1".into(), true, true).key, "dl:s1", "the permanent copy, whatever the network");
+        // The settings' defaults: the original on Wi-Fi, 192k opus on a metered network.
+        assert_eq!(c.resolve("s1".into(), false, false).key, "s1:0");
+        assert_eq!(c.resolve("s1".into(), false, true).key, "s1:192opus");
     }
 
     #[test]

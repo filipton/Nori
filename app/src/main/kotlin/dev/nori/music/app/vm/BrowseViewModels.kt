@@ -2,7 +2,12 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.data.AlbumSort
+import dev.nori.music.ffi.AlbumSort
+import dev.nori.music.ffi.albumSortKept
+import dev.nori.music.ffi.albumSortSaved
+import dev.nori.music.ffi.albumsExhausted
+import dev.nori.music.ffi.songSortKept
+import dev.nori.music.ffi.songSortSaved
 import dev.nori.music.ffi.Album
 import dev.nori.music.ffi.AlbumDetail
 import dev.nori.music.ffi.Artist
@@ -82,7 +87,7 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
     /** What each shelf is and where it comes from is the core's (browse.rs); this only makes the requests. */
     private fun source(r: HomeRow, shelf: HomeShelf): kotlinx.coroutines.flow.Flow<Shelf> = when (shelf) {
         is HomeShelf.Albums -> {
-            val sort = AlbumSort.entries.first { it.api == shelf.sort }
+            val sort = shelf.sort
             val size = shelf.size.toInt()
             if (shelf.followsStars) combine(
                 combine(refreshes, nori.library.starsVersion) { _, v -> v }.flatMapLatest { nori.library.albums(sort, size = size) },
@@ -135,7 +140,8 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
 @OptIn(ExperimentalCoroutinesApi::class)
 class AlbumsViewModel(app: Application) : NoriViewModel(app) {
     private val pageSize by lazy { browsePaging().albums.toInt() }
-    private val _sort = MutableStateFlow(nori.settings.value.listPrefs["albums.sort"]?.let { n -> AlbumSort.entries.firstOrNull { it.name == n } } ?: AlbumSort.BY_NAME)
+    // The order it was left in, and how that is kept, are the core's (`album_sort_saved`, `album_sort_kept`).
+    private val _sort = MutableStateFlow(albumSortSaved(nori.settings.value.listPrefs))
     val sort: StateFlow<AlbumSort> = _sort
     private val _albums = MutableStateFlow(Grown.empty<Album>())
     val albums: StateFlow<List<Album>> = _albums
@@ -147,7 +153,8 @@ class AlbumsViewModel(app: Application) : NoriViewModel(app) {
     fun setSort(s: AlbumSort) {
         if (s == _sort.value) return
         _sort.value = s
-        nori.settings.update { it.copy(listPrefs = it.listPrefs + ("albums.sort" to s.name)) }
+        val kept = albumSortKept(s)
+        nori.settings.update { it.copy(listPrefs = it.listPrefs + (kept.key to kept.value)) }
         _albums.value = Grown.empty()
         exhausted = false
         loading = false
@@ -163,7 +170,7 @@ class AlbumsViewModel(app: Application) : NoriViewModel(app) {
             nori.library.albums(sort, pageSize, offset).catch { }.collect { page ->
                 if (sort != _sort.value) return@collect
                 _albums.value = _albums.value.from(offset, page)
-                exhausted = page.size < pageSize
+                exhausted = albumsExhausted(page.size.toUInt())
             }
             loading = false
         }
@@ -262,7 +269,7 @@ enum class SongSort {
 
 /** Every song of the offline index, a page at a time. Nothing here touches the network. */
 class SongsViewModel(app: Application) : NoriViewModel(app) {
-    private val _sort = MutableStateFlow(nori.settings.value.listPrefs["songs.sort"]?.let { n -> SongSort.entries.firstOrNull { it.name == n } } ?: SongSort.TITLE)
+    private val _sort = MutableStateFlow(SongSort.valueOf(songSortSaved(nori.settings.value.listPrefs)))
     val sort: StateFlow<SongSort> = _sort
     private val _starred = MutableStateFlow(false)
     val starredOnly: StateFlow<Boolean> = _starred
@@ -275,7 +282,12 @@ class SongsViewModel(app: Application) : NoriViewModel(app) {
     init { loadMore() }
 
     fun setYears(range: IntRange?) { if (range != years) { years = range; reset() } }
-    fun setSort(s: SongSort) { _sort.value = s; nori.settings.update { it.copy(listPrefs = it.listPrefs + ("songs.sort" to s.name)) }; reset() }
+    fun setSort(s: SongSort) {
+        _sort.value = s
+        val kept = songSortKept(s.name)
+        nori.settings.update { it.copy(listPrefs = it.listPrefs + (kept.key to kept.value)) }
+        reset()
+    }
     fun setStarredOnly(on: Boolean) { _starred.value = on; reset() }
     private fun reset() { _songs.value = Grown.empty(); exhausted = false; loading = false; loadMore() }
 

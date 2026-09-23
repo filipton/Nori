@@ -29,6 +29,7 @@ mod outputs;
 mod profiles;
 mod settings;
 mod settings_store;
+mod settings_schema;
 mod fmt;
 mod pages;
 mod smart;
@@ -44,7 +45,13 @@ mod cache_policy;
 mod lrclib;
 mod stream;
 mod autofill;
+mod car;
+mod decoder;
+mod stream_cache;
 mod playlist;
+mod library;
+mod menus;
+mod stage;
 
 use std::sync::Arc;
 
@@ -576,7 +583,9 @@ impl Core {
             position: u64,
         }
         let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-        Ok(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position })
+        // A queue saved by an older build (or edited since) may point past its end: the last song then.
+        let index = q.index.min(q.songs.len().saturating_sub(1) as u32);
+        Ok(PlayQueue { songs: q.songs, index, position_ms: q.position })
     }
 
     // ---- writes made while offline (stars, ratings, playlist edits, scrobbles), replayed in order ----

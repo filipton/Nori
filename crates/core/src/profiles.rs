@@ -205,10 +205,17 @@ impl Core {
 
     /// The AutoEQ browser's search: nothing until two characters are typed, then the first 40 hits.
     pub fn autoeq_find(&self, query: String) -> Vec<AutoEqEntry> {
-        if query.encode_utf16().count() < 2 {
+        if autoeq_too_short(&query) {
             return Vec::new();
         }
         self.autoeq_search(query, 40).unwrap_or_default()
+    }
+
+    /// The AutoEQ browser's search as the screens show it: whether the query is too short to search,
+    /// and the hits with the lines under them.
+    pub fn autoeq_browse(&self, query: String) -> AutoEqFound {
+        let too_short = autoeq_too_short(&query);
+        AutoEqFound { too_short, hits: autoeq_hits(self.autoeq_find(query)) }
     }
 }
 
@@ -389,6 +396,91 @@ pub fn device_spec(value: String) -> DeviceSpec {
     DeviceSpec { output: output.to_string(), kind, arg: arg.to_string() }
 }
 
+// ---- the device list and the AutoEQ browser, worded ----
+
+/// Fewer than two characters (UTF-16 units, as the platform counts them) is not searched.
+pub fn autoeq_too_short(query: &str) -> bool {
+    query.trim().encode_utf16().count() < 2
+}
+
+/// One AutoEQ curve with the lines under it: `caption` in the browser (who measured it, the form and
+/// the target, whichever are known), `short` in a device's sheet (who measured it and the form).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AutoEqHit {
+    pub entry: AutoEqEntry,
+    pub caption: String,
+    pub short: String,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AutoEqFound {
+    pub too_short: bool,
+    pub hits: Vec<AutoEqHit>,
+}
+
+fn hit(entry: AutoEqEntry) -> AutoEqHit {
+    let caption = [&entry.source, &entry.form, &entry.target].iter().filter(|s| !s.is_empty()).map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
+    let short = format!("{} · {}", entry.source, entry.form);
+    AutoEqHit { entry, caption, short }
+}
+
+/// The curves with their lines.
+#[uniffi::export]
+pub fn autoeq_hits(entries: Vec<AutoEqEntry>) -> Vec<AutoEqHit> {
+    entries.into_iter().map(hit).collect()
+}
+
+/// The size of the downloaded AutoEQ list: "8123 headphones", and the search field's "Search 8123 headphones".
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AutoEqCount {
+    pub count: String,
+    pub search: String,
+}
+
+#[uniffi::export]
+pub fn autoeq_count_words(count: u32) -> AutoEqCount {
+    AutoEqCount { count: format!("{count} headphones"), search: format!("Search {count} headphones") }
+}
+
+/// What a device's sheet says and offers.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct DeviceSheet {
+    /// The words under its name.
+    pub intro: String,
+    /// The line under "Automatic": whether a known curve is used or offered.
+    pub automatic: String,
+    /// The saved profiles it can be given; "Flat" is its own row, so it is not among them.
+    pub profiles: Vec<String>,
+    /// Neither the one playing now nor the phone's speaker, which are always there.
+    pub can_forget: bool,
+}
+
+pub fn sheet(output: &str, kind: Option<&str>, current: bool, auto_eq_auto: bool, profiles: &[String]) -> DeviceSheet {
+    let this = match kind {
+        None => "this".to_string(),
+        Some(k) => format!("this {k} device"),
+    };
+    DeviceSheet {
+        intro: format!("What music played through {this} sounds like. It switches by itself whenever the device connects."),
+        automatic: (if auto_eq_auto { "Uses a matching AutoEQ curve when one is known" } else { "Offers a matching AutoEQ curve when one is known" }).into(),
+        profiles: profiles.iter().filter(|p| *p != FLAT).cloned().collect(),
+        can_forget: !current && output != SPEAKER,
+    }
+}
+
+/// The sheet of the device `output` (plugged in as `kind`, the one playing now or not), given the
+/// saved profiles' names.
+#[uniffi::export]
+pub fn device_sheet(output: String, kind: Option<String>, current: bool, auto_eq_auto: bool, profiles: Vec<String>) -> DeviceSheet {
+    sheet(&output, kind.as_deref(), current, auto_eq_auto, &profiles)
+}
+
+/// The mark on the device playing now, after its kind when it has one: " · Playing now", "Playing now".
+#[uniffi::export]
+pub fn device_playing_now(after_kind: bool) -> String {
+    (if after_kind { " · Playing now" } else { "Playing now" }).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +495,32 @@ mod tests {
 
     fn now(sound: SoundSettings) -> Now {
         Now { sound, per_output: true, auto_apply: false }
+    }
+
+    #[test]
+    fn the_device_sheet_and_the_curves_are_worded() {
+        let names = vec![FLAT.to_string(), "Warm".to_string()];
+        let s = sheet("USB: K3", Some("USB"), false, false, &names);
+        assert_eq!(s.intro, "What music played through this USB device sounds like. It switches by itself whenever the device connects.");
+        assert_eq!(s.automatic, "Offers a matching AutoEQ curve when one is known");
+        assert_eq!(s.profiles, ["Warm"]);
+        assert!(s.can_forget);
+        let s = sheet("x", None, true, true, &[]);
+        assert_eq!(s.intro, "What music played through this sounds like. It switches by itself whenever the device connects.");
+        assert_eq!(s.automatic, "Uses a matching AutoEQ curve when one is known");
+        assert!(!s.can_forget, "not the one playing");
+        assert!(!sheet(SPEAKER, None, false, false, &[]).can_forget, "not the speaker");
+        assert_eq!((device_playing_now(true), device_playing_now(false)), (" · Playing now".into(), "Playing now".into()));
+        let e = |target: &str| AutoEqEntry { name: "HD 600".into(), source: "oratory1990".into(), form: "over-ear".into(), target: target.into(), path: "p".into() };
+        let h = autoeq_hits(vec![e("Harman"), e("")]);
+        assert_eq!(h[0].caption, "oratory1990 · over-ear · Harman");
+        assert_eq!(h[1].caption, "oratory1990 · over-ear");
+        assert_eq!(h[0].short, "oratory1990 · over-ear");
+        assert!(autoeq_too_short("a") && autoeq_too_short("") && !autoeq_too_short("hd"));
+        assert_eq!(autoeq_count_words(8123), AutoEqCount { count: "8123 headphones".into(), search: "Search 8123 headphones".into() });
+        let c = core();
+        assert!(c.autoeq_browse("h".into()).too_short);
+        assert!(!c.autoeq_browse("hd".into()).too_short);
     }
 
     const PRESET: &str = "Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n";

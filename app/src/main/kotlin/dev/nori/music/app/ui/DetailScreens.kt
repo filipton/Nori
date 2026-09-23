@@ -85,7 +85,8 @@ private fun Header(title: String, subtitle: String, coverUrl: String?, actions: 
  */
 @Composable
 private fun FilterField(count: Int, filter: String, onFilter: (String) -> Unit) {
-    if (count <= 12 && filter.isEmpty()) return
+    val filtering = filter.isNotEmpty()
+    if (!remember(count, filtering) { dev.nori.music.ffi.filterOffered(count.toUInt(), filtering) }) return
     SearchField(filter, onFilter, "Filter", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
 }
 
@@ -144,14 +145,36 @@ private fun groupsOf(albums: List<Album>): List<Pair<String, List<Album>>> =
  */
 @Composable
 internal fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
-    val missing = songs.filterNot { it.id in done }
-    return when {
-        songs.isEmpty() -> "Download" to { actions.download(songs) }
-        missing.isEmpty() -> "Remove downloads" to { actions.undownload(songs) }
-        missing.size == songs.size -> "Download" to { actions.download(songs) }
-        else -> "Download the other ${missing.size}" to { actions.download(missing) }
+    val missing = remember(songs, done) { songs.filterNot { it.id in done } }
+    // What it says and does is the core's (`menus::download_entry`).
+    val entry = remember(songs.size, missing.size) { dev.nori.music.ffi.downloadEntry(songs.size.toUInt(), missing.size.toUInt()) }
+    return entry.label to when (entry.act) {
+        dev.nori.music.ffi.DownloadAct.ALL -> { { actions.download(songs) } }
+        dev.nori.music.ffi.DownloadAct.MISSING -> { { actions.download(missing) } }
+        dev.nori.music.ffi.DownloadAct.REMOVE -> { { actions.undownload(songs) } }
     }
 }
+
+/** The offer on a provider's album or playlist page (the core's `library_offer`), under the hero. */
+@Composable
+private fun LibraryOffer(id: String, external: Boolean, actions: ActionsViewModel) {
+    val offer = remember(id, external) { dev.nori.music.ffi.libraryOffer(id, external) } ?: return
+    TextButton({ actions.addToLibrary(id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) { Text(offer) }
+}
+
+/** An album's own queue: its songs, and any song of the record some other queue carried along. */
+private fun albumQueue(album: Album, songs: List<Song>?) =
+    dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Songs(songs?.map { it.id }.orEmpty(), album.id))
+
+/** A list's own queue: its songs, whatever order they are being played in. */
+internal fun songsQueue(songs: List<Song>?) = dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Songs(songs?.map { it.id }.orEmpty(), null))
+
+/** An artist's page has no song list of its own: what makes it the page playing is a song of one of its albums. */
+private fun artistQueue(albums: List<Album>?) = dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Albums(albums?.map { it.id }.orEmpty()))
+
+/** Makes a playlist a favourite on this phone, or not (the core's `pins_toggled`). */
+private fun SettingsViewModel.pin(id: String, on: Boolean) =
+    update { it.copy(pinnedPlaylists = dev.nori.music.ffi.pinsToggled(it.pinnedPlaylists, id, on)) }
 
 @Composable
 fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = viewModel()) {
@@ -175,12 +198,8 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
     }
     val discs = remember(detail) { detail?.let(::discsOf).orEmpty() }
     // Worked out once per album, not on every recomposition (nori-core's `fmt`).
-    val caption = remember(detail, album) {
-        if (detail != null) dev.nori.music.ffi.albumCaption(album.year, detail.songs, album.explicitStatus == "explicit")
-        else dev.nori.music.ffi.albumHintCaption(album.year, album.songCount, album.duration)
-    }
-    // This page's own queue: its songs, plus a song of this record some other queue carried along.
-    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val caption = remember(detail, album) { dev.nori.music.ffi.albumPageCaption(album, detail?.songs) }
+    val queue = remember(detail, album.id) { albumQueue(album, detail?.songs) }
     HeroPage(
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
         title = album.name,
@@ -194,7 +213,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         awaitingPlay = detail == null && load !is Load.Failed,
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
-        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == album.id } == true },
+        queue = queue,
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, album.id, album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(album.id, !albumStarred); Unit }
@@ -214,13 +233,10 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
             detail != null -> item(key = "body") {
                 Arrive {
                     Column {
-                        if (album.isExternal || album.id.startsWith("pl-")) {
-                            TextButton({ actions.addToLibrary(album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                                Text("Add the whole ${if (album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(album.id) ?: "provider"})")
-                            }
-                        }
+                        LibraryOffer(album.id, album.isExternal, actions)
                         discs.forEach { (disc, tracks) ->
-                            if (discs.size > 1) SectionTitle(disc.heading)
+                            // Only an album of several discs heads them (the core leaves the one disc's empty).
+                            if (disc.heading.isNotEmpty()) SectionTitle(disc.heading)
                             val (onRight, onLeft) = actions.swipes
                             tracks.forEachIndexed { i, s ->
                                 SongRow(
@@ -268,8 +284,8 @@ private fun AlbumBody(
     // An album is short enough to scroll and its running order is the point of it, so the songs
     // stay exactly as the record has them, grouped by disc and never narrowed.
     val discs = remember(d) { discsOf(d) }
-    val caption = remember(d) { dev.nori.music.ffi.albumCaption(d.album.year, d.songs, d.album.explicitStatus == "explicit") }
-    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
+    val caption = remember(d) { dev.nori.music.ffi.albumPageCaption(d.album, d.songs) }
+    val queue = remember(d) { albumQueue(d.album, d.songs) }
     HeroPage(
         coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
         title = d.album.name,
@@ -280,20 +296,16 @@ private fun AlbumBody(
         },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
-        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == d.album.id } == true },
+        queue = queue,
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(d.album.id, !albumStarred); Unit }
             MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
         },
     ) {
-        if (d.album.isExternal || d.album.id.startsWith("pl-")) item(key = "header") {
-            TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
-            }
-        }
+        item(key = "header") { LibraryOffer(d.album.id, d.album.isExternal, actions) }
         discs.forEach { (disc, tracks) ->
-            if (discs.size > 1) item(key = "disc${disc.disc}") { SectionTitle(disc.heading) }
+            if (disc.heading.isNotEmpty()) item(key = "disc${disc.disc}") { SectionTitle(disc.heading) }
             songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d${disc.disc}-", context = d.songs, pageArtist = d.album.artist)
         }
     }
@@ -323,18 +335,19 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         return
     }
     val groups = remember(ui?.detail) { ui?.detail?.albums?.let(::groupsOf).orEmpty() }
-    // An artist's page has no song list of its own - the queue is every album's songs - so what
-    // makes it the page playing is a song of one of its albums sounding.
-    val albumIds = remember(ui?.detail) { ui?.detail?.albums?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val queue = remember(ui?.detail) { artistQueue(ui?.detail?.albums) }
+    val similar = remember(ui?.info) { ui?.info?.similar?.let { dev.nori.music.ffi.similarArtists(it) }.orEmpty() }
     HeroPage(
         coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
         title = artist.name,
-        caption = if (ui != null) "${ui.detail.albums.size} releases"
-            else artist.albumCount.takeIf { it > 0u }?.let { "$it releases" }.orEmpty(),
+        caption = remember(ui?.detail, artist.albumCount) {
+            if (ui != null) dev.nori.music.ffi.wordsReleases(ui.detail.albums.size.toUInt())
+            else artist.albumCount.takeIf { it > 0u }?.let { dev.nori.music.ffi.wordsReleases(it) }.orEmpty()
+        },
         onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
         onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
         awaitingPlay = ui == null && load !is Load.Failed,
-        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
+        queue = queue,
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(artist.id, !artistStarred); Unit }
@@ -383,7 +396,7 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
                                 )
                             }
                         }
-                        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
+                        if (similar.isNotEmpty()) {
                             SectionTitle("Similar artists")
                             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(similar, key = { it.id }) { a ->
@@ -420,14 +433,15 @@ private fun ArtistBody(
     leave: (String) -> Unit,
 ) {
     val groups = remember(ui.detail) { groupsOf(ui.detail.albums) }
-    val albumIds = remember(ui.detail) { ui.detail.albums.mapTo(HashSet()) { it.id } }
+    val queue = remember(ui.detail) { artistQueue(ui.detail.albums) }
+    val similar = remember(ui.info) { ui.info?.similar?.let { dev.nori.music.ffi.similarArtists(it) }.orEmpty() }
     HeroPage(
         coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
         title = ui.detail.artist.name,
-        caption = "${ui.detail.albums.size} releases",
+        caption = remember(ui.detail) { dev.nori.music.ffi.wordsReleases(ui.detail.albums.size.toUInt()) },
         onPlay = { actions.playArtist(ui.detail.albums) },
         onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
-        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
+        queue = queue,
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(ui.detail.artist.id, !artistStarred); Unit }
@@ -456,7 +470,7 @@ private fun ArtistBody(
         }
         if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
         songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
-        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
+        if (similar.isNotEmpty()) {
             item(key = "similar") {
                 SectionTitle("Similar artists")
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -489,12 +503,11 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         if (uri != null && detail != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(detail.playlist.name, detail.songs).toByteArray()) } }
     }
     if (playlist == null) {
-        LoadBox(load) { d -> PlaylistBody(d, id, actions, vm, settings, prefs, done, selected, menu, playing, filter, { filter = it }, { exportM3u.launch("${d.playlist.name}.m3u8") }) }
+        LoadBox(load) { d -> PlaylistBody(d, id, actions, vm, settings, prefs, done, selected, menu, playing, filter, { filter = it }, { exportM3u.launch(dev.nori.music.ffi.m3uFileName(d.playlist.name)) }) }
         return
     }
     val shown = rememberMatching(detail?.songs.orEmpty(), filter)
-    // This playlist's own queue: its songs, whatever order they are being played in.
-    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val queue = remember(detail) { songsQueue(detail?.songs) }
     HeroPage(
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
@@ -506,7 +519,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         awaitingPlay = detail == null && load !is Load.Failed,
-        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
+        queue = queue,
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             // A favourite, drawn and named as every other favourite in the app is: a heart, filled
@@ -514,7 +527,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             // from the page whether this playlist was on the home page or not. The server has no
             // way to star a playlist, so it is kept on this phone, and the home page's shelf of
             // them reads it.
-            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
+            FavoriteCircle(pinned) { settings.pin(id, !pinned); Unit }
             Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.animation.AnimatedVisibility(
                     visible = detail != null,
@@ -525,7 +538,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
                         listOf(
                             "Add to queue" to { actions.enqueue(detail!!.songs) },
                             downloadEntry(detail!!.songs, done, actions),
-                            "Export M3U" to { exportM3u.launch("${playlist.name}.m3u8") },
+                            "Export M3U" to { exportM3u.launch(dev.nori.music.ffi.m3uFileName(playlist.name)) },
                         ),
                     )
                 }
@@ -582,7 +595,7 @@ private fun PlaylistBody(
     onExport: () -> Unit,
 ) {
     val shown = rememberMatching(d.songs, filter)
-    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
+    val queue = remember(d) { songsQueue(d.songs) }
     HeroPage(
         coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
         title = d.playlist.name,
@@ -590,10 +603,10 @@ private fun PlaylistBody(
         caption = remember(d) { dev.nori.music.ffi.listCaption(d.songs, true) },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
-        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
+        queue = queue,
         actions = {
             val pinned = id in prefs.pinnedPlaylists
-            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
+            FavoriteCircle(pinned) { settings.pin(id, !pinned); Unit }
             MoreCircle(
                 listOf(
                     "Add to queue" to { actions.enqueue(d.songs) },
@@ -618,7 +631,7 @@ fun GenreScreen(name: String, actions: ActionsViewModel, vm: GenreViewModel = vi
     val playing = playingId()
     LoadBox(load) { list ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item(key = "header") { Header(name, "${list.size} songs", null); PlayButtons(list, actions) }
+            item(key = "header") { Header(name, remember(list.size) { dev.nori.music.ffi.wordsSongs(list.size.toUInt()) }, null); PlayButtons(list, actions) }
             songRows(list, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }
@@ -636,7 +649,13 @@ fun FolderScreen(id: String, actions: ActionsViewModel, vm: FolderViewModel = vi
     val playing = playingId()
     LoadBox(load) { d ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item(key = "header") { Header(d.name.ifEmpty { "Folder" }, "${d.folders.size} folders · ${d.songs.size} songs", null); if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions) }
+            item(key = "header") {
+                Header(
+                    remember(d.name) { dev.nori.music.ffi.wordsFolderTitle(d.name) },
+                    remember(d) { dev.nori.music.ffi.wordsFolder(d.folders.size.toUInt(), d.songs.size.toUInt()) }, null,
+                )
+                if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions)
+            }
             items(d.folders, key = { "f" + it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
             songRows(d.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }

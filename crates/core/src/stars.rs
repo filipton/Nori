@@ -20,8 +20,34 @@ fn key(kind: Starrable, id: &str) -> String {
     format!("{}:{id}", kind.param())
 }
 
-fn marks_now(m: &Option<HashMap<String, bool>>) -> HashMap<String, bool> {
-    m.clone().unwrap_or_default()
+/// This session's marks, one map per kind keyed by the item's id: a screen asks "is this song
+/// starred" by id alone and never needs to know how the marks are keyed here.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct StarMarks {
+    pub songs: HashMap<String, bool>,
+    pub albums: HashMap<String, bool>,
+    pub artists: HashMap<String, bool>,
+}
+
+fn marks_now(m: &Option<HashMap<String, bool>>) -> StarMarks {
+    let mut out = StarMarks::default();
+    for (k, on) in m.iter().flatten() {
+        let Some((param, id)) = k.split_once(':') else { continue };
+        let into = match param {
+            p if p == Starrable::Song.param() => &mut out.songs,
+            p if p == Starrable::Album.param() => &mut out.albums,
+            p if p == Starrable::Artist.param() => &mut out.artists,
+            _ => continue,
+        };
+        into.insert(id.to_string(), *on);
+    }
+    out
+}
+
+/// The marks as they are now.
+#[uniffi::export]
+pub fn star_marks() -> StarMarks {
+    marks_now(&MARKS.lock())
 }
 
 /// This session's marks as they are now, read without copying them.
@@ -34,7 +60,7 @@ pub(crate) fn with_marks<R>(f: impl FnOnce(&HashMap<String, bool>) -> R) -> R {
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct StarMarked {
     pub previous: Option<bool>,
-    pub marks: HashMap<String, bool>,
+    pub marks: StarMarks,
 }
 
 #[uniffi::export]
@@ -47,7 +73,7 @@ pub fn star_mark(kind: Starrable, id: String, on: bool) -> StarMarked {
 /// The server refused a star change (being offline is not refusing: those are kept and sent later), so
 /// the heart must not keep showing it: the mark from before comes back. Returns the marks as they are now.
 #[uniffi::export]
-pub fn star_restore(kind: Starrable, id: String, previous: Option<bool>) -> HashMap<String, bool> {
+pub fn star_restore(kind: Starrable, id: String, previous: Option<bool>) -> StarMarks {
     let mut m = MARKS.lock();
     let all = m.get_or_insert_with(HashMap::new);
     match previous {
@@ -139,11 +165,15 @@ mod tests {
     fn a_refused_star_puts_the_mark_from_before_back() {
         let first = star_mark(Starrable::Album, "sm-1".into(), true);
         assert_eq!(first.previous, None);
-        assert_eq!(first.marks.get("albumId:sm-1"), Some(&true));
+        assert_eq!(first.marks.albums.get("sm-1"), Some(&true));
         let second = star_mark(Starrable::Album, "sm-1".into(), false);
         assert_eq!(second.previous, Some(true));
-        assert_eq!(star_restore(Starrable::Album, "sm-1".into(), second.previous).get("albumId:sm-1"), Some(&true));
-        assert_eq!(star_restore(Starrable::Album, "sm-1".into(), first.previous).get("albumId:sm-1"), None);
+        assert_eq!(star_restore(Starrable::Album, "sm-1".into(), second.previous).albums.get("sm-1"), Some(&true));
+        assert_eq!(star_restore(Starrable::Album, "sm-1".into(), first.previous).albums.get("sm-1"), None);
+        // Split by kind, keyed by the id alone: a song and an album may share an id.
+        star_mark(Starrable::Song, "sm-1".into(), true);
+        let m = star_marks();
+        assert_eq!((m.songs.get("sm-1"), m.albums.get("sm-1"), m.artists.get("sm-1")), (Some(&true), None, None));
         star_mark(Starrable::Album, "sm-2".into(), false);
         assert!(star_overlay_albums(vec![Album { id: "sm-2".into(), ..Default::default() }]).is_empty(), "the overlay reads the marks kept here");
     }

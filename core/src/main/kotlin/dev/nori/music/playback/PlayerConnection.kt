@@ -15,6 +15,8 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.MoreExecutors
 import dev.nori.music.Nori
+import dev.nori.music.ffi.Hand
+import dev.nori.music.ffi.NextAction
 import dev.nori.music.ffi.RadioStation
 import dev.nori.music.ffi.Song
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -67,46 +69,28 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private var connecting = false
     private val pending = ArrayList<(MediaController) -> Unit>()
 
-    // The controller is released while the app is in the background and built again when it returns,
-    // and for that moment it can answer nothing at all. Reporting zero then makes the seek bar snap to
-    // 0:00 and jump back a heartbeat later, which looks like a bug in playback rather than in the UI.
-    @Volatile private var lastPosition = 0L
-    @Volatile private var lastPositionAt = 0L
     @Volatile private var lastBuffered = 0L
 
-    val positionMs: Long get() {
-        val c = controller
-        if (c != null) {
-            // Through a transition the player runs ahead of the ear (the held ending is counted as
-            // played so the next track arrives in time to be mixed in); the sink says what is really
-            // heard, and the bar shows that, in the song it belongs to (see publish).
-            val ahead = heard(c)
-            // The ear has just changed song and the page follows on the next tick (see heard): until it
-            // has, the old song's title must not be shown with the new song's time under it.
-            val queue = _state.value.queue
-            val shown = queue.getOrNull(_state.value.index)?.id
-            if (ahead && shown != null && queue.getOrNull(heardIndex)?.id != shown) return lastPosition
-            lastPosition = heardMs
-            lastPositionAt = android.os.SystemClock.elapsedRealtime()
-            return lastPosition
-        }
-        // Still reconnecting: carry on from where it was, moving if it was playing.
-        val elapsed = if (_state.value.playing && lastPositionAt > 0) android.os.SystemClock.elapsedRealtime() - lastPositionAt else 0
-        return (lastPosition + elapsed).coerceAtLeast(0)
-    }
-
     /**
-     * Album/playlist Shuffle with weighted order leaves media3 shuffle off so the spread sticks;
-     * this keeps the UI control lit until Play, or an explicit shuffle-off, clears it.
+     * Where the seek bar is. Through a transition the player runs ahead of the ear (the held ending is
+     * counted as played so the next track arrives in time to be mixed in); the sink says what is really
+     * heard, and the bar shows that, in the song it belongs to (see publish) - held while the ear has
+     * changed song and the page has not followed yet, and run on from where it was while the controller
+     * is being built again and can answer nothing (reporting zero then makes the bar snap to 0:00 and
+     * jump back a heartbeat later). Those rules are nori-player's (heard.rs Playhead); this is one JNI
+     * call with primitives in and out per frame.
      */
-    @Volatile private var shuffleLit = false
+    val positionMs: Long get() {
+        val c = controller ?: return PlayheadJni.runOn(clock, android.os.SystemClock.elapsedRealtime(), _state.value.playing)
+        return heard(c, _state.value.index)
+    }
 
     /**
      * The song being heard and the place in it, while that is not what the player says. Through a
      * transition the player runs ahead of the ear: the held ending is counted as played the moment it
      * is decoded, so that the next track arrives in time to be mixed in, and the player is on the next
      * song while this one's ending still plays alone. The sink says what is really heard; the UI shows
-     * that, in the song it belongs to; the answer is left in [heardIndex] and [heardMs]. False when the
+     * that, in the song it belongs to; the song is left in [heardIndex]. False when the
      * player's own word is the truth.
      *
      * The sink's reading is taken when the player asks for its position, which with a deep buffer is
@@ -115,18 +99,25 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * nori-player (crates/player/src/heard.rs), so any app on it shows the same.
      */
     private fun heard(c: MediaController): Boolean {
-        // One call, primitives only: this runs every frame the seek bar is drawn. The queue is the core's own.
-        val r = HeardJni.at(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, c.currentPosition)
-        heardIndex = (r ushr 44).toInt() - 1
-        heardMs = r and ((1L shl 43) - 1)
-        // The ear changed song between two readings: the page changes with it now, not at the next one.
-        if ((r ushr 43) and 1L != 0L) main.post { controller?.let { publish(it, queueChanged = false) } }
+        // One call, primitives only. The queue is the core's own.
+        read(HeardJni.at(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, c.currentPosition))
         return heardIndex >= 0
     }
 
-    /** What [heard] last found: the queue index the ear is on (-1: the player's own) and the place in it. */
+    /** [heard] for the seek bar, whose page shows queue index [shown]: the place the bar shows. */
+    private fun heard(c: MediaController, shown: Int): Long =
+        read(PlayheadJni.position(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, c.currentPosition, shown))
+
+    /** Unpacks an answer into [heardIndex]; returns the place in it. */
+    private fun read(r: Long): Long {
+        heardIndex = (r ushr 44).toInt() - 1
+        // The ear changed song between two readings: the page changes with it now, not at the next one.
+        if ((r ushr 43) and 1L != 0L) main.post { controller?.let { publish(it, queueChanged = false) } }
+        return r and ((1L shl 43) - 1)
+    }
+
+    /** What [heard] last found: the queue index the ear is on (-1: the player's own). */
     private var heardIndex = -1
-    private var heardMs = 0L
     /** nori-player's reading of the transition engine: see crates/player/src/heard.rs. */
     private val clock = HeardJni.create()
 
@@ -200,21 +191,22 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let { this.heardIndex }?.takeIf { it >= 0 }?.let { i ->
             if (fresh) old.queue.getOrNull(i)?.id?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } else i
         }?.takeIf { queue.getOrNull(it)?.id != item?.mediaId }
-        // Weighted album shuffle plays a pre-spread list with media3 shuffle off so the order sticks;
-        // [shuffleLit] keeps the Shuffle control lit until the user turns it off or starts a plain Play.
-        if (p.shuffleModeEnabled) shuffleLit = true
         _state.value = old.copy(
             connected = true, queue = queue, order = order, queued = queued,
             index = if (p.mediaItemCount == 0) -1 else heardIndex ?: p.currentMediaItemIndex,
             nextIndex = if (p.mediaItemCount == 0) -1 else p.nextMediaItemIndex,
             previousIndex = if (p.mediaItemCount == 0) -1 else p.previousMediaItemIndex,
-            // For a stream the live metadata carries what the station announces (ICY title), falling back to its name.
-            radio = item?.takeIf { it.isRadio }?.let { p.mediaMetadata.title?.toString()?.takeIf(String::isNotBlank) ?: it.mediaMetadata.title?.toString() },
+            // For a stream the live metadata carries what the station announces (ICY title); which of that and
+            // the station's name shows is the core's (words.rs radio_title).
+            radio = item?.takeIf { it.isRadio }?.let { dev.nori.music.ffi.radioTitle(p.mediaMetadata.title?.toString(), it.mediaMetadata.title?.toString()) },
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
-            shuffle = p.shuffleModeEnabled || shuffleLit,
+            // A weighted shuffle plays a pre-spread list with the player's shuffle off so the order sticks;
+            // the core keeps the control lit until the user turns it off or starts a plain Play.
+            shuffle = p.shuffleModeEnabled || dev.nori.music.ffi.playlistShuffleShown(),
             repeat = when (p.repeatMode) { Player.REPEAT_MODE_ALL -> Repeat.ALL; Player.REPEAT_MODE_ONE -> Repeat.ONE; else -> Repeat.OFF },
-            durationMs = if (heardIndex != null) queue[heardIndex].duration.toLong() * 1000
-                else p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
+            // The heard song's length while the ear is a song behind the player, else the player's, else
+            // the tags' (nori_player::heard::shown_duration_ms).
+            durationMs = dev.nori.music.ffi.shownDurationMs(heardIndex?.let { queue[it].duration.toLong() } ?: -1, p.duration, item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
             bridging = view?.bridging ?: old.bridging,
         )
@@ -237,8 +229,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         if (songs.isEmpty()) return@with
         // Shuffle lit when this start asked for shuffle; cleared on a plain Play, so the album
         // control does not stay on after the row's Play starts some other queue. Pause and resume on
-        // the page's own queue do not come through here, and leave the light as it was.
-        shuffleLit = shuffle
+        // the page's own queue do not come through here, and leave the light as it was. Said to the
+        // core at once, so the page does not flicker while the queue's own change is on its way.
+        dev.nori.music.ffi.playlistShowShuffle(shuffle)
         c.shuffleModeEnabled = shuffle
         c.setMediaItems(items(songs), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)
         c.prepare()
@@ -251,23 +244,24 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      */
     fun playShuffledOrder(songs: List<Song>) = with { c ->
         if (songs.isEmpty()) return@with
-        shuffleLit = true
-        c.shuffleModeEnabled = false
-        c.setMediaItems(items(songs), 0, 0)
+        dev.nori.music.ffi.playlistShowShuffle(true)
+        // Marked as already in order: the service takes it as it is and turns the player's own shuffle off.
+        val items = items(songs)
+        c.setMediaItems(listOf(items.first().ordered()) + items.drop(1), 0, 0)
         c.prepare()
         c.play()
         _state.value = _state.value.copy(shuffle = true)
     }
 
-    // Where these land is the service's business (PlaybackService.upNext): after the playing song, and
+    // Where these land is the core's (nori_player::playlist::Playlist::take): after the playing song, and
     // for "last" after the songs added by hand before them, whatever the shuffle order says.
     fun playNext(songs: List<Song>) = with { c ->
-        c.addMediaItems(items(songs).map { it.queued("next") })
+        c.addMediaItems(items(songs).map { it.queued(Hand.NEXT) })
         if (c.playbackState == Player.STATE_IDLE) c.prepare()
     }
 
     fun enqueue(songs: List<Song>) = with { c ->
-        c.addMediaItems(items(songs).map { it.queued("last") })
+        c.addMediaItems(items(songs).map { it.queued(Hand.LAST) })
         if (c.playbackState == Player.STATE_IDLE) c.prepare()
     }
 
@@ -288,8 +282,12 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     fun toggle() = with { Util.handlePlayPauseButtonAction(it) }
     fun next() = with { c ->
         forget()
-        if (c.hasNextMediaItem()) c.seekToNextMediaItem()
-        else c.sendCustomCommand(SessionCommand(PlaybackService.CMD_FILL_NEXT, Bundle.EMPTY), Bundle.EMPTY)
+        // With nothing after, the service refills the queue and takes the skip when songs land
+        // (nori_player::transport::next_action).
+        when (dev.nori.music.ffi.nextAction(c.hasNextMediaItem())) {
+            NextAction.SKIP -> c.seekToNextMediaItem()
+            NextAction.FILL_THEN_SKIP -> c.sendCustomCommand(SessionCommand(PlaybackService.CMD_FILL_NEXT, Bundle.EMPTY), Bundle.EMPTY)
+        }
     }
     /**
      * A rewind is a seek to the top, not a skip: on a queue restored but never prepared the
@@ -300,7 +298,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      */
     fun previous() = with { c ->
         // Restart here, or let the player's own previous decide: nori_player::queue::previous_restarts.
-        if (dev.nori.music.ffi.queuePreviousRestarts(c.currentPosition, c.hasPreviousMediaItem(), nori.settings.value.previousAlwaysSkips)) { seekTo(0); if (!c.playWhenReady) c.play() }
+        if (dev.nori.music.ffi.queuePreviousRestarts(c.currentPosition, c.hasPreviousMediaItem())) { seekTo(0); if (!c.playWhenReady) c.play() }
         else { forget(); c.seekToPrevious() }
     }
     /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
@@ -341,11 +339,13 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         if (!c.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) c.prepare()
         c.seekTo(ms)
         main.removeCallbacks(watch)
-        main.postDelayed(watch, 300)
+        main.postDelayed(watch, seekLookMs)
     }
 
     /** The seek being made to stick, in Rust (crates/player/src/seek.rs), and the song it was asked in. */
     private val seeks = SeekJni.create()
+    /** How often the watch looks (nori_player::seek::LOOK_EVERY_MS), read once. */
+    private val seekLookMs by lazy { dev.nori.music.ffi.playbackTimings().seekLookMs }
     private var wantedId: String? = null
     /**
      * Where a seek asked to go, while the watch is still making sure it sticks. The seek bar
@@ -365,7 +365,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private val watch = object : Runnable {
         override fun run() {
             controller?.let(::keepSeek)
-            if (_pendingSeek.value != null) main.postDelayed(this, 300)
+            if (_pendingSeek.value != null) main.postDelayed(this, seekLookMs)
         }
     }
 
@@ -384,7 +384,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     }
 
     fun setShuffle(on: Boolean) = with {
-        shuffleLit = on
+        dev.nori.music.ffi.playlistShowShuffle(on)
         it.shuffleModeEnabled = on
         _state.value = _state.value.copy(shuffle = on || it.shuffleModeEnabled)
     }
@@ -417,6 +417,20 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_SLEEP, Bundle.EMPTY), Bundle().apply {
             putInt(PlaybackService.ARG_MINUTES, minutes); putBoolean(PlaybackService.ARG_END_OF_TRACK, endOfTrack); putInt(PlaybackService.ARG_SONGS, songs)
         })
-        _state.value = _state.value.copy(sleepAt = if (minutes > 0) SystemClock.elapsedRealtime() + minutes * 60_000L else 0, sleepAtEndOfTrack = endOfTrack || songs > 0)
+        val shown = dev.nori.music.ffi.sleepShown(minutes.coerceAtLeast(0).toUInt(), endOfTrack, songs.coerceAtLeast(0).toUInt(), SystemClock.elapsedRealtime())
+        _state.value = _state.value.copy(sleepAt = shown.atMs, sleepAtEndOfTrack = shown.atEndOfTrack)
     }
+}
+
+/**
+ * The seek bar's place over a [HeardJni] clock (crates/core/src/heard.rs over nori_player::heard::Playhead):
+ * asked every frame the bar is drawn, so primitives only.
+ */
+internal object PlayheadJni {
+    init { System.loadLibrary("norimusic") }
+
+    /** As [HeardJni.at], with the place the bar shows while the page shows queue index [shown] (-1: nothing). */
+    @JvmStatic external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int): Long
+    /** The last place shown, run on from then if [playing]: for while the controller cannot be asked. */
+    @JvmStatic external fun runOn(h: Long, nowMs: Long, playing: Boolean): Long
 }

@@ -30,6 +30,12 @@ pub fn duration(seconds: i64) -> String {
     }
 }
 
+/// The time left in a song, under the seek bar: "-3:07".
+#[uniffi::export]
+pub fn duration_left(seconds: i64) -> String {
+    format!("-{}", duration(seconds))
+}
+
 /// A decibel figure with its sign, one decimal: "+3.5", "-1.0", and "+0.0" for nothing at all. `-0.0`
 /// is a real float - the automatic pre-amp is minus the largest boost, and minus nothing is negative
 /// zero - and printed as it is it read "-0.0 dB".
@@ -225,6 +231,16 @@ pub fn album_hint_caption(year: u32, song_count: u32, seconds: u32) -> String {
     parts.join(" · ")
 }
 
+/// An album page's caption from whatever is known of it: [`album_caption`] once its songs are in, the
+/// [`album_hint_caption`] of the row that opened it before then. Explicit is the server's own flag.
+#[uniffi::export]
+pub fn album_page_caption(album: crate::model::Album, songs: Option<Vec<Song>>) -> String {
+    match songs {
+        Some(songs) => album_caption(album.year, songs, album.explicit_status == "explicit"),
+        None => album_hint_caption(album.year, album.song_count, album.duration),
+    }
+}
+
 /// A caption for `songs` as a whole: "12 songs · 48:10". See [`songs_caption`].
 #[uniffi::export]
 pub fn list_caption(songs: Vec<Song>, always_plural: bool) -> String {
@@ -375,6 +391,52 @@ fn busiest(v: &[u32]) -> Option<usize> {
     }).map(|(i, _)| i)
 }
 
+/// One period the listening stats can cover: `days` back from now, 0 for all time.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct StatsPeriod {
+    pub days: u32,
+    pub label: String,
+}
+
+/// The periods, in the order the chips run, and which one opens (a year).
+#[uniffi::export]
+pub fn stats_periods() -> Vec<StatsPeriod> {
+    [(7, "Week"), (30, "Month"), (365, "Year"), (0, "All time")].map(|(days, l)| StatsPeriod { days, label: l.into() }).to_vec()
+}
+
+#[uniffi::export]
+pub fn stats_default_days() -> u32 {
+    365
+}
+
+/// One tile of the stats: a number and what it counts.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct StatTileWords {
+    pub value: String,
+    pub label: String,
+}
+
+/// The six tiles under the headline, in two rows of three.
+#[uniffi::export]
+pub fn stats_tiles(stats: ListeningStats) -> Vec<StatTileWords> {
+    [
+        (stats.distinct_songs, "songs"),
+        (stats.distinct_artists, "artists"),
+        (stats.distinct_albums, "albums"),
+        (stats.skips, "skips"),
+        (stats.active_days, "active days"),
+        (stats.longest_streak_days, "day streak"),
+    ]
+    .map(|(v, l)| StatTileWords { value: v.to_string(), label: l.into() })
+    .to_vec()
+}
+
+/// The hours marked under the listening-day chart.
+#[uniffi::export]
+pub fn stats_hour_ticks() -> Vec<String> {
+    ["00", "06", "12", "18", "23"].map(String::from).to_vec()
+}
+
 #[uniffi::export]
 pub fn stats_words(stats: ListeningStats) -> StatsWords {
     const DAYS: [&str; 7] = ["Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
@@ -402,6 +464,16 @@ mod tests {
     const HZ: &[(u32, &str)] = include!("fmt_hz.in");
 
     #[test]
+    fn stats_periods_and_tiles() {
+        assert_eq!(stats_periods().iter().map(|p| (p.days, p.label.as_str())).collect::<Vec<_>>(), [(7, "Week"), (30, "Month"), (365, "Year"), (0, "All time")]);
+        assert_eq!(stats_default_days(), 365);
+        let t = stats_tiles(ListeningStats { distinct_songs: 4, longest_streak_days: 2, ..Default::default() });
+        assert_eq!((t[0].value.as_str(), t[0].label.as_str()), ("4", "songs"));
+        assert_eq!((t[5].value.as_str(), t[5].label.as_str()), ("2", "day streak"));
+        assert_eq!(stats_hour_ticks(), ["00", "06", "12", "18", "23"]);
+    }
+
+    #[test]
     fn frequencies_read_as_they_did() {
         for &(bits, want) in HZ {
             assert_eq!(hz_text(f32::from_bits(bits)), want, "{}", f32::from_bits(bits));
@@ -416,6 +488,7 @@ mod tests {
     #[test]
     fn times_decibels_and_captions() {
         assert_eq!((duration(0), duration(187), duration(3723)), ("0:00".into(), "3:07".into(), "1:02:03".into()));
+        assert_eq!((duration_left(187), duration_left(0)), ("-3:07".into(), "-0:00".into()));
         assert_eq!((signed_db(-0.0), signed_db(3.25), signed_db(-1.0)), ("+0.0".into(), "+3.3".into(), "-1.0".into()));
         assert_eq!(nudge_seconds(-250), "-0.3 s");
         assert_eq!((eq_balance(0.0), eq_balance(-0.3), eq_balance(0.05)), ("centre".into(), "L 30%".into(), "R 5%".into()));
@@ -436,6 +509,10 @@ mod tests {
         assert_eq!(quality_of(&s).as_deref(), Some("FLAC 24/96.0"));
         assert_eq!(album_caption(2019, vec![s.clone(), s], true), "2019 · 2 songs · 3:20 · FLAC 24/96.0 · explicit");
         assert_eq!(album_hint_caption(0, 12, 0), "12 songs");
+        let album = crate::model::Album { year: 2019, song_count: 2, duration: 200, explicit_status: "explicit".into(), ..Default::default() };
+        assert_eq!(album_page_caption(album.clone(), None), "2019 · 2 songs · 3:20");
+        let t = Song { suffix: "flac".into(), bit_depth: 24, sampling_rate: 96000, duration: 100, ..Default::default() };
+        assert_eq!(album_page_caption(album, Some(vec![t.clone(), t])), "2019 · 2 songs · 3:20 · FLAC 24/96.0 · explicit");
     }
 
     #[test]

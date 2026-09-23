@@ -84,17 +84,62 @@ pub fn settings_open(db_path: String, legacy: HashMap<String, PrefValue>) -> cra
     Ok(prefs)
 }
 
-/// The settings changed; kept now and written on the core's background thread.
+/// [`settings_put`]'s answer: what the platform's player has to apply again. The sound chain and the
+/// transition planner's settings follow by themselves.
+/// Which parts of the output chain may run, speed and pitch (`dsp::audio_apply`).
+pub const APPLY_AUDIO: u32 = 1;
+/// The ReplayGain volume.
+pub const APPLY_GAIN: u32 = 2;
+/// A plan already made for the song playing is asked for again.
+pub const REPLAN: u32 = 4;
+
+/// What a change from `a` to `b` asks of the player.
+fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
+    let audio = (a.eq_enabled, a.crossfeed_db, a.balance, a.mono, a.limiter, a.skip_silence, a.offload, a.crossfade_sec, a.auto_mix, a.speed, a.pitch, a.bit_perfect)
+        != (b.eq_enabled, b.crossfeed_db, b.balance, b.mono, b.limiter, b.skip_silence, b.offload, b.crossfade_sec, b.auto_mix, b.speed, b.pitch, b.bit_perfect);
+    let gain = (a.replay_gain, a.preamp_db, a.untagged_gain_db) != (b.replay_gain, b.preamp_db, b.untagged_gain_db);
+    let plan = (
+        a.auto_mix,
+        a.crossfade_sec,
+        a.auto_mix_max_s,
+        a.auto_mix_beat_match,
+        a.auto_mix_max_tempo_pct,
+        a.auto_mix_bass_swap,
+        a.auto_mix_filters,
+        a.auto_mix_echo_out,
+        a.auto_mix_keep_pitch,
+        a.crossfade_keep_albums,
+        a.replay_gain,
+    ) != (
+        b.auto_mix,
+        b.crossfade_sec,
+        b.auto_mix_max_s,
+        b.auto_mix_beat_match,
+        b.auto_mix_max_tempo_pct,
+        b.auto_mix_bass_swap,
+        b.auto_mix_filters,
+        b.auto_mix_echo_out,
+        b.auto_mix_keep_pitch,
+        b.crossfade_keep_albums,
+        b.replay_gain,
+    );
+    (if audio { APPLY_AUDIO } else { 0 }) | (if gain { APPLY_GAIN } else { 0 }) | (if plan { REPLAN } else { 0 })
+}
+
+/// The settings changed; kept now and written on the core's background thread. Returns what the
+/// platform's player has to apply again ([`APPLY_AUDIO`], [`APPLY_GAIN`], [`REPLAN`]); 0 for a change
+/// only screens care about.
 #[uniffi::export]
-pub fn settings_put(prefs: StoredPrefs) {
-    let db = {
+pub fn settings_put(prefs: StoredPrefs) -> u32 {
+    let (db, effect) = {
         let mut k = KEPT.write();
-        let Some(k) = k.as_mut() else { return };
+        let Some(k) = k.as_mut() else { return 0 };
         if k.prefs == prefs {
-            return;
+            return 0;
         }
+        let effect = effects(&k.prefs, &prefs);
         k.prefs = prefs.clone();
-        k.db.clone()
+        (k.db.clone(), effect)
     };
     changed(&prefs);
     let change = CHANGES.fetch_add(1, Ordering::SeqCst) + 1;
@@ -109,6 +154,7 @@ pub fn settings_put(prefs: StoredPrefs) {
             }
         }
     });
+    effect
 }
 
 /// What in the core follows the settings by itself, told at once.
@@ -143,6 +189,19 @@ mod tests {
         ] {
             assert_eq!(from_json(&to_json(&v)), Some(v));
         }
+    }
+
+    #[test]
+    fn only_what_the_player_uses_asks_it_to_apply_again() {
+        let a = StoredPrefs::default();
+        let theme = StoredPrefs { amoled: !a.amoled, ..a.clone() };
+        assert_eq!(effects(&a, &theme), 0, "a screen's setting");
+        let bands = StoredPrefs { eq_bands: vec![crate::settings::SoundBand { kind: 0, freq: 100.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..a.clone() };
+        assert_eq!(effects(&a, &bands), 0, "the sound chain follows its bands by itself");
+        assert_eq!(effects(&a, &StoredPrefs { eq_enabled: true, ..a.clone() }), APPLY_AUDIO);
+        assert_eq!(effects(&a, &StoredPrefs { replay_gain: 1, ..a.clone() }), APPLY_GAIN | REPLAN);
+        assert_eq!(effects(&a, &StoredPrefs { crossfade_sec: 6, ..a.clone() }), APPLY_AUDIO | REPLAN);
+        assert_eq!(effects(&a, &StoredPrefs { auto_mix_bass_swap: !a.auto_mix_bass_swap, ..a.clone() }), REPLAN);
     }
 
     #[test]

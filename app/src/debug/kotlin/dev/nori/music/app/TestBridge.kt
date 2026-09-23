@@ -30,6 +30,26 @@ class TestBridge : BroadcastReceiver() {
             """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten}}"""
     }
 
+    private fun watchStates() {
+        val counts = HashMap<String, Int>()
+        val handle = androidx.compose.runtime.snapshots.Snapshot.registerApplyObserver { changed, _ ->
+            for (o in changed) {
+                val name = o.toString().take(120)
+                counts[name] = (counts[name] ?: 0) + 1
+            }
+        }
+        Handler(Looper.getMainLooper()).postDelayed({
+            handle.dispose()
+            Log.i("noritest", "states changed: ${counts.values.sum()} changes over ${counts.size} states")
+            // By kind, with the value dropped, so many states of one kind count together.
+            counts.entries.groupBy { it.key.substringBefore("(") + "@" + it.key.substringAfterLast("@").length }
+                .mapValues { e -> e.value.sumOf { it.value } }.entries.sortedByDescending { it.value }.take(6)
+                .forEach { Log.i("noritest", "kind ${it.value}x ${it.key}") }
+            counts.entries.sortedByDescending { it.value }.take(12).forEach { Log.i("noritest", "state ${it.value}x ${it.key}") }
+            Log.i("noritest", "states done")
+        }, 1000)
+    }
+
     override fun onReceive(context: Context, intent: Intent) {
         val cmd = intent.getStringExtra("cmd") ?: return
         val arg = intent.getStringExtra("arg").orEmpty()
@@ -45,6 +65,9 @@ class TestBridge : BroadcastReceiver() {
                 "play" -> TestHooks.play?.let { it(arg); "ok" } ?: "no ui"
                 "login" -> TestHooks.login?.let { it(arg); "ok" } ?: "no ui"
                 "do" -> TestHooks.act?.let { it(arg); "ok" } ?: "no ui"
+                // Which Compose states change in the next second, and how often: a screen that redraws
+                // when nothing on it moves has one of these changing every frame.
+                "states" -> { watchStates(); "watching" }
                 else -> "unknown command $cmd"
             }
             Log.i("noritest", reply)

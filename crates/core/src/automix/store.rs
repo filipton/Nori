@@ -173,8 +173,10 @@ impl Core {
         Ok(get(&self.db.lock(), &song_id)?)
     }
 
-    /// Which of `song_ids` still need analysing (no row, or an older analysis version).
+    /// Which of `song_ids` still need analysing (no row, or an older analysis version); ids that can
+    /// never be measured (a provider's song, a radio stream) are left out.
     pub fn analysis_missing(&self, song_ids: Vec<String>) -> Result<Vec<String>> {
+        let song_ids: Vec<String> = song_ids.into_iter().filter(|id| crate::queue::analysable(id)).collect();
         Ok(missing(&self.db.lock(), &song_ids)?)
     }
 

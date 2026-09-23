@@ -41,6 +41,11 @@ pub fn transition_setup(transitions_off: bool) {
     p.generation += 1;
 }
 
+/// Whether the output forbids transitions, as last set up: what is fetched ahead for a mix follows it.
+pub(crate) fn transitions_off() -> bool {
+    PLANNER.lock().transitions_off
+}
+
 /// The settings changed: the planner takes the transition settings from them. A plan already made is
 /// asked for again by the platform when it hears of the change.
 pub(crate) fn settings_changed(s: &crate::settings::StoredPrefs) {

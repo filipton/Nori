@@ -184,6 +184,11 @@ struct Applied {
 
 static APPLIED: Mutex<Applied> = Mutex::new(Applied { speed: 1.0, pitch: 1.0, offload: false, processor: false });
 
+/// Whether the output wants compressed audio handed to the chip, as last worked out ([`audio_apply`]).
+pub(crate) fn offload_wanted() -> bool {
+    APPLIED.lock().offload
+}
+
 /// Everything the platform applies to its player when the settings or the output change, in one call.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct AudioApply {

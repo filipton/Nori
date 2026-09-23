@@ -5,7 +5,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import dev.nori.music.ffi.CoreException
 import dev.nori.music.ffi.FailureKind
-import dev.nori.music.ffi.HostPort
+import dev.nori.music.ffi.getFailed
 import dev.nori.music.ffi.NetException
 import dev.nori.music.ffi.Transport
 import dev.nori.music.ffi.TransportException
@@ -13,7 +13,8 @@ import dev.nori.music.ffi.TransportResponse
 import dev.nori.music.ffi.Trouble
 import dev.nori.music.ffi.describeError
 import dev.nori.music.ffi.netPolicy
-import dev.nori.music.ffi.serverHost
+import dev.nori.music.ffi.netServer
+import dev.nori.music.ffi.requestPolicy
 import dev.nori.music.settings.ServerProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -57,9 +58,6 @@ class Http(private val context: Context) {
     private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = policy.streamMaxRequestsPerHost.toInt(); maxRequests = policy.streamMaxRequests.toInt() }
     @Volatile private var profile: ServerProfile? = null
 
-    /** Where the profile's addresses point, parsed once by the core; each request is compared with these. */
-    @Volatile private var serverHosts: Array<HostPort> = emptyArray()
-
     @Volatile var api: OkHttpClient = build(null)
         private set
 
@@ -77,7 +75,8 @@ class Http(private val context: Context) {
 
     fun configure(next: ServerProfile?) {
         val old = profile
-        serverHosts = if (next == null) emptyArray() else listOfNotNull(serverHost(next.url), serverHost(next.altUrl)).toTypedArray()
+        // Which requests are the server's, and its Wi-Fi-only rule, are the core's (transport.rs request_policy).
+        netServer(next?.url, next?.altUrl, next?.wifiOnly == true)
         profile = next
         // Only TLS settings need new clients; headers and the Wi-Fi rule are read per request.
         if (old?.allowSelfSigned != next?.allowSelfSigned || old?.clientCert != next?.clientCert || old?.clientCertPassword != next?.clientCertPassword) {
@@ -89,12 +88,6 @@ class Http(private val context: Context) {
     private fun streamClient(api: OkHttpClient) =
         api.newBuilder().dispatcher(streamDispatcher).readTimeout(policy.streamReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS).build()
 
-    /** Whether [url] goes to the music server: only that gets the profile's headers and its Wi-Fi-only rule. */
-    private fun toServer(url: okhttp3.HttpUrl): Boolean {
-        for (h in serverHosts) if (h.port.toInt() == url.port && h.host.equals(url.host, ignoreCase = true)) return true
-        return false
-    }
-
     private fun build(p: ServerProfile?): OkHttpClient {
         val b = OkHttpClient.Builder()
             .dispatcher(dispatcher)
@@ -105,13 +98,14 @@ class Http(private val context: Context) {
                 val now = profile
                 val request = chain.request()
                 // Third parties (LRCLIB, AutoEQ) must not receive a reverse-proxy token, and are not subject to the
-                // server's Wi-Fi-only setting.
-                val toServer = now != null && toServer(request.url)
-                if (toServer && now.wifiOnly && metered) throw MeteredNetworkException()
+                // server's Wi-Fi-only setting: the core says which this is. The network is only looked at when
+                // the answer depends on it.
+                val rule = if (now != null) requestPolicy(request.url.toString()) else null
+                if (rule?.unmeteredOnly == true && metered) throw MeteredNetworkException()
                 chain.proceed(request.newBuilder().apply {
                     // Public services ask clients to identify themselves; some reject OkHttp's default outright.
                     header("User-Agent", policy.userAgent)
-                    if (toServer) now.headers.forEach { (k, v) -> header(k, v) }
+                    if (rule?.server == true) now?.headers?.forEach { (k, v) -> header(k, v) }
                 }.build())
             }
         if (p != null && (p.allowSelfSigned || p.clientCert.isNotEmpty())) tls(b, p)
@@ -168,7 +162,7 @@ class Http(private val context: Context) {
      */
     suspend fun get(url: String, timeoutMs: Long = 0): ByteArray {
         val r = exchange(url, timeoutMs)
-        if (r.body.isEmpty() && r.status.toInt() !in 200..299) throw IOException("HTTP ${r.status}")
+        if (getFailed(r.status, r.body.isEmpty())) throw IOException("HTTP ${r.status}")
         return r.body
     }
 

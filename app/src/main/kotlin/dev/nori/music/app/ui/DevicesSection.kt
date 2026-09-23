@@ -89,7 +89,8 @@ private fun DeviceItem(d: DeviceRow, onClick: () -> Unit) {
                 Row {
                     d.kind?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant) }
                     AnimatedVisibility(d.current, enter = fadeIn(tween(motion())) + expandHorizontally(tween(motion())), exit = fadeOut(tween(motion())) + shrinkHorizontally(tween(motion()))) {
-                        Text(if (d.kind != null) " · Playing now" else "Playing now", style = MaterialTheme.typography.bodySmall, color = scheme.primary)
+                        val playing = remember(d.kind != null) { dev.nori.music.ffi.devicePlayingNow(d.kind != null) }
+                        Text(playing, style = MaterialTheme.typography.bodySmall, color = scheme.primary)
                     }
                 }
             }
@@ -151,9 +152,13 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
     val eq by vm.autoEq.collectAsStateWithLifecycle()
     val busy by vm.assigning.collectAsStateWithLifecycle()
     val error by vm.assignError.collectAsStateWithLifecycle()
-    val suggested by produceState(emptyList<dev.nori.music.ffi.AutoEqEntry>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
+    val suggested by produceState(emptyList<dev.nori.music.ffi.AutoEqHit>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
     var query by remember { mutableStateOf("") }
-    val curves = if (query.trim().length >= 2 && eq.query == query) eq.hits else suggested
+    // What it says, which profiles it offers and whether it can be forgotten are the core's (device_sheet).
+    val sheet = remember(d.output, d.kind, d.current, p.autoEqAuto, profiles) {
+        dev.nori.music.ffi.deviceSheet(d.output, d.kind, d.current, p.autoEqAuto, profiles.map { it.name })
+    }
+    val curves = if (!eq.tooShort && eq.query == query) eq.hits else suggested
     val pick = { c: DeviceSound.Choice -> vm.assignDevice(d.output, c, onDone) }
     val ms = motion()
 
@@ -163,7 +168,7 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
                 Column(Modifier.padding(bottom = 4.dp)) {
                     LargeTitle(d.name)
                     Text(
-                        "What music played through ${if (d.kind == null) "this" else "this ${d.kind} device"} sounds like. It switches by itself whenever the device connects.",
+                        sheet.intro,
                         Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -171,14 +176,14 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
             item("auto") {
                 Option(
                     "Automatic",
-                    if (p.autoEqAuto) "Uses a matching AutoEQ curve when one is known" else "Offers a matching AutoEQ curve when one is known",
+                    sheet.automatic,
                     d.choice == DeviceSound.Choice.Automatic,
                 ) { pick(DeviceSound.Choice.Automatic) }
             }
             item("flat") { Option("Flat", "The equalizer off on this device", d.choice == DeviceSound.Choice.Flat) { pick(DeviceSound.Choice.Flat) } }
             item("quiet") { Option("Leave as is", "Nothing switches and nothing is offered", d.choice == DeviceSound.Choice.Quiet) { pick(DeviceSound.Choice.Quiet) } }
-            items(profiles.filter { it.name != DeviceSound.FLAT }, key = { "p:" + it.name }) { prof ->
-                Option(prof.name, "Saved profile", d.choice == DeviceSound.Choice.Profile(prof.name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(prof.name)) }
+            items(sheet.profiles, key = { "p:$it" }) { name ->
+                Option(name, "Saved profile", d.choice == DeviceSound.Choice.Profile(name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(name)) }
             }
             item("curves") { SectionHeader("AutoEQ curves") }
             if (eq.count == 0) item("download") {
@@ -193,10 +198,10 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
                     }
                 }
             } else item("search") {
-                SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, "Search ${eq.count} headphones", Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
+                SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, eq.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
             }
-            items(curves, key = { "c:" + it.path }) { e ->
-                Option(e.name, "${e.source} · ${e.form}", false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e)) }
+            items(curves, key = { "c:" + it.entry.path }) { e ->
+                Option(e.entry.name, e.short, false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e.entry)) }
             }
             item("status") {
                 Column {
@@ -208,7 +213,7 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
                     }
                 }
             }
-            if (!d.current && d.output != dev.nori.music.playback.Outputs.SPEAKER) item("forget") {
+            if (sheet.canForget) item("forget") {
                 Column(Modifier.padding(top = 12.dp)) {
                     Hairline()
                     ActionRow("Forget this device", Icons.Outlined.Delete, { vm.forgetDevice(d.output); onDone() }, divider = false)

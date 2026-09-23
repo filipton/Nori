@@ -1,42 +1,110 @@
-//! How the queue moves (`nori_player::queue`), as the platform asks: what is fetched ahead, what to do
-//! when a song will not play, and the previous and repeat buttons (the queue itself is playlist.rs). One call per user action or player event.
+//! How the queue moves and the controls behave (`nori_player::queue`, `nori_player::transport`), as the
+//! platform asks: what is fetched and measured ahead, what to do when a song will not play (the run of
+//! failures is counted here), the previous, next and repeat buttons, a switch waiting out its dip, the
+//! sleep timer, and how long the service waits before each of its chores. The queue itself is
+//! playlist.rs. One call per user action or player event; the settings are read here, not handed in.
 
-use nori_player::queue::{self as q, OnError, PlaybackError};
+use nori_player::queue::{self as q, ErrorRun, OnError, PlaybackError};
+use nori_player::transport::{self as t, NextAction, SwitchQueue};
+use parking_lot::Mutex;
 
-/// The songs coming up that are fetched ahead, as [first, last] positions after the playing one (0);
-/// empty when none.
-#[uniffi::export]
-pub fn queue_precache(count: u32, mixing: bool, shuffling: bool) -> Vec<u32> {
-    q::precache_range(count as usize, mixing, shuffling).map_or(Vec::new(), |(a, b)| vec![a as u32, b as u32])
+use crate::settings::StoredPrefs;
+
+/// One answer from the settings as they are now; the defaults before the app opened them.
+pub(crate) fn prefs<R>(f: impl Fn(&StoredPrefs) -> R) -> R {
+    crate::settings_store::with_prefs(&f).unwrap_or_else(|| f(&StoredPrefs::default()))
 }
 
-/// How many songs coming up (the playing one included) are measured ahead for AutoMix.
-#[uniffi::export]
-pub fn queue_measure_ahead() -> u32 {
-    q::MEASURE_AHEAD as u32
+// ---- described again for uniffi ----
+
+#[uniffi::remote(Enum)]
+pub enum PlaybackError {
+    Output,
+    Network,
+    Other,
 }
 
-/// What to do when a song will not play. `kind`: 0 the output refused it, 1 the network, 2 anything else.
-/// Returns 0 give up offload, 1 hand to the offline bridge, 2 skip, 3 stop.
-#[uniffi::export]
-pub fn queue_on_error(kind: u8, offload_refused: bool, bridge: bool, skip_on_error: bool, has_next: bool, errors_in_a_row: u32) -> u8 {
-    let kind = match kind {
-        0 => PlaybackError::Output,
-        1 => PlaybackError::Network,
-        _ => PlaybackError::Other,
-    };
-    match q::on_error(kind, offload_refused, bridge, skip_on_error, has_next, errors_in_a_row) {
-        OnError::GiveUpOffload => 0,
-        OnError::Bridge => 1,
-        OnError::Skip => 2,
-        OnError::Stop => 3,
-    }
+#[uniffi::remote(Enum)]
+pub enum OnError {
+    GiveUpOffload,
+    Bridge,
+    Skip,
+    Stop,
 }
 
-/// Whether previous restarts the song playing (else the player's own previous decides).
+#[uniffi::remote(Enum)]
+pub enum NextAction {
+    Skip,
+    FillThenSkip,
+}
+
+// ---- fetched and measured ahead ----
+
+/// How many songs coming up (the current one first) the chores below look at.
+const UPCOMING: usize = 8;
+
+/// The songs coming up that are fetched ahead now, on a metered network or not: the count is the
+/// user's setting for that network, and a crossfade or AutoMix brings the next song in early
+/// (`nori_player::queue::precache_range`). Empty: nothing to fetch.
 #[uniffi::export]
-pub fn queue_previous_restarts(position_ms: i64, has_previous: bool, always_skips: bool) -> bool {
-    q::previous_restarts(position_ms, has_previous, always_skips)
+pub fn queue_precache(metered: bool) -> Vec<String> {
+    let (count, mixing) = prefs(|p| {
+        (q::precache_count(metered, p.precache_wifi, p.precache_mobile), q::mixing(crate::automix::planner::transitions_off(), p.crossfade_sec, p.auto_mix))
+    });
+    crate::playlist::with(|p| {
+        let Some((first, last)) = q::precache_range(count, mixing, p.shuffling()) else { return Vec::new() };
+        p.upcoming().take(UPCOMING).skip(first).take(last + 1 - first).map(|i| p.ids()[i].clone()).collect()
+    })
+}
+
+/// The songs coming up (the one playing first) to measure for AutoMix, those that can be measured at
+/// all; none while AutoMix is off.
+#[uniffi::export]
+pub fn queue_measure() -> Vec<String> {
+    let n = prefs(|p| q::measure_ahead(p.auto_mix));
+    crate::playlist::with(|p| p.upcoming().take(UPCOMING).take(n).map(|i| &p.ids()[i]).filter(|id| crate::queue::analysable(id)).cloned().collect())
+}
+
+// ---- a song that will not play ----
+
+static ERRORS: Mutex<ErrorRun> = Mutex::new(ErrorRun::new());
+
+/// A song would not play: what to do (`nori_player::queue::on_error`, with the run of failures counted
+/// here). `bridge_ready` whether the platform has an offline bridge to hand a network failure to; the
+/// user's settings decide whether it is used, and whether a failure skips.
+#[uniffi::export]
+pub fn queue_error(kind: PlaybackError, offload_refused: bool, bridge_ready: bool) -> OnError {
+    let (skip, bridge) = prefs(|p| (p.skip_on_error, p.bridge_offline));
+    let has_next = crate::playlist::with(|p| p.next().is_some());
+    ERRORS.lock().failed(kind, offload_refused, bridge && bridge_ready, skip, has_next)
+}
+
+/// The offline bridge took a network failure over: the run of failures is broken.
+#[uniffi::export]
+pub fn queue_bridged() {
+    ERRORS.lock().played();
+}
+
+/// The offline bridge could not take a network failure over: whether to skip it like any other.
+#[uniffi::export]
+pub fn queue_bridge_failed() -> bool {
+    let skip = prefs(|p| p.skip_on_error);
+    let has_next = crate::playlist::with(|p| p.next().is_some());
+    ERRORS.lock().bridge_failed(skip, has_next)
+}
+
+/// A new song started: the run of failures is broken.
+pub(crate) fn song_started() {
+    ERRORS.lock().played();
+}
+
+// ---- the buttons ----
+
+/// Whether previous restarts the song playing (else the player's own previous decides), as the user's
+/// "previous always skips" says.
+#[uniffi::export]
+pub fn queue_previous_restarts(position_ms: i64, has_previous: bool) -> bool {
+    q::previous_restarts(position_ms, has_previous, prefs(|p| p.previous_always_skips))
 }
 
 /// The repeat mode after the button (media3's numbering: off 0, one 1, all 2).
@@ -45,10 +113,49 @@ pub fn queue_next_repeat(mode: u8) -> u8 {
     q::next_repeat(mode)
 }
 
+/// What the next button does, with or without a song after the one playing.
+#[uniffi::export]
+pub fn next_action(has_next: bool) -> NextAction {
+    t::next_action(has_next)
+}
+
+/// Whether a skip the user asked for starts the music (it was paused).
+#[uniffi::export]
+pub fn skip_plays(play_when_ready: bool) -> bool {
+    t::skip_plays(play_when_ready)
+}
+
+/// A switch waiting out its dip (`nori_player::transport::SwitchQueue`): the platform keeps the action,
+/// this keeps whether it may still run.
+#[derive(uniffi::Object, Default)]
+pub struct SwitchState(Mutex<SwitchQueue>);
+
+#[uniffi::export]
+impl SwitchState {
+    #[uniffi::constructor]
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// A switch now waits, asked on `song` at queue index `index`.
+    pub fn wait(&self, song: Option<String>, index: i32) {
+        self.0.lock().wait(song.as_deref(), index);
+    }
+
+    /// The waiting switch is due: whether it runs (the player is still where it was asked).
+    pub fn take(&self, song: Option<String>, index: i32) -> bool {
+        self.0.lock().take(song.as_deref(), index)
+    }
+
+    pub fn drop_waiting(&self) {
+        self.0.lock().drop_waiting();
+    }
+}
+
 /// The output's rebuild bookkeeping for the equalizer screen and settings changes; see
 /// `nori_player::transport::Chain`. Each method says whether to rebuild the output now.
 #[derive(uniffi::Object, Default)]
-pub struct ChainState(parking_lot::Mutex<nori_player::transport::Chain>);
+pub struct ChainState(Mutex<nori_player::transport::Chain>);
 
 #[uniffi::export]
 impl ChainState {
@@ -83,30 +190,136 @@ impl ChainState {
     }
 }
 
-/// The sleep timer set to `songs` songs (or the end of this one): [pause at the end of this song (0/1),
-/// song changes still to go].
+// ---- the sleep timer ----
+
+/// Song changes still to go before the sleep timer "after N songs" pauses.
+static SLEEP_LEFT: Mutex<u32> = Mutex::new(0);
+
+/// The sleep timer set to `songs` songs (or the end of this one; both 0/false cancel it): whether to
+/// pause at the end of the song playing now. The song changes still to go are kept here.
 #[uniffi::export]
-pub fn sleep_after(songs: u32, end_of_track: bool) -> Vec<u32> {
-    let (pause, left) = nori_player::transport::sleep_after(songs, end_of_track);
-    vec![pause as u32, left]
+pub fn sleep_set(songs: u32, end_of_track: bool) -> bool {
+    let (pause, left) = t::sleep_after(songs, end_of_track);
+    *SLEEP_LEFT.lock() = left;
+    pause
 }
 
-/// A song change with `left` to go: [changes still to go, pause at the end of this song (0/1)].
+/// The song changed: whether the sleep timer now pauses at the end of this one.
 #[uniffi::export]
-pub fn sleep_song_changed(left: u32) -> Vec<u32> {
-    let (left, pause) = nori_player::transport::sleep_song_changed(left);
-    vec![left, pause as u32]
+pub fn sleep_song_changed() -> bool {
+    let mut left = SLEEP_LEFT.lock();
+    let (still, pause) = t::sleep_song_changed(*left);
+    *left = still;
+    pause
 }
 
 /// The sleep timer in minutes as [delay ms, slack ms].
 #[uniffi::export]
 pub fn sleep_delay(minutes: u32) -> Vec<i64> {
-    let (d, s) = nori_player::transport::sleep_delay_ms(minutes);
+    let (d, s) = t::sleep_delay_ms(minutes);
     vec![d, s]
+}
+
+/// What the sleep timer shows once set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct SleepShown {
+    /// The clock time (the platform's monotonic one, as `now_ms` was) it pauses at; 0 for none.
+    pub at_ms: i64,
+    /// It waits for a song to end.
+    pub at_end_of_track: bool,
+}
+
+#[uniffi::export]
+pub fn sleep_shown(minutes: u32, end_of_track: bool, songs: u32, now_ms: i64) -> SleepShown {
+    let (at_ms, at_end_of_track) = t::sleep_shown(minutes, end_of_track, songs, now_ms);
+    SleepShown { at_ms, at_end_of_track }
+}
+
+// ---- when the service does its chores ----
+
+/// How long the service waits before each of its chores, so every platform paces them the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct PlaybackTimings {
+    /// Into a song, before the songs after it are fetched ahead.
+    pub precache_after_ms: i64,
+    /// After the queue was edited, before the songs coming up are measured for AutoMix.
+    pub measure_after_edit_ms: i64,
+    /// After the sound settings changed, before the songs coming up are measured.
+    pub measure_after_settings_ms: i64,
+    /// After the queue changed, before it is saved.
+    pub save_after_ms: i64,
+    /// Paused this long, the output is let go (`nori_player::transport::IDLE_RELEASE_MS`).
+    pub idle_release_ms: i64,
+    /// One tick of a running volume fade.
+    pub fade_tick_ms: i64,
+    /// How often a seek being made to stick is looked at (`nori_player::seek::LOOK_EVERY_MS`).
+    pub seek_look_ms: i64,
+}
+
+#[uniffi::export]
+pub fn playback_timings() -> PlaybackTimings {
+    PlaybackTimings {
+        precache_after_ms: t::PRECACHE_AFTER_MS,
+        measure_after_edit_ms: t::MEASURE_AFTER_EDIT_MS,
+        measure_after_settings_ms: t::MEASURE_AFTER_SETTINGS_MS,
+        save_after_ms: t::SAVE_AFTER_MS,
+        idle_release_ms: t::IDLE_RELEASE_MS,
+        fade_tick_ms: t::FADE_TICK_MS,
+        seek_look_ms: nori_player::seek::LOOK_EVERY_MS,
+    }
 }
 
 /// How much the player reads ahead: [min buffer ms, max ms, to start ms, to resume ms, target bytes].
 #[uniffi::export]
 pub fn load_control(memory_class_mb: u32) -> Vec<i64> {
-    nori_player::transport::load_control(memory_class_mb).to_vec()
+    t::load_control(memory_class_mb).to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::playlist::tests::hold;
+
+    #[test]
+    fn the_songs_ahead_come_from_the_queue() {
+        let _g = hold(&["pc1", "pc2", "pc3", "pc4", "ext-5"], 0);
+        // Defaults: two ahead on Wi-Fi, one on a metered network, no transition.
+        assert_eq!(queue_precache(false), ["pc3"], "the player buffers the next song itself");
+        assert!(queue_precache(true).is_empty(), "one ahead is the player's own");
+        assert!(queue_measure().is_empty(), "AutoMix off: nothing measured");
+    }
+
+    #[test]
+    fn errors_are_counted_here_and_a_new_song_breaks_the_run() {
+        let _g = hold(&["er1", "er2"], 0);
+        ERRORS.lock().played();
+        for _ in 0..3 {
+            assert_eq!(queue_error(PlaybackError::Other, false, true), OnError::Skip);
+        }
+        assert_eq!(queue_error(PlaybackError::Other, false, true), OnError::Stop);
+        song_started();
+        assert_eq!(queue_error(PlaybackError::Network, false, true), OnError::Skip, "the bridge is off by default");
+        crate::playlist::playlist_moved_to(1);
+        assert_eq!(queue_error(PlaybackError::Other, false, true), OnError::Stop, "nothing after the last song");
+        assert!(!queue_bridge_failed());
+        song_started();
+    }
+
+    #[test]
+    fn the_sleep_timer_counts_songs_here() {
+        assert!(!sleep_set(3, false));
+        assert!(!sleep_song_changed());
+        assert!(sleep_song_changed(), "the third song is the last");
+        assert!(!sleep_song_changed());
+        assert!(sleep_set(0, true));
+        assert!(!sleep_song_changed(), "end of track: nothing counted");
+        assert_eq!(sleep_shown(1, false, 0, 10), SleepShown { at_ms: 60_010, at_end_of_track: false });
+        assert_eq!(playback_timings().seek_look_ms, 300);
+    }
+
+    #[test]
+    fn previous_reads_the_setting_itself() {
+        assert!(queue_previous_restarts(5_000, true), "the default does not always skip");
+        assert!(!queue_previous_restarts(1_000, true));
+    }
 }

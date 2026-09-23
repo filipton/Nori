@@ -21,15 +21,21 @@ import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Quality
 import java.io.File
 
+/** The stream cache's order of use, kept in the core (crates/core/src/stream_cache.rs). */
+internal object StreamCacheJni {
+    init { System.loadLibrary("norimusic") }
+    @JvmStatic external fun touch(key: String)
+    /** [keys] reordered in place into the order they leave the cache in. */
+    @JvmStatic external fun order(keys: Array<String>)
+}
+
 /**
- * Least-recently-used eviction with a limit that follows the setting. media3's own evictor takes its
- * maximum once, in the constructor, so changing "Space for streamed music" would otherwise wait for a
- * restart to mean anything. Trimming mirrors what that evictor does - the stalest whole resources go
- * until the cache fits - from the write callbacks (which is where media3 calls it) and on demand.
+ * Eviction with a limit that follows the setting. media3's own evictor takes its maximum once, in the
+ * constructor, so changing "Space for streamed music" would otherwise wait for a restart to mean
+ * anything. What goes first is the core's (never used by this run, then least recently used); this
+ * reports each use and, only when the cache is over its limit, drops whole resources in that order.
  */
 class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
-    private val order = LinkedHashMap<String, Unit>(16, 0.75f, true)
-
     override fun onCacheInitialized() {}
     override fun onStartFile(cache: Cache, key: String, position: Long, length: Long) = touch(cache, key)
     override fun onSpanAdded(cache: Cache, span: CacheSpan) = touch(cache, span.key!!)
@@ -38,26 +44,20 @@ class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
     override fun requiresCacheSpanTouches() = true
 
     private fun touch(cache: Cache, key: String) = synchronized(this) {
-        order[key] = Unit
+        StreamCacheJni.touch(key)
         trimLocked(cache)
     }
 
-    /** Throws out the stalest whole resources until the cache fits. Runs wherever the caller is. */
+    /** Throws out whole resources until the cache fits. Runs wherever the caller is. */
     fun trim(cache: Cache) = synchronized(this) { trimLocked(cache) }
 
     private fun trimLocked(cache: Cache) {
         if (cache.cacheSpace <= maxBytes) return
-        val dropping = order.keys.toList()
-        for (key in dropping) {
+        val keys = cache.keys.toTypedArray()
+        StreamCacheJni.order(keys)
+        for (key in keys) {
             if (cache.cacheSpace <= maxBytes) return
-            order.remove(key)
-            if (key in cache.keys) runCatching { cache.removeResource(key) }
-        }
-        // Keys an earlier process wrote and this one never touched are not in the order above;
-        // untouched since the restart is the stalest there is, so they go first.
-        for (key in cache.keys) {
-            if (cache.cacheSpace <= maxBytes) return
-            if (key !in order) runCatching { cache.removeResource(key) }
+            runCatching { cache.removeResource(key) }
         }
     }
 }
@@ -98,10 +98,11 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     fun resolve(dataSpec: DataSpec): DataSpec {
         applyStreamLimit()
         val id = dataSpec.uri.lastPathSegment!!
-        // A download is the permanent copy; for anything else the core picks the quality (the network the
-        // phone is on, the second address's cap) and the cache key.
-        val target = if (id in downloaded) client.downloadTarget(id, settings.value.download.ffi())
-        else settings.value.let { client.streamTarget(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
+        // Which copy and at what quality (a download is the permanent copy; a stream follows the network the
+        // phone is on and the second address's cap) is the core's, over its own settings. The network is
+        // asked only for a stream: one binder call per track.
+        val kept = id in downloaded
+        val target = client.resolve(id, kept, !kept && http.metered)
         return dataSpec.buildUpon().setUri(Uri.parse(target.url)).setKey(target.key).build()
     }
 

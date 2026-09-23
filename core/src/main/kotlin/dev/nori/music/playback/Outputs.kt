@@ -87,6 +87,6 @@ class Outputs(context: Context) {
         _usb.value = seen.usb
     }
 
-    /** The name nori_player::outputs::SPEAKER gives the phone's own speaker. */
-    companion object { const val SPEAKER = "Phone speaker" }
+    /** The name nori_player::outputs::SPEAKER gives the phone's own speaker, read once. */
+    companion object { val SPEAKER: String by lazy { dev.nori.music.ffi.outputsSpeaker() } }
 }

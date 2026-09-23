@@ -46,6 +46,169 @@ pub fn search_split(result: SearchResult) -> SearchSplit {
     })
 }
 
+/// Which of the answer the search screen shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum SearchScope {
+    #[default]
+    Everything,
+    /// Only what is in the library already; everything when there are no provider items.
+    Library,
+    /// Only what the providers offer; nothing when there is none.
+    Providers,
+}
+
+/// The scope chips and their words, in their order.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SearchScopeChip {
+    pub scope: SearchScope,
+    pub label: String,
+}
+
+#[uniffi::export]
+pub fn search_scopes() -> Vec<SearchScopeChip> {
+    [(SearchScope::Everything, "Everything"), (SearchScope::Library, "In library"), (SearchScope::Providers, "Not in library yet")]
+        .map(|(scope, label)| SearchScopeChip { scope, label: label.into() })
+        .to_vec()
+}
+
+impl SearchSplit {
+    /// The answer narrowed to `scope`.
+    fn shown(&self, scope: SearchScope) -> SearchResult {
+        match scope {
+            SearchScope::Everything => self.everything.clone(),
+            SearchScope::Library => self.library.clone().unwrap_or_else(|| self.everything.clone()),
+            SearchScope::Providers => self.providers.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// What the search screen shows now.
+#[derive(Debug, Clone, Default, uniffi::Record)]
+pub struct SearchView {
+    /// What is in the field, as typed.
+    pub text: String,
+    /// The query that is asked: the text trimmed. Empty for none.
+    pub query: String,
+    /// The answer narrowed to the scope; None with no query (the recent searches show instead).
+    pub shown: Option<SearchResult>,
+    /// The answer is the server's rather than the offline index's.
+    pub from_server: bool,
+    /// The server is being asked.
+    pub searching: bool,
+    /// The server could not be asked, in words; the offline answer stays on screen.
+    pub error: Option<String>,
+    pub scope: SearchScope,
+    /// The scope chips are offered: there are provider items, or a scope other than everything is on.
+    pub scopes_offered: bool,
+    /// The server answered with nothing at all.
+    pub nothing_found: bool,
+}
+
+#[derive(Default)]
+struct Session {
+    text: String,
+    split: Option<SearchSplit>,
+    from_server: bool,
+    searching: bool,
+    error: Option<String>,
+    scope: SearchScope,
+}
+
+impl Session {
+    fn query(&self) -> &str {
+        self.text.trim()
+    }
+
+    fn view(&self) -> SearchView {
+        let shown = self.split.as_ref().map(|s| s.shown(self.scope));
+        let has_providers = self.split.as_ref().is_some_and(|s| s.has_providers);
+        let empty = shown.as_ref().is_some_and(|r| r.songs.is_empty() && r.albums.is_empty() && r.artists.is_empty());
+        SearchView {
+            text: self.text.clone(),
+            query: self.query().to_string(),
+            nothing_found: self.from_server && empty,
+            shown,
+            from_server: self.from_server,
+            searching: self.searching,
+            error: self.error.clone(),
+            scope: self.scope,
+            scopes_offered: has_providers || self.scope != SearchScope::Everything,
+        }
+    }
+}
+
+/// Live search in two layers, as one state: every keystroke is answered at once from the offline index,
+/// and once typing pauses the server is asked too, because only the server (octo-fiesta) knows what is
+/// not in the library yet. An answer is taken only while it is still the answer to what is in the field,
+/// and the index's never over the server's for the same query - both come back out of order.
+#[derive(uniffi::Object, Default)]
+pub struct SearchSession(parking_lot::Mutex<Session>);
+
+#[uniffi::export]
+impl SearchSession {
+    #[uniffi::constructor]
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self::default())
+    }
+
+    /// The field now says `text`. Emptied, it goes back to the recent searches.
+    pub fn typed(&self, text: String) -> SearchView {
+        let mut s = self.0.lock();
+        let blank = text.trim().is_empty();
+        s.text = text;
+        s.from_server = false;
+        s.error = None;
+        s.searching = !blank;
+        if blank {
+            s.split = None;
+        }
+        s.view()
+    }
+
+    /// The offline index's answer to `query`, when it is still the one in the field and the server has
+    /// not answered it already; None otherwise.
+    pub fn local(&self, core: std::sync::Arc<Core>, query: String, limit: u32) -> Result<Option<SearchView>> {
+        let split = core.local_search_split(query.clone(), limit)?;
+        let mut s = self.0.lock();
+        if s.query() != query || s.from_server {
+            return Ok(None);
+        }
+        s.split = Some(split);
+        Ok(Some(s.view()))
+    }
+
+    /// The server's answer to `query`; None when the field has moved on.
+    pub fn server(&self, query: String, result: SearchResult) -> Option<SearchView> {
+        let split = search_split(result);
+        let mut s = self.0.lock();
+        if s.query() != query {
+            return None;
+        }
+        s.split = Some(split);
+        s.from_server = true;
+        s.searching = false;
+        s.error = None;
+        Some(s.view())
+    }
+
+    /// The server could not answer `query`: said, and the offline answer stays.
+    pub fn failed(&self, query: String, reason: Option<String>) -> Option<SearchView> {
+        let mut s = self.0.lock();
+        if s.query() != query {
+            return None;
+        }
+        s.searching = false;
+        s.error = Some(format!("Server search failed: {} — showing offline results", reason.as_deref().unwrap_or("null")));
+        Some(s.view())
+    }
+
+    pub fn scope(&self, scope: SearchScope) -> SearchView {
+        let mut s = self.0.lock();
+        s.scope = scope;
+        s.view()
+    }
+}
+
 /// Shorter than this, a query is a keystroke on the way to one, not one worth remembering.
 const REMEMBER_MIN_UTF16: usize = 2;
 
@@ -107,6 +270,34 @@ mod tests {
         r.albums.retain(|a| !a.is_external);
         let s = search_split(r);
         assert!(!s.has_providers && s.library.is_none() && s.providers.is_none());
+    }
+
+    #[test]
+    fn a_session_takes_only_answers_to_what_is_in_the_field() {
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        let s = SearchSession::new();
+        let v = s.typed(" dogs ".into());
+        assert_eq!((v.query.as_str(), v.searching, v.shown.is_none()), ("dogs", true, true));
+        assert!(s.local(core.clone(), "dog".into(), 30).unwrap().is_none(), "an older keystroke");
+        assert!(s.local(core.clone(), "dogs".into(), 30).unwrap().is_some());
+        let v = s.server("dogs".into(), result()).unwrap();
+        assert!(v.from_server && !v.searching && v.scopes_offered && !v.nothing_found);
+        assert_eq!(v.shown.as_ref().unwrap().songs.len(), 3);
+        assert!(s.local(core, "dogs".into(), 30).unwrap().is_none(), "the index never over the server");
+        assert_eq!(s.scope(SearchScope::Providers).shown.unwrap().songs.len(), 1);
+        assert_eq!(s.scope(SearchScope::Library).shown.unwrap().songs.len(), 2);
+        assert!(s.server("cats".into(), result()).is_none());
+        let failed = s.failed("dogs".into(), Some("timeout".into())).unwrap();
+        assert_eq!(failed.error.as_deref(), Some("Server search failed: timeout — showing offline results"));
+        let v = s.typed("  ".into());
+        assert!(v.shown.is_none() && !v.searching && v.error.is_none());
+        assert!(s.scope(SearchScope::Everything).scopes_offered == false);
+        let none = s.typed("x".into());
+        assert!(!none.nothing_found);
+        let v = s.server("x".into(), SearchResult::default()).unwrap();
+        assert!(v.nothing_found);
+        assert_eq!(s.scope(SearchScope::Library).shown.unwrap().songs.len(), 0, "no provider items: the library is everything");
+        assert_eq!(search_scopes()[2].label, "Not in library yet");
     }
 
     #[test]

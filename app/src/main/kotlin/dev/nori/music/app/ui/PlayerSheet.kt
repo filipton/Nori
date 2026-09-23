@@ -84,7 +84,7 @@ class PlayerSheet(private val scope: CoroutineScope) {
      */
     suspend fun backBy(progress: Float) {
         val eased = 1f - (1f - progress.coerceIn(0f, 1f)).let { it * it }
-        this.progress.snapTo(1f - BACK_TRAVEL * eased)
+        this.progress.snapTo(1f - stage.backTravel * eased)
     }
     fun close() = settle(0f, 0f)
 
@@ -105,21 +105,12 @@ class PlayerSheet(private val scope: CoroutineScope) {
     }
 
     /**
-     * The finger let go at [velocityY] pixels a second. A flick goes the way it was flicked; otherwise a
-     * drag that has come a little way - [COMMIT] of the travel - finishes the move it started, and a
-     * smaller one goes back. Deciding by the halfway point instead meant a pull down from the player had
-     * to cover half the screen before it would close.
+     * The finger let go at [velocityY] pixels a second. Where the sheet goes is the core's
+     * (`sheet_target`): a flick goes the way it was flicked, a drag that has come a little way finishes
+     * the move it started, and a smaller one goes back.
      */
     fun release(velocityY: Float) {
-        val moved = progress.value - from
-        val target = when {
-            velocityY < -FLICK -> 1f
-            velocityY > FLICK -> 0f
-            moved > COMMIT -> 1f
-            moved < -COMMIT -> 0f
-            else -> from
-        }
-        settle(target, -velocityY / travel)
+        settle(dev.nori.music.ffi.sheetTarget(from, progress.value, velocityY), -velocityY / travel)
     }
 
     private fun settle(target: Float, velocity: Float, stiffness: Float = 420f) {
@@ -131,16 +122,6 @@ class PlayerSheet(private val scope: CoroutineScope) {
         }
     }
 
-    private companion object {
-        /** A release faster than this, in pixels a second, goes the way it was flicked. */
-        const val FLICK = 900f
-
-        /** How far a slow drag has to come, as a share of the travel, to finish rather than go back. */
-        const val COMMIT = 0.15f
-
-        /** How far the back gesture takes the sheet down before it is let go. */
-        const val BACK_TRAVEL = 0.2f
-    }
 }
 
 val LocalPlayerSheet = staticCompositionLocalOf<PlayerSheet> { error("no player sheet") }

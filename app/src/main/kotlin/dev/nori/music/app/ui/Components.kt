@@ -92,19 +92,29 @@ import androidx.compose.ui.draw.drawWithCache
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-/** A cover of an octo-fiesta provider item (external song, album, artist or playlist). */
-fun isProviderCover(url: String) = url.contains("&id=ext-") || url.contains("&id=pl-")
+/**
+ * A cover of an octo-fiesta provider item (external song, album, artist or playlist). Which ids those
+ * are, and how a cover's address names its id, are nori-core's (`cover_rules`); this is only the string
+ * test, made where a cover is first composed, without a crossing.
+ */
+fun isProviderCover(url: String): Boolean = CoverSize.providerMarks.any { url.contains(it) }
 
 /** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from (nori-core's `fmt`). */
-fun providerOf(id: String): String? = if (id.startsWith("ext-") || id.startsWith("pl-")) dev.nori.music.ffi.providerOf(id) else null
+fun providerOf(id: String): String? = dev.nori.music.ffi.providerOf(id)
 
 /**
- * Two sizes, not four. A Subsonic server renders each requested size on demand and caches it per size,
- * so every extra bucket is another slow first fetch for every album in the library - measured at over
- * a second each on a real server. A list thumbnail and a grid card now share one rendition, and the
- * full-screen artwork shares its rendition with the notification and the lock screen.
+ * The sizes covers are drawn at, nori-core's (`cover_rules`): two, not four, because a Subsonic server
+ * renders each size it is asked for on demand. A list thumbnail and a grid card share one rendition, and
+ * the full-screen artwork shares its rendition with the notification and the lock screen.
  */
-object CoverSize { const val ROW = 320; const val CARD = 320; const val FULL = 800 }
+object CoverSize {
+    private val rules get() = dev.nori.music.data.Covers.rules
+    val ROW: Int = rules.row.toInt()
+    val CARD: Int = rules.card.toInt()
+    val FULL: Int = rules.full.toInt()
+    /** "&id=ext-", "&id=pl-": what a provider's cover address carries. */
+    internal val providerMarks: List<String> = rules.providerPrefixes.map { rules.idParam + it }
+}
 
 /**
  * Artwork with the app's corner radius. The request is remembered and sized up front, so scrolling
@@ -181,11 +191,11 @@ fun duration(seconds: Long): String {
     return Durations.made[i] ?: dev.nori.music.ffi.duration(seconds).also { Durations.made[i] = it }
 }
 
-/** The same with a minus in front, for the time left: kept the same way. */
+/** The time left, "-3:07" (nori-core's `fmt::duration_left`): kept the same way. */
 fun durationLeft(seconds: Long): String {
-    if (seconds < 0 || seconds >= Durations.MAX) return "-" + dev.nori.music.ffi.duration(seconds)
+    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.durationLeft(seconds)
     val i = seconds.toInt()
-    return Durations.left[i] ?: ("-" + duration(seconds)).also { Durations.left[i] = it }
+    return Durations.left[i] ?: dev.nori.music.ffi.durationLeft(seconds).also { Durations.left[i] = it }
 }
 
 private object Durations {
@@ -208,8 +218,8 @@ class SwipeState {
     var settling: kotlinx.coroutines.Job? = null
 }
 
-/** How far across the row a drag has to go before letting go acts. */
-private const val SWIPE_ARM = 0.3f
+/** How far across the row a drag has to go before letting go acts: the share that turns a record. */
+private val SWIPE_ARM: Float get() = stage.turn
 
 /**
  * Sideways drag on a row. Only a direction with an action moves at all. Past [SWIPE_ARM] of the width
@@ -408,9 +418,10 @@ fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
     androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     androidx.compose.runtime.LaunchedEffect(moving, resumed) {
         if (!moving || !resumed) return@LaunchedEffect
-        // One callback object for every frame, not a new lambda each time round.
-        val tick: (Long) -> Unit = { phase.floatValue = it / 1000f }
-        while (coroutineContext.isActive) androidx.compose.animation.core.withInfiniteAnimationFrameMillis(tick)
+        // One callback object for every frame, handed to the frame clock as it is: the millisecond
+        // variants wrap it in a new lambda each frame, which is garbage for as long as the music plays.
+        val tick: (Long) -> Unit = { phase.floatValue = it / 1e9f }
+        while (coroutineContext.isActive) androidx.compose.runtime.withFrameNanos(tick)
     }
     androidx.compose.foundation.Canvas(modifier) {
         val t = phase.floatValue
@@ -466,14 +477,27 @@ fun LazyListScope.songRows(
 
 /** The icon and words a swipe setting uncovers under [song]'s row, and the action; null when that side does nothing. */
 @Composable
-internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? = when (action) {
-    SwipeAction.NONE -> null
-    SwipeAction.QUEUE -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, "Add to queue") { actions.enqueue(listOf(song)) }
-    SwipeAction.PLAY_NEXT -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, "Play next") { actions.playNext(listOf(song)) }
-    SwipeAction.DOWNLOAD -> RowSwipe(Icons.Filled.Download, "Download") { actions.download(listOf(song)) }
-    SwipeAction.FAVOURITE -> {
-        val on = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
-        RowSwipe(if (on) Icons.Filled.HeartBroken else Icons.Filled.Favorite, if (on) "Remove" else "Favourite") { actions.star(song, !on) }
+internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? {
+    val starred = action == SwipeAction.FAVOURITE && LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
+    // What it says and does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once.
+    val words = SwipeWords.of(action.ordinal, starred) ?: return null
+    return when (val act = words.act) {
+        dev.nori.music.ffi.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, words.label) { actions.enqueue(listOf(song)) }
+        dev.nori.music.ffi.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, words.label) { actions.playNext(listOf(song)) }
+        dev.nori.music.ffi.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, words.label) { actions.download(listOf(song)) }
+        is dev.nori.music.ffi.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, words.label) { actions.star(song, act.on) }
+    }
+}
+
+/** The core's words for each swipe setting, hearted or not, asked once each. */
+private object SwipeWords {
+    private val made = arrayOfNulls<Any>(16)
+    private val NONE = Any()
+    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.RowSwipe? {
+        val i = setting * 2 + if (starred) 1 else 0
+        if (i !in made.indices) return null
+        val got = made[i] ?: (dev.nori.music.ffi.rowSwipe(setting.toUInt(), starred) ?: NONE).also { made[i] = it }
+        return got as? dev.nori.music.ffi.RowSwipe
     }
 }
 
@@ -564,7 +588,7 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
     androidx.compose.animation.AnimatedContent(
         load, contentKey = { it::class },
         transitionSpec = {
-            if (android.os.SystemClock.uptimeMillis() - opened < QUICK_LOAD_MS) {
+            if (android.os.SystemClock.uptimeMillis() - opened < stage.quickLoadMs) {
                 androidx.compose.animation.fadeIn(androidx.compose.animation.core.snap()) togetherWith
                     androidx.compose.animation.fadeOut(androidx.compose.animation.core.snap())
             } else {
@@ -578,15 +602,21 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
             is Load.Ready -> content(state.data)
             is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { LoadingDots() }
             is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
-                Text("Could not load", style = MaterialTheme.typography.titleLarge)
+                Text(remember { dev.nori.music.ffi.wordsNote(dev.nori.music.ffi.Note.COULD_NOT_LOAD) }, style = MaterialTheme.typography.titleLarge)
                 Text(state.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
     }
 }
 
-/** Data that arrives within this long of a page opening was never waited for; see LoadBox. */
-private const val QUICK_LOAD_MS = 300L
+
+/** One of nori-core's notes (`words_note`), asked once where it is shown. */
+@Composable
+fun noteText(note: dev.nori.music.ffi.Note): String = remember(note) { dev.nori.music.ffi.wordsNote(note) }
+
+/** Big, quiet type for an empty list, in the core's words. */
+@Composable
+fun EmptyNote(note: dev.nori.music.ffi.Note, modifier: Modifier = Modifier) = EmptyNote(noteText(note), modifier)
 
 /** Big, quiet type for an empty list: "Nothing here yet". */
 @Composable

@@ -280,3 +280,65 @@ fn asking_what_is_heard_allocates_nothing() {
     });
     assert_eq!(n, 1);
 }
+
+/// The seek bar's place (held while the page is a song behind, run on while reconnecting) and a volume
+/// fade's tick are asked every frame and every 16 ms: neither may allocate.
+#[test]
+fn the_playhead_and_a_fade_tick_allocate_nothing() {
+    use crate::heard::{Playhead, Seen};
+    let mut t = HeardTracker::new();
+    t.set_queue([("a".to_string(), 200_000), ("b".to_string(), 180_000)]);
+    let mut p = Playhead::new();
+    let mut sum = 0i64;
+    let mut vol = 0f32;
+    let n = allocations(|| {
+        for ms in (16..8_000).step_by(16) {
+            let index = if ms > 4_000 { Some(1) } else { Some(0) };
+            sum += p.show(&t, Seen { index, ms, changed: false }, Some(0), ms);
+            sum += p.run_on(ms, true);
+            vol += crate::transport::fade_step(1.0, 0.0, 16, ms, 600).0;
+        }
+    });
+    assert_eq!(n, 0);
+    assert!(sum > 0 && vol > 0.0);
+}
+
+#[test]
+fn decoding_a_packet_allocates_nothing_after_the_first() {
+    use crate::decode::{Codec, Decoder};
+    let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.mp3")).unwrap();
+    let frames = crate::decode::tests::mp3_frames(&file);
+    let mut d = Decoder::new(Codec::Mp3, 44_100, 2, None, true).unwrap();
+    let mut out = vec![0i16; 1152 * 2];
+    let mut outf = vec![0f32; 1152 * 2];
+    for f in &frames[..4] {
+        d.decode_i16(f, &mut out).unwrap();
+    }
+    let n = allocations(|| {
+        for f in &frames[4..] {
+            d.decode_i16(f, &mut out).unwrap();
+        }
+        for f in &frames[4..] {
+            d.decode_f32(f, &mut outf).unwrap();
+        }
+    });
+    assert_eq!(n, 0, "allocations while decoding");
+}
+
+#[test]
+fn decoding_opus_allocates_nothing_after_the_first_packets() {
+    use crate::decode::{Codec, Decoder};
+    let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.opus")).unwrap();
+    let (setup, packets) = crate::decode::tests::ogg_opus(&file);
+    let mut d = Decoder::new(Codec::Opus, 48_000, 2, Some(&setup), false).unwrap();
+    let mut out = vec![0i16; 5760 * 2];
+    for p in &packets[..4] {
+        d.decode_i16(p, &mut out).unwrap();
+    }
+    let n = allocations(|| {
+        for p in &packets[4..] {
+            d.decode_i16(p, &mut out).unwrap();
+        }
+    });
+    assert_eq!(n, 0, "allocations while decoding Opus");
+}

@@ -117,10 +117,6 @@ fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePale
  * record the same way. This only reads the pixels out and wraps the answer for Compose.
  */
 private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette? {
-    val px = IntArray(bitmap.width * bitmap.height).also { bitmap.getPixels(it, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height) }
-    val c = CoverLook.derive(px, bitmap.width, bitmap.height, dark, amoled) ?: return null
-    return PagePalette(
-        c.look,
-        wash = c.wash?.let { Bitmap.createBitmap(it, CoverLook.WASH, CoverLook.WASH, Bitmap.Config.ARGB_8888).asImageBitmap() },
-    )
+    val c = CoverLook.derive(bitmap, dark, amoled) ?: return null
+    return PagePalette(c.look, wash = c.wash?.asImageBitmap())
 }

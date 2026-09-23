@@ -28,6 +28,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -44,7 +45,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.playback.PlayerState
 import dev.nori.music.settings.ThemeMode
 
 /**
@@ -75,14 +75,11 @@ fun HeroPage(
      */
     awaitingPlay: Boolean = false,
     /**
-     * Says whether the queue on the phone was started from this page. A page only has to say what
-     * "this page's own" means - its songs, or the albums of an artist - and reads [PlayerState] for
-     * the rest, so the two big buttons can answer for that queue rather than for the player in
-     * general: Play becomes Pause while it sounds (and picks it up where it stopped rather than
-     * starting the record again), Shuffle lights while it is shuffling, and a second press on Shuffle
-     * turns shuffle off instead of drawing the same songs into a new queue.
+     * What "this page's own queue" means - its songs, or the albums of an artist - held by the core
+     * (`pages::PageQueue`), so the two big buttons answer for that queue rather than for the player in
+     * general (`pages::hero_buttons`). Null: the page has no queue of its own.
      */
-    playingHere: (PlayerState) -> Boolean = { false },
+    queue: dev.nori.music.ffi.PageQueue? = null,
     /** Icon buttons on the line with the pills: favourite, queue, download. */
     actions: @Composable RowScope.() -> Unit = {},
     /**
@@ -99,11 +96,13 @@ fun HeroPage(
     // Shuffle stays labelled Shuffle (never Pause); it lights while this page's queue is shuffling.
     val player: PlayerViewModel = viewModel()
     val playerState by player.state.collectAsStateWithLifecycle()
-    // The queue this page started is what is on - whichever song of it happens to be sounding.
-    val here = playingHere(playerState)
-    val shuffling = playerState.shuffle && here
-    // Pause while that queue sounds; otherwise Play starts one, or picks this one back up.
-    val pausing = here && (playerState.playing || playerState.buffering)
+    // The queue this page started is what is on - whichever song of it happens to be sounding. Asked
+    // when the song changes, not on every change of the player's state.
+    val current = playerState.current
+    val here = remember(queue, current?.id, current?.albumId) { queue?.plays(current?.id, current?.albumId) ?: false }
+    val buttons = remember(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null) {
+        dev.nori.music.ffi.heroButtons(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null)
+    }
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
@@ -138,14 +137,15 @@ fun HeroPage(
                                     // its own height to do this in, and ending on the page colour means
                                     // there is nothing left to hand over to. The stops are the look's
                                     // (nori_look::dress), made into brushes once per size.
+                                    val at = stage.heroStops
                                     val dissolve = Brush.verticalGradient(
-                                        0.60f to Color.Transparent,
-                                        0.76f to look.color(CoverLook.HERO_EDGE),
-                                        0.88f to look.color(CoverLook.HERO_MID),
-                                        1f to look.color(CoverLook.BACKGROUND),
+                                        at[0] to Color.Transparent,
+                                        at[1] to look.color(CoverLook.HERO_EDGE),
+                                        at[2] to look.color(CoverLook.HERO_MID),
+                                        at[3] to look.color(CoverLook.BACKGROUND),
                                     )
                                     // Just enough shade under the status bar for white icons on a pale cover.
-                                    val shade = Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 0.16f to Color.Transparent)
+                                    val shade = Brush.verticalGradient(0f to Color.Black.copy(alpha = stage.statusShade), stage.statusShadeTo to Color.Transparent)
                                     onDrawWithContent {
                                         drawContent()
                                         drawRect(dissolve)
@@ -188,21 +188,22 @@ fun HeroPage(
                             Modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.gutter, top = 16.dp),
                             Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
                         ) {
+                            val press: (dev.nori.music.ffi.HeroPress, (() -> Unit)?) -> Unit = { p, start ->
+                                when (p) {
+                                    dev.nori.music.ffi.HeroPress.START -> start?.invoke()
+                                    dev.nori.music.ffi.HeroPress.TOGGLE -> player.toggle()
+                                    dev.nori.music.ffi.HeroPress.SHUFFLE_OFF -> player.toggleShuffle()
+                                }
+                            }
                             CircleButton(
                                 Icons.Filled.Shuffle, "Shuffle",
-                                enabled = shuffling || onShuffle != null, lit = shuffling,
-                                onClick = {
-                                    // On the page that is what sounds, a second press turns shuffle off
-                                    // for this queue rather than shuffling the same songs once more.
-                                    if (shuffling) player.toggleShuffle() else onShuffle?.invoke()
-                                },
+                                enabled = buttons.shuffleEnabled, lit = buttons.shuffleLit,
+                                onClick = { press(buttons.shufflePress, onShuffle) },
                             )
                             PillButton(
-                                if (pausing) "Pause" else "Play", if (pausing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                // On its own queue the pill pauses and resumes; starting the record
-                                // over is what it does only for a queue that is not this page's.
-                                { if (here) player.toggle() else onPlay?.invoke() }, Modifier.weight(1f),
-                                prominent = true, enabled = here || onPlay != null,
+                                buttons.playLabel, if (buttons.pausing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                { press(buttons.playPress, onPlay) }, Modifier.weight(1f),
+                                prominent = true, enabled = buttons.playEnabled,
                             )
                             actions()
                         } else Row(

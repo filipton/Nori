@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.padding
@@ -100,7 +101,11 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val shown = LocalPlayerShown.current
-    if (prefs.lyricsKeepScreenOn && shown) { val view = LocalView.current; DisposableEffect(playing) { view.keepScreenOn = playing; onDispose { view.keepScreenOn = false } } }
+    // When the screen stays on is the core's (`lyrics_keep_screen_on`).
+    if (prefs.lyricsKeepScreenOn && shown) {
+        val view = LocalView.current
+        DisposableEffect(playing) { view.keepScreenOn = dev.nori.music.ffi.lyricsKeepScreenOn(true, true, playing); onDispose { view.keepScreenOn = false } }
+    }
     Column(Modifier.fillMaxSize()) {
         LyricsHeader(vm, actions, playerState.current)
         // Loading, nothing found, or the words - each fades into the next rather than replacing it, the
@@ -123,7 +128,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     val look = LocalLook.current
-                    LookText("No lyrics", { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
+                    LookText(noteText(dev.nori.music.ffi.Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
                 }
             }
         }
@@ -132,8 +137,6 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
 
 private enum class LyricsPhase { LOADING, NONE }
 
-/** How long the words stay where a finger left them before they come back to the song. */
-private const val READING_MS = 4_000L
 
 /** The words of one song, in time with it. */
 @Composable
@@ -201,7 +204,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
         var returning by remember(lyrics) { mutableStateOf(false) }
         LaunchedEffect(dragged) {
             if (dragged) { follow = false; returning = false } else if (!follow) {
-                delay(READING_MS)
+                delay(stage.lyricsReadingMs)
                 returning = true
                 follow = true
             }
@@ -235,7 +238,14 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = maxHeight / 2),
             modifier = Modifier
                 .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent {
+                .drawWithCache {
+                  // Gone by the source label at the bottom, so the two never sit on each other. The
+                  // stops are the core's (`nori_look::sleeve::LYRICS_MASK`); one brush per size, which a
+                  // scroll does not change.
+                  val mask = alphaGradient(stage.lyricsMask, Color.Black, 0f, size.height)
+                  val at = androidx.compose.ui.geometry.Offset(-1f, -1f)
+                  val area = androidx.compose.ui.geometry.Size(size.width + 2f, size.height + 2f)
+                  onDrawWithContent {
                     drawContent()
                     // Drawn a pixel beyond the panel on every side, with the gradient still anchored to
                     // the panel's own height. The layer is clipped to whole pixels and the mask was not,
@@ -243,17 +253,8 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     // letters below, between the source label and the seek bar, which is what was
                     // peeking out of the "1 px gap". Past the last stop the brush stays transparent, so
                     // the extra row erases rather than paints.
-                    drawRect(
-                        Brush.verticalGradient(
-                            // Gone by the source label at the bottom, so the two never sit on each other.
-                            0f to Color.Transparent, 0.05f to Color.Black,
-                            0.66f to Color.Black, 0.92f to Color.Transparent,
-                            startY = 0f, endY = size.height,
-                        ),
-                        topLeft = androidx.compose.ui.geometry.Offset(-1f, -1f),
-                        size = androidx.compose.ui.geometry.Size(size.width + 2f, size.height + 2f),
-                        blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
-                    )
+                    drawRect(mask, topLeft = at, size = area, blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
+                  }
                 },
         ) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
@@ -264,7 +265,9 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     // old-line/new-line blend, and when the next line arrived before a blend had
                     // finished it restarted from a line two changes back - one frame of the wrong
                     // line fully lit. Nothing here can jump: a change mid-way just turns it round.
-                    val target = if (!lyrics.synced || i == active) 1f else if (i < active) PAST_LINE else NEXT_LINE
+                    // How lit each line is, by where the singing is, is the core's; asked when the line
+                    // being sung changes, not per frame.
+                    val target = remember(lyrics.synced, i, active) { dev.nori.music.ffi.lyricLineStrength(lyrics.synced, i, active) }
                     val strength = remember { Animatable(target) }
                     LaunchedEffect(target, plain) {
                         if (plain) strength.snapTo(target)
@@ -294,9 +297,10 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
         // corner carries where they came from, and tapping it opens the two buttons. It closes again
         // on the next tap, and stays open while the offset is not zero so the number can be read.
         var tuning by remember(lyrics) { mutableStateOf(false) }
-        val source = found.source.takeIf { it != dev.nori.music.data.LyricsSource.SERVER }
+        // Whose words these are and whether they are timed, in the core's words; None: no corner at all.
+        val credit = remember(found.source, lyrics.synced) { dev.nori.music.ffi.wordsLyricsCredit(found.source, lyrics.synced) }
         val open = tuning || nudgeMs != 0L
-        if (lyrics.synced || source != null) androidx.compose.material3.Surface(
+        if (credit != null) androidx.compose.material3.Surface(
             onClick = { if (lyrics.synced) tuning = !tuning },
             enabled = lyrics.synced,
             shape = PillShape,
@@ -314,8 +318,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                 // came without timings, that they did. Unsung words are all one brightness and a tap on
                 // one goes nowhere, which looks broken unless the corner says why.
                 LookText(
-                    listOfNotNull(source?.label ?: "Timing".takeIf { lyrics.synced }, "not timed".takeIf { !lyrics.synced })
-                        .joinToString(" · "),
+                    credit,
                     dim, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall,
                 )
                 if (open) {
@@ -394,6 +397,3 @@ private fun SweepLine(line: LyricLine, style: TextStyle, dim: ColorProducer, bri
 /** Ease in and out, soft at both ends, the curve iOS uses for its own scrolling transitions. */
 private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
 
-/** How lit a line is once it has been sung, and before it is reached. */
-private const val PAST_LINE = 0.35f * 0.55f
-private const val NEXT_LINE = 0.35f

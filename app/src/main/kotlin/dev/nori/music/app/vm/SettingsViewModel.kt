@@ -23,7 +23,23 @@ import dev.nori.music.ffi.eqImport
 import dev.nori.music.ffi.eqPresets
 import dev.nori.music.ffi.eqRemoveBand
 import dev.nori.music.ffi.eqResetBands
-import dev.nori.music.ffi.settingByName
+import dev.nori.music.ffi.AutoEqHit
+import dev.nori.music.ffi.DacFacts
+import dev.nori.music.ffi.EqLevel
+import dev.nori.music.ffi.SettingChange
+import dev.nori.music.ffi.SettingsFacts
+import dev.nori.music.ffi.SettingsGroup
+import dev.nori.music.ffi.SettingsHit
+import dev.nori.music.ffi.SettingsPage
+import dev.nori.music.ffi.StorageFacts
+import dev.nori.music.ffi.SyncFacts
+import dev.nori.music.ffi.autoeqCountWords
+import dev.nori.music.ffi.autoeqHits
+import dev.nori.music.ffi.eqSetAutoPreamp
+import dev.nori.music.ffi.eqSetBand
+import dev.nori.music.ffi.eqSetLevel
+import dev.nori.music.ffi.serverNewId
+import dev.nori.music.ffi.settingSet
 import dev.nori.music.ffi.soundFromJson
 import dev.nori.music.ffi.storageIndexFiles
 import dev.nori.music.ffi.NamedPreset
@@ -46,7 +62,21 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
 
 data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
-data class AutoEqUi(val count: Int = 0, val query: String = "", val hits: List<AutoEqEntry> = emptyList(), val busy: Boolean = false, val applied: String? = null, val error: String? = null)
+/**
+ * The AutoEQ list: how many headphones it holds ([countWords] and [searchWords] say so), the query and
+ * its hits, and whether the query is still too short to search (the core's `autoeq_too_short`).
+ */
+data class AutoEqUi(
+    val count: Int = 0,
+    val query: String = "",
+    val hits: List<AutoEqHit> = emptyList(),
+    val tooShort: Boolean = true,
+    val busy: Boolean = false,
+    val applied: String? = null,
+    val error: String? = null,
+    val countWords: String = "",
+    val searchWords: String = "",
+)
 
 /**
  * One output device in the equalizer's device list: [name] is what it calls itself, [kind] where it is
@@ -81,6 +111,59 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     init { viewModelScope.launch { runCatching { nori.library.indexSize() }.onSuccess { n -> _sync.update { it.copy(indexed = n) } } } }
 
     fun update(change: (Prefs) -> Prefs) = nori.settings.update(change)
+
+    // ---- the settings screen, laid out by the core (settings_schema.rs) ----
+
+    /** The groups the root of Settings lists. */
+    val settingsGroups: List<SettingsGroup> by lazy { dev.nori.music.ffi.settingsGroups() }
+
+    fun searchSettings(query: String): List<SettingsHit> = dev.nori.music.ffi.settingsSearch(query)
+
+    /** One group's page for the settings as they are now; asked only when they or [settingsFacts] change. */
+    fun settingsPage(id: String, facts: SettingsFacts): SettingsPage? = dev.nori.music.ffi.settingsPage(id, facts)
+
+    /** What a settings page depends on besides the settings, from this platform. */
+    val settingsFacts: StateFlow<SettingsFacts> by lazy {
+        combine(dac, _sync, _storage, _analysed, _folders, ::factsOf)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), factsOf(dac.value, _sync.value, _storage.value, _analysed.value, _folders.value))
+    }
+
+    private fun factsOf(d: DacState, s: SyncUi, st: StorageUi, analysed: Int, folders: List<MusicFolder>) = SettingsFacts(
+        dac = DacFacts(d.device, d.bitPerfect, d.sampleRate.toUInt(), d.bits.toUInt(), d.supported, d.modes, d.blockedBy, d.playing, d.track),
+        // Wallpaper colours and the blurred sleeve both need Android 12.
+        wallpaperColours = android.os.Build.VERSION.SDK_INT >= 31,
+        coverBlur = android.os.Build.VERSION.SDK_INT >= 31,
+        analysed = analysed.toUInt(),
+        sync = SyncFacts(s.running, s.indexed.songs, s.indexed.albums, s.indexed.artists, s.error),
+        storage = StorageFacts(st.streamBytes, st.coverBytes, st.downloadBytes, st.downloadSongs.toUInt(), st.indexBytes, st.busy),
+        folders = folders,
+    )
+
+    /** A row's setting changed: its name and the value picked, which the core reads and applies. */
+    fun set(name: String, value: String) {
+        settingSet(name, value)?.let(::apply)
+    }
+
+    private fun apply(change: SettingChange) {
+        // The active server's own settings go through the server's update, which connects it again.
+        if (change.server) {
+            change.prefs.prefs().server?.let(nori::updateServer)
+            return
+        }
+        nori.settings.put(change.prefs)
+        if (change.applyCacheLimit) applyCacheLimit()
+    }
+
+    /** A button on a settings row. */
+    fun act(action: String) {
+        when (action) {
+            "measure-again" -> clearAnalyses()
+            "sync-library" -> syncLibrary()
+            "download-library" -> downloadLibrary()
+            "clear-stream" -> clearStreamCache()
+            "clear-covers" -> clearCovers()
+        }
+    }
 
     /** Applies "Space for streamed music" at once instead of at the next track. */
     fun applyCacheLimit() = viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() }
@@ -124,8 +207,8 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         return f.listFiles()?.sumOf(::dirBytes) ?: 0L
     }
 
-    /** A blank profile for the "add server" form. */
-    fun newProfile() = ServerProfile(id = java.util.UUID.randomUUID().toString().take(8))
+    /** A blank profile for the "add server" form, with a fresh id from the core. */
+    fun newProfile() = ServerProfile(id = serverNewId())
 
     fun login(profile: ServerProfile) {
         if (_login.value.busy) return
@@ -178,11 +261,11 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         // Not a setting: the one button on that screen a check needs, so a run can start from a phone
         // that has measured nothing and see the measuring happen.
         if (name == "clearAnalyses") { clearAnalyses(); return true }
+        // The "Streamed music" button: a check that needs a song to be fetched cannot have it cached.
+        if (name == "clearStreamCache") { clearStreamCache(); return true }
         // Which names exist, how each value reads and the ranges are the core's (settings::set_by_name),
-        // the same ranges the settings are loaded with.
-        val change = settingByName(prefs.value.stored(), name, value) ?: return false
-        update { change.prefs.prefs() }
-        if (change.applyCacheLimit) viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() }
+        // the same the settings screen's rows use and the settings are loaded with.
+        apply(settingSet(name, value) ?: return false)
         return true
     }
 
@@ -229,7 +312,14 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     // graphic bands coming back when the last one goes) are the core's (settings.rs).
     fun applyPreset(p: NamedPreset) = update { it.withSound(eqApplyPreset(it.sound(), p)) }
 
-    fun setBand(index: Int, band: Band) = update { it.copy(eqBands = it.eqBands.toMutableList().also { l -> l[index] = band }) }
+    /** One band changed, held in the equalizer's ranges by the core. */
+    fun setBand(index: Int, band: Band) = update { it.withSound(eqSetBand(it.sound(), index.toUInt(), band.stored())) }
+
+    /** Pre-amp, balance, limiter ceiling or crossfeed moved; the core holds it in range and snaps it. */
+    fun setLevel(level: EqLevel, value: Float) = update { it.withSound(eqSetLevel(it.sound(), level, value)) }
+
+    /** The automatic pre-amp on or off; off starts from the level it was at. */
+    fun setAutoPreamp(automatic: Boolean) = update { it.withSound(eqSetAutoPreamp(it.sound(), automatic)) }
     fun addBand() = update { it.withSound(eqAddBand(it.sound())) }
     fun removeBand(index: Int) = update { it.withSound(eqRemoveBand(it.sound(), index.toUInt())) }
     fun resetBands() = update { it.withSound(eqResetBands(it.sound())) }
@@ -338,7 +428,9 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     private val _autoEq = MutableStateFlow(AutoEqUi())
     val autoEq: StateFlow<AutoEqUi> = _autoEq
 
-    init { viewModelScope.launch { _autoEq.update { it.copy(count = runCatching { nori.core.autoeqCount() }.getOrDefault(0u).toInt()) } } }
+    init { viewModelScope.launch { val n = runCatching { nori.core.autoeqCount() }.getOrDefault(0u); _autoEq.update { it.counted(n) } } }
+
+    private fun AutoEqUi.counted(n: UInt) = autoeqCountWords(n).let { w -> copy(count = n.toInt(), countWords = w.count, searchWords = w.search) }
 
     /** Downloads the AutoEQ index once (850 kB) so searching is local afterwards. */
     fun downloadAutoEqIndex() = viewModelScope.launch {
@@ -347,7 +439,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         _autoEq.update { it.copy(busy = true, error = null) }
         _autoEq.value = try {
             val text = withContext(Dispatchers.IO) { nori.http.get(nori.core.autoeqIndexUrl()).decodeToString() }
-            AutoEqUi(count = withContext(Dispatchers.IO) { nori.core.autoeqStore(text) }.toInt())
+            AutoEqUi().counted(withContext(Dispatchers.IO) { nori.core.autoeqStore(text) })
         } catch (e: Exception) {
             AutoEqUi(error = describeConnectionError(e))
         }
@@ -355,9 +447,9 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     fun searchAutoEq(query: String) = viewModelScope.launch {
         _autoEq.update { it.copy(query = query) }
-        // Too short a query and the limit are the core's (autoeq_find).
-        val hits = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqFind(query) }.getOrDefault(emptyList()) }
-        _autoEq.update { if (it.query == query) it.copy(hits = hits) else it }
+        // Too short a query, the limit and the lines under each hit are the core's (autoeq_browse).
+        val found = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqBrowse(query) }.getOrNull() }
+        _autoEq.update { if (it.query == query) it.copy(hits = found?.hits.orEmpty(), tooShort = found?.tooShort ?: true) else it }
     }
 
     /**
@@ -365,7 +457,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
      * "Sony WH-1000XM5". Empty when the index is not downloaded or the name says nothing (the speaker, a
      * generic "USB Audio").
      */
-    suspend fun autoEqFor(output: String): List<AutoEqEntry> = devices.curvesFor(output)
+    suspend fun autoEqFor(output: String): List<AutoEqHit> = autoeqHits(devices.curvesFor(output))
 
     /** Fetches one headphone's parametric preset and makes it the current curve. */
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {

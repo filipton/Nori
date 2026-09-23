@@ -4,6 +4,7 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import dev.nori.music.ffi.Hand
 import dev.nori.music.ffi.RadioStation
 import dev.nori.music.ffi.Song
 
@@ -67,24 +68,34 @@ fun RadioStation.toMediaItem(): MediaItem = MediaItem.Builder()
     .setUri(streamUrl)
     .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(streamUrl)).build())
     .setMediaMetadata(
-        MediaMetadata.Builder().setTitle(name).setArtist("Radio").setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+        MediaMetadata.Builder().setTitle(name).setArtist(dev.nori.music.ffi.wordsRadioArtist()).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
             .setIsPlayable(true).setIsBrowsable(false).build()
     )
     .build()
 
 val MediaItem.isRadio get() = mediaId.startsWith(RADIO_PREFIX)
 
-/** A controller's items arrive without their URI; put it back. */
 /**
- * Songs added by hand carry how they came: "next" (Play next) or "last" (Add to queue). The service
- * keeps them right after the playing song, in the order they were added and ahead of the rest of the
- * queue, shuffled or not (see PlaybackService.upNext). Once in, both count alike as hand-added.
+ * Songs added by hand carry how they came across the controller: [Hand.NEXT] (Play next) or [Hand.LAST]
+ * (Add to queue). Where that puts them is the core's (nori_player::playlist::Playlist::take); once in,
+ * both count alike as hand-added.
  */
 private const val QUEUED = "queued"
-fun MediaItem.queuedAs(): String? = mediaMetadata.extras?.getString(QUEUED)
-fun MediaItem.queued(how: String): MediaItem =
-    buildUpon().setMediaMetadata(mediaMetadata.buildUpon().setExtras(Bundle(mediaMetadata.extras ?: Bundle.EMPTY).apply { putString(QUEUED, how) }).build()).build()
+fun MediaItem.queuedAs(): Hand? = mediaMetadata.extras?.getString(QUEUED)?.let { runCatching { Hand.valueOf(it) }.getOrNull() }
+fun MediaItem.queued(how: Hand): MediaItem = withExtra { putString(QUEUED, how.name) }
 
+/**
+ * A list already put in the order it plays (a weighted shuffle, which the player's own shuffle would
+ * undo), marked on its first item so the core keeps shuffle shown while the player's is off.
+ */
+private const val ORDERED = "ordered"
+fun MediaItem.inOrder(): Boolean = mediaMetadata.extras?.getBoolean(ORDERED) == true
+fun MediaItem.ordered(): MediaItem = withExtra { putBoolean(ORDERED, true) }
+
+private inline fun MediaItem.withExtra(put: Bundle.() -> Unit): MediaItem =
+    buildUpon().setMediaMetadata(mediaMetadata.buildUpon().setExtras(Bundle(mediaMetadata.extras ?: Bundle.EMPTY).apply(put)).build()).build()
+
+/** A controller's items arrive without their URI; put it back. */
 fun MediaItem.playable(): MediaItem =
     buildUpon().setUri(requestMetadata.mediaUri ?: songUri(mediaId)).build()
 

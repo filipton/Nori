@@ -10,8 +10,8 @@ import dev.nori.music.ffi.Core
 import dev.nori.music.ffi.Genre
 import dev.nori.music.ffi.IngestStats
 import dev.nori.music.ffi.Lyrics
+import dev.nori.music.ffi.LyricsOrigin
 import dev.nori.music.ffi.Page
-import dev.nori.music.ffi.PlayQueue
 import dev.nori.music.ffi.Playlist
 import dev.nori.music.ffi.PlaylistDetail
 import dev.nori.music.ffi.RadioStation
@@ -21,13 +21,14 @@ import dev.nori.music.ffi.ServerInfo
 import dev.nori.music.ffi.Song
 import dev.nori.music.ffi.Starrable
 import dev.nori.music.ffi.Starred
+import dev.nori.music.ffi.StarMarks
+import dev.nori.music.ffi.AlbumSort
+import dev.nori.music.ffi.albumSortApi
+import dev.nori.music.ffi.librarySizes
+import dev.nori.music.ffi.starMarks
 import dev.nori.music.ffi.Write
 import dev.nori.music.ffi.starMark
-import dev.nori.music.ffi.starRestore
-import dev.nori.music.ffi.NetException
-import dev.nori.music.net.lift
 import dev.nori.music.net.lifted
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,14 +40,21 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 
-enum class AlbumSort(val api: String) {
-    NEWEST("newest"), RECENT("recent"), FREQUENT("frequent"), RANDOM("random"),
-    BY_NAME("alphabeticalByName"), BY_ARTIST("alphabeticalByArtist"), STARRED("starred"), BY_GENRE("byGenre"), BY_YEAR("byYear"),
+/** What can be starred. The marks are kept per kind by the core (`stars.rs`), keyed by id alone. */
+enum class StarKind(internal val target: Starrable) {
+    SONG(Starrable.SONG), ALBUM(Starrable.ALBUM), ARTIST(Starrable.ARTIST),
 }
 
+/** The mark of [id] of [kind], if this session changed it. */
+fun StarMarks.of(kind: StarKind, id: String): Boolean? = when (kind) {
+    StarKind.SONG -> songs[id]
+    StarKind.ALBUM -> albums[id]
+    StarKind.ARTIST -> artists[id]
+}
 
-enum class StarKind(val param: String, internal val target: Starrable) {
-    SONG("id", Starrable.SONG), ALBUM("albumId", Starrable.ALBUM), ARTIST("artistId", Starrable.ARTIST),
+/** How the app sizes, names and keeps artwork (the core's `cover_rules`), read once. */
+object Covers {
+    val rules: dev.nori.music.ffi.CoverRules by lazy { dev.nori.music.ffi.coverRules() }
 }
 
 /**
@@ -63,17 +71,19 @@ class Library(
     // and building it costs ~100 ms the UI thread should not pay.
     private val core get() = coreOf()
     private val client get() = clientOf()
+    /** How much each read asks for (the core's `library_sizes`). */
+    private val sizes by lazy { librarySizes() }
 
     /**
-     * Star changes made this session, keyed `"${kind.param}:$id"`, as the core keeps them (`stars.rs`,
-     * which also lays them over the lists it is asked to). Reads that paint once (a cached list, a queue
-     * snapshot) would otherwise sit stale until the screen is reopened; the UI prefers these over the
-     * snapshot. Bumped alongside [starsVersion].
+     * Star changes made this session, one map per kind, as the core keeps them (`stars.rs`, which also
+     * lays them over the lists it is asked to). Reads that paint once (a cached list, a queue snapshot)
+     * would otherwise sit stale until the screen is reopened; the UI prefers these over the snapshot.
+     * Bumped alongside [starsVersion].
      */
-    private val _starMarks = MutableStateFlow(emptyMap<String, Boolean>())
-    val starMarks: StateFlow<Map<String, Boolean>> = _starMarks.asStateFlow()
+    private val _starMarks = MutableStateFlow(StarMarks(emptyMap(), emptyMap(), emptyMap()))
+    val starMarks: StateFlow<StarMarks> = _starMarks.asStateFlow()
     /** Star state as it should be shown: this session's change wins over the [snapshot] a list or queue item was built with. */
-    fun isStarred(kind: StarKind, id: String, snapshot: Boolean): Boolean = _starMarks.value["${kind.param}:$id"] ?: snapshot
+    fun isStarred(kind: StarKind, id: String, snapshot: Boolean): Boolean = _starMarks.value.of(kind, id) ?: snapshot
     /** Bumped on every star change, so one-shot reads (the favourites list) can re-query. */
     private val _starsVersion = MutableStateFlow(0)
     val starsVersion: StateFlow<Int> = _starsVersion.asStateFlow()
@@ -83,20 +93,15 @@ class Library(
 
     /**
      * The stored answer paints the screen at once; the server is asked unless that answer is fresh, and
-     * its answer is emitted only when it differs. Offline with something stored is not an error.
+     * its answer is emitted only when it differs. When a failure is an error is the core's (`read_refresh`:
+     * offline with something stored is not).
      */
     private inline fun <T> cached(read: Read, crossinline pick: (Page) -> T): Flow<T> = flow {
         val c = client
         val stored = lifted { c.readStored(read) }
         stored.page?.let { emit(pick(it)) }
         if (stored.fresh) return@flow
-        try {
-            c.readFetch(read, stored.digest)?.let { emit(pick(it)) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (stored.digest == null) throw if (e is NetException) e.lift() else e
-        }
+        lifted { c.readRefresh(read, stored.digest) }?.let { emit(pick(it)) }
     }.flowOn(Dispatchers.IO)
 
     /**
@@ -116,8 +121,8 @@ class Library(
      * Always asks the server, so provider results from octo-fiesta show up. One big
      * page: the proxy repeats its external results on every offset.
      */
-    suspend fun search(query: String, songs: Int = 40, albums: Int = 20, artists: Int = 10): SearchResult =
-        call(Read.Search(query, songs, albums, artists)) { (it as Page.Found).v }
+    suspend fun search(query: String): SearchResult =
+        call(Read.Search(query, sizes.searchSongs, sizes.searchAlbums, sizes.searchArtists)) { (it as Page.Found).v }
 
     suspend fun searchHistory(): List<String> = withContext(Dispatchers.IO) { core.searchHistory() }
     suspend fun forgetSearches() = withContext(Dispatchers.IO) { core.searchForget() }
@@ -125,8 +130,8 @@ class Library(
     // ---- browse ----
 
     /** "By year" is this year's albums; "random" is never stored (the core decides both). */
-    fun albums(sort: AlbumSort, size: Int = 50, offset: Int = 0, genre: String? = null): Flow<List<Album>> =
-        cached(Read.AlbumList(sort.api, size, offset, genre)) { (it as Page.Albums).v }
+    fun albums(sort: AlbumSort, size: Int, offset: Int = 0, genre: String? = null): Flow<List<Album>> =
+        cached(Read.AlbumList(albumSortApi(sort), size, offset, genre)) { (it as Page.Albums).v }
 
     fun artists(): Flow<List<Artist>> = cached(Read.ArtistIndex) { (it as Page.Artists).v }
     fun album(id: String): Flow<AlbumDetail> = cached(Read.AlbumById(id)) { (it as Page.AlbumPage).v }
@@ -148,11 +153,11 @@ class Library(
         var fromServer: Lyrics? = null
         // An empty answer from the server is not shown here while LRCLIB may still have the song; the core
         // hands it back below if nothing better follows.
-        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) emit(FoundLyrics(it, LyricsSource.SERVER)) }
+        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) emit(FoundLyrics(it, LyricsOrigin.SERVER)) }
         val server = fromServer
         val hasLines = server != null && server.lines.isNotEmpty()
         lifted { client.lyricsAfterServer(song, hasLines, server?.synced == true) }
-            ?.let { emit(FoundLyrics(it.lyrics, if (it.lrclib) LyricsSource.LRCLIB else LyricsSource.SERVER)) }
+            ?.let { emit(FoundLyrics(it.lyrics, if (it.lrclib) LyricsOrigin.LRCLIB else LyricsOrigin.SERVER)) }
     }.flowOn(Dispatchers.IO)
 
     // ---- local only: history, mixes, smart playlists (all computed in the Rust core from the index) ----
@@ -178,8 +183,8 @@ class Library(
     fun smartDefaults() = dev.nori.music.ffi.smartDefaults()
     suspend fun smartSave(id: String, name: String, json: String): String = withContext(Dispatchers.IO) { core.smartSave(id, name, json) }
     suspend fun smartDelete(id: String) = withContext(Dispatchers.IO) { core.smartDelete(id) }
-    suspend fun smartSongs(json: String, offset: Int = 0, limit: Int = 500): List<Song> =
-        withContext(Dispatchers.IO) { core.smartEvaluate(json, offset.toUInt(), limit.toUInt()) }
+    suspend fun smartSongs(json: String): List<Song> =
+        withContext(Dispatchers.IO) { core.smartEvaluate(json, 0u, sizes.smartSongs) }
 
     fun m3uExport(name: String, songs: List<Song>): String = dev.nori.music.ffi.m3uExport(name, songs)
 
@@ -195,13 +200,25 @@ class Library(
     suspend fun decades(): List<Genre> = withContext(Dispatchers.IO) { core.browseDecades() }
 
 
-    suspend fun randomSongs(size: Int = 100, genre: String? = null): List<Song> = call(Read.RandomSongs(size, genre)) { (it as Page.Songs).v }
+    suspend fun randomSongs(): List<Song> = call(Read.RandomSongs(sizes.randomSongs, null)) { (it as Page.Songs).v }
 
-    suspend fun songsByGenre(genre: String, count: Int = 200): List<Song> = call(Read.SongsByGenre(genre, count)) { (it as Page.Songs).v }
+    suspend fun songsByGenre(genre: String): List<Song> = call(Read.SongsByGenre(genre, sizes.genreSongs)) { (it as Page.Songs).v }
 
 
     /** What carries the queue on past the song playing (see the core's autofill.rs); nothing on any failure. */
     suspend fun autofill(): List<Song> = withContext(Dispatchers.IO) { client.autofill() }
+
+    /**
+     * Draws mix [id] unless this period's draw is there already ([again]: a different one); the core
+     * fetches the server's random songs when the index has nothing to draw from. True when it changed.
+     */
+    suspend fun mixEnsure(id: String, again: Boolean): Boolean = withContext(Dispatchers.IO) { client.mixEnsure(id, again) }
+
+    /** Draws whichever mixes are missing or from the last period. True when any tile changed. */
+    suspend fun mixWarm(): Boolean = withContext(Dispatchers.IO) { client.mixWarmAll() }
+
+    /** What picking the server's saved queue back up plays (the core's `resume_from_server`). */
+    suspend fun resumeFromServer(): dev.nori.music.ffi.ResumePlan = withContext(Dispatchers.IO) { lifted { client.resumeFromServer() } }
 
     suspend fun song(id: String): Song? = call(Read.SongById(id)) { (it as Page.OneSong).v }
     suspend fun albumSongs(id: String): List<Song> = call(Read.AlbumSongs(id)) { (it as Page.Songs).v }
@@ -221,11 +238,11 @@ class Library(
         _starMarks.value = marked.marks
         _starsVersion.update { it + 1 }
         try {
-            write(Write.Star(kind.target, id, on))
+            withContext(Dispatchers.IO) { lifted { client.starSend(kind.target, id, on, marked.previous) } }
         } catch (e: Exception) {
-            // Offline is not a failure: the core queues those and replays them. Anything else is, and the
-            // screen must not keep showing a favourite the server never took.
-            _starMarks.value = starRestore(kind.target, id, marked.previous)
+            // Refused (offline is not: the core keeps those and replays them). The core has put the mark
+            // from before back, so the screen stops showing a favourite the server never took.
+            _starMarks.value = starMarks()
             _starsVersion.update { it + 1 }
             throw e
         }
@@ -258,7 +275,6 @@ class Library(
 
     suspend fun pushQueue(ids: List<String>, current: String?, positionMs: Long) = write(Write.SaveQueue(ids, current, positionMs))
 
-    suspend fun pullQueue(): PlayQueue = call(Read.PullQueue) { (it as Page.Queue).v }
 
     // ---- offline index ----
 
@@ -266,7 +282,7 @@ class Library(
      * Walks the whole library into the local index. The pages go from the socket
      * into SQLite inside Rust; only three counters come back per page.
      */
-    fun sync(page: Int = 500): Flow<IngestStats> = flow {
+    fun sync(page: Int = sizes.syncPage.toInt()): Flow<IngestStats> = flow {
         var offset = 0u
         var total = IngestStats(0u, 0u, 0u)
         while (true) {
@@ -283,13 +299,13 @@ class Library(
 
     /**
      * Called for every row a list draws, on the UI thread: plain string work, no FFI. The core signs the
-     * prefix once (per server and address); a row only appends its id and size, which is cheaper than any
-     * crossing into the core would be.
+     * prefix once (per server and address) and says how the rest is put together (`cover_rules`); a row
+     * only appends its id and size, which is cheaper than any crossing into the core would be.
      */
     fun coverUrl(id: String?, size: Int): String? {
         if (id == null) return null
-        val prefix = coverPrefix ?: core.urlPrefix("getCoverArt").also { coverPrefix = it }
-        return "$prefix&id=${android.net.Uri.encode(id)}&size=$size"
+        val prefix = coverPrefix ?: (core.urlPrefix("getCoverArt") + Covers.rules.idParam).also { coverPrefix = it }
+        return prefix + android.net.Uri.encode(id) + Covers.rules.sizeParam + size
     }
 
     /** The signed prefix changes with the server, the credentials or the address in use. */

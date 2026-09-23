@@ -38,19 +38,19 @@ class AutoMixPrefetch(
     private var running: Future<*>? = null
 
     /**
-     * [ids] are the songs coming up, the one playing first. Whatever was being measured for an older
+     * [ids] are the songs coming up, the one playing first, as the core picks them (queue_measure: only
+     * songs that can be measured, none while AutoMix is off). Whatever was being measured for an older
      * queue is abandoned: the point of this is the next boundary, not completeness.
      */
     fun update(ids: List<String>) {
         cancel()
-        val wanted = ids.filterNot { it.startsWith("ext-") || it.startsWith("pl-") || it.startsWith(RADIO_PREFIX) }
-        if (wanted.isEmpty()) return
+        if (ids.isEmpty()) return
         running = worker.submit {
-            val missing = runCatching { coreOf().analysisMissing(wanted) }.getOrDefault(emptyList())
+            val missing = runCatching { coreOf().analysisMissing(ids) }.getOrDefault(emptyList())
             val waiting = missing.count { !onDevice(it) }
             // One line per queue move, and only while AutoMix is on: which of the tracks coming up have
             // never been measured, and how many of those are not on the device yet to measure.
-            android.util.Log.i("nori", "measuring ahead: ${missing.size} of ${wanted.size} unmeasured, $waiting not on the device yet")
+            android.util.Log.i("nori", "measuring ahead: ${missing.size} of ${ids.size} unmeasured, $waiting not on the device yet")
             for (id in missing) {
                 if (Thread.currentThread().isInterrupted) return@submit
                 if (!onDevice(id)) continue

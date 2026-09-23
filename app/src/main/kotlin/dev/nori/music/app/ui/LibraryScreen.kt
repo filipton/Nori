@@ -72,7 +72,6 @@ import dev.nori.music.app.vm.GenresViewModel
 import dev.nori.music.app.vm.PlaylistsViewModel
 import dev.nori.music.app.vm.RadioViewModel
 import dev.nori.music.app.vm.StarredViewModel
-import dev.nori.music.data.AlbumSort
 
 /**
  * One line that says how the list is ordered and opens the alternatives, instead of a second row of
@@ -99,7 +98,8 @@ private fun <T> SortMenu(options: List<Pair<T, String>>, value: T, onChange: (T)
     }
 }
 
-private val sections = listOf("Albums", "Favourites", "Artists", "Songs", "Playlists", "Smart", "History", "Genres", "Decades", "Folders", "Radio", "Downloads")
+/** The library's sections, in the order their pills run (the core's `library_sections`). */
+private val sections: List<String> by lazy { dev.nori.music.ffi.librarySections() }
 
 @Composable
 fun LibraryScreen(actions: ActionsViewModel) {
@@ -135,10 +135,7 @@ private fun Albums(vm: AlbumsViewModel = viewModel()) {
     val sort by vm.sort.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column {
-        SortMenu(
-            listOf(AlbumSort.BY_NAME to "A–Z", AlbumSort.BY_ARTIST to "Artist", AlbumSort.NEWEST to "Added", AlbumSort.RECENT to "Played", AlbumSort.FREQUENT to "Most played", AlbumSort.STARRED to "Favourites", AlbumSort.BY_YEAR to "Year", AlbumSort.RANDOM to "Random"),
-            sort, vm::setSort,
-        )
+        SortMenu(remember { dev.nori.music.ffi.albumSorts().map { it.sort to it.label } }, sort, vm::setSort)
         // Ask for the covers just past the fold while the ones on screen are still arriving.
         val list = rememberLazyGridState()
         PrefetchCovers(
@@ -182,14 +179,14 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
                                 Cover(vm.cover(a.coverArt, CoverSize.ROW), 48.dp, radius = 24.dp)
                                 Column(Modifier.padding(start = 12.dp)) {
                                     Text(a.name, style = MaterialTheme.typography.bodyLarge)
-                                    Text("${a.albumCount} albums", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(remember(a.albumCount) { dev.nori.music.ffi.wordsAlbums(a.albumCount) }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
                             Hairline(startIndent = Space.gutter + 60.dp)
                         }
                     }
                 }
-                if (letters.size > 3) Column(Modifier.padding(end = 2.dp).verticalScroll(rememberScrollState())) {
+                if (view.showLetters) Column(Modifier.padding(end = 2.dp).verticalScroll(rememberScrollState())) {
                     letters.forEach { l -> Text(l.letter, Modifier.clickable { scope.launch { list.scrollToItem(l.row.toInt()) } }.padding(horizontal = 8.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
                 }
             }
@@ -200,7 +197,7 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
 /** Every indexed song, sorted; with [decade] set, only that decade. Reads the offline index, never the network. */
 @Composable
 fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = viewModel(key = "songs-$decade")) {
-    LaunchedEffect(decade) { vm.setYears(decade?.let { it..it + 9 }) }
+    LaunchedEffect(decade) { vm.setYears(decade?.let { dev.nori.music.ffi.decadeYears(it.toUInt()) }?.let { it.from.toInt()..it.to.toInt() }) }
     val songs by vm.songs.collectAsStateWithLifecycle()
     val sort by vm.sort.collectAsStateWithLifecycle()
     val starred by vm.starredOnly.collectAsStateWithLifecycle()
@@ -214,12 +211,12 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
     // Ask for the next page a screenful before the end, from a snapshot observer rather than from inside item composition.
     LaunchedEffect(list, songs.size) { snapshotFlow { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= songs.size - 40 }.collect { if (it) vm.loadMore() } }
     Column {
-        if (decade != null) SectionTitle("${decade}s")
+        if (decade != null) SectionTitle(remember(decade) { dev.nori.music.ffi.wordsDecade(decade.toUInt()) })
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             item { Chip("★ Favourites", starred) { vm.setStarredOnly(!starred) } }
             items(SongSort.entries) { s -> Chip(s.label, sort == s) { vm.setSort(s) } }
         }
-        if (songs.isEmpty()) EmptyNote("No songs on this phone yet. Settings, then Library and lists, then Update.")
+        if (songs.isEmpty()) EmptyNote(dev.nori.music.ffi.Note.NO_INDEX)
         LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
     }
 }
@@ -230,9 +227,9 @@ private fun Decades(vm: DecadesViewModel = viewModel()) {
     val nav = LocalNav.current
     LoadBox(load) { decades ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            if (decades.isEmpty()) item { EmptyNote("No songs on this phone yet. Settings, then Library and lists, then Update.") }
+            if (decades.isEmpty()) item { EmptyNote(dev.nori.music.ffi.Note.NO_INDEX) }
             items(decades, key = { it.name }) { d ->
-                NavRow("${d.name}s", { nav.decade(d.name.toInt()) }, trailing = "${d.songCount}", chevron = true)
+                NavRow(remember(d.name) { dev.nori.music.ffi.wordsDecade(d.name.toUInt()) }, { nav.decade(d.name.toInt()) }, trailing = "${d.songCount}", chevron = true)
             }
         }
     }
@@ -263,7 +260,7 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
     val context = androidx.compose.ui.platform.LocalContext.current
     val pickM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) runCatching { context.contentResolver.openInputStream(uri)?.use { it.readBytes().decodeToString() } }.getOrNull()?.let { text ->
-            actions.importM3u(uri.lastPathSegment?.substringAfterLast('/')?.substringBeforeLast('.') ?: "Imported", text)
+            actions.importM3u(dev.nori.music.ffi.m3uPlaylistName(uri.lastPathSegment), text)
         }
     }
     if (creating) AlertDialog(
@@ -275,11 +272,11 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item { ActionRow("New playlist", Icons.Filled.Add, { creating = true }) }
             item { ActionRow("Import M3U…", Icons.Filled.FileDownload, { pickM3u.launch(arrayOf("*/*")) }) }
-            if (playlists.isEmpty()) item { EmptyNote("No playlists yet") }
+            if (playlists.isEmpty()) item { EmptyNote(dev.nori.music.ffi.Note.NO_PLAYLISTS) }
             items(playlists, key = { it.id }) { p ->
                 NavRow(
                     p.name, { nav.playlist(p.id, p) },
-                    subtitle = "${p.songCount} songs · ${duration(p.duration.toLong())}",
+                    subtitle = remember(p.songCount, p.duration) { dev.nori.music.ffi.wordsPlaylistLine(p.songCount, p.duration) },
                     leading = { Cover(vm.cover(p.coverArt, CoverSize.ROW), 48.dp) },
                     action = { IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Delete, "Delete", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
                 )
@@ -299,7 +296,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
             item(key = "all") {
                 NavRow(
                     "Favourite songs", { nav.mix(dev.nori.music.app.vm.FAVOURITES_MIX) }, chevron = true,
-                    subtitle = remember(s.songs) { dev.nori.music.ffi.wordsSongs(s.songs.count { !it.isExternal }.toUInt()) },
+                    subtitle = remember(s.songs) { dev.nori.music.ffi.wordsFavouriteSongs(s.songs) },
                     leading = { Icon(Icons.Filled.Favorite, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
                 )
             }
@@ -341,12 +338,12 @@ private fun Radio(vm: RadioViewModel = viewModel()) {
     if (adding) AlertDialog(
         onDismissRequest = { adding = false }, title = { Text("New station") },
         text = { Column { FormField(name, { name = it }, label = { Text("Name") }, singleLine = true); Spacer(Modifier.height(10.dp)); FormField(url, { url = it }, label = { Text("Stream URL") }, singleLine = true) } },
-        confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = name.isNotBlank() && url.startsWith("http")) { Text("Add") } },
+        confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = dev.nori.music.ffi.radioCanAdd(name, url)) { Text("Add") } },
     )
     LoadBox(load) { stations ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item { ActionRow("New station", Icons.Filled.Add, { adding = true }) }
-            if (stations.isEmpty()) item { EmptyNote("No stations yet") }
+            if (stations.isEmpty()) item { EmptyNote(dev.nori.music.ffi.Note.NO_STATIONS) }
             items(stations, key = { it.id }) { s ->
                 NavRow(
                     s.name, { vm.play(s) },
@@ -363,20 +360,21 @@ private fun Downloads(actions: ActionsViewModel) {
     val d by actions.downloads.collectAsState()
     val menu = LocalSongMenu.current
     val vm: StarredViewModel = viewModel()
-    val marks by actions.downloadMarks.collectAsStateWithLifecycle()
+    val sections by actions.downloadSections.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         // The way to the queue, always there: what is on its way now, or where it went.
         item(key = "queue") {
-            val failed = marks.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.FAILED }
-            val waiting = (d.pending.size - failed).coerceAtLeast(0)
+            // Counted by the core, which splits the queue for the downloads screen: waiting is what is
+            // downloading or queued, the failed are counted apart.
+            val s = sections
             NavRow(
                 "Download queue", nav::downloads, chevron = true,
-                subtitle = dev.nori.music.ffi.wordsDownloadQueue(waiting.toUInt(), failed.toUInt()),
+                subtitle = remember(s) { dev.nori.music.ffi.wordsDownloadQueue(((s?.active?.size ?: 0) + (s?.queued?.size ?: 0)).toUInt(), (s?.failed?.size ?: 0).toUInt()) },
                 leading = { Icon(Icons.Filled.Downloading, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
             )
         }
-        if (d.done.isEmpty()) item { EmptyNote("Nothing downloaded yet") }
+        if (d.done.isEmpty()) item { EmptyNote(dev.nori.music.ffi.Note.NOTHING_DOWNLOADED) }
         songRows(d.done, actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }

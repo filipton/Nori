@@ -44,7 +44,9 @@ fn queue_and_cache_round_trip() {
     let songs = core.parse_search(SEARCH.into()).unwrap().songs;
     core.save_queue(PlayQueue { songs: songs.clone(), index: 1, position_ms: 5000 }).unwrap();
     let q = core.load_queue().unwrap();
-    assert_eq!((q.songs, q.index, q.position_ms), (songs, 1, 5000));
+    assert_eq!((q.songs, q.index, q.position_ms), (songs.clone(), 1, 5000));
+    core.save_queue(PlayQueue { songs: songs.clone(), index: 99, position_ms: 0 }).unwrap();
+    assert_eq!(core.load_queue().unwrap().index as usize, songs.len() - 1, "an index past the end: the last song");
 
     core.cache_put("getAlbum?id=1".into(), vec![1, 2]).unwrap();
     core.cache_put("getArtist?id=1".into(), vec![3]).unwrap();

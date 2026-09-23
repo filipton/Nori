@@ -158,6 +158,13 @@ pub fn queue_albums(ids: Vec<String>) -> Vec<String> {
     })
 }
 
+/// Whether a queued id is a song AutoMix can measure: not a provider's song (octo-fiesta's `ext-`), not a
+/// playlist's own entry (`pl-`) and not a radio stream. Measuring reads only what is already on the
+/// device, but those never are and never will be.
+pub(crate) fn analysable(id: &str) -> bool {
+    !id.starts_with("ext-") && !id.starts_with("pl-") && !id.starts_with(RADIO_PREFIX)
+}
+
 /// Of the queued songs `ids`, those that can be fetched ahead: not a radio stream, not a provider's
 /// song (fetching one makes the provider download it for the server).
 #[uniffi::export]
@@ -167,4 +174,17 @@ pub fn queue_fetchable(ids: Vec<String>) -> Vec<String> {
             .filter(|id| !id.starts_with(RADIO_PREFIX) && !id.starts_with("ext-") && !s.songs.get(id).is_some_and(|(song, _)| song.is_external))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_songs_that_can_be_on_the_device_are_measured() {
+        assert!(analysable("a1b2"));
+        assert!(!analysable("ext-deezer-1"), "a provider's song");
+        assert!(!analysable("pl-7"));
+        assert!(!analysable("radio:3"));
+    }
 }

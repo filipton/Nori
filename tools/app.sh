@@ -6,12 +6,12 @@
 #   tools/app.sh state                    one JSON line: route, playback, key settings
 # Needs the app running (tools/app.sh launch). Answers come back from logcat, tag noritest.
 set -uo pipefail
-pkg=dev.nori.music
+pkg=${NORI_PKG:-dev.nori.music}
 send() {
   adb logcat -c
   # Quote for the shell ON THE DEVICE: adb hands it a command line, so an unquoted | or space there
   # becomes a pipe or an argument break and the extra arrives mangled (or not at all).
-  local cmdline="am broadcast -n dev.nori.music/dev.nori.music.app.TestBridge -a dev.nori.music.TEST --es cmd '$1'"
+  local cmdline="am broadcast -n $pkg/dev.nori.music.app.TestBridge -a dev.nori.music.TEST --es cmd '$1'"
   [ -n "${2:-}" ] && cmdline="$cmdline --es arg '$2'"
   [ -n "${3:-}" ] && cmdline="$cmdline --es value '$3'"
   adb shell "$cmdline" >/dev/null 2>&1

@@ -4,8 +4,50 @@
 //! this says at the sizes it says, with the same requests the rows and the player make, so a warmed
 //! cover is a cache hit.
 
+/// The list rendition: a row's thumbnail and a grid's card share it. A Subsonic server renders each size
+/// it is asked for on demand and keeps it per size, so every extra size is another slow first fetch for
+/// every album - measured at over a second each on a real server.
+const ROW: u32 = 320;
+/// The player's rendition, shared with the notification and the lock screen.
+const FULL: u32 = 800;
+
 /// The two sizes the app draws covers at: the list rendition and the player's.
-const SIZES: [u32; 2] = [320, 800];
+const SIZES: [u32; 2] = [ROW, FULL];
+
+/// Ids of an octo-fiesta provider's items (songs, albums, artists; playlists).
+const PROVIDER_PREFIXES: [&str; 2] = ["ext-", "pl-"];
+
+/// How the app sizes, names and keeps artwork. Read once; a list asks for thousands of covers and builds
+/// their addresses itself from the signed prefix (`Core::url_prefix`) rather than crossing for each.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct CoverRules {
+    pub row: u32,
+    pub card: u32,
+    pub full: u32,
+    /// What follows the signed prefix of `getCoverArt`: `&id=` and the encoded id, then `&size=`.
+    pub id_param: String,
+    pub size_param: String,
+    /// Ids that belong to a provider. octo-fiesta draws a "not downloaded" badge on their covers and
+    /// replaces the picture once the item is in the library, under the same id: never stored.
+    pub provider_prefixes: Vec<String>,
+    /// The share of the app's memory decoded covers may hold, and the disk cache's size.
+    pub memory_share: f64,
+    pub disk_bytes: u64,
+}
+
+#[uniffi::export]
+pub fn cover_rules() -> CoverRules {
+    CoverRules {
+        row: ROW,
+        card: ROW,
+        full: FULL,
+        id_param: "&id=".into(),
+        size_param: "&size=".into(),
+        provider_prefixes: PROVIDER_PREFIXES.map(String::from).to_vec(),
+        memory_share: 0.15,
+        disk_bytes: 256 * 1024 * 1024,
+    }
+}
 
 /// One cover to fetch: the cover id at one size.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -17,7 +59,7 @@ pub struct CoverWant {
 /// Provider artwork is left alone: asking octo-fiesta for it is asking a provider, for a song the user
 /// may never keep.
 fn warmable(art: &str) -> bool {
-    !art.starts_with("ext-") && !art.starts_with("pl-")
+    !PROVIDER_PREFIXES.iter().any(|p| art.starts_with(p))
 }
 
 /// The covers of `arts` (cover ids, in order) to fetch, each at both sizes: provider artwork left out,
@@ -73,6 +115,15 @@ mod tests {
         let w = cover_wants(arts.clone(), 500);
         assert_eq!(w.iter().map(|w| (w.id.as_str(), w.size)).collect::<Vec<_>>(), [("a", 320), ("a", 800), ("b", 320), ("b", 800), ("c", 320), ("c", 800)]);
         assert_eq!(cover_wants(arts, 2).len(), 4);
+    }
+
+    #[test]
+    fn the_rules_the_app_sizes_and_keeps_covers_by() {
+        let r = cover_rules();
+        assert_eq!((r.row, r.card, r.full), (320, 320, 800));
+        assert_eq!((r.id_param.as_str(), r.size_param.as_str()), ("&id=", "&size="));
+        assert_eq!(r.provider_prefixes, ["ext-", "pl-"]);
+        assert_eq!((r.memory_share, r.disk_bytes), (0.15, 268_435_456));
     }
 
     #[test]

@@ -164,7 +164,13 @@ fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, look: Look,
 @Composable
 fun rememberChromeLook(): Look {
     val base = LocalLook.current
-    val target = pagePalette.value?.look ?: (base as? FixedLook)?.table ?: IntArray(CoverLook.LEN) { base.argb(it) }
+    val made = pagePalette.value?.look ?: (base as? FixedLook)?.table ?: IntArray(CoverLook.LEN) { base.argb(it) }
+    // Keyed on the colours, not the array: a look read out afresh is a new array with the same colours
+    // every time this composes, and keying the fade on that restarted it every frame - the fade's own
+    // state recomposing this, which made another array, sixty times a second on every screen.
+    val kept = remember { arrayOf(made) }
+    if (!kept[0].contentEquals(made)) kept[0] = made
+    val target = kept[0]
     val t = remember { androidx.compose.animation.core.Animatable(1f) }
     val live = remember { LiveLook { t.value }.also { it.set(null, target, 0) } }
     var first by remember { mutableStateOf(true) }
@@ -234,12 +240,11 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     // player because the bar is on screen whenever something is playing, so a skip from the
     // notification or the lock screen is covered too.
     val context = androidx.compose.ui.platform.LocalContext.current
-    val around = remember(state.current?.coverArt, state.nextIndex, state.previousIndex, state.queue) {
-        listOfNotNull(
-            vm.cover(state.current?.coverArt, CoverSize.ROW),
-            vm.cover(state.queue.getOrNull(state.nextIndex)?.coverArt, CoverSize.ROW),
-            vm.cover(state.queue.getOrNull(state.previousIndex)?.coverArt, CoverSize.ROW),
-        ).filterNot(::isProviderCover)
+    // Which songs either side is the core's (`cover_neighbours`, the skips' own targets, shuffle included).
+    val around = remember(state.current?.coverArt, state.index, state.nextIndex, state.previousIndex, state.queue) {
+        val either = dev.nori.music.ffi.coverNeighbours(state.index, state.previousIndex, state.nextIndex, 1, state.queue.size.toUInt())
+        (listOf(vm.cover(state.current?.coverArt, CoverSize.ROW)) + either.map { vm.cover(state.queue[it.toInt()].coverArt, CoverSize.ROW) })
+            .filterNotNull().filterNot(::isProviderCover)
     }
     LaunchedEffect(around, dark, prefs.coverColors, prefs.amoled, prefs.playerColours) {
         if (!prefs.coverColors) return@LaunchedEffect
@@ -291,8 +296,9 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodyLarge,
                         )
+                        val error = if (real) state.error else null
                         Text(
-                            (if (real) state.error else null) ?: s?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            remember(error, s?.artist) { dev.nori.music.ffi.wordsBarLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
                             color = if (real && state.error != null) scheme.error else look.color(CoverLook.CHROME_CONTENT_65),
                         )
@@ -383,11 +389,8 @@ internal fun <T> SwipeCarousel(
             val release: (Float) -> Unit = { v ->
                 val o = offset
                 val w = size.width.toFloat()
-                val go = when {
-                    o < 0f && hasAfter && (v < -900f || o < -w * 0.3f) -> -1
-                    o > 0f && hasBefore && (v > 900f || o > w * 0.3f) -> 1
-                    else -> 0
-                }
+                // The same gesture as the sleeve's, by the same rule (the core's `swipe_turn`).
+                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
@@ -425,7 +428,7 @@ internal fun <T> SwipeCarousel(
                 val w = size.width.toFloat()
                 val moved = offset + d
                 val allowed = (moved > 0f && hasBefore) || (moved < 0f && hasAfter)
-                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)
+                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * stage.give).coerceIn(-w * stage.giveLimit, w * stage.giveLimit)
             }
         },
     ) {

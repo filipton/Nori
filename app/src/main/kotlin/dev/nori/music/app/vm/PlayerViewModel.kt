@@ -4,7 +4,7 @@ import android.app.Application
 import android.media.AudioManager
 import dev.nori.music.ffi.Lyrics
 import dev.nori.music.data.FoundLyrics
-import dev.nori.music.data.LyricsSource
+import dev.nori.music.ffi.LyricsOrigin
 import dev.nori.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
@@ -40,7 +40,7 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
         .flatMapLatest { song ->
-            val found = if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
+            val found = if (song == null) flowOf(FoundLyrics(dev.nori.music.ffi.lyricsNone(), LyricsOrigin.SERVER))
             else nori.library.lyricsFor(song)
             found.map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) }
                 .onStart { emit(Load.Loading) }

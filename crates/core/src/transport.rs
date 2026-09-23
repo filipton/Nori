@@ -40,6 +40,36 @@ impl FailureKind {
     }
 }
 
+/// One link of what the platform says went wrong: its kind, and its own words.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Failure {
+    pub kind: FailureKind,
+    pub detail: Option<String>,
+}
+
+/// Whether a song failed to play because the server could not be reached (not a bad file or a refused
+/// output): what the offline bridge takes over. `status` is the player's own word that the server
+/// answered with an error status, or that the connection failed or timed out; `causes` is the chain of
+/// what the platform threw. A lookup, a connection or a wait that failed counts, and any I/O failure
+/// whose words say "offline"; a refused certificate, a Wi-Fi-only refusal or anything else does not.
+#[uniffi::export]
+pub fn failure_networkish(status: bool, causes: Vec<Failure>) -> bool {
+    status
+        || causes.iter().any(|c| match c.kind {
+            FailureKind::UnknownHost | FailureKind::Connect | FailureKind::NoRoute | FailureKind::Timeout | FailureKind::Interrupted => true,
+            FailureKind::Other => false,
+            _ => c.detail.as_deref().is_some_and(|d| d.to_lowercase().contains("offline")),
+        })
+}
+
+/// Whether a plain GET (for callers outside the client, AutoEQ) failed. octo-fiesta reports auth
+/// failures as 401 with a normal Subsonic error body, so the body counts either way; only an empty error
+/// answer is a failure.
+#[uniffi::export]
+pub fn get_failed(status: u16, body_empty: bool) -> bool {
+    body_empty && !(200..=299).contains(&status)
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct TransportResponse {
     pub status: u16,
@@ -253,6 +283,36 @@ pub fn server_host(address: String) -> Option<HostPort> {
     parse_host(&full)
 }
 
+/// The music server's addresses, and whether it may be reached on a metered network: set whenever the
+/// server profile changes, read for every request.
+static SERVER: parking_lot::RwLock<(Vec<HostPort>, bool)> = parking_lot::RwLock::new((Vec::new(), false));
+
+/// The server profile changed (none: no server): its two addresses and its Wi-Fi-only setting.
+#[uniffi::export]
+pub fn net_server(address: Option<String>, alt_address: Option<String>, wifi_only: bool) {
+    let hosts = [address, alt_address].into_iter().flatten().filter_map(server_host).collect();
+    *SERVER.write() = (hosts, wifi_only);
+}
+
+/// What a request is to the network policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct RequestPolicy {
+    /// It goes to the music server: it carries the profile's headers (a reverse proxy's token).
+    pub server: bool,
+    /// It may not go out over a metered network (the server is set to Wi-Fi only). The platform asks
+    /// the network only for these, so an ordinary request costs no look at it.
+    pub unmetered_only: bool,
+}
+
+/// The policy for a request to `url`. Third parties (LRCLIB, AutoEQ) get neither the server's headers nor
+/// its Wi-Fi-only rule. Called once per request.
+#[uniffi::export]
+pub fn request_policy(url: String) -> RequestPolicy {
+    let s = SERVER.read();
+    let server = !s.0.is_empty() && parse_host(&url).is_some_and(|h| s.0.contains(&h));
+    RequestPolicy { server, unmetered_only: server && s.1 }
+}
+
 /// The authority of an http(s) URL, read the way the platform's URL parser reads it: surrounding ASCII
 /// whitespace ignored, any number of slashes after the scheme, user info dropped, IPv6 in brackets.
 fn parse_host(url: &str) -> Option<HostPort> {
@@ -316,6 +376,43 @@ mod tests {
         assert!(!same("https://raw.githubusercontent.com/x", "music.example.com"));
         assert!(!same("https://music.example.com.evil.net/", "music.example.com"));
         assert!(!same("https://music.example.com/", ""));
+    }
+
+    #[test]
+    fn requests_to_the_server_carry_its_rules() {
+        net_server(Some("http://10.0.2.2:4533".into()), Some("music.example.com".into()), true);
+        assert_eq!(request_policy("http://10.0.2.2:4533/rest/stream?id=1".into()), RequestPolicy { server: true, unmetered_only: true });
+        assert_eq!(request_policy("https://MUSIC.example.com/rest/ping".into()).server, true, "the second address");
+        assert_eq!(request_policy("https://lrclib.net/api/get".into()), RequestPolicy { server: false, unmetered_only: false });
+        assert!(!request_policy("http://10.0.2.2:8080/".into()).server, "another port is another service");
+        net_server(Some("http://10.0.2.2:4533".into()), None, false);
+        assert_eq!(request_policy("http://10.0.2.2:4533/x".into()), RequestPolicy { server: true, unmetered_only: false });
+        net_server(None, None, true);
+        assert!(!request_policy("http://10.0.2.2:4533/x".into()).server, "no server");
+    }
+
+    #[test]
+    fn a_playback_failure_is_the_networks_when_it_could_not_reach_it() {
+        let f = |kind, detail: Option<&str>| Failure { kind, detail: detail.map(str::to_string) };
+        assert!(failure_networkish(true, vec![]), "the player said so");
+        assert!(!failure_networkish(false, vec![]));
+        for k in [FailureKind::UnknownHost, FailureKind::Connect, FailureKind::NoRoute, FailureKind::Timeout, FailureKind::Interrupted] {
+            assert!(failure_networkish(false, vec![f(FailureKind::Io, None), f(k, None)]), "{k:?} anywhere in the chain");
+        }
+        assert!(failure_networkish(false, vec![f(FailureKind::Io, Some("Device is OFFLINE"))]));
+        assert!(failure_networkish(false, vec![f(FailureKind::Tls, Some("offline"))]), "any I/O failure's words");
+        assert!(!failure_networkish(false, vec![f(FailureKind::Other, Some("offline"))]), "not an I/O failure");
+        assert!(!failure_networkish(false, vec![f(FailureKind::Metered, Some("This server is set to Wi-Fi only"))]));
+        assert!(!failure_networkish(false, vec![f(FailureKind::Io, Some("bad file"))]));
+        assert!(!failure_networkish(false, vec![f(FailureKind::Tls, None), f(FailureKind::Cleartext, None)]));
+    }
+
+    #[test]
+    fn a_get_fails_only_on_an_empty_error() {
+        assert!(!get_failed(200, true));
+        assert!(!get_failed(401, false), "an error with a body is read");
+        assert!(get_failed(404, true));
+        assert!(get_failed(301, true));
     }
 
     #[test]

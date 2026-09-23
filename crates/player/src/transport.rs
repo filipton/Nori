@@ -45,6 +45,91 @@ pub fn pause_fade(fade_ms: i32, playing: bool) -> Option<i32> {
     (fade_ms > 0 && playing).then_some(fade_ms)
 }
 
+/// How often a running volume fade moves: one frame at 60 Hz, so the ramp is smooth and ticks only while
+/// it lasts.
+pub const FADE_TICK_MS: i64 = 16;
+
+/// One tick of a volume fade from `from` to `to` that started at `start_ms` and lasts `ms`: the volume
+/// now, and whether the fade is over. A fade of no length is over at once, at `to`. Asked on every tick,
+/// so primitives only.
+pub fn fade_step(from: f32, to: f32, start_ms: i64, now_ms: i64, ms: i32) -> (f32, bool) {
+    if ms <= 0 {
+        return (to, true);
+    }
+    let t = ((now_ms - start_ms) as f32 / ms as f32).clamp(0.0, 1.0);
+    (crate::policy::fade(from, to, t), t >= 1.0)
+}
+
+/// A switch waiting out its dip. The old sound has to fall before the flush, so the switch runs a
+/// heartbeat after the finger - guarded by what was current when it was asked: anything else moving on
+/// first (a song ending inside the dip) drops it instead of yanking the queue back. A second switch
+/// chains behind the first instead of cancelling it, so the queue steps once per tap, and a pause never
+/// swallows the seek it interrupts. The platform keeps the action itself; this keeps whether it may run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SwitchQueue {
+    /// The song and queue index current when the waiting switch was asked for.
+    waiting: Option<(Option<String>, i32)>,
+}
+
+impl SwitchQueue {
+    pub const fn new() -> Self {
+        SwitchQueue { waiting: None }
+    }
+
+    /// A switch now waits out its dip, asked on `song` at queue index `index`.
+    pub fn wait(&mut self, song: Option<&str>, index: i32) {
+        self.waiting = Some((song.map(str::to_string), index));
+    }
+
+    /// The waiting switch is due (its dip is down, another control was pressed): whether it runs, which it
+    /// does only if the player is still where it was asked. Either way it no longer waits.
+    pub fn take(&mut self, song: Option<&str>, index: i32) -> bool {
+        self.waiting.take().is_some_and(|(s, i)| s.as_deref() == song && i == index)
+    }
+
+    /// Stopping drops a switch still waiting: starting over is not continuing it.
+    pub fn drop_waiting(&mut self) {
+        self.waiting = None;
+    }
+}
+
+/// A skip asked for while the music is paused is a request for music, not for a different song to sit
+/// paused on: the song changes and starts. Only the user's controls follow this - the player's own skips
+/// (an explicit song, a song that will not play) leave a paused queue paused.
+pub fn skip_plays(play_when_ready: bool) -> bool {
+    !play_when_ready
+}
+
+/// What the next button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextAction {
+    /// Skip to the song after.
+    Skip,
+    /// Nothing after the song playing: refilling the queue may still be fetching, so the press is
+    /// remembered and taken when the songs land, instead of dying as a no-op.
+    FillThenSkip,
+}
+
+pub fn next_action(has_next: bool) -> NextAction {
+    if has_next {
+        NextAction::Skip
+    } else {
+        NextAction::FillThenSkip
+    }
+}
+
+/// A few seconds into a song it has been fetched and the radio is still up: the songs after it are
+/// fetched ahead then.
+pub const PRECACHE_AFTER_MS: i64 = 6_000;
+/// The queue was edited: the new next song is measured for AutoMix after this, so a burst of edits
+/// measures once.
+pub const MEASURE_AFTER_EDIT_MS: i64 = 2_000;
+/// The sound settings changed: AutoMix may just have been switched on mid-song, and the songs coming up
+/// are measured after this, so the next boundary can already be mixed.
+pub const MEASURE_AFTER_SETTINGS_MS: i64 = 1_000;
+/// The queue is saved this long after it last changed, so a burst of changes is written once.
+pub const SAVE_AFTER_MS: i64 = 1_500;
+
 /// Facts about a settings change, for [`rebuild`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChainChange {
@@ -199,6 +284,19 @@ pub fn sleep_delay_ms(minutes: u32) -> (i64, i64) {
     (minutes as i64 * 60_000, 15_000)
 }
 
+/// What the sleep timer shows once set: when it fires (0: no timer by the clock), and whether it waits
+/// for a song to end ("end of track", or a number of songs).
+pub fn sleep_shown(minutes: u32, end_of_track: bool, songs: u32, now_ms: i64) -> (i64, bool) {
+    let at = if minutes > 0 { now_ms + sleep_delay_ms(minutes).0 } else { 0 };
+    let (pause, left) = sleep_after(songs, end_of_track);
+    (at, pause || left > 0)
+}
+
+/// A pause this long lets the output go: the player keeps the queue and the place in the song but closes
+/// the audio track and stops its own once-a-second tick, so a phone left paused sleeps. Pressing play
+/// opens it again from the local cache, which takes a moment only after a pause this long.
+pub const IDLE_RELEASE_MS: i64 = 5 * 60_000;
+
 /// How much the player reads ahead: at least a minute, up to ten, playback starting after a second and
 /// resuming after two - and at most a quarter of the app's memory class, between 16 and 48 MB. A song is
 /// fetched in seconds and then played from memory, so the network sleeps for most of it.
@@ -256,6 +354,43 @@ mod tests {
     }
 
     #[test]
+    fn a_fade_steps_to_its_end_and_says_so() {
+        assert_eq!(fade_step(1.0, 0.0, 100, 100, 200), (1.0, false));
+        assert_eq!(fade_step(1.0, 0.0, 100, 200, 200), (0.5, false));
+        assert_eq!(fade_step(1.0, 0.0, 100, 300, 200), (0.0, true));
+        assert_eq!(fade_step(1.0, 0.0, 100, 900, 200), (0.0, true), "late ticks stay at the end");
+        assert_eq!(fade_step(0.2, 0.8, 100, 50, 200), (0.2, false), "a clock before the start holds");
+        assert_eq!(fade_step(1.0, 0.3, 100, 100, 0), (0.3, true), "no length: there at once");
+    }
+
+    #[test]
+    fn a_waiting_switch_runs_only_where_it_was_asked() {
+        let mut q = SwitchQueue::new();
+        assert!(!q.take(Some("a"), 0), "nothing waits");
+        q.wait(Some("a"), 0);
+        assert!(q.take(Some("a"), 0));
+        assert!(!q.take(Some("a"), 0), "taken once");
+        q.wait(Some("a"), 0);
+        assert!(!q.take(Some("b"), 1), "the song moved on inside the dip: dropped");
+        assert!(!q.take(Some("a"), 0));
+        q.wait(Some("a"), 0);
+        assert!(!q.take(Some("a"), 2), "the same song queued twice is another place");
+        q.wait(None, -1);
+        assert!(q.take(None, -1));
+        q.wait(Some("a"), 0);
+        q.drop_waiting();
+        assert!(!q.take(Some("a"), 0), "stopping drops it");
+    }
+
+    #[test]
+    fn controls_ask_for_music() {
+        assert!(skip_plays(false) && !skip_plays(true));
+        assert_eq!(next_action(true), NextAction::Skip);
+        assert_eq!(next_action(false), NextAction::FillThenSkip);
+        assert_eq!((PRECACHE_AFTER_MS, MEASURE_AFTER_EDIT_MS, MEASURE_AFTER_SETTINGS_MS, SAVE_AFTER_MS, FADE_TICK_MS), (6_000, 2_000, 1_000, 1_500, 16));
+    }
+
+    #[test]
     fn sleep_counts_songs() {
         assert_eq!(sleep_after(1, false), (true, 0));
         assert_eq!(sleep_after(3, false), (false, 2));
@@ -263,6 +398,11 @@ mod tests {
         assert_eq!(sleep_song_changed(2), (1, false));
         assert_eq!(sleep_song_changed(1), (0, true));
         assert_eq!(sleep_song_changed(0), (0, false));
+        assert_eq!(sleep_shown(30, false, 0, 1_000), (1_000 + 1_800_000, false));
+        assert_eq!(sleep_shown(0, false, 0, 1_000), (0, false), "cancelled");
+        assert_eq!(sleep_shown(0, true, 0, 1_000), (0, true));
+        assert_eq!(sleep_shown(0, false, 1, 1_000), (0, true));
+        assert_eq!(sleep_shown(0, false, 3, 1_000), (0, true));
         assert_eq!(load_control(256)[4], 48 * 1024 * 1024);
         assert_eq!(load_control(32)[4], 16 * 1024 * 1024);
     }

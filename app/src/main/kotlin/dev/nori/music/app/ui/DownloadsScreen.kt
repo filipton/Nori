@@ -104,8 +104,17 @@ fun rememberDownloadMarks(actions: ActionsViewModel): DownloadMarks {
     return remember(state, marks, plain) { DownloadMarks(state, marks, plain) }
 }
 
-/** The glyph a row's mark shows. Waiting and downloading share the ring, so one flows into the other. */
-private enum class Glyph { NONE, RING, DONE, FAILED }
+/** The glyph a row's mark shows (the core's `download_glyph`). */
+private typealias Glyph = dev.nori.music.ffi.DownloadGlyph
+
+/** The core's answer for each phase and state, asked once each: a row asks on every composition. */
+private object Glyphs {
+    private val made = arrayOfNulls<Glyph>(20)
+    fun of(phase: Int, downloaded: Boolean, pending: Boolean): Glyph {
+        val i = (phase + 1) * 4 + (if (downloaded) 2 else 0) + (if (pending) 1 else 0)
+        return made[i] ?: dev.nori.music.ffi.downloadGlyph(phase, downloaded, pending).also { made[i] = it }
+    }
+}
 
 /** The last glyph a row showed, kept so it can fade out rather than vanish. A plain field: never drawn from. */
 private class LastGlyph(var value: Glyph, val bornEmpty: Boolean)
@@ -130,16 +139,8 @@ fun DownloadSlot(id: String, downloaded: Boolean, tint: Color) {
         return
     }
     val mark = all.marks.value[id]
-    val glyph = when {
-        mark != null -> when (mark.phase) {
-            DownloadPhase.DONE -> Glyph.DONE
-            DownloadPhase.FAILED -> Glyph.FAILED
-            else -> Glyph.RING
-        }
-        downloaded -> Glyph.DONE
-        id in all.state.value.pendingIds -> Glyph.RING
-        else -> Glyph.NONE
-    }
+    // The phase's ordinal is the core's numbering (`download_phase`).
+    val glyph = Glyphs.of(mark?.phase?.ordinal ?: -1, downloaded, id in all.state.value.pendingIds)
     val last = remember { LastGlyph(glyph, glyph == Glyph.NONE) }
     if (glyph != Glyph.NONE) last.value = glyph
     if (last.value == Glyph.NONE) return
@@ -260,10 +261,12 @@ fun DownloadsScreen(actions: ActionsViewModel) {
     var confirm by remember { mutableStateOf(false) }
     val s = sections
     val unfinished = s?.let { it.active.size + it.queued.size + it.failed.size } ?: 0
+    // Whether stopping everything asks first, and what it says, are the core's (`words_stop_all`).
+    val stop = remember(unfinished) { dev.nori.music.ffi.wordsStopAll(unfinished.toUInt()) }
     if (confirm) AlertDialog(
         onDismissRequest = { confirm = false },
-        title = { Text("Stop all downloads?") },
-        text = { Text("$unfinished songs that have not finished downloading leave the queue. Songs already downloaded stay.") },
+        title = { Text(stop.title) },
+        text = { Text(stop.text) },
         confirmButton = { TextButton({ actions.cancelAllDownloads(); confirm = false }) { Text("Stop all") } },
         dismissButton = { TextButton({ confirm = false }) { Text("Cancel") } },
     )
@@ -274,7 +277,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
             AnimatedVisibility(unfinished > 0, enter = fadeIn(tween(if (plain) 0 else 200)), exit = fadeOut(tween(if (plain) 0 else 200))) {
                 Text(
                     "Stop all",
-                    Modifier.clip8().clickable { if (unfinished > 1) confirm = true else actions.cancelAllDownloads() }.padding(horizontal = 8.dp, vertical = 8.dp),
+                    Modifier.clip8().clickable { if (stop.asks) confirm = true else actions.cancelAllDownloads() }.padding(horizontal = 8.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
                 )
             }
@@ -330,9 +333,9 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Icon(Icons.Outlined.Downloading, null, Modifier.size(44.dp), MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                    Text("No downloads", Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                    Text(noteText(dev.nori.music.ffi.Note.NO_DOWNLOADS), Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                     Text(
-                        "Songs you download show here while they arrive, and for a while after.",
+                        noteText(dev.nori.music.ffi.Note.NO_DOWNLOADS_HELP),
                         Modifier.padding(top = 6.dp), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -363,6 +366,7 @@ private fun DownloadRow(
     onClick: (() -> Unit)? = null, trailing: @Composable RowScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
+    val couldNot = noteText(dev.nori.music.ffi.Note.DOWNLOAD_FAILED)
     Column(modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
@@ -377,7 +381,7 @@ private fun DownloadRow(
                     Text(
                         // The second line says what went wrong when something did, how an arrival is
                         // doing while it is, otherwise the artist.
-                        if (failed) "Couldn't download" else sub ?: song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        if (failed) couldNot else sub ?: song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                     )
                 }

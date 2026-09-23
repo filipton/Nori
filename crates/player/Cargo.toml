@@ -18,6 +18,10 @@ nori-text = { path = "../text" }
 # AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
 rustfft = "6"
 signalsmith-stretch = "0.1"
+# Decoding: pure Rust codecs only (no containers - the platform's extractor hands in packets).
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "flac", "aac", "vorbis", "alac", "pcm"] }
+# Opus, which symphonia does not decode: a pure Rust port of libopus (BSD-3).
+opus-rs = "0.1.34"
 
 # Test-only: the resample evaluation compares the transition-time cubic interpolator against a
 # sinc resampler. It stays out of release builds.

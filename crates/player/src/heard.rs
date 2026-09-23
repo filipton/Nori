@@ -94,6 +94,61 @@ impl HeardTracker {
         }
         seen
     }
+
+    /// Whether the song heard (`heard`) is another song than the one a page shows (`shown`), both indexes
+    /// into the queue. A page showing nothing, or a song the queue does not have, differs from nothing.
+    pub fn differs(&self, heard: usize, shown: usize) -> bool {
+        match self.queue.get(shown) {
+            None => false,
+            Some((id, _)) => self.queue.get(heard).is_none_or(|(h, _)| h != id),
+        }
+    }
+}
+
+/// The place a seek bar shows, and when it was taken. The ear changes song a moment before the page
+/// follows (on the next tick): until it has, the old song's title must not be shown with the new song's
+/// time under it, so the bar holds where it was. And while the app is reconnecting to the player
+/// nothing can be asked at all - reporting zero then makes the bar snap to 0:00 and jump back a
+/// heartbeat later, so it carries on from where it was, moving if the music was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Playhead {
+    ms: i64,
+    at_ms: i64,
+}
+
+impl Playhead {
+    pub const fn new() -> Self {
+        Playhead { ms: 0, at_ms: 0 }
+    }
+
+    /// What the bar shows for `seen`, asked at `now_ms` while the page shows queue index `shown`.
+    pub fn show(&mut self, t: &HeardTracker, seen: Seen, shown: Option<usize>, now_ms: i64) -> i64 {
+        if let (Some(h), Some(s)) = (seen.index, shown) {
+            if t.differs(h, s) {
+                return self.ms;
+            }
+        }
+        self.ms = seen.ms;
+        self.at_ms = now_ms;
+        self.ms
+    }
+
+    /// Where the bar is at `now_ms` with nothing to ask: the last place, run on at one times if `playing`.
+    pub fn run_on(&self, now_ms: i64, playing: bool) -> i64 {
+        let elapsed = if playing && self.at_ms > 0 { now_ms - self.at_ms } else { 0 };
+        (self.ms + elapsed).max(0)
+    }
+}
+
+/// The length a page shows for its song: the heard song's own (in seconds, from the queue) while the ear
+/// is on a song the player has left, else what the player measured once it knows, else what the song's
+/// tags said.
+pub fn shown_duration_ms(heard_s: Option<i64>, player_ms: i64, tagged_ms: i64) -> i64 {
+    match heard_s {
+        Some(s) => s * 1000,
+        None if player_ms > 0 => player_ms,
+        None => tagged_ms,
+    }
 }
 
 impl Ear {
@@ -260,5 +315,30 @@ mod tests {
         assert_eq!(t.at(&holding(190_000_000, 0), p).seen(), Some((A, 190_000)));
         let late = Heard { until_us: i64::MAX, ..holding(199_000_000, 0) };
         assert_eq!(t.at(&late, now(60_000, "b", 0)).seen(), Some((A, 200_000)), "clamped to the song's length");
+    }
+
+    #[test]
+    fn the_bar_holds_while_the_page_is_a_song_behind() {
+        let mut t = HeardTracker::new();
+        t.set_queue([("a".to_string(), 200_000), ("b".to_string(), 180_000), ("a".to_string(), 200_000)]);
+        let mut p = Playhead::new();
+        let seen = |index, ms| Seen { index, ms, changed: false };
+        assert_eq!(p.show(&t, seen(None, 5_000), Some(A), 100), 5_000, "the player's own word");
+        assert_eq!(p.show(&t, seen(Some(A), 6_000), Some(A), 200), 6_000, "heard on the song shown");
+        assert_eq!(p.show(&t, seen(Some(2), 7_000), Some(A), 300), 7_000, "another copy of the same song is the same song");
+        assert_eq!(p.show(&t, seen(Some(B), 1_000), Some(A), 400), 7_000, "the ear moved to b, the page is still on a: hold");
+        assert_eq!(p.show(&t, seen(Some(B), 1_100), None, 500), 1_100, "a page showing nothing does not hold");
+        assert_eq!(p.show(&t, seen(Some(B), 1_200), Some(9), 600), 1_200, "nor one the queue does not have");
+        assert_eq!(p.run_on(1_600, true), 2_200, "reconnecting while playing: runs on from when it was taken");
+        assert_eq!(p.run_on(1_600, false), 1_200, "paused: stands");
+        assert_eq!(Playhead::new().run_on(5_000, true), 0, "never shown: zero, not the clock");
+    }
+
+    #[test]
+    fn the_length_shown_is_the_heard_songs() {
+        assert_eq!(shown_duration_ms(Some(180), 200_000, 199_000), 180_000, "the ear is a song behind the player");
+        assert_eq!(shown_duration_ms(None, 200_123, 199_000), 200_123, "measured");
+        assert_eq!(shown_duration_ms(None, 0, 199_000), 199_000, "not measured yet");
+        assert_eq!(shown_duration_ms(None, i64::MIN + 1, 199_000), 199_000, "unknown (media3's TIME_UNSET)");
     }
 }

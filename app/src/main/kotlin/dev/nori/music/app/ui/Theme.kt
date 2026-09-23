@@ -23,7 +23,9 @@ import dev.nori.music.settings.ThemeMode
 @Composable
 fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
+    val system = isSystemInDarkTheme()
+    // Light, dark or the phone's: the core's rule (nori_look::theme::is_dark), the same for every screen.
+    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.themeIsDark(prefs.theme.ordinal, system) }
     val dynamic = prefs.dynamicColor && Build.VERSION.SDK_INT >= 31
     val scheme = remember(dark, dynamic, prefs.accent, prefs.amoled) {
         val base = when {
@@ -33,13 +35,13 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
         }
         if (dark && prefs.amoled) base.black() else base
     }
-    val system = androidx.compose.ui.platform.LocalDensity.current
+    val systemDensity = androidx.compose.ui.platform.LocalDensity.current
     val widthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
-    val scale = uiScale(prefs.uiScale, widthDp)
+    val scale = remember(prefs.uiScale, widthDp) { uiScale(prefs.uiScale, widthDp) }
     // The whole app's density, scaled once here: dp and sp both follow it, so every size keeps its
     // proportion to the screen. The system's font scale is left as it is - that one is the reader's.
-    val density = remember(system, scale) {
-        if (scale == 1f) system else androidx.compose.ui.unit.Density(system.density * scale, system.fontScale)
+    val density = remember(systemDensity, scale) {
+        if (scale == 1f) systemDensity else androidx.compose.ui.unit.Density(systemDensity.density * scale, systemDensity.fontScale)
     }
     // Everything dressed in the theme's own colours - the plates behind the buttons, the chrome, the
     // status bar - worked out once per scheme in Rust (nori_look::dress) and only looked up after.
@@ -60,19 +62,11 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
 }
 
 /**
- * Every size in this app was measured against Apple's own screens as a share of the screen's width,
- * on a phone 411 dp wide. A phone whose display size makes it narrower in dp - one measured at 358 dp
- * - draws every one of those sizes a seventh larger, and the whole thing looks zoomed in. Automatic
- * lays the app out as if the screen were at least [REFERENCE_WIDTH_DP] wide, so the proportions hold;
- * it only ever shrinks, never enlarges past what the system asked for.
+ * How big the interface is drawn: a fixed factor, or automatic - laid out as if the screen were at
+ * least as wide as the phone every size was measured on, so a large display size does not zoom the
+ * layout in. The rule is the core's (`nori_look::theme::ui_scale`).
  */
-fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
-    setting > 0f -> setting
-    screenWidthDp <= 0 -> 1f
-    else -> (screenWidthDp / REFERENCE_WIDTH_DP).coerceIn(0.75f, 1f)
-}
-
-private const val REFERENCE_WIDTH_DP = 411f
+fun uiScale(setting: Float, screenWidthDp: Int): Float = dev.nori.music.ffi.uiScale(setting, screenWidthDp)
 
 /** A light or dark scheme from one colour: tones of the same hue, worked out in Rust (`nori_look::theme::seeded`). */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {

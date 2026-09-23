@@ -16,7 +16,7 @@ use rusqlite::{types::Value, Connection, OptionalExtension};
 use crate::{db, history, model::Song, Core, Result};
 
 /// The "For you" row built on these draws.
-mod board;
+pub(crate) mod board;
 
 const DAY_MS: i64 = 86_400_000;
 

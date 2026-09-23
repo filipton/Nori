@@ -36,6 +36,32 @@ const SWEEP_STEP: f32 = 0.04;
 /// One press of "Sooner" or "Later", for the few songs whose timings are wrong.
 pub const NUDGE_STEP_MS: i64 = 250;
 
+/// How long the words stay where a finger left them before they come back to the line being sung.
+pub const READING_MS: i64 = 4_000;
+
+/// How lit a line is before it is reached...
+pub const NEXT_LINE: f32 = 0.35;
+/// ...and once it has been sung: dimmer again, so the eye goes forward.
+pub const PAST_LINE: f32 = NEXT_LINE * 0.55;
+
+/// How lit line `line` is with `active` the line being sung (-1 before the first). Untimed words are all
+/// fully lit: nothing says which one is being sung.
+pub fn line_strength(synced: bool, line: i32, active: i32) -> f32 {
+    if !synced || line == active {
+        1.0
+    } else if line < active {
+        PAST_LINE
+    } else {
+        NEXT_LINE
+    }
+}
+
+/// Whether the screen is kept on for the lyrics: the listener asked for it, the player is on screen, and
+/// the music plays.
+pub fn keeps_screen_on(asked: bool, shown: bool, playing: bool) -> bool {
+    asked && shown && playing
+}
+
 /// Lines past this are never lit: the index has to fit its field in [`Step::pack`]. A song has a few
 /// hundred at most.
 pub const MAX_LINES: usize = (1 << ACTIVE_BITS) - 2;
@@ -334,6 +360,17 @@ impl Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lines_are_lit_by_where_the_singing_is() {
+        assert_eq!(line_strength(true, 3, 3), 1.0);
+        assert_eq!(line_strength(true, 2, 3), 0.35 * 0.55);
+        assert_eq!(line_strength(true, 4, 3), 0.35);
+        assert_eq!(line_strength(true, 0, -1), 0.35, "before the first line, all are still to come");
+        assert_eq!(line_strength(false, 0, 5), 1.0);
+        assert!(keeps_screen_on(true, true, true) && !keeps_screen_on(true, true, false) && !keeps_screen_on(false, true, true) && !keeps_screen_on(true, false, true));
+        assert_eq!(READING_MS, 4_000);
+    }
 
     fn lines(starts: &[i64]) -> Vec<Line> {
         starts.iter().map(|&s| Line { start_ms: s, len: 10, words: Vec::new() }).collect()

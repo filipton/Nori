@@ -50,13 +50,34 @@ pub fn needed_ms(duration_s: i64, percent: i32) -> i64 {
     (duration_s * 10 * percent.clamp(10, 100) as i64).min(240_000).max(10_000)
 }
 
-/// The player moved to `next` (None: playback ended), playing or not, at `now_ms` (monotonic) and
-/// `wall_ms`. Records the song left in the history when the taste model is on, and says what to send
-/// when scrobbling is, counting a play at the share of the song the settings ask for.
+/// Why the player's song changed, for [`scrobble_track`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum TrackChange {
+    /// Onto another song (or onto nothing).
+    Moved,
+    /// The same song again under repeat: a play of its own.
+    Looped,
+    /// Playback came to its end.
+    Ended,
+}
+
+/// What the scrobbler follows after a change to `id`: nothing once playback ended, and a radio stream
+/// only when it loops (a stream moved onto is not a song to count or to announce).
+fn followed(id: Option<String>, why: TrackChange) -> Option<String> {
+    match why {
+        TrackChange::Ended => None,
+        TrackChange::Looped => id,
+        TrackChange::Moved => id.filter(|i| !i.starts_with(queue::RADIO_PREFIX)),
+    }
+}
+
+/// The player's song changed to `id` (`why`), playing or not, at `now_ms` (monotonic) and `wall_ms`.
+/// Records the song left in the history when the taste model is on, and says what to send when
+/// scrobbling is, counting a play at the share of the song the settings ask for.
 #[uniffi::export]
-pub fn scrobble_track(next: Option<String>, playing: bool, now_ms: i64, wall_ms: i64, tz_offset_ms: i32) -> ScrobbleSend {
+pub fn scrobble_track(id: Option<String>, why: TrackChange, playing: bool, now_ms: i64, wall_ms: i64, tz_offset_ms: i32) -> ScrobbleSend {
     let (taste_model, scrobble, percent) = crate::settings_store::with_prefs(|p| (p.taste_model, p.scrobble, p.scrobble_percent)).unwrap_or((true, true, 50));
-    track(next, playing, now_ms, wall_ms, tz_offset_ms, taste_model, scrobble, percent)
+    track(followed(id, why), playing, now_ms, wall_ms, tz_offset_ms, taste_model, scrobble, percent)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -94,6 +115,16 @@ mod tests {
         assert_eq!(needed_ms(600, 50), 240_000, "four minutes at most");
         assert_eq!(needed_ms(10, 50), 10_000, "ten seconds at least");
         assert_eq!(needed_ms(200, 5), 20_000, "the share is at least 10 %");
+    }
+
+    #[test]
+    fn what_a_change_is_followed_as() {
+        let id = |s: &str| Some(s.to_string());
+        assert_eq!(followed(id("s1"), TrackChange::Moved), id("s1"));
+        assert_eq!(followed(id("radio:4"), TrackChange::Moved), None, "a stream moved onto");
+        assert_eq!(followed(id("radio:4"), TrackChange::Looped), id("radio:4"), "a loop keeps whatever it is");
+        assert_eq!(followed(id("s1"), TrackChange::Ended), None);
+        assert_eq!(followed(None, TrackChange::Moved), None);
     }
 
     #[test]

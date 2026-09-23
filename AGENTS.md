@@ -17,16 +17,25 @@ crates/player/  Rust, platform-free: how music is played and heard. The sound ch
                 rebuilt (transport.rs), what mixes where (transitions.rs), the audio policy, ReplayGain
                 and fades (policy.rs), USB DACs (dac.rs), outputs (outputs.rs) and which sound an output
                 device gets (device.rs, sound.rs). No I/O, no uniffi, no JNI.
-crates/look/    Rust, platform-free: how a page looks. The colours a page takes from its cover (cover.rs,
-                with a line-for-line port of AndroidX Palette in palette.rs) and a theme's tones from
-                one colour (theme.rs). Pixels in, colours out; no I/O, no uniffi, no JNI.
+crates/look/    Rust, platform-free: how a page looks and moves. The colours a page takes from its cover
+                (cover.rs, with a line-for-line port of AndroidX Palette in palette.rs), a theme's tones
+                from one colour (theme.rs), a page's whole dressed look and its cross-fade (dress.rs,
+                over Compose's own colour maths in compose.rs), and lyric timing, sweep and redraw pacing
+                (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
+crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
+                decimal separator is handed in once), with Java's rounding.
 crates/core/    Rust for Android, and the app's state: the Subsonic client and network policy (client.rs,
-                transport.rs, cache_policy.rs, stream.rs), the SQLite/FTS5 index and caches, settings
-                (settings.rs, profiles.rs), the queue the app plays (playlist.rs; the songs in it by id,
-                queue.rs), refilling it (autofill.rs), downloads (transfers.rs), scrobbling, the
-                transition planner (automix/planner.rs), and the doors into nori-player and nori-look
-                (JNI in dsp.rs, stages.rs, automix/engine_jni.rs, heard.rs, seek.rs, look.rs,
-                transfers.rs; uniffi everywhere else). Kotlin asks and draws; the core decides.
+                transport.rs, cache_policy.rs, stream.rs), one SQLite/FTS5 database for the whole app with
+                every server's rows keyed by its id (db.rs), settings (settings.rs codec, settings_store.rs
+                the live copy, profiles.rs), the queue the app plays (playlist.rs; the songs in it by id,
+                queue.rs), refilling it (autofill.rs), the offline bridge (bridge.rs), downloads
+                (transfers.rs), the stream cache's order (stream_cache.rs), stars, actions and every word
+                the app says (actions.rs, stars.rs, words.rs, fmt.rs, pages.rs), the car's browse tree
+                (car.rs), scrobbling, the transition planner (automix/planner.rs), and the doors into
+                nori-player and nori-look (JNI in dsp.rs, stages.rs, automix/engine_jni.rs, heard.rs,
+                seek.rs, look.rs, transfers.rs, stream_cache.rs; uniffi everywhere else). Kotlin asks and
+                draws; the core decides. The core reacts to its own state (a settings change reaches the
+                planner and the sound chain by itself) rather than waiting for Kotlin to pass it on.
 core/           Android library, no UI: net/, data/ (Library = the repository), playback/
                 (media3 service, DAC, scrobbling; TransitionSink only forwards to the engine,
                 Stages.kt only forwards speed/pitch and silence skipping),
@@ -40,9 +49,11 @@ which parts of the chain may run - belongs in `crates/player`, tested there agai
 output, so a desktop app gets the same behaviour without writing it again. The Android side only
 decodes, outputs, and asks.
 
-The boundary that matters: `ui/` may be thrown away and rewritten. It must only read ViewModel
-state and call ViewModel functions; it never touches `Nori`, media3, OkHttp or the FFI. `core/`
-must never know a UI exists.
+The boundary that matters: `ui/` may be thrown away and rewritten. It reads ViewModel state and
+calls ViewModel functions, and may call the core's pure functions (words, numbers, looks) directly;
+it never touches `Nori`, media3, OkHttp or the core's state. `core/` must never know a UI exists.
+Everything a second client (a desktop app) would need to behave the same - every decision, rule,
+word, colour and piece of state - lives in the crates; the Kotlin is a front end.
 
 ## Build and test
 

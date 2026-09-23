@@ -44,6 +44,39 @@ fn kind(t: i32) -> OutputKind {
     }
 }
 
+/// The glyph the player's output button shows for where the sound is going.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OutputGlyph {
+    Headphones,
+    Bluetooth,
+    /// The phone's speaker and anything else: Apple's AirPlay mark, filled in when it is elsewhere.
+    Cast,
+}
+
+/// The output button as it stands.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OutputLook {
+    pub glyph: OutputGlyph,
+    /// The sound is going somewhere other than the phone's speaker: the glyph takes the accent.
+    pub elsewhere: bool,
+    /// What the button says to a screen reader.
+    pub description: String,
+}
+
+/// The output button for `output`, one of the names outputs are remembered by ("USB: …",
+/// "Bluetooth: …", "Wired headphones", the speaker, or a device's own name).
+#[uniffi::export]
+pub fn output_look(output: String) -> OutputLook {
+    let glyph = if output.starts_with("USB") || output.starts_with("Wired") {
+        OutputGlyph::Headphones
+    } else if output.starts_with("Bluetooth") {
+        OutputGlyph::Bluetooth
+    } else {
+        OutputGlyph::Cast
+    };
+    OutputLook { glyph, elsewhere: output != outputs::SPEAKER, description: format!("Output: {output}") }
+}
+
 /// `AudioFormat.ENCODING_*` in bits per sample; float counts as 32.
 fn bits(encoding: i32) -> u32 {
     match encoding {
@@ -70,6 +103,18 @@ fn modes(rates: &[u32], encodings: &[i32]) -> Vec<DacMode> {
 pub fn outputs_refresh(types: Vec<i32>, names: Vec<String>, known: Vec<String>, fake_usb: Option<String>) -> Seen {
     let attached: Vec<(OutputKind, &str)> = types.iter().zip(&names).map(|(t, n)| (kind(*t), n.as_str())).collect();
     outputs::refresh(&attached, &known, fake_usb.as_deref())
+}
+
+/// The name the phone's own speaker goes by (`nori_player::outputs::SPEAKER`).
+#[uniffi::export]
+pub fn outputs_speaker() -> String {
+    nori_player::outputs::SPEAKER.into()
+}
+
+/// The name of the sound profile that changes nothing (`nori_player::device::FLAT`).
+#[uniffi::export]
+pub fn device_flat() -> String {
+    nori_player::device::FLAT.into()
 }
 
 /// The list of outputs as it comes back from storage.
@@ -140,6 +185,20 @@ pub fn dac_mock(spec: String) -> MockDac {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_output_button_names_where_the_sound_goes() {
+        let l = |o: &str| {
+            let l = output_look(o.into());
+            (l.glyph, l.elsewhere)
+        };
+        assert_eq!(l("USB: K3"), (OutputGlyph::Headphones, true));
+        assert_eq!(l("Wired headphones"), (OutputGlyph::Headphones, true));
+        assert_eq!(l("Bluetooth: buds"), (OutputGlyph::Bluetooth, true));
+        assert_eq!(l(outputs::SPEAKER), (OutputGlyph::Cast, false));
+        assert_eq!(l("HDMI"), (OutputGlyph::Cast, true));
+        assert_eq!(output_look("Bluetooth: buds".into()).description, "Output: Bluetooth: buds");
+    }
 
     #[test]
     fn android_devices_map_onto_the_player_kinds() {

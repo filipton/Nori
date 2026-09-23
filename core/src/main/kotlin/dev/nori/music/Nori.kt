@@ -17,6 +17,9 @@ import dev.nori.music.playback.MediaSources
 import dev.nori.music.playback.PlayerConnection
 import dev.nori.music.settings.ServerProfile
 import dev.nori.music.settings.Settings
+import dev.nori.music.settings.serverList
+import dev.nori.music.settings.stored
+import dev.nori.music.settings.withServers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -34,8 +37,11 @@ class Nori private constructor(private val context: Context) {
     // time anything needs the core it is normally there; the UI thread itself only ever needs [settings] and
     // the cheap shells ([library], [downloads], [player]) to draw its first frame.
     private val lock = Any()
-    /** The active profile's core and the client over it, opened together. */
-    private class Opened(val id: String, val core: Core, val client: Client)
+    /**
+     * The active profile's core and the client over it, opened together. [key] is the active server id as
+     * the settings hold it, [id] whose rows those are (the core's `server_db`: "default" before any).
+     */
+    private class Opened(val key: String, val id: String, val core: Core, val client: Client)
     @Volatile private var opened: Opened? = null
     private val lazyHttp = lazy { Http(context).also { it.configure(settings.value.server) } }
     private val lazySources = lazy { MediaSources(context, ::client, http, settings) }
@@ -44,12 +50,14 @@ class Nori private constructor(private val context: Context) {
     private val transport by lazy { http.transport { library.onServerChanged() } }
 
     private fun active(): Opened {
-        val id = settings.value.activeServerId.ifEmpty { "default" }
-        opened?.takeIf { it.id == id }?.let { return it }
+        // Compared as the settings hold it, so the core is only asked whose rows those are on a switch.
+        val key = settings.value.activeServerId
+        opened?.takeIf { it.key == key }?.let { return it }
         return synchronized(lock) {
-            opened?.takeIf { it.id == id } ?: settings.value.server.let { p ->
+            opened?.takeIf { it.key == key } ?: settings.value.server.let { p ->
+                val id = dev.nori.music.ffi.serverDb(key)
                 val core = open(id, p)
-                Opened(id, core, Client(core, transport).also { c -> p?.let { c.setProfile(it.net()) } })
+                Opened(key, id, core, Client(core, transport).also { c -> p?.let { c.setProfile(it.net()) } })
             }.also { opened = it }
         }
     }
@@ -134,17 +142,17 @@ class Nori private constructor(private val context: Context) {
         player.clear()
         // The old core is dropped, not closed: a request may still be using it, and the cleaner frees it.
         synchronized(lock) { opened = null }
-        settings.update { p -> p.copy(servers = p.servers.filterNot { it.id == profile.id } + profile, activeServerId = profile.id) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.serversActivated(p.serverList(), profile.stored())) }
         http.configure(profile)
         library.onServerChanged()
     }
 
     /** Settings that do not need the server asked again: headers, Wi-Fi only, music folder, name. */
     fun updateServer(profile: ServerProfile) {
-        settings.update { p -> p.copy(servers = p.servers.map { if (it.id == profile.id) profile else it }) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.serversUpdated(p.serverList(), profile.stored())) }
         if (profile.id == settings.value.activeServerId) {
             http.configure(profile)
-            opened?.takeIf { it.id == profile.id }?.client?.setProfile(profile.net())
+            opened?.takeIf { it.key == profile.id }?.client?.setProfile(profile.net())
             library.onServerChanged()
         }
     }
@@ -152,10 +160,8 @@ class Nori private constructor(private val context: Context) {
     fun removeServer(id: String) {
         val wasActive = settings.value.activeServerId == id
         if (wasActive) { player.clear(); synchronized(lock) { opened = null } }
-        settings.update { p ->
-            val rest = p.servers.filterNot { it.id == id }
-            p.copy(servers = rest, activeServerId = if (wasActive) rest.firstOrNull()?.id.orEmpty() else p.activeServerId)
-        }
+        // Which one takes over when the one in use goes is the core's (`settings::servers_remove`).
+        settings.update { p -> p.withServers(dev.nori.music.ffi.serversRemoved(p.serverList(), id)) }
         // Its rows in the app's database; a whole library is a lot of rows, so not on this thread.
         val db = File(context.filesDir, dev.nori.music.ffi.dbFileName()).path
         Thread({ runCatching { dev.nori.music.ffi.dbForgetServer(db, id) } }, "nori-forget").start()

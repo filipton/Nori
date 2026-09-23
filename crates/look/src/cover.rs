@@ -147,7 +147,13 @@ pub fn derive(pixels: &[u32], w: usize, h: usize, dark: bool, amoled: bool) -> C
     // in cloud; a dark page under them faded light into dark across the whole width.
     let body_ink = body_hsl[2] < 0.10 && body_hsl[1] < 0.18;
     let light_foot = solid && foot.strip >= 0.08 && edge_luma > 0.45 && !sleeve_paper && (dark || body_ink);
-    let paper_hsl = if light_foot { color_to_hsl(edge_raw) } else { body_hsl };
+    // Paper keeps its tint only where there is one to see. A white sleeve averages out a few levels off
+    // grey - JPEG noise, a scanner's cast, the grey of whatever is printed on it - and a whole screen of
+    // page showed that as a tint the sleeve does not have. So the tint fades out below twelve levels and
+    // is gone under four: Rumours' cream stays cream, and Dreamland's lavender cloud (ten) mostly stays.
+    let paper_src = if light_foot { edge_raw } else { body };
+    let mut paper_hsl = color_to_hsl(paper_src);
+    paper_hsl[1] *= ((chroma(paper_src) - 4) as f32 / (GREY_CHROMA - 4) as f32).clamp(0.0, 1.0);
     let paper = (sleeve_paper && !black_foot) || light_foot;
     let ink = (body_ink && !light_foot) || (sleeve_paper && black_foot);
     let page_dark = (dark && !paper) || ink || black_foot;
@@ -411,6 +417,20 @@ const HUES: usize = 18;
 const NEUTRAL: usize = HUES;
 const DARK: usize = HUES + 1;
 
+/// How far apart a pale pixel's channels must be (out of 255) before it counts as a colour and not as
+/// paper. HSL saturation cannot say: it divides by how far the lightness is from white, so near white
+/// it explodes - FEFDFD, one level off grey, is a third saturated. A sleeve's white paper, carrying a
+/// few levels of JPEG chroma noise or a scanner's cast, was counted pixel by pixel as a vivid colour of
+/// whatever hue the noise had, and the page took that hue: a white sleeve with a CD on it came out
+/// blue, and Cage the Elephant's off-white paper joined the yellow of its splashes into an olive page.
+/// Under twelve levels the eye sees white, whatever the hue works out to.
+const GREY_CHROMA: i32 = 12;
+
+fn chroma(c: u32) -> i32 {
+    let (r, g, b) = (red(c), green(c), blue(c));
+    r.max(g).max(b) - r.min(g).min(b)
+}
+
 /// The colour there is most of, which is not what Palette's dominant swatch answers: Palette drops
 /// whole families on the way in (anything near white or black, the 10-37 degree band unless strongly
 /// saturated), so on a field of pale dusty pink with dark hair down one side, the hair won. So count
@@ -443,7 +463,7 @@ fn dominant(pixels: &[u32], w: usize, h: usize, fallback: u32) -> u32 {
             total += 1.0;
             // Dark and colourless - or so dark that any hue it has is noise - is black.
             let black = hsl[2] < 0.06 || (hsl[2] < 0.18 && hsl[1] < 0.25);
-            let white = hsl[2] > 0.88 && hsl[1] < 0.18;
+            let white = hsl[2] > 0.88 && (hsl[1] < 0.18 || chroma(px) < GREY_CHROMA);
             if black {
                 ink += 1.0;
             }
@@ -538,8 +558,13 @@ fn dominant(pixels: &[u32], w: usize, h: usize, fallback: u32) -> u32 {
             }
         }
         let subject = family_share >= 0.30 && solid as f32 / total >= 0.18;
+        // On paper the subject only keeps a page it won. A light sleeve's ground is what it is printed
+        // on, and when the paper out-counts the colour as well, the eye takes the paper for the sleeve:
+        // Villains is half off-white paper round a red devil, and handing the devil the page the paper
+        // had won painted it red. A black field is different - Amnesiac's red book is the picture and
+        // the black round it is not - so ink still gives way to a subject.
         if paper / total >= 0.45 {
-            best = if subject && paper / total < 0.60 { family } else { NEUTRAL };
+            best = if subject && paper / total < 0.60 && best != NEUTRAL { family } else { NEUTRAL };
         }
         if ink / total >= 0.45 {
             best = if subject && ink / total < 0.60 { family } else { DARK };
@@ -678,6 +703,83 @@ mod tests {
         let yellow = derive(&solid(0xFFF2_D544), S, S, false, false);
         let [h, s, _] = color_to_hsl(yellow.background);
         assert!((40.0..60.0).contains(&h) && s > 0.3, "yellow bleached to {:08x}", yellow.background);
+    }
+
+    /// `base` with a few levels of JPEG-like noise per channel, leaning by `cast`.
+    fn noisy(base: u32, cast: [i32; 3], noise: &mut JavaRandom) -> u32 {
+        let mut ch = |v: i32, c: i32| (v + c + (noise.next_float() * 5.0) as i32 - 2).clamp(0, 255);
+        rgb(ch(red(base), cast[0]), ch(green(base), cast[1]), ch(blue(base), cast[2]))
+    }
+
+    /// How far from grey a page is, in levels.
+    fn tint(c: u32) -> i32 {
+        red(c).max(green(c)).max(blue(c)) - red(c).min(green(c)).min(blue(c))
+    }
+
+    #[test]
+    fn a_white_sleeve_with_a_disc_on_it_keeps_a_white_page() {
+        // White paper with a faint cool cast and a silver CD in the middle with a bluish sheen. Each of
+        // the paper's pixels is "a third saturated" to HSL, and they used to vote the page blue.
+        let mut noise = JavaRandom::new(7);
+        let c = S as f32 / 2.0;
+        let v: Vec<u32> = (0..S * S)
+            .map(|i| {
+                let (x, y) = ((i % S) as f32 + 0.5 - c, (i / S) as f32 + 0.5 - c);
+                let r = (x * x + y * y).sqrt() / S as f32;
+                if r < 0.3 && r > 0.03 {
+                    let sheen = (40.0 * (0.5 + 0.5 * (2.0 * (y.atan2(x) - 0.7)).cos())) as i32;
+                    noisy(rgb(176 + sheen, 180 + sheen, 190 + sheen), [0, 0, 0], &mut noise)
+                } else {
+                    noisy(0xFFF6_F7FA, [-1, 0, 2], &mut noise)
+                }
+            })
+            .collect();
+        for dark in [true, false] {
+            let p = derive(&v, S, S, dark, false);
+            assert!(tint(p.background) <= 3 && luminance(p.background) > 0.7, "dark={dark}: {:08x}", p.background);
+        }
+    }
+
+    #[test]
+    fn off_white_paper_under_bright_splashes_is_paper_and_not_their_colour() {
+        // Cage the Elephant: off-white paper, a few levels warm, with yellow and red splashes round it.
+        // The paper and the yellow used to be averaged into one family and gave an olive page.
+        let mut noise = JavaRandom::new(11);
+        let v: Vec<u32> = (0..S * S)
+            .map(|i| {
+                let (x, y) = (i % S, i / S);
+                let edge = x.min(y).min(S - 1 - x).min(S - 1 - y);
+                match (edge < S / 12, (x / 8 + y / 8) % 3) {
+                    (true, 0) => noisy(0xFFE8_D850, [0, 0, 0], &mut noise),
+                    (true, 1) => noisy(0xFFE0_C890, [0, 0, 0], &mut noise),
+                    (true, _) => noisy(0xFFD0_3048, [0, 0, 0], &mut noise),
+                    _ => noisy(0xFFEE_EEE8, [0, 0, 0], &mut noise),
+                }
+            })
+            .collect();
+        for dark in [true, false] {
+            let p = derive(&v, S, S, dark, false);
+            assert!(tint(p.background) <= 3 && luminance(p.background) > 0.7, "dark={dark}: {:08x}", p.background);
+        }
+    }
+
+    #[test]
+    fn a_colour_on_paper_does_not_take_the_page_the_paper_won() {
+        // Villains: off-white paper, a solid red devil over a third of it, a dark coat below.
+        let mut noise = JavaRandom::new(3);
+        let v: Vec<u32> = (0..S * S)
+            .map(|i| {
+                let (x, y) = (i % S, i / S);
+                if x > S / 4 && y > S / 5 && x < S * 5 / 6 {
+                    let c = if y > S * 4 / 5 { 0xFF1C_1D27 } else { 0xFFD2_4850 };
+                    noisy(c, [0, 0, 0], &mut noise)
+                } else {
+                    noisy(0xFFF7_F8F1, [0, 0, 0], &mut noise)
+                }
+            })
+            .collect();
+        let p = derive(&v, S, S, true, false);
+        assert!(luminance(p.background) > 0.7, "{:08x}", p.background);
     }
 
     #[test]

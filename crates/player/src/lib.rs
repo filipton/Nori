@@ -7,6 +7,7 @@ pub mod automix;
 pub mod burst;
 pub mod dac;
 pub mod device;
+pub mod decode;
 pub mod dsp;
 pub mod engine;
 pub mod outputs;

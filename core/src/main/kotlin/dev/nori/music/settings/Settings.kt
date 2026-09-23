@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import dev.nori.music.ffi.PrefValue
 import dev.nori.music.ffi.SavedQuality
 import dev.nori.music.ffi.SavedServer
+import dev.nori.music.ffi.ServerList
 import dev.nori.music.ffi.SoundBand
 import dev.nori.music.ffi.SoundSettings
 import dev.nori.music.ffi.StoredPrefs
@@ -13,6 +14,7 @@ import dev.nori.music.ffi.serverLabel
 import dev.nori.music.ffi.dbFileName
 import dev.nori.music.ffi.settingsOpen
 import dev.nori.music.ffi.settingsPut
+import dev.nori.music.ffi.settingLabels
 import kotlinx.coroutines.flow.StateFlow
 
 /** AUTO: album gain while the neighbours in the queue are from the same album, track gain otherwise. */
@@ -31,16 +33,17 @@ enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
  * listens to records wants the next record, not fifteen loose songs, so the two are separate choices:
  * what is added, and what it is chosen by.
  */
-enum class AutoFillKind(val label: String) { SONGS("Songs"), ALBUMS("Albums") }
+enum class AutoFillKind { SONGS, ALBUMS; val label: String get() = LABELS.autoFillKinds[ordinal] }
 
-enum class AutoFillBasis(val label: String) {
-    SIMILAR("Similar music"), ARTIST("The same artist"), GENRE("The same genre"), ERA("The same era")
+enum class AutoFillBasis { SIMILAR, ARTIST, GENRE, ERA; val label: String get() = LABELS.autoFillBases[ordinal] }
+
+enum class HomeRow {
+    PINNED, PLAYLISTS, RECENT, NEWEST, FREQUENT, TOP_SONGS, RANDOM, STARRED;
+    val title: String get() = LABELS.homeRows[ordinal]
 }
 
-enum class HomeRow(val title: String) {
-    PINNED("Favourite playlists"), PLAYLISTS("Playlists"), RECENT("Recently played"), NEWEST("Recently added"),
-    FREQUENT("Most played albums"), TOP_SONGS("Most played songs"), RANDOM("Random"), STARRED("Favourite albums"),
-}
+/** What every enum here is called on screen, the band kinds and the equalizer's ranges: the core's (`settings::labels`), asked once. */
+val LABELS by lazy { settingLabels() }
 
 /**
  * One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
@@ -74,16 +77,19 @@ data class ServerProfile(
     val label: String by lazy { serverLabel(name, url) }
 }
 
-/** Mirrors `EqKind` in the core; the ordinals are the wire format, so the order must not change. */
-enum class BandKind(val label: String, val usesGain: Boolean = true) {
-    PEAKING("Peak"), LOW_SHELF("Low shelf"), HIGH_SHELF("High shelf"),
-    LOW_PASS("Low pass", false), HIGH_PASS("High pass", false), BAND_PASS("Band pass", false),
-    NOTCH("Notch", false), ALL_PASS("All pass", false),
-    LOW_SHELF_SLOPE("Low shelf (slope)"), HIGH_SHELF_SLOPE("High shelf (slope)"),
+/**
+ * Mirrors `EqKind` in the core; the ordinals are the wire format, so the order must not change. What
+ * each is called, whether it has a gain and whether its width is a slope are the core's.
+ */
+enum class BandKind {
+    PEAKING, LOW_SHELF, HIGH_SHELF, LOW_PASS, HIGH_PASS, BAND_PASS, NOTCH, ALL_PASS, LOW_SHELF_SLOPE, HIGH_SHELF_SLOPE;
+    val label: String get() = LABELS.bandKinds[ordinal].label
+    val usesGain: Boolean get() = LABELS.bandKinds[ordinal].usesGain
+    val slope: Boolean get() = LABELS.bandKinds[ordinal].slope
 }
 
 /** Which side a band applies to. */
-enum class BandChannel(val label: String) { BOTH("Both"), LEFT("Left"), RIGHT("Right") }
+enum class BandChannel { BOTH, LEFT, RIGHT; val label: String get() = LABELS.bandChannels[ordinal] }
 
 /** One equalizer filter. The ten default bands are peaking filters an octave apart. */
 data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float, val channel: BandChannel = BandChannel.BOTH) {
@@ -94,164 +100,166 @@ data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: F
 }
 
 /** One stream quality: [bitRate] 0 and empty [format] mean the original file. */
-data class Quality(val bitRate: Int = 0, val format: String = "") {
-    val key get() = "$bitRate$format"
-}
+data class Quality(val bitRate: Int = 0, val format: String = "")
 
+/**
+ * Every setting, as the core checked and keeps them (`settings.rs`); the defaults are the core's own
+ * (`StoredPrefs::default`), so a fresh install gets them through [StoredPrefs.prefs].
+ */
 data class Prefs(
-    val servers: List<ServerProfile> = emptyList(),
-    val activeServerId: String = "",
-    val wifi: Quality = Quality(),
-    val mobile: Quality = Quality(192, "opus"),
-    val download: Quality = Quality(),
+    val servers: List<ServerProfile>,
+    val activeServerId: String,
+    val wifi: Quality,
+    val mobile: Quality,
+    val download: Quality,
     /** Songs downloaded at the same time, 1 to 10; the rest wait their turn in the order they were asked for. */
-    val parallelDownloads: Int = 5,
+    val parallelDownloads: Int,
     /**
      * Covers of the songs coming up in the queue, fetched into the cache before they are shown, so a
      * skip or a swipe lands on a picture that is already there. 0 to 10; the one before is always kept.
      */
-    val coversAhead: Int = 3,
-    val cacheMb: Int = 1024,
-    val replayGain: ReplayGainMode = ReplayGainMode.OFF,
-    val preampDb: Float = 0f,
+    val coversAhead: Int,
+    val cacheMb: Int,
+    val replayGain: ReplayGainMode,
+    val preampDb: Float,
     /** Applied to files that carry no ReplayGain tags, so they do not jump out next to tagged ones. */
-    val untaggedGainDb: Float = -6f,
+    val untaggedGainDb: Float,
     /** Volume ramp on play, pause, seek and manual skip, in milliseconds; 0 is off. Costs nothing between ramps. */
-    val fadeMs: Int = 0,
-    val pitch: Float = 1f,
+    val fadeMs: Int,
+    val pitch: Float,
     /** "Previous" always goes to the previous track instead of first rewinding the current one. */
-    val previousAlwaysSkips: Boolean = false,
+    val previousAlwaysSkips: Boolean,
     /** Whole tracks fetched ahead into the stream cache, in one go while the radio is already awake. */
-    val precacheWifi: Int = 2,
-    val precacheMobile: Int = 1,
+    val precacheWifi: Int,
+    val precacheMobile: Int,
     /** A track that fails to load is skipped (up to three in a row) instead of stopping playback. */
-    val skipOnError: Boolean = true,
+    val skipOnError: Boolean,
     /** No crossfade between two tracks that follow each other on the same album. */
-    val crossfadeKeepAlbums: Boolean = true,
+    val crossfadeKeepAlbums: Boolean,
     /** Decode on the audio DSP and let the CPU sleep. Only possible while nothing has to touch samples. */
-    val offload: Boolean = true,
+    val offload: Boolean,
     /** Ask Android 14+ for an unmixed, unresampled path to a USB DAC. */
-    val bitPerfect: Boolean = false,
+    val bitPerfect: Boolean,
     /** 32-bit float to the mixer so 24-bit files are not cut to 16. media3 skips audio processors in this mode, so no equalizer. Read when the service starts. */
-    val hiRes: Boolean = false,
-    val scrobble: Boolean = true,
+    val hiRes: Boolean,
+    val scrobble: Boolean,
     /** When the last queued song starts, keep the music going past the end of the queue. */
-    val autoFill: Boolean = true,
+    val autoFill: Boolean,
     /**
      * Server gone mid-evening and the next song is not downloaded: keep playing from full downloads
      * until the network is back, then resume the parked queue. Off by default; costs nothing until it
      * engages (no network listener until then).
      */
-    val bridgeOffline: Boolean = false,
+    val bridgeOffline: Boolean,
     /** Songs, or one whole album at a time, queued in its own order. */
-    val autoFillKind: AutoFillKind = AutoFillKind.SONGS,
+    val autoFillKind: AutoFillKind,
     /** What the next songs are chosen by: what the server thinks is similar, or the artist, genre or decade. */
-    val autoFillBasis: AutoFillBasis = AutoFillBasis.SIMILAR,
-    val eqEnabled: Boolean = false,
-    val eqBands: List<Band> = Band.GRAPHIC,
+    val autoFillBasis: AutoFillBasis,
+    val eqEnabled: Boolean,
+    val eqBands: List<Band>,
     /** Null: pulled down automatically by the largest boost, so the curve cannot clip. */
-    val eqPreampDb: Float? = null,
+    val eqPreampDb: Float?,
     /** Headphone crossfeed level in dB; 0 is off. */
-    val crossfeedDb: Float = 0f,
+    val crossfeedDb: Float,
     /** −1 hard left, 0 centre, +1 hard right. */
-    val balance: Float = 0f,
-    val mono: Boolean = false,
+    val balance: Float,
+    val mono: Boolean,
     /**
      * Catches what the pre-amp, the equalizer and a positive ReplayGain would otherwise clip. Costs a few
      * milliseconds of delay, so it is opt-in; below its threshold the samples come through untouched.
      */
-    val limiter: Boolean = false,
-    val limiterThresholdDb: Float = -1f,
-    val crossfadeSec: Int = 0,
+    val limiter: Boolean,
+    val limiterThresholdDb: Float,
+    val crossfadeSec: Int,
     /**
      * AutoMix: transitions planned from each track's analysed tempo, beats and cue points, like Apple Music's.
      * Analysis runs on audio being played anyway, once per track; a transition costs a few percent of a core
      * for its own few seconds. Off by default.
      */
-    val autoMix: Boolean = false,
-    val autoMixMaxS: Int = 12,
-    val autoMixBeatMatch: Boolean = true,
-    val autoMixMaxTempoPct: Float = 6f,
-    val autoMixBassSwap: Boolean = true,
-    val autoMixFilters: Boolean = true,
-    val autoMixEchoOut: Boolean = true,
+    val autoMix: Boolean,
+    val autoMixMaxS: Int,
+    val autoMixBeatMatch: Boolean,
+    val autoMixMaxTempoPct: Float,
+    val autoMixBassSwap: Boolean,
+    val autoMixFilters: Boolean,
+    val autoMixEchoOut: Boolean,
     /** Off: tempo is matched by changing speed and pitch together (cheaper, and within 2 % inaudible). */
-    val autoMixKeepPitch: Boolean = true,
-    val speed: Float = 1f,
-    val skipSilence: Boolean = false,
+    val autoMixKeepPitch: Boolean,
+    val speed: Float,
+    val skipSilence: Boolean,
     /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
-    val scrobblePercent: Int = 50,
-    val liveSearchDelayMs: Int = 350,
+    val scrobblePercent: Int,
+    val liveSearchDelayMs: Int,
     // ---- optional subsystems; one that is off is never initialised and costs nothing ----
     /** Keeps a local play history and a taste score per song; feeds mixes, smart playlists and the year in review. */
-    val tasteModel: Boolean = true,
+    val tasteModel: Boolean,
     /** Third-party lookups: lyrics from LRCLIB, the AutoEQ headphone list, update checks. */
-    val thirdPartyLookups: Boolean = false,
+    val thirdPartyLookups: Boolean,
     /** Apply the profile bound to an output device when that device becomes the active one. */
-    val profilePerOutput: Boolean = true,
+    val profilePerOutput: Boolean,
     /**
      * Headphones connected with nothing chosen for them and a matching AutoEQ curve: use that curve and
      * remember it for the device, instead of asking first. Off asks. Fetches one small preset per new device.
      */
-    val autoEqAuto: Boolean = false,
+    val autoEqAuto: Boolean,
     /** "Shuffle" spreads artists and albums apart instead of being purely random. */
-    val weightedShuffle: Boolean = true,
+    val weightedShuffle: Boolean,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
-    val lyricsSweep: Boolean = true,
+    val lyricsSweep: Boolean,
     /** The bottom of the player's cover goes blurred before it melts into the page. One blur pass per frame while the cover moves. */
-    val softSleeve: Boolean = true,
+    val softSleeve: Boolean,
     /** A short message when something is favourited or unfavourited. The heart itself always changes. */
-    val favouriteNotice: Boolean = true,
-    val lyricsKeepScreenOn: Boolean = true,
-    val lyricsTranslation: Boolean = true,
+    val favouriteNotice: Boolean,
+    val lyricsKeepScreenOn: Boolean,
+    val lyricsTranslation: Boolean,
     /** 0 small, 1 medium, 2 large. */
-    val lyricsSize: Int = 1,
+    val lyricsSize: Int,
     /**
      * Ask LRCLIB when the server has no synced lyrics. Needs [thirdPartyLookups]. Off means only the
      * server's lyrics (octo-fiesta already asks LRCLIB itself for tracks it serves from a provider).
      */
-    val lyricsLrclib: Boolean = true,
+    val lyricsLrclib: Boolean,
     // ---- look ----
-    val theme: ThemeMode = ThemeMode.SYSTEM,
+    val theme: ThemeMode,
     /** Pure black backgrounds in dark mode: OLED pixels are off, which saves power as well as looking right. */
-    val amoled: Boolean = false,
+    val amoled: Boolean,
     /**
      * With AMOLED black on, the full-screen player still wears the cover's colours, the way Apple Music's
      * does - it is one page about one record, and a sleeve dropping straight into black reads as cut
      * off. Off keeps that screen black as well.
      */
-    val playerColours: Boolean = true,
+    val playerColours: Boolean,
     /** Android 12+ wallpaper colours; off uses [accent]. */
-    val dynamicColor: Boolean = true,
+    val dynamicColor: Boolean,
     /** ARGB seed colour when dynamic colour is off or unavailable. */
-    val accent: Long = 0xFF6750A4,
+    val accent: Long,
     /** Album, artist and playlist pages take their colour from the cover, which runs edge to edge at the top. */
-    val coverColors: Boolean = true,
+    val coverColors: Boolean,
     /** Shorter, plainer movement everywhere; also follows the system when animations are off there. */
-    val reduceMotion: Boolean = false,
+    val reduceMotion: Boolean,
     /**
      * Animate even though Android's own animations are switched off. That switch is as often a speed
      * habit as an accessibility need, and with it off every Compose animation is scaled to nothing -
      * the lyrics then jump from line to line whatever this app asks for. On, the app's own movement
      * runs at its real speed regardless; Reduce motion above still turns it off.
      */
-    val ignoreSystemMotion: Boolean = false,
+    val ignoreSystemMotion: Boolean,
     /**
      * How big the interface is drawn. 0 is automatic: laid out as if the screen were at least as wide
      * as the one every size was measured against, so a phone set to a large display size does not
      * blow the layout up. Anything else is a fixed factor on top of the system's own size.
      */
-    val uiScale: Float = 0f,
-    val tapAction: TapAction = TapAction.PLAY_LIST,
-    val swipeRight: SwipeAction = SwipeAction.QUEUE,
-    val swipeLeft: SwipeAction = SwipeAction.FAVOURITE,
+    val uiScale: Float,
+    val tapAction: TapAction,
+    val swipeRight: SwipeAction,
+    val swipeLeft: SwipeAction,
     /** Songs the server marks explicit are skipped instead of played. */
-    val skipExplicit: Boolean = false,
+    val skipExplicit: Boolean,
     /** Home shelves, in order; a row that is not listed is hidden. */
-    val homeRows: List<HomeRow> = HomeRow.entries,
-    val pinnedPlaylists: List<String> = emptyList(),
+    val homeRows: List<HomeRow>,
+    val pinnedPlaylists: List<String>,
     /** Remembered per list: sort order, grid or list, filters. Keys are list names. */
-    val listPrefs: Map<String, String> = emptyMap(),
+    val listPrefs: Map<String, String>,
 ) {
     val server: ServerProfile? get() = servers.firstOrNull { it.id == activeServerId }
     val loggedIn get() = server != null
@@ -264,11 +272,8 @@ data class Prefs(
      */
     val dsp: Boolean by lazy { dev.nori.music.playback.Dsp.soundOn(eqEnabled, crossfeedDb, balance, mono, limiter) }
 
-    /** The pre-amp in effect: the one set, or the automatic one (nori_player::dsp::auto_preamp_db), worked out once per settings. */
-    val effectivePreampDb: Float by lazy {
-        if (!eqEnabled) 0f
-        else eqPreampDb ?: dev.nori.music.playback.Dsp.autoPreampDb(IntArray(eqBands.size) { eqBands[it].kind.ordinal }, FloatArray(eqBands.size) { eqBands[it].gainDb })
-    }
+    /** The pre-amp in effect: the one set, or the automatic one (the core's `SoundSettings::effective_preamp_db`), worked out once per settings. */
+    val effectivePreampDb: Float by lazy { dev.nori.music.ffi.eqEffectivePreampDb(sound()) }
 }
 
 /** The part of [Prefs] a sound profile remembers; its JSON is read and written by the core (`settings.rs`). */
@@ -289,17 +294,22 @@ fun Prefs.withSound(s: Sound) = copy(
     replayGain = ReplayGainMode.entries[s.replayGain], preampDb = s.preampDb, crossfadeSec = s.crossfadeSec, hiRes = s.hiRes, bitPerfect = s.bitPerfect,
 )
 
-private fun ServerProfile.stored() = SavedServer(
+fun ServerProfile.stored() = SavedServer(
     id = id, name = name, url = url, altUrl = altUrl, user = user, password = password, apiKey = apiKey, legacyAuth = legacyAuth,
     headers = headers, allowSelfSigned = allowSelfSigned, clientCert = clientCert, clientCertPassword = clientCertPassword,
     wifiOnly = wifiOnly, musicFolderId = musicFolderId, altMaxBitRate = altMaxBitRate,
 )
 
-private fun SavedServer.profile() = ServerProfile(
+fun SavedServer.profile() = ServerProfile(
     id = id, name = name, url = url, altUrl = altUrl, user = user, password = password, apiKey = apiKey, legacyAuth = legacyAuth,
     headers = headers, allowSelfSigned = allowSelfSigned, clientCert = clientCert, clientCertPassword = clientCertPassword,
     wifiOnly = wifiOnly, musicFolderId = musicFolderId, altMaxBitRate = altMaxBitRate,
 )
+
+/** The saved servers and the one in use, as the core edits them (`settings::servers_*`). */
+fun Prefs.serverList() = ServerList(servers.map { it.stored() }, activeServerId)
+
+fun Prefs.withServers(list: ServerList) = copy(servers = list.servers.map { it.profile() }, activeServerId = list.activeServerId)
 
 private fun Quality.stored() = SavedQuality(bitRate, format)
 private fun SavedQuality.quality() = Quality(bitRate, format)
@@ -357,12 +367,30 @@ class Settings(private val context: Context) {
     val prefs: StateFlow<Prefs> = state
     val value get() = state.value
 
+    /**
+     * What each change asks of the player, as the core says (settings_store.rs: APPLY_AUDIO 1,
+     * APPLY_GAIN 2, REPLAN 4); nothing for a change only screens care about.
+     */
+    private val _effects = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 16)
+    val effects: kotlinx.coroutines.flow.SharedFlow<Int> = _effects
+
     fun update(change: (Prefs) -> Prefs) {
         val next = change(state.value)
         if (next == state.value) return
+        put(next.stored(), next)
+    }
+
+    /** Settings the core already worked out (a change by name, `settings::set_by_name`), kept as they are. */
+    fun put(stored: StoredPrefs) {
+        val next = stored.prefs()
+        if (next != state.value) put(stored, next)
+    }
+
+    private fun put(stored: StoredPrefs, next: Prefs) {
         // The core first: whatever reacts to the new value (on any thread) reads it from there.
-        settingsPut(next.stored())
+        val effect = settingsPut(stored)
         state.value = next
+        if (effect != 0u) _effects.tryEmit(effect.toInt())
     }
 
     private fun load(): Prefs {

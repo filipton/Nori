@@ -94,6 +94,10 @@ impl Playlist {
     pub fn hand(&self, i: usize) -> Hand {
         self.hand.get(i).copied().unwrap_or_default()
     }
+    /// While the offline bridge plays: the song the queue picks up at once the server is back.
+    pub fn parked_id(&self) -> Option<&str> {
+        self.parked.and_then(|i| self.ids.get(i)).map(String::as_str)
+    }
     pub fn by_hand(&self) -> impl Iterator<Item = usize> + '_ {
         self.hand.iter().enumerate().filter(|(_, h)| h.by_user()).map(|(i, _)| i)
     }
@@ -226,6 +230,25 @@ impl Playlist {
         }
         self.rev += 1;
         p.at
+    }
+
+    /// Songs a controller hands over at `at`, each marked with how it came (`hands`, one per song). Songs
+    /// that were all added by hand, to a queue that already has songs, go where Play next or Add to queue
+    /// puts them (the first one's say decides); anything else is the controller's own insert at `at`.
+    /// Returns where they went in the list.
+    pub fn take(&mut self, at: usize, ids: Vec<String>, hands: &[Hand]) -> usize {
+        if !self.ids.is_empty() && !hands.is_empty() && hands.iter().all(|h| h.by_user()) {
+            return self.add(ids, hands[0]);
+        }
+        let at = at.min(self.ids.len());
+        self.insert(at, ids, Hand::No);
+        at
+    }
+
+    /// Shuffle shown as on or off because the user asked for it, before the change itself reaches the
+    /// queue; the change then says the same.
+    pub fn show_shuffle(&mut self, on: bool) {
+        self.lit = on;
     }
 
     /// Songs inserted at `at` (a controller's own insert): under shuffle they play after the rest.
@@ -505,6 +528,37 @@ mod tests {
         assert_eq!(list(&p)[..5], ["a", "b", "z", "x", "y"]);
         assert_eq!(p.by_hand().collect::<Vec<_>>(), [2, 3, 4]);
         assert_eq!(p.current_id(), Some("b"));
+    }
+
+    #[test]
+    fn songs_handed_over_go_where_they_were_marked_for() {
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b", "c"]), Some(0), false, 0);
+        assert_eq!(p.take(99, ids(&["x", "y"]), &[Hand::Last, Hand::Last]), 1, "added by hand: after the playing song");
+        assert_eq!(p.take(99, ids(&["n"]), &[Hand::Next]), 1, "play next: right after it, ahead of the others");
+        assert_eq!(p.take(99, ids(&["l"]), &[Hand::Last]), 4, "add to queue: after the ones added before");
+        assert_eq!(p.take(1, ids(&["m"]), &[Hand::Next, Hand::No]), 1, "not all by hand: the controller's own insert");
+        assert_eq!(p.take(99, ids(&["e"]), &[Hand::No]), 8, "an insert past the end lands at the end");
+        let mut empty = Playlist::default();
+        assert_eq!(empty.take(5, ids(&["q"]), &[Hand::Next]), 0, "an empty queue takes them as its list");
+        assert_eq!(empty.hand(0), Hand::No);
+    }
+
+    #[test]
+    fn shuffle_shown_follows_the_ask_and_the_queue() {
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b"]), Some(0), false, 0);
+        p.show_shuffle(true);
+        assert!(p.lit() && !p.shuffling(), "asked for before the queue changed");
+        p.set_ordered(ids(&["b", "a"]));
+        assert!(p.lit() && !p.shuffling(), "a weighted shuffle stays lit with the player's shuffle off");
+        p.add(ids(&["c"]), Hand::Next);
+        assert!(p.lit(), "editing the queue keeps it lit");
+        p.show_shuffle(false);
+        p.set_shuffle(false, 0);
+        assert!(!p.lit(), "turned off");
+        p.set(ids(&["a"]), Some(0), false, 0);
+        assert!(!p.lit(), "a plain play");
     }
 
     #[test]

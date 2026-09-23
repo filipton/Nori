@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.settings.ServerProfile
+import dev.nori.music.settings.profile
+import dev.nori.music.settings.stored
 
 @Composable
 private fun Check(title: String, detail: String, value: Boolean, onChange: (Boolean) -> Unit) {
@@ -52,12 +54,15 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
     val ui by vm.login.collectAsStateWithLifecycle()
     var p by remember { mutableStateOf(initial ?: vm.newProfile()) }
     var advanced by remember { mutableStateOf(initial != null) }
-    var headers by remember { mutableStateOf(p.headers.entries.joinToString("\n") { "${it.key}: ${it.value}" }) }
+    var headers by remember { mutableStateOf(dev.nori.music.ffi.serverHeadersText(p.headers)) }
     var certPassword by remember { mutableStateOf("") }
     val pickCert = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> if (uri != null) p = vm.importClientCert(p, uri, certPassword) }
     LaunchedEffect(ui.done) { if (ui.done) { vm.clearLoginResult(); onClose?.invoke() } }
 
-    fun parsedHeaders() = headers.lines().mapNotNull { l -> l.split(':', limit = 2).takeIf { it.size == 2 && it[0].isNotBlank() }?.let { it[0].trim() to it[1].trim() } }.toMap()
+    // Reading the form - the headers typed, the addresses trimmed, whether it can be sent, the schemes
+    // offered for an address typed without one - is the core's (settings.rs).
+    val ready = remember(p.url, p.user, p.apiKey) { dev.nori.music.ffi.serverReady(p.stored()) }
+    val schemes = remember(p.url) { dev.nori.music.ffi.serverUrlSchemes(p.url) }
 
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.systemBarsPadding().imePadding().verticalScroll(rememberScrollState()).padding(24.dp), Arrangement.spacedBy(12.dp)) {
@@ -67,9 +72,8 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
             )
             if (initial == null) Text("Navidrome, octo-fiesta or any Subsonic server", color = MaterialTheme.colorScheme.onSurfaceVariant)
             FormField(p.url, { p = p.copy(url = it) }, label = { Text("Server URL") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), modifier = Modifier.fillMaxWidth().testTag("url"))
-            if (p.url.isNotEmpty() && "://" !in p.url) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Chip("https://", false) { p = p.copy(url = "https://${p.url}") }
-                Chip("http://", false) { p = p.copy(url = "http://${p.url}") }
+            if (schemes.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                schemes.forEach { s -> Chip(s, false) { p = p.copy(url = s + p.url) } }
             }
             if (p.apiKey.isEmpty()) {
                 FormField(p.user, { p = p.copy(user = it) }, label = { Text("User") }, singleLine = true, modifier = Modifier.fillMaxWidth().testTag("user"))
@@ -78,9 +82,9 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
             ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             PillButton(
                 if (ui.busy) "Connecting…" else "Connect", null,
-                { vm.login(p.copy(url = p.url.trim(), altUrl = p.altUrl.trim(), headers = parsedHeaders())) },
+                { vm.login(dev.nori.music.ffi.serverFromForm(p.stored(), headers).profile()) },
                 Modifier.fillMaxWidth().padding(top = 4.dp), prominent = true,
-                enabled = !ui.busy && p.url.isNotBlank() && (p.user.isNotBlank() || p.apiKey.isNotBlank()),
+                enabled = !ui.busy && ready,
             )
             Row {
                 TextButton({ advanced = !advanced }) { Text(if (advanced) "Hide advanced" else "Advanced") }

@@ -19,6 +19,21 @@ fn line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The name an imported file's playlist gets: the file's own name without its folders or extension,
+/// "Imported" when the picker said nothing about it.
+#[uniffi::export]
+pub fn m3u_playlist_name(file: Option<String>) -> String {
+    let Some(f) = file else { return "Imported".into() };
+    let base = f.rsplit('/').next().unwrap_or(&f);
+    base.rsplit_once('.').map_or(base, |(stem, _)| stem).to_string()
+}
+
+/// The file an exported playlist is offered as.
+#[uniffi::export]
+pub fn m3u_file_name(playlist: String) -> String {
+    format!("{playlist}.m3u8")
+}
+
 #[uniffi::export]
 pub fn m3u_export(name: String, songs: Vec<Song>) -> String {
     let mut out = String::from("#EXTM3U\n");
@@ -146,6 +161,15 @@ impl Core {
 mod tests {
     use super::*;
     use crate::history::tests::song;
+
+    #[test]
+    fn an_imported_file_names_its_playlist() {
+        assert_eq!(m3u_playlist_name(Some("primary:Music/Road trip.m3u8".into())), "Road trip");
+        assert_eq!(m3u_playlist_name(Some("a.b.m3u".into())), "a.b");
+        assert_eq!(m3u_playlist_name(Some("plain".into())), "plain");
+        assert_eq!(m3u_playlist_name(None), "Imported");
+        assert_eq!(m3u_file_name("Road".into()), "Road.m3u8");
+    }
 
     fn entry(duration_s: i32, artist: &str, title: &str) -> M3uEntry {
         M3uEntry { duration_s, artist: artist.into(), title: title.into(), path: String::new() }

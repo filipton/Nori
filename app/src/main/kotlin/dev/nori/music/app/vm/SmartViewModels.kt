@@ -5,47 +5,19 @@ import androidx.lifecycle.viewModelScope
 import dev.nori.music.ffi.HistoryEntry
 import dev.nori.music.ffi.ListeningStats
 import dev.nori.music.ffi.SmartEdit
-import dev.nori.music.ffi.SmartEditRule
 import dev.nori.music.ffi.SmartPlaylist
 import dev.nori.music.ffi.Song
-import dev.nori.music.ffi.smartEditJson
 import dev.nori.music.ffi.smartEditPrepare
-import dev.nori.music.ffi.smartEditRead
-import dev.nori.music.ffi.smartEditSchema
+import dev.nori.music.ffi.Note
+import dev.nori.music.ffi.wordsNote
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** One condition of a smart playlist as the editor sees it. The core's JSON schema is the storage format. */
-data class SmartRule(val field: String = "genre", val op: String = "contains", val value: String = "")
-
-/** The editor's form. Writing it as a definition, reading one back and the tables it offers are the core's (smart/draft.rs). */
-data class SmartDraft(
-    val id: String = "", val name: String = "", val all: Boolean = true, val rules: List<SmartRule> = listOf(SmartRule()),
-    val sortField: String = "random", val descending: Boolean = false, val limit: Int = 100,
-) {
-    internal fun edit() = SmartEdit(id, name, all, rules.map { SmartEditRule(it.field, it.op, it.value) }, sortField, descending, limit)
-
-    fun toJson(): String = smartEditJson(edit())
-
-    companion object {
-        private val schema by lazy { smartEditSchema() }
-        val TEXTS: List<String> get() = schema.texts
-        val NUMBERS: List<String> get() = schema.numbers
-        val DATES: List<String> get() = schema.dates
-        val FLAGS: List<String> get() = schema.flags
-        val FLAG_OPS: List<String> get() = schema.flagOps
-        fun ops(field: String): List<String> = schema.ops[field] ?: schema.flagOps
-        val SORTS: List<String> get() = schema.sorts
-
-        /** Reads back what this editor wrote; definitions with nested groups are kept as raw JSON by the caller. */
-        fun from(p: SmartPlaylist): SmartDraft? = smartEditRead(p)?.let { e ->
-            SmartDraft(e.id, e.name, e.all, e.rules.map { SmartRule(it.field, it.op, it.value) }, e.sortField, e.descending, e.limit)
-        }
-    }
-}
+// The editor's form is the core's `SmartEdit`: what a new one holds, how a rule changes and how it is
+// written and read back are all smart/draft.rs.
 
 class SmartViewModel(app: Application) : NoriViewModel(app) {
     private val _saved = MutableStateFlow<List<SmartPlaylist>>(emptyList())
@@ -61,12 +33,12 @@ class SmartViewModel(app: Application) : NoriViewModel(app) {
 
     fun open(json: String) = viewModelScope.launch {
         _songs.value = Load.Loading
-        _songs.value = runCatching { Load.Ready(nori.library.smartSongs(json)) }.getOrElse { Load.Failed(it.message ?: "Could not evaluate") }
+        _songs.value = runCatching { Load.Ready(nori.library.smartSongs(json)) }.getOrElse { Load.Failed(it.message ?: wordsNote(Note.COULD_NOT_EVALUATE)) }
     }
 
     /** Null when saved; otherwise what is wrong with the definition. */
-    fun save(draft: SmartDraft, onSaved: (String) -> Unit): String? {
-        val ready = smartEditPrepare(draft.edit())
+    fun save(draft: SmartEdit, onSaved: (String) -> Unit): String? {
+        val ready = smartEditPrepare(draft)
         ready.error?.let { return it }
         viewModelScope.launch { val id = nori.library.smartSave(ready.id, ready.name, ready.json); refresh(); onSaved(id) }
         return null

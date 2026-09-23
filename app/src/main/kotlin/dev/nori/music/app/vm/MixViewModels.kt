@@ -3,7 +3,6 @@ package dev.nori.music.app.vm
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.nori.music.Nori
-import dev.nori.music.ffi.MixDraw
 import dev.nori.music.ffi.MixLookup
 import dev.nori.music.ffi.MixSheet
 import dev.nori.music.ffi.MixTile
@@ -45,13 +44,14 @@ data class MixPage(
 )
 
 /** The core names the covers; the list rendition of each, so they are cache hits. */
-private fun NoriViewModel.card(t: MixTile) = MixCard(t.id, t.title, t.covers.mapNotNull { cover(it, 320) }, t.favourites)
-private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, s.title, s.songs, s.covers.mapNotNull { cover(it, 320) }, s.refreshable, s.favourites)
+private val tileSize: Int get() = dev.nori.music.data.Covers.rules.row.toInt()
+private fun NoriViewModel.card(t: MixTile) = MixCard(t.id, t.title, t.covers.mapNotNull { cover(it, tileSize) }, t.favourites)
+private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, s.title, s.songs, s.covers.mapNotNull { cover(it, tileSize) }, s.refreshable, s.favourites)
 
 /**
  * Today's (or this week's) draw of each mix lives in the core (see mixes/board.rs), shared by the Home
- * tiles and the mix pages. This only tells the core what day it is, fetches the server's random songs
- * when a draw comes out empty (the one step that needs the network), and says when to read again.
+ * tiles and the mix pages, and so does drawing it - the calendar day, and the server's random songs when
+ * a draw comes out empty (library.rs). This only says when to read again.
  */
 internal object MixStore {
     /** Bumped whenever a draw changed, so the tiles and pages read the core again. */
@@ -61,34 +61,14 @@ internal object MixStore {
     /** The last row shown and for which server and taste setting, so a Home page opened again has its covers from the first frame. */
     @Volatile var lastCards: Triple<String, Boolean, List<MixCard>>? = null
 
-    private fun today() = java.time.LocalDate.now().toEpochDay()
-
-    /** With no listening history yet the personal mixes are empty: what the server thinks is random stands in. */
-    private suspend fun fallback(nori: Nori, id: String, day: Long, again: Boolean) {
-        val random = runCatching { nori.library.randomSongs(50) }.getOrDefault(emptyList())
-        nori.core.mixDraw(id, day, again, random)
-    }
-
     /** Draws mix [id] unless this period's draw is already there; [again] asks for a different one. */
     suspend fun ensure(nori: Nori, id: String, again: Boolean = false) = lock.withLock {
-        withContext(Dispatchers.IO) {
-            val day = today()
-            when (nori.core.mixDraw(id, day, again, null)) {
-                MixDraw.DRAWN -> version.update { it + 1 }
-                MixDraw.NEEDS_FALLBACK -> { fallback(nori, id, day, again); version.update { it + 1 } }
-                MixDraw.KEPT, MixDraw.UNKNOWN -> {}
-            }
-        }
+        if (nori.library.mixEnsure(id, again)) version.update { it + 1 }
     }
 
     /** Draws whichever mixes are missing or from the last period; a few milliseconds each, off the main thread. */
     suspend fun warm(nori: Nori) = lock.withLock {
-        withContext(Dispatchers.IO) {
-            val day = today()
-            val warm = nori.core.mixWarm(day)
-            warm.needsFallback.forEach { fallback(nori, it, day, false) }
-            if (warm.changed || warm.needsFallback.isNotEmpty()) version.update { it + 1 }
-        }
+        if (nori.library.mixWarm()) version.update { it + 1 }
     }
 }
 

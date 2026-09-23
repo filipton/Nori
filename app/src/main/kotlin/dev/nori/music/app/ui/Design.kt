@@ -82,6 +82,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.role
 import dev.nori.music.app.R
 import dev.nori.music.look.CoverLook
+import dev.nori.music.data.of
 
 /**
  * The look of the app in one file: radii, spacing, type and the handful of shapes every screen is
@@ -177,16 +178,16 @@ class PagePalette(val look: IntArray, val wash: androidx.compose.ui.graphics.Ima
 
 val LocalPalette = staticCompositionLocalOf<PagePalette?> { null }
 
-/** Star changes made this session, keyed `"${kind.param}:$id"` (see Library.starMarks). */
-val LocalStarMarks = staticCompositionLocalOf<Map<String, Boolean>> { emptyMap() }
+/** Star changes made this session, per kind (see Library.starMarks). */
+val LocalStarMarks = staticCompositionLocalOf { dev.nori.music.ffi.StarMarks(emptyMap(), emptyMap(), emptyMap()) }
 
 /**
  * Star state as the screen should show it: this session's change wins over the snapshot the list was
  * painted with. Every toggle must also act on this, not on the snapshot, or the second tap undoes
  * the first one's server call instead of flipping what is on screen.
  */
-fun Map<String, Boolean>.effectiveStar(kind: dev.nori.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
-    get("${kind.param}:$id") ?: snapshot
+fun dev.nori.music.ffi.StarMarks.effectiveStar(kind: dev.nori.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
+    of(kind, id) ?: snapshot
 
 /**
  * The player's page, aligned to its sleeve. The cover is drawn at the sleeve's own scale behind it, so
@@ -221,10 +222,10 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
     val floor = if (endY - bottom > 1f) Brush.verticalGradient(
         // The colours stay through the controls and settle into one only towards the bottom:
         // the owner liked them under the transport and did not want them gone, just ended.
-        0f to Color(look[CoverLook.FLOOR_0]),
-        0.45f to Color(look[CoverLook.FLOOR_22]),
-        0.80f to Color(look[CoverLook.FLOOR_75]),
-        1f to page,
+        stage.floorStops[0] to Color(look[CoverLook.FLOOR_0]),
+        stage.floorStops[1] to Color(look[CoverLook.FLOOR_22]),
+        stage.floorStops[2] to Color(look[CoverLook.FLOOR_75]),
+        stage.floorStops[3] to page,
         startY = bottom, endY = endY,
     ) else null
     val floorTop = Offset(0f, bottom)
@@ -249,10 +250,20 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
 }
 
 /**
- * How much of the sleeve's height goes soft at the bottom. Shared, because the colour of those rows
- * is averaged out of the wash at the same fraction (see `CoverColors.washOf`).
+ * How the app lays out and times its pages - the sleeve's geometry, every gradient's stops, the waits and
+ * fades - as nori-core says (`stage.rs`, `nori_look::sleeve`). Read once, the first time a page draws.
  */
-const val MELT = 0.19f
+val stage: dev.nori.music.ffi.Stage by lazy { dev.nori.music.ffi.stage() }
+
+/**
+ * How much of the sleeve's height goes soft at the bottom: the same share the colour of those rows is
+ * averaged out of the wash at (`nori_look::cover::MELT`).
+ */
+val MELT: Float get() = stage.melt
+
+/** A gradient of [color] at the core's [stops], from [startY] to [endY]. Made once per size, never per frame. */
+fun alphaGradient(stops: List<dev.nori.music.ffi.GradientStop>, color: Color, startY: Float, endY: Float): Brush =
+    Brush.verticalGradient(*Array(stops.size) { stops[it].at to color.copy(alpha = stops[it].alpha) }, startY = startY, endY = endY)
 
 /** The wash texture is this many pixels a side (nori_look's `WASH_OUT`). */
 private const val WASH_ROWS = CoverLook.WASH
@@ -744,7 +755,10 @@ fun reduceMotion(): Boolean {
     val systemOff = androidx.compose.runtime.remember {
         android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
     }
-    return prefs.reduceMotion || (systemOff && !prefs.ignoreSystemMotion)
+    // The rule is the core's; asked only when one of its three answers changes.
+    return androidx.compose.runtime.remember(prefs.reduceMotion, prefs.ignoreSystemMotion, systemOff) {
+        dev.nori.music.ffi.motionReduced(prefs.reduceMotion, prefs.ignoreSystemMotion, systemOff)
+    }
 }
 
 /**
@@ -915,10 +929,11 @@ fun PlayPauseGlyph(
 ) {
     var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(buffering) {
-        if (buffering) kotlinx.coroutines.delay(300)
+        if (buffering) kotlinx.coroutines.delay(stage.spinnerAfterMs)
         busy = buffering
     }
-    val glyph = when { busy -> 2; playing || buffering -> 1; else -> 0 }
+    // Which glyph is the core's (`transport_glyph`), asked when one of the three changes.
+    val glyph = androidx.compose.runtime.remember(playing, buffering, busy) { dev.nori.music.ffi.transportGlyph(playing, buffering, busy) }
     androidx.compose.animation.AnimatedContent(
         glyph,
         transitionSpec = {
@@ -932,8 +947,8 @@ fun PlayPauseGlyph(
     ) { g ->
         Box(Modifier.size(size), Alignment.Center) {
             when (g) {
-                2 -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = tint?.invoke() ?: androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
-                1 -> if (tint != null) LookIcon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize(), tint)
+                dev.nori.music.ffi.TransportGlyph.SPINNER -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = tint?.invoke() ?: androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
+                dev.nori.music.ffi.TransportGlyph.PAUSE -> if (tint != null) LookIcon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize(), tint)
                     else androidx.compose.material3.Icon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize())
                 else -> if (tint != null) LookIcon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize(), tint)
                     else androidx.compose.material3.Icon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize())

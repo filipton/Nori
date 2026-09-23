@@ -40,6 +40,42 @@ pub fn seeded(seed: u32, dark: bool) -> [u32; 11] {
     }
 }
 
+/// The accent colours offered when the wallpaper's are not used, in the order they are shown. The first
+/// is the default accent.
+pub const ACCENTS: [u32; 8] = [0xFF67_50A4, 0xFF1E_88E5, 0xFF00_897B, 0xFF43_A047, 0xFFF4_511E, 0xFFE5_3935, 0xFFD8_1B60, 0xFF8E_24AA];
+
+/// The theme setting: follow the system, always light, always dark (the order it is stored in).
+pub const THEME_SYSTEM: i32 = 0;
+pub const THEME_LIGHT: i32 = 1;
+pub const THEME_DARK: i32 = 2;
+
+/// Whether the interface is dark: the setting, or the system's own answer when the setting follows it.
+/// Anything unknown follows the system.
+pub fn is_dark(theme: i32, system_dark: bool) -> bool {
+    match theme {
+        THEME_DARK => true,
+        THEME_LIGHT => false,
+        _ => system_dark,
+    }
+}
+
+/// Every size in the app was measured as a share of the width of a phone this many dp wide.
+pub const REFERENCE_WIDTH_DP: f32 = 411.0;
+
+/// How big the interface is drawn. A setting above 0 is a fixed factor. 0 is automatic: laid out as if
+/// the screen were at least [`REFERENCE_WIDTH_DP`] wide, so a phone set to a large display size (one
+/// measured at 358 dp draws everything a seventh larger) keeps the proportions; it only ever shrinks,
+/// never below three quarters, and never enlarges past what the system asked for.
+pub fn ui_scale(setting: f32, width_dp: i32) -> f32 {
+    if setting > 0.0 {
+        setting
+    } else if width_dp <= 0 {
+        1.0
+    } else {
+        (width_dp as f32 / REFERENCE_WIDTH_DP).clamp(0.75, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -52,5 +88,27 @@ mod tests {
             assert!(calculate_contrast(t[0], t[1]) >= 4.5, "primary / on primary, dark={dark}");
             assert!(calculate_contrast(t[10], t[9]) >= 3.0, "on surface variant, dark={dark}");
         }
+    }
+
+    #[test]
+    fn dark_follows_the_setting_or_the_system() {
+        assert!(is_dark(THEME_SYSTEM, true) && !is_dark(THEME_SYSTEM, false));
+        assert!(is_dark(THEME_DARK, false) && !is_dark(THEME_LIGHT, true));
+        assert!(is_dark(9, true), "an unknown setting follows the system");
+    }
+
+    #[test]
+    fn automatic_size_only_shrinks_and_not_below_three_quarters() {
+        assert_eq!(ui_scale(1.1, 300), 1.1);
+        assert_eq!(ui_scale(0.0, 0), 1.0);
+        assert_eq!(ui_scale(0.0, 600), 1.0);
+        assert_eq!(ui_scale(0.0, 358), 358.0 / 411.0);
+        assert_eq!(ui_scale(0.0, 200), 0.75);
+    }
+
+    #[test]
+    fn the_accents_start_with_the_default() {
+        assert_eq!(ACCENTS[0], 0xFF6750A4);
+        assert_eq!(ACCENTS, [0xFF6750A4, 0xFF1E88E5, 0xFF00897B, 0xFF43A047, 0xFFF4511E, 0xFFE53935, 0xFFD81B60, 0xFF8E24AA]);
     }
 }

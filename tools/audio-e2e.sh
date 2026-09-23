@@ -20,7 +20,7 @@ field() { state | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1
 # Only this app's own tracks: the list also holds other apps' and dead processes' tracks, and the first
 # line of it was a stopped track left by something else - every check then read "stopped" over music.
 track_state() {
-  local pid; pid=$(adb shell pidof dev.nori.music | tr -d '\r')
+  local pid; pid=$(adb shell pidof ${NORI_PKG:-dev.nori.music} | tr -d '\r')
   [ -n "$pid" ] || return 0
   local states; states=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/$pid state:[a-z]+" |
     grep -oE "state:[a-z]+" | sed 's/state://')
@@ -49,7 +49,7 @@ check() { # check <name> <command...>
 key() { adb shell input keyevent "$1"; sleep 2; }
 
 echo "== audio end to end"
-adb shell am force-stop dev.nori.music >/dev/null 2>&1
+adb shell am force-stop ${NORI_PKG:-dev.nori.music} >/dev/null 2>&1
 "$app" wake >/dev/null; "$app" launch >/dev/null
 "$app" play "$song" >/dev/null; sleep 6
 check "plays a song" moving
@@ -242,7 +242,7 @@ echo "-- seek after a restart"
 "$app" play "$song" >/dev/null; sleep 4
 "$app" do "seek 10000" >/dev/null; sleep 2
 "$app" do pause >/dev/null; sleep 2
-adb shell am force-stop dev.nori.music >/dev/null 2>&1
+adb shell am force-stop ${NORI_PKG:-dev.nori.music} >/dev/null 2>&1
 "$app" launch >/dev/null
 # Cold boot: wait for the queue to be back before touching it.
 for _ in $(seq 40); do t=$(field title); [ -n "$t" ] && break; sleep 2; done

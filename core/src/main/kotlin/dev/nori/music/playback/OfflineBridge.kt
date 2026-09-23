@@ -9,9 +9,9 @@ import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.exoplayer.ExoPlayer
 import dev.nori.music.ffi.QueueEdit
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
+import dev.nori.music.ffi.Failure
+import dev.nori.music.ffi.failureNetworkish
+import dev.nori.music.net.failureKind
 
 /**
  * When the server is gone mid-evening and the next queued song is not on the phone, keep playing from
@@ -96,18 +96,20 @@ class OfflineBridge(
     }
 }
 
-/** Network / unreachable server, not a bad file or a refused audio sink. */
+/**
+ * Network / unreachable server, not a bad file or a refused audio sink. The platform only reads its own
+ * error codes and exceptions into kinds; which of them mean the network is the core's
+ * (crates/core/src/transport.rs failure_networkish).
+ */
 fun PlaybackException.isNetworkish(): Boolean {
-    when (errorCode) {
+    val status = when (errorCode) {
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
         PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
         PlaybackException.ERROR_CODE_TIMEOUT,
-        -> return true
-        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> return true
+        PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+        -> true
+        else -> false
     }
-    return generateSequence(cause) { it.cause }.any {
-        it is UnknownHostException || it is SocketTimeoutException || it is ConnectException ||
-            it is java.net.NoRouteToHostException || it is java.io.InterruptedIOException ||
-            (it is java.io.IOException && it.message?.contains("offline", ignoreCase = true) == true)
-    }
+    val causes = generateSequence(cause) { it.cause }.map { Failure(failureKind(it), it.message) }.toList()
+    return failureNetworkish(status, causes)
 }

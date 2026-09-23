@@ -177,7 +177,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
             SectionTitle(title)
             LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(playlists, key = { it.id }, contentType = { "playlist" }) { p ->
-                    CoverCard(p.name, "${p.songCount} songs", vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
+                    CoverCard(p.name, remember(p.songCount) { dev.nori.music.ffi.wordsSongs(p.songCount) }, vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
                 }
             }
         }
@@ -281,7 +281,11 @@ private fun Modifier.arriving(arrival: State<Float>, place: Int, rise: Float) = 
 private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: () -> Unit) {
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val shown = prefs.homeRows
-    val hidden = HomeRow.entries.filter { it !in shown }
+    // Which rows are left out, and where one switched on or off goes, are the core's (browse.rs).
+    val hidden = remember(shown) { dev.nori.music.ffi.homeRowsHidden(HomeRow.entries.map { it.name }, shown.map { it.name }).map(HomeRow::valueOf) }
+    fun toggled(row: HomeRow, on: Boolean) = settings.update { p ->
+        p.copy(homeRows = dev.nori.music.ffi.homeRowsToggled(p.homeRows.map { it.name }, row.name, on).map(HomeRow::valueOf))
+    }
     // Tracked by which shelf is being held, never by its position: the position changes the instant the
     // list reorders, and a gesture keyed on that is cancelled mid-drag - which is why a row could only
     // be moved one place per press. The offset keeps the held row under the finger while the rest slide
@@ -336,7 +340,7 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
                     Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                     // Turning a row off leaves it in the list below rather than taking it away, so it is
                     // clear where it went and how to have it back.
-                    NoriSwitch(true, { _ -> settings.update { p -> p.copy(homeRows = p.homeRows - row) } })
+                    NoriSwitch(true, { _ -> toggled(row, false) })
                 }
                 Hairline()
             }
@@ -350,7 +354,7 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
                         Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         // It comes back at the end of the page, where it can be seen, and can be carried
                         // up from there.
-                        NoriSwitch(false, { _ -> settings.update { p -> p.copy(homeRows = p.homeRows + row) } })
+                        NoriSwitch(false, { _ -> toggled(row, true) })
                     }
                     Hairline()
                 }

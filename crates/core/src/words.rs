@@ -39,6 +39,46 @@ pub fn words_favourite(on: bool) -> Option<String> {
     crate::settings_store::with_prefs(|p| p.favourite_notice).unwrap_or(true).then(|| favourite(on))
 }
 
+/// The system media controls' extra buttons (the notification, the lock screen): a heart beside previous
+/// and a shuffle toggle beside next. `heart` is none while no song of the library plays (nothing, or a
+/// radio stream): there is nothing to favourite.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SessionButtons {
+    pub heart: Option<String>,
+    pub starred: bool,
+    pub shuffle: String,
+    pub shuffling: bool,
+}
+
+/// The session's buttons for the song playing now in the core's queue, `starred` or not, `shuffle` on or off.
+#[uniffi::export]
+pub fn words_session_buttons(starred: bool, shuffle: bool) -> SessionButtons {
+    let song = crate::playlist::with(|p| p.current_id().is_some_and(|id| !id.starts_with(crate::queue::RADIO_PREFIX)));
+    session_buttons(song, starred, shuffle)
+}
+
+fn session_buttons(song: bool, starred: bool, shuffle: bool) -> SessionButtons {
+    SessionButtons {
+        heart: song.then(|| (if starred { "Remove from favourites" } else { "Add to favourites" }).into()),
+        starred: song && starred,
+        shuffle: (if shuffle { "Shuffle off" } else { "Shuffle on" }).into(),
+        shuffling: shuffle,
+    }
+}
+
+/// What a radio stream shows as its title: what the station announces now (its ICY title), or, while it
+/// announces nothing, the station's own name.
+#[uniffi::export]
+pub fn radio_title(announced: Option<String>, station: Option<String>) -> Option<String> {
+    announced.filter(|a| !a.trim().is_empty()).or(station)
+}
+
+/// What a radio stream is listed under where a song shows its artist.
+#[uniffi::export]
+pub fn words_radio_artist() -> String {
+    "Radio".into()
+}
+
 fn favourite(on: bool) -> String {
     (if on { "Added to favourites" } else { "Removed from favourites" }).into()
 }
@@ -128,6 +168,194 @@ pub fn words_downloads_removed(songs: u32) -> String {
     format!("Removed {}", counted(songs, "download", "downloads"))
 }
 
+/// How many releases an artist has: "1 release", "12 releases".
+#[uniffi::export]
+pub fn words_releases(n: u32) -> String {
+    counted(n, "release", "releases")
+}
+
+/// How many albums an artist has, under their name in the artists list: "1 album", "12 albums".
+#[uniffi::export]
+pub fn words_albums(n: u32) -> String {
+    counted(n, "album", "albums")
+}
+
+/// A folder's caption: "2 folders · 14 songs".
+#[uniffi::export]
+pub fn words_folder(folders: u32, songs: u32) -> String {
+    format!("{} · {}", counted(folders, "folder", "folders"), counted(songs, "song", "songs"))
+}
+
+/// A folder's title: its name, or "Folder" for one the server did not name.
+#[uniffi::export]
+pub fn words_folder_title(name: String) -> String {
+    if name.is_empty() { "Folder".into() } else { name }
+}
+
+/// A decade by its first year: "1990s".
+#[uniffi::export]
+pub fn words_decade(start_year: u32) -> String {
+    format!("{start_year}s")
+}
+
+/// The favourite songs row: how many of the starred songs are in the library (a provider's song that was
+/// starred is being fetched by the server, not yet something to play).
+#[uniffi::export]
+pub fn words_favourite_songs(songs: Vec<crate::Song>) -> String {
+    words_songs(songs.iter().filter(|s| !s.is_external).count() as u32)
+}
+
+/// A playlist's line in the library: "12 songs · 48:10".
+#[uniffi::export]
+pub fn words_playlist_line(songs: u32, seconds: u32) -> String {
+    format!("{} · {}", words_songs(songs), crate::fmt::duration(seconds as i64))
+}
+
+/// What the player's title says with no song: the station playing, or that nothing is.
+#[uniffi::export]
+pub fn words_player_idle(radio: Option<String>) -> String {
+    radio.unwrap_or_else(|| "Nothing playing".into())
+}
+
+/// The line under the player's title while the offline bridge plays downloads in place of the queue.
+#[uniffi::export]
+pub fn words_bridging() -> String {
+    "Playing downloads until you’re online".into()
+}
+
+/// The now playing bar's second line: what went wrong with the song showing, else its artist, else
+/// (a station) "Radio".
+#[uniffi::export]
+pub fn words_bar_line(error: Option<String>, artist: Option<String>) -> String {
+    error.or(artist).unwrap_or_else(|| "Radio".into())
+}
+
+/// Where lyrics came from, for the credit line under them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum LyricsOrigin {
+    Server,
+    Lrclib,
+}
+
+/// A lyrics source's name: "your server", "LRCLIB".
+#[uniffi::export]
+pub fn words_lyrics_origin(origin: LyricsOrigin) -> String {
+    match origin {
+        LyricsOrigin::Server => "your server",
+        LyricsOrigin::Lrclib => "LRCLIB",
+    }
+    .into()
+}
+
+/// The corner under the lyrics, closed: whose words these are when they are not the server's, and when
+/// they came without timings, that they did - unsung words are all one brightness and a tap on one goes
+/// nowhere, which looks broken unless the corner says why. The server's timed words say "Timing" (the
+/// corner opens the nudge buttons); the server's untimed words have no corner at all (None).
+#[uniffi::export]
+pub fn words_lyrics_credit(origin: LyricsOrigin, synced: bool) -> Option<String> {
+    let source = (origin != LyricsOrigin::Server).then(|| words_lyrics_origin(origin));
+    if source.is_none() && !synced {
+        return None;
+    }
+    let first = source.or_else(|| synced.then(|| "Timing".to_string()));
+    Some([first, (!synced).then(|| "not timed".to_string())].into_iter().flatten().collect::<Vec<_>>().join(" · "))
+}
+
+/// The heading over the queue in the player: what plays after this song.
+#[uniffi::export]
+pub fn words_up_next() -> String {
+    "Playing next".into()
+}
+
+/// The toast when the phone has no output picker to open.
+#[uniffi::export]
+pub fn words_playing_through(output: String) -> String {
+    format!("Playing through {output}")
+}
+
+/// Stopping every download, and whether it asks first.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct StopAll {
+    /// More than one song would leave the queue: ask before doing it.
+    pub asks: bool,
+    pub title: String,
+    pub text: String,
+}
+
+#[uniffi::export]
+pub fn words_stop_all(unfinished: u32) -> StopAll {
+    let (that, leave) = if unfinished == 1 { ("has", "leaves") } else { ("have", "leave") };
+    StopAll {
+        asks: unfinished > 1,
+        title: "Stop all downloads?".into(),
+        text: format!("{} that {that} not finished downloading {leave} the queue. Songs already downloaded stay.", counted(unfinished, "song", "songs")),
+    }
+}
+
+/// The empty-list, failure and help lines around the app, by where they are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum Note {
+    /// No index yet: the songs and decades lists.
+    NoIndex,
+    NoPlaylists,
+    NoStations,
+    NothingDownloaded,
+    NoDownloads,
+    NoDownloadsHelp,
+    DownloadFailed,
+    NoFavouriteSongs,
+    NothingToMix,
+    SmartHelp,
+    NoHistory,
+    NothingFound,
+    NoLyrics,
+    /// Over the reason, where a page could not be read.
+    CouldNotLoad,
+    CouldNotEvaluate,
+}
+
+#[uniffi::export]
+pub fn words_note(note: Note) -> String {
+    match note {
+        Note::NoIndex => "No songs on this phone yet. Settings, then Library and lists, then Update.",
+        Note::NoPlaylists => "No playlists yet",
+        Note::NoStations => "No stations yet",
+        Note::NothingDownloaded => "Nothing downloaded yet",
+        Note::NoDownloads => "No downloads",
+        Note::NoDownloadsHelp => "Songs you download show here while they arrive, and for a while after.",
+        Note::DownloadFailed => "Couldn't download",
+        Note::NoFavouriteSongs => "No favourite songs yet. Tap the heart on a song and it will be here.",
+        Note::NothingToMix => "Nothing to mix yet. Play some music, or sync the library in Settings.",
+        Note::SmartHelp => "Matched against the synced library: sync it in Settings so every song can be found.",
+        Note::NoHistory => "Nothing played yet, or listening history is off in Settings, under Library and lists.",
+        Note::NothingFound => "Nothing found",
+        Note::NoLyrics => "No lyrics",
+        Note::CouldNotLoad => "Could not load",
+        Note::CouldNotEvaluate => "Could not evaluate",
+    }
+    .into()
+}
+
+/// The download notification's words that do not change: the batch is over, and its button.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DownloadNoticeWords {
+    pub complete: String,
+    pub cancel: String,
+    /// How long a batch's result stays when nothing failed; one that failed stays until tapped.
+    pub result_timeout_ms: i64,
+}
+
+#[uniffi::export]
+pub fn words_download_notice() -> DownloadNoticeWords {
+    DownloadNoticeWords { complete: "Downloads complete".into(), cancel: "Cancel".into(), result_timeout_ms: 8_000 }
+}
+
+/// The home-screen widget's title with nothing playing yet.
+#[uniffi::export]
+pub fn words_widget_idle() -> String {
+    "Nori".into()
+}
+
 /// After an M3U import: how many of its entries were found in the index and went into `playlist`.
 pub(crate) fn m3u_imported(found: usize, entries: usize, playlist: &str) -> String {
     if found == 0 {
@@ -140,6 +368,26 @@ pub(crate) fn m3u_imported(found: usize, entries: usize, playlist: &str) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_buttons_say_what_a_press_does() {
+        let b = session_buttons(true, true, false);
+        assert_eq!((b.heart.as_deref(), b.starred, b.shuffle.as_str()), (Some("Remove from favourites"), true, "Shuffle on"));
+        let b = session_buttons(true, false, true);
+        assert_eq!((b.heart.as_deref(), b.shuffle.as_str()), (Some("Add to favourites"), "Shuffle off"));
+        let b = session_buttons(false, true, false);
+        assert_eq!((b.heart, b.starred), (None, false), "a radio stream or nothing: no heart");
+    }
+
+    #[test]
+    fn a_stream_is_titled_by_what_it_announces() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(radio_title(s("Artist - Song"), s("FM 4")), s("Artist - Song"));
+        assert_eq!(radio_title(s("  "), s("FM 4")), s("FM 4"), "announcing nothing");
+        assert_eq!(radio_title(None, s("FM 4")), s("FM 4"));
+        assert_eq!(radio_title(None, None), None);
+        assert_eq!(words_radio_artist(), "Radio");
+    }
 
     #[test]
     fn numbers_agree_with_their_nouns() {
@@ -185,6 +433,49 @@ mod tests {
         assert_eq!(words_downloads_removed(3), "Removed 3 downloads");
         assert_eq!(m3u_imported(0, 4, "Road"), "None of the 4 entries are on this phone yet. Update the offline search first.");
         assert_eq!(m3u_imported(3, 4, "Road"), "Imported 3 of 4 tracks into Road");
+    }
+
+    #[test]
+    fn counts_and_lines_the_screens_used_to_write() {
+        assert_eq!((words_releases(1), words_releases(3)), ("1 release".into(), "3 releases".into()));
+        assert_eq!((words_albums(1), words_albums(0)), ("1 album".into(), "0 albums".into()));
+        assert_eq!(words_folder(2, 14), "2 folders · 14 songs");
+        assert_eq!(words_folder(1, 1), "1 folder · 1 song");
+        assert_eq!((words_folder_title(String::new()), words_folder_title("Rock".into())), ("Folder".into(), "Rock".into()));
+        assert_eq!(words_decade(1990), "1990s");
+        let s = |ext| crate::Song { is_external: ext, ..Default::default() };
+        assert_eq!(words_favourite_songs(vec![s(false), s(true), s(false)]), "2 songs");
+        assert_eq!(words_playlist_line(12, 2890), "12 songs · 48:10");
+        assert_eq!(words_playlist_line(1, 200), "1 song · 3:20");
+        assert_eq!(words_player_idle(None), "Nothing playing");
+        assert_eq!(words_player_idle(Some("FIP".into())), "FIP");
+        assert_eq!(words_bridging(), "Playing downloads until you’re online");
+        assert_eq!(words_bar_line(Some("Offline".into()), Some("A".into())), "Offline");
+        assert_eq!(words_bar_line(None, Some("A".into())), "A");
+        assert_eq!(words_bar_line(None, None), "Radio");
+        assert_eq!(words_playing_through("Phone speaker".into()), "Playing through Phone speaker");
+        assert_eq!(words_note(Note::DownloadFailed), "Couldn't download");
+        assert_eq!(words_note(Note::CouldNotLoad), "Could not load");
+        assert_eq!(words_download_notice().complete, "Downloads complete");
+        assert_eq!(words_widget_idle(), "Nori");
+    }
+
+    #[test]
+    fn the_lyrics_corner_says_whose_words_and_whether_timed() {
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Server, true).as_deref(), Some("Timing"));
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Server, false), None);
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Lrclib, true).as_deref(), Some("LRCLIB"));
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Lrclib, false).as_deref(), Some("LRCLIB · not timed"));
+        assert_eq!(words_lyrics_origin(LyricsOrigin::Server), "your server");
+    }
+
+    #[test]
+    fn stopping_everything_asks_only_for_more_than_one() {
+        assert!(!words_stop_all(1).asks);
+        let many = words_stop_all(3);
+        assert!(many.asks);
+        assert_eq!(many.title, "Stop all downloads?");
+        assert_eq!(many.text, "3 songs that have not finished downloading leave the queue. Songs already downloaded stay.");
     }
 
     #[test]

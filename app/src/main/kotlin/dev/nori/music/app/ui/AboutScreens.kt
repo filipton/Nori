@@ -100,39 +100,29 @@ private data class Credit(val name: String, val what: String, val copyright: Str
 /**
  * Everything the app is built from that is not ours. A static list, because the set changes with the
  * code and not with the user: a line here, and in NOTICE, is added in the same commit that adds the
- * dependency. Where a library offers MIT or Apache-2.0, the MIT text is the one shown.
+ * dependency. Where a library offers MIT or Apache-2.0, the MIT text is the one shown. The core's own
+ * crates are credited by the core (`settings_schema::core_credits`), so every app on it lists them alike.
  */
-private val CREDITS = listOf(
-    "Rust core" to listOf(
-        Credit("uniffi", "Generates the Kotlin bindings to the core", "Mozilla Foundation", "MPL-2.0", "MPL-2.0"),
-        Credit("rusqlite", "The library index, full-text search and caches", "Copyright (c) 2014 The rusqlite developers", "MIT", "MIT"),
-        Credit("SQLite", "The database itself, bundled into the core", "D. Richard Hipp and the SQLite developers, dedicated to the public domain", "Public domain", null),
-        Credit("RustFFT", "The spectrum analysis behind tempo, beats and key", "Copyright (c) 2015 The RustFFT Developers", "MIT or Apache-2.0", "MIT"),
-        Credit("Signalsmith Stretch", "Time-stretching for beat-matched mixes", "Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd.; Rust binding Copyright 2024 Colin Marc", "MIT", "MIT"),
-        Credit("serde and serde_json", "Reading the server's answers", "Copyright (c) David Tolnay and the Serde developers", "MIT or Apache-2.0", "MIT"),
-        Credit("jni", "The core's direct calls from the audio path", "Copyright (c) 2016 Prevoty, Inc. and jni-rs contributors", "MIT or Apache-2.0", "MIT"),
-        Credit("md-5", "Signing requests the way the Subsonic API asks", "Copyright (c) RustCrypto Developers", "MIT or Apache-2.0", "MIT"),
-        Credit("parking_lot", "Locks inside the core", "Copyright (c) 2016 The Rust Project Developers (Amanieu d'Antras)", "MIT or Apache-2.0", "MIT"),
-        Credit("thiserror", "Errors inside the core", "Copyright (c) David Tolnay", "MIT or Apache-2.0", "MIT"),
-        Credit("Media3 Sonic and silence skipping, ported", "Speed, pitch and shortened silences, ported line for line into the core", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-        Credit("AndroidX Palette, ported", "The colour quantiser behind a page's accent, ported line for line into the core", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-    ),
-    "Android" to listOf(
-        Credit("AndroidX Media3", "Playback, the media session and the notification", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-        Credit("Jetpack Compose and Material 3", "The user interface toolkit", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-        Credit("Material Icons", "The icons", "Copyright Google LLC", "Apache-2.0", "Apache-2.0"),
-        Credit("AndroidX Navigation, Lifecycle, Activity, Core", "The app's plumbing", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-        Credit("OkHttp", "Every network request", "Copyright Square, Inc.", "Apache-2.0", "Apache-2.0"),
-        Credit("Coil", "Loading and caching covers", "Copyright Coil Contributors", "Apache-2.0", "Apache-2.0"),
-        Credit("kotlinx.coroutines", "The concurrency the app is written in", "Copyright JetBrains s.r.o. and Kotlin Programming Language contributors", "Apache-2.0", "Apache-2.0"),
-        Credit("JNA", "How Kotlin reaches the Rust core, taken under the Apache half of its dual licence", "Copyright (c) 2007 Timothy Wall and the JNA contributors", "Apache-2.0", "Apache-2.0"),
-    ),
-    "Fonts and data" to listOf(
-        Credit("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", "OFL-1.1"),
-        Credit("AutoEQ", "Headphone correction curves, fetched when you ask for them", "Copyright (c) 2018 Jaakko Pasanen", "MIT", "MIT"),
-        Credit("LRCLIB", "Synced lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", null),
-    ),
-)
+private val CREDITS by lazy {
+    listOf(
+        "Rust core" to dev.nori.music.ffi.coreCredits().map { Credit(it.name, it.what, it.copyright, it.licence, it.file) },
+        "Android" to listOf(
+            Credit("AndroidX Media3", "Playback, the media session and the notification", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
+            Credit("Jetpack Compose and Material 3", "The user interface toolkit", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
+            Credit("Material Icons", "The icons", "Copyright Google LLC", "Apache-2.0", "Apache-2.0"),
+            Credit("AndroidX Navigation, Lifecycle, Activity, Core", "The app's plumbing", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
+            Credit("OkHttp", "Every network request", "Copyright Square, Inc.", "Apache-2.0", "Apache-2.0"),
+            Credit("Coil", "Loading and caching covers", "Copyright Coil Contributors", "Apache-2.0", "Apache-2.0"),
+            Credit("kotlinx.coroutines", "The concurrency the app is written in", "Copyright JetBrains s.r.o. and Kotlin Programming Language contributors", "Apache-2.0", "Apache-2.0"),
+            Credit("JNA", "How Kotlin reaches the Rust core, taken under the Apache half of its dual licence", "Copyright (c) 2007 Timothy Wall and the JNA contributors", "Apache-2.0", "Apache-2.0"),
+        ),
+        "Fonts and data" to listOf(
+            Credit("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", "OFL-1.1"),
+            Credit("AutoEQ", "Headphone correction curves, fetched when you ask for them", "Copyright (c) 2018 Jaakko Pasanen", "MIT", "MIT"),
+            Credit("LRCLIB", "Synced lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", null),
+        ),
+    )
+}
 
 /**
  * The licences page: every credit, grouped, with its licence at the end of the row. A tap shows who it

@@ -9,7 +9,6 @@ import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.math.abs
 
 /** The Rust side of speed/pitch and silence skipping; see crates/core/src/stages.rs. */
 internal object Stages {
@@ -24,8 +23,20 @@ internal object Stages {
     @JvmStatic external fun end(handle: Long, keep: Boolean): Int
     /** A direct buffer over the stage's own output memory. */
     @JvmStatic external fun output(handle: Long): ByteBuffer
-    @JvmStatic external fun mediaDurationUs(handle: Long, playoutUs: Long): Long
-    @JvmStatic external fun playoutDurationUs(handle: Long, mediaUs: Long): Long
+    /** With [handle] 0 (no stage made yet) these work from the nominal [speed]. */
+    @JvmStatic external fun mediaDurationUs(handle: Long, speed: Float, playoutUs: Long): Long
+    @JvmStatic external fun playoutDurationUs(handle: Long, speed: Float, mediaUs: Long): Long
+    /** Whether speed and pitch change the sound at all (nori_player::speed::speed_active). */
+    @JvmStatic external fun speedActive(speed: Float, pitch: Float): Boolean
+    /**
+     * One tick of a volume fade (nori_player::transport::fade_step): the volume's bits in the low 32,
+     * [FADE_DONE] set once it is over. See [fadeVolume] and [fadeDone].
+     */
+    @JvmStatic external fun fadeStep(from: Float, to: Float, startMs: Long, nowMs: Long, ms: Int): Long
+
+    const val FADE_DONE = 1L shl 32
+    fun fadeVolume(step: Long): Float = java.lang.Float.intBitsToFloat(step.toInt())
+    fun fadeDone(step: Long): Boolean = step and FADE_DONE != 0L
     @JvmStatic external fun skippedFrames(handle: Long): Long
 
     const val MOVED = 1 shl 30
@@ -151,10 +162,10 @@ class SpeedPitch : AudioProcessor {
     }
 
     fun mediaDurationUs(playoutUs: Long): Long =
-        if (handle != 0L) Stages.mediaDurationUs(handle, playoutUs) else (speed.toDouble() * playoutUs).toLong()
+        Stages.mediaDurationUs(handle, speed, playoutUs)
 
     override fun getDurationAfterProcessorApplied(durationUs: Long): Long =
-        if (handle != 0L) Stages.playoutDurationUs(handle, durationUs) else (durationUs / speed.toDouble()).toLong()
+        Stages.playoutDurationUs(handle, speed, durationUs)
 
     override fun configure(input: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (input.encoding != C.ENCODING_PCM_16BIT && input.encoding != C.ENCODING_PCM_FLOAT) {
@@ -165,7 +176,7 @@ class SpeedPitch : AudioProcessor {
     }
 
     override fun isActive() =
-        pendingFormat.sampleRate != Format.NO_VALUE && (abs(speed - 1f) >= CLOSE || abs(pitch - 1f) >= CLOSE)
+        pendingFormat.sampleRate != Format.NO_VALUE && Stages.speedActive(speed, pitch)
 
     override fun queueInput(input: ByteBuffer) {
         if (input.hasRemaining() && handle != 0L) out.feed(handle, input)
@@ -205,10 +216,6 @@ class SpeedPitch : AudioProcessor {
         handle = 0
         out.reset()
         inputEnded = false
-    }
-
-    private companion object {
-        const val CLOSE = 0.0001f
     }
 }
 

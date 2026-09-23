@@ -43,7 +43,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     /** One-line confirmations and failures, for a snackbar or whatever the UI uses. */
     val messages = _messages.receiveAsFlow()
     /** This session's star changes, so every heart on screen can prefer them over its snapshot. */
-    val starMarks: StateFlow<Map<String, Boolean>> = nori.library.starMarks
+    val starMarks: StateFlow<dev.nori.music.ffi.StarMarks> = nori.library.starMarks
     val downloads: StateFlow<DownloadState> = nori.downloads.state
 
     // A process started in the background could not restart the download service; with a screen up it can.
@@ -185,8 +185,11 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
 
     /** Picks up the queue another device (or the web player) left on the server. */
     fun resumeFromServer() = attempt(null) {
-        val q = nori.library.pullQueue()
-        if (q.songs.isEmpty()) _messages.send(words(Said.NO_SERVER_QUEUE, "")) else { nori.player.play(q.songs, q.index.toInt()); nori.player.seekTo(q.positionMs.toLong()) }
+        // What to do with what the server kept is the core's (`resume_from_server`).
+        when (val plan = nori.library.resumeFromServer()) {
+            is dev.nori.music.ffi.ResumePlan.Nothing -> _messages.send(plan.message)
+            is dev.nori.music.ffi.ResumePlan.Play -> { nori.player.play(plan.songs, plan.index.toInt()); nori.player.seekTo(plan.positionMs.toLong()) }
+        }
     }
 
     /**

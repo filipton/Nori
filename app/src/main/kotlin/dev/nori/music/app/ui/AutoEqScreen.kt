@@ -53,18 +53,18 @@ fun AutoEqScreen(vm: SettingsViewModel) {
         }
 
         Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("${ui.count} headphones", Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(ui.countWords, Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(vm::downloadAutoEqIndex, enabled = !ui.busy) { Text("Refresh list") }
         }
-        SearchField(ui.query, vm::searchAutoEq, "Search ${ui.count} headphones", Modifier.padding(horizontal = Space.gutter, vertical = 8.dp))
+        SearchField(ui.query, vm::searchAutoEq, ui.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            items(ui.hits, key = { it.path }) { e ->
-                Column(Modifier.fillMaxWidth().clickable { vm.applyAutoEq(e) }.padding(horizontal = Space.gutter, vertical = 11.dp)) {
-                    Text(e.name)
-                    Text(listOfNotNull(e.source.ifEmpty { null }, e.form.ifEmpty { null }, e.target.ifEmpty { null }).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            items(ui.hits, key = { it.entry.path }) { e ->
+                Column(Modifier.fillMaxWidth().clickable { vm.applyAutoEq(e.entry) }.padding(horizontal = Space.gutter, vertical = 11.dp)) {
+                    Text(e.entry.name)
+                    Text(e.caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (ui.query.length >= 2 && ui.hits.isEmpty()) item { Text("Nothing matches", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (!ui.tooShort && ui.hits.isEmpty()) item { Text("Nothing matches", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
             item { Text("Curves by the AutoEQ project (jaakkopasanen/AutoEq). Tapping one replaces the equalizer's bands.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }

@@ -229,15 +229,42 @@ const REPLAY_GAIN: (i32, i32) = (0, 3);
 const CACHE_MB: (i32, i32) = (256, 16384);
 const RATE: (f32, f32) = (0.25, 4.0);
 const FADE_MS: (i32, i32) = (0, 5000);
+/// 0 small, 1 medium, 2 large.
+const LYRICS_SIZE: (i32, i32) = (0, 2);
+/// ReplayGain's overall level, as its slider offers it.
+pub(crate) const REPLAY_GAIN_PREAMP: (f32, f32) = (-12.0, 6.0);
 
-/// How many values each enum setting has: `AutoFillKind`, `AutoFillBasis`, `ThemeMode`, `TapAction`, `SwipeAction`.
+/// Each enum setting's values by name, in ordinal order: `AutoFillKind`, `AutoFillBasis`, `ReplayGainMode`,
+/// `ThemeMode`, `TapAction`, `SwipeAction`. A change by name takes these as well as the ordinals.
 const AUTO_FILL_KINDS: [&str; 2] = ["SONGS", "ALBUMS"];
 const AUTO_FILL_BASES: [&str; 4] = ["SIMILAR", "ARTIST", "GENRE", "ERA"];
-const THEMES: i32 = 3;
-const TAP_ACTIONS: i32 = 4;
-const SWIPE_ACTIONS: i32 = 5;
+const REPLAY_GAIN_MODES: [&str; 4] = ["OFF", "TRACK", "ALBUM", "AUTO"];
+const THEME_MODES: [&str; 3] = ["SYSTEM", "LIGHT", "DARK"];
+const TAP_ACTION_NAMES: [&str; 4] = ["PLAY_LIST", "PLAY_ONE", "QUEUE", "PLAY_NEXT"];
+const SWIPE_ACTION_NAMES: [&str; 5] = ["NONE", "QUEUE", "PLAY_NEXT", "FAVOURITE", "DOWNLOAD"];
+const THEMES: i32 = THEME_MODES.len() as i32;
+const TAP_ACTIONS: i32 = TAP_ACTION_NAMES.len() as i32;
+const SWIPE_ACTIONS: i32 = SWIPE_ACTION_NAMES.len() as i32;
 /// `HomeRow`, by the names they are stored under, in their order.
 const HOME_ROWS: [&str; 8] = ["PINNED", "PLAYLISTS", "RECENT", "NEWEST", "FREQUENT", "TOP_SONGS", "RANDOM", "STARRED"];
+
+/// What each is called on screen, in the same order.
+pub(crate) const AUTO_FILL_KIND_LABELS: [&str; 2] = ["Songs", "Albums"];
+pub(crate) const AUTO_FILL_BASIS_LABELS: [&str; 4] = ["Similar music", "The same artist", "The same genre", "The same era"];
+const HOME_ROW_TITLES: [&str; 8] = [
+    "Favourite playlists",
+    "Playlists",
+    "Recently played",
+    "Recently added",
+    "Most played albums",
+    "Most played songs",
+    "Random",
+    "Favourite albums",
+];
+/// `EqKind`, in its order, as the band editor names each kind.
+const BAND_KIND_LABELS: [&str; BAND_KINDS as usize] =
+    ["Peak", "Low shelf", "High shelf", "Low pass", "High pass", "Band pass", "Notch", "All pass", "Low shelf (slope)", "High shelf (slope)"];
+const BAND_CHANNEL_LABELS: [&str; BAND_CHANNELS as usize] = ["Both", "Left", "Right"];
 
 /// Where the left swipe is stored. It used to default to Play next and be saved along with everything
 /// else, so a new key is what gives existing installs the new default (the left swipe favourites).
@@ -368,7 +395,7 @@ fn float(s: &str) -> Option<f32> {
 
 /// A float written the way the Kotlin side always wrote it ("1000.0", "1.41", "1.0E-5"), so what is
 /// stored does not change shape when a different side saves it.
-fn kotlin_float(v: f32) -> String {
+pub(crate) fn kotlin_float(v: f32) -> String {
     if v.is_nan() {
         return "NaN".to_string();
     }
@@ -764,24 +791,48 @@ pub fn save(p: &StoredPrefs) -> PrefsWrite {
     PrefsWrite { put, remove }
 }
 
-/// What the test bridge changed, and whether the stream cache has to shrink to a new limit now.
+/// What a change by name did: the settings after it, whether the stream cache has to shrink to a new
+/// limit now, and whether the active server's own profile changed (its connection is set up again).
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct SettingChange {
     pub prefs: StoredPrefs,
     pub apply_cache_limit: bool,
+    pub server: bool,
 }
 
-/// Flips one setting by name, for the debug test bridge. Only the switches a check needs; anything else
-/// is `None`, so a typo in a script fails loudly instead of silently doing nothing. A number that does
-/// not read leaves the setting as it is.
+/// Stream quality as a value: "0:" is the original file, "320:mp3" a bitrate and a format.
+pub(crate) fn quality_name(q: &SavedQuality) -> String {
+    format!("{}:{}", q.bit_rate, q.format)
+}
+
+fn quality_named(value: &str) -> Option<SavedQuality> {
+    let (rate, format) = value.split_once(':')?;
+    Some(SavedQuality { bit_rate: rate.trim().parse().ok()?, format: format.trim().to_string() })
+}
+
+/// Changes one setting by name: the settings screen's rows (each row says which name it sets) and the
+/// debug test bridge (`tools/app.sh set <name> <value>`). A switch reads "true"/"1" as on; an enum reads
+/// its name or its ordinal; a number that does not read leaves the setting as it is. Anything that is
+/// not a setting is `None`, so a typo in a script fails loudly instead of silently doing nothing.
 pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingChange> {
     let on = value.eq_ignore_ascii_case("true") || value == "1";
-    let int = value.parse::<i32>().ok();
-    let float = value.parse::<f32>().ok();
+    let int = value.trim().parse::<i32>().ok();
+    let float = value.trim().parse::<f32>().ok();
     let clamp = |v: Option<i32>, (lo, hi): (i32, i32), keep: i32| v.map_or(keep, |v| v.clamp(lo, hi));
-    let named = |names: &[&str]| names.iter().position(|n| n.eq_ignore_ascii_case(value)).map(|i| i as i32);
+    let named = |names: &[&str]| {
+        names.iter().position(|n| n.eq_ignore_ascii_case(value)).map(|i| i as i32).or(int.filter(|i| (0..names.len() as i32).contains(i)))
+    };
     let mut n = p.clone();
+    let mut server = false;
     match name {
+        // "raw" or "<format>:<kbps>" (e.g. "opus:128"): what streams on Wi-Fi, for checks of a codec.
+        "wifiQuality" => {
+            n.wifi = match value.split_once(':') {
+                Some((format, kbps)) => SavedQuality { bit_rate: kbps.parse().ok()?, format: format.to_string() },
+                None if value == "raw" => SavedQuality::default(),
+                None => return None,
+            }
+        }
         "limiter" => n.limiter = on,
         "eq" => n.eq_enabled = on,
         "mono" => n.mono = on,
@@ -794,31 +845,79 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "reduceMotion" => n.reduce_motion = on,
         "playerColours" => n.player_colours = on,
         "coverColors" => n.cover_colors = on,
-        "thirdPartyLookups" => n.third_party_lookups = on,
+        "dynamicColor" => n.dynamic_color = on,
+        // The lookups switch covers LRCLIB too, so it takes the lyrics half with it both ways.
+        "thirdPartyLookups" => (n.third_party_lookups, n.lyrics_lrclib) = (on, on),
+        // Lyrics from LRCLIB need lookups, so switching them on switches lookups on; off leaves the
+        // lookups (update checks) as they are.
+        "lyricsLrclib" => (n.lyrics_lrclib, n.third_party_lookups) = (on, on || p.third_party_lookups),
         "crossfadeKeepAlbums" => n.crossfade_keep_albums = on,
         "lyricsSweep" => n.lyrics_sweep = on,
+        "lyricsTranslation" => n.lyrics_translation = on,
+        "lyricsKeepScreenOn" => n.lyrics_keep_screen_on = on,
+        "lyricsSize" => n.lyrics_size = clamp(int, LYRICS_SIZE, p.lyrics_size),
         "softSleeve" => n.soft_sleeve = on,
         "favouriteNotice" => n.favourite_notice = on,
         "crossfadeSec" => n.crossfade_sec = int.unwrap_or(p.crossfade_sec),
+        "autoMixMaxS" => n.auto_mix_max_s = int.unwrap_or(p.auto_mix_max_s),
+        "autoMixBeatMatch" => n.auto_mix_beat_match = on,
+        "autoMixMaxTempoPct" => n.auto_mix_max_tempo_pct = float.unwrap_or(p.auto_mix_max_tempo_pct),
+        "autoMixKeepPitch" => n.auto_mix_keep_pitch = on,
+        "autoMixBassSwap" => n.auto_mix_bass_swap = on,
+        "autoMixFilters" => n.auto_mix_filters = on,
+        "autoMixEchoOut" => n.auto_mix_echo_out = on,
         "coversAhead" => n.covers_ahead = clamp(int, COVERS_AHEAD, p.covers_ahead),
         "cacheMb" => n.cache_mb = clamp(int, CACHE_MB, p.cache_mb),
         "parallelDownloads" => n.parallel_downloads = clamp(int, PARALLEL_DOWNLOADS, p.parallel_downloads),
+        "precacheWifi" => n.precache_wifi = int.unwrap_or(p.precache_wifi),
+        "precacheMobile" => n.precache_mobile = int.unwrap_or(p.precache_mobile),
+        "wifi" => n.wifi = quality_named(value)?,
+        "mobile" => n.mobile = quality_named(value)?,
+        "download" => n.download = quality_named(value)?,
         "speed" => n.speed = float.map_or(p.speed, |v| v.clamp(RATE.0, RATE.1)),
         "pitch" => n.pitch = float.map_or(p.pitch, |v| v.clamp(RATE.0, RATE.1)),
         "skipSilence" => n.skip_silence = on,
         "fadeMs" => n.fade_ms = clamp(int, FADE_MS, p.fade_ms),
+        "previousAlwaysSkips" => n.previous_always_skips = on,
         "crossfeedDb" => n.crossfeed_db = float.unwrap_or(p.crossfeed_db),
         "limiterThresholdDb" => n.limiter_threshold_db = float.unwrap_or(p.limiter_threshold_db),
+        "replayGain" => n.replay_gain = named(&REPLAY_GAIN_MODES)?,
+        "preampDb" => n.preamp_db = float.map_or(p.preamp_db, |v| v.clamp(REPLAY_GAIN_PREAMP.0, REPLAY_GAIN_PREAMP.1)),
+        "untaggedGainDb" => n.untagged_gain_db = float.unwrap_or(p.untagged_gain_db),
         "autoFill" => n.auto_fill = on,
         "bridgeOffline" => n.bridge_offline = on,
         "autoFillKind" => n.auto_fill_kind = named(&AUTO_FILL_KINDS)?,
         "autoFillBasis" => n.auto_fill_basis = named(&AUTO_FILL_BASES)?,
         "autoEqAuto" => n.auto_eq_auto = on,
         "profilePerOutput" => n.profile_per_output = on,
+        "weightedShuffle" => n.weighted_shuffle = on,
+        "skipExplicit" => n.skip_explicit = on,
+        "skipOnError" => n.skip_on_error = on,
+        "theme" => n.theme = named(&THEME_MODES)?,
+        "accent" => n.accent = value.trim().parse::<i64>().unwrap_or(p.accent),
+        "uiScale" => n.ui_scale = float.unwrap_or(p.ui_scale),
+        "tapAction" => n.tap_action = named(&TAP_ACTION_NAMES)?,
+        "swipeRight" => n.swipe_right = named(&SWIPE_ACTION_NAMES)?,
+        "swipeLeft" => n.swipe_left = named(&SWIPE_ACTION_NAMES)?,
+        "liveSearchDelayMs" => n.live_search_delay_ms = int.unwrap_or(p.live_search_delay_ms),
+        "tasteModel" => n.taste_model = on,
+        "scrobble" => n.scrobble = on,
+        "scrobblePercent" => n.scrobble_percent = int.unwrap_or(p.scrobble_percent),
+        // The active server's own settings: which music folder it browses, and the bitrate cap on its
+        // second address.
+        "musicFolder" | "altMaxBitRate" => {
+            let s = n.servers.iter_mut().find(|s| s.id == p.active_server_id)?;
+            if name == "musicFolder" {
+                s.music_folder_id = value.to_string();
+            } else {
+                s.alt_max_bit_rate = int.map_or(s.alt_max_bit_rate, |v| v.max(0));
+            }
+            server = true;
+        }
         _ => return None,
     }
     // "Space for streamed music" is applied at once instead of at the next track.
-    Some(SettingChange { prefs: n, apply_cache_limit: name == "cacheMb" })
+    Some(SettingChange { prefs: n, apply_cache_limit: name == "cacheMb", server })
 }
 
 /// What a server is called in lists: its name, or else the host of its address.
@@ -875,12 +974,356 @@ pub fn remove_band(s: SoundSettings, index: u32) -> SoundSettings {
     with_bands(s, if bands.is_empty() { graphic() } else { bands })
 }
 
+/// How far each equalizer control goes. The screen's sliders span exactly this, and every edit made
+/// through the core is held inside it, so a value from anywhere else cannot leave the range either.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct Span {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl Span {
+    fn hold(self, v: f32) -> f32 {
+        if v.is_nan() { self.min.max(0.0).min(self.max) } else { v.clamp(self.min, self.max) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct EqRanges {
+    /// A band's boost or cut, dB.
+    pub gain: Span,
+    /// The equalizer's own pre-amp when it is not automatic, dB.
+    pub preamp: Span,
+    /// -1 hard left, +1 hard right.
+    pub balance: Span,
+    /// The limiter's ceiling, dB.
+    pub limiter: Span,
+    /// Crossfeed, dB; 0 is off.
+    pub crossfeed: Span,
+    /// A band's width (or a shelf's slope).
+    pub q: Span,
+    /// A band's frequency, Hz: the frequency slider's 20 Hz to 20 kHz.
+    pub freq: Span,
+    /// ReplayGain's overall level, dB.
+    pub replay_gain_preamp: Span,
+}
+
+pub const EQ_RANGES: EqRanges = EqRanges {
+    gain: Span { min: -12.0, max: 12.0 },
+    preamp: Span { min: -20.0, max: 6.0 },
+    balance: Span { min: -1.0, max: 1.0 },
+    limiter: Span { min: -12.0, max: 0.0 },
+    crossfeed: Span { min: 0.0, max: 9.0 },
+    q: Span { min: 0.2, max: 8.0 },
+    freq: Span { min: 20.0, max: 20_000.0 },
+    replay_gain_preamp: Span { min: REPLAY_GAIN_PREAMP.0, max: REPLAY_GAIN_PREAMP.1 },
+};
+
+/// One kind of band as the editor shows it: its name, whether it has a gain to set, and which marks
+/// its label gets.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BandKindInfo {
+    pub label: String,
+    pub uses_gain: bool,
+    /// A shelf given by its slope rather than a Q.
+    pub slope: bool,
+}
+
+/// The words every enum setting is shown with, in ordinal order; asked once.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SettingLabels {
+    pub auto_fill_kinds: Vec<String>,
+    pub auto_fill_bases: Vec<String>,
+    pub home_rows: Vec<String>,
+    pub band_kinds: Vec<BandKindInfo>,
+    pub band_channels: Vec<String>,
+    pub eq_ranges: EqRanges,
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+pub fn labels() -> SettingLabels {
+    SettingLabels {
+        auto_fill_kinds: strings(&AUTO_FILL_KIND_LABELS),
+        auto_fill_bases: strings(&AUTO_FILL_BASIS_LABELS),
+        home_rows: strings(&HOME_ROW_TITLES),
+        band_kinds: BAND_KIND_LABELS
+            .iter()
+            .enumerate()
+            .map(|(k, l)| BandKindInfo {
+                label: l.to_string(),
+                uses_gain: nori_player::dsp::uses_gain(k as i32),
+                slope: k as i32 == EqKind::LowShelfSlope as i32 || k as i32 == EqKind::HighShelfSlope as i32,
+            })
+            .collect(),
+        band_channels: strings(&BAND_CHANNEL_LABELS),
+        eq_ranges: EQ_RANGES,
+    }
+}
+
+/// A band as the edit leaves it: a kind and a channel that exist, and gain, width and frequency held
+/// inside [`EQ_RANGES`].
+fn held(b: SoundBand) -> SoundBand {
+    let r = EQ_RANGES;
+    SoundBand {
+        kind: if (0..BAND_KINDS).contains(&b.kind) { b.kind } else { EqKind::Peaking as i32 },
+        freq: r.freq.hold(b.freq),
+        gain_db: r.gain.hold(b.gain_db),
+        q: r.q.hold(b.q),
+        channel: if (0..BAND_CHANNELS).contains(&b.channel) { b.channel } else { 0 },
+    }
+}
+
+/// One band changed. An index past the end changes nothing.
+pub fn set_band(s: SoundSettings, index: u32, band: SoundBand) -> SoundSettings {
+    let mut bands = s.eq_bands.clone();
+    match bands.get_mut(index as usize) {
+        Some(b) => *b = held(band),
+        None => return s,
+    }
+    with_bands(s, bands)
+}
+
+impl SoundSettings {
+    /// The pre-amp in effect: the one set, or the automatic one for these bands; none with the
+    /// equalizer off.
+    pub fn effective_preamp_db(&self) -> f32 {
+        if !self.eq_enabled {
+            return 0.0;
+        }
+        self.eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(self.eq_bands.iter().map(|b| (b.kind, b.gain_db))))
+    }
+}
+
+/// The automatic pre-amp switched on, or off - and then it starts from the level it was at, so the
+/// sound does not jump when the switch is flipped.
+pub fn set_auto_preamp(s: SoundSettings, automatic: bool) -> SoundSettings {
+    let eq_preamp_db = if automatic { None } else { Some(EQ_RANGES.preamp.hold(s.effective_preamp_db())) };
+    SoundSettings { eq_preamp_db, ..s }
+}
+
+/// One of the equalizer screen's other controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum EqLevel {
+    Preamp,
+    Balance,
+    Limiter,
+    Crossfeed,
+}
+
+/// A level moved on the equalizer screen, held in its range; balance near the middle and crossfeed
+/// under a decibel snap to none (see `fmt::eq_balance_snap`, `fmt::eq_crossfeed_snap`).
+pub fn set_level(s: SoundSettings, level: EqLevel, value: f32) -> SoundSettings {
+    let r = EQ_RANGES;
+    match level {
+        EqLevel::Preamp => SoundSettings { eq_preamp_db: Some(r.preamp.hold(value)), ..s },
+        EqLevel::Balance => SoundSettings { balance: crate::fmt::eq_balance_snap(r.balance.hold(value)), ..s },
+        EqLevel::Limiter => SoundSettings { limiter_threshold_db: r.limiter.hold(value), ..s },
+        EqLevel::Crossfeed => SoundSettings { crossfeed_db: crate::fmt::eq_crossfeed_snap(r.crossfeed.hold(value)), ..s },
+    }
+}
+
+/// Why nothing on the equalizer screen reaches the sound, or `None` when it does. Bit-perfect output
+/// and high quality output both hand the file's samples to the DAC untouched, so the whole chain is
+/// out of the path; without this the screen looks broken.
+pub fn eq_bypass(hi_res: bool, bit_perfect: bool) -> Option<String> {
+    if bit_perfect {
+        Some("Bit-perfect USB output is active, so nothing here touches the audio.".into())
+    } else if hi_res {
+        Some("High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound.".into())
+    } else {
+        None
+    }
+}
+
+/// A band's label for the band list: its frequency and a mark for its channel or kind.
+pub fn band_label(b: &SoundBand) -> String {
+    let k = b.kind;
+    let low = k == EqKind::LowShelf as i32 || k == EqKind::LowShelfSlope as i32;
+    let high = k == EqKind::HighShelf as i32 || k == EqKind::HighShelfSlope as i32;
+    crate::fmt::eq_band_label(b.freq, b.channel == 1, b.channel == 2, low, high, nori_player::dsp::uses_gain(k))
+}
+
+/// Under a saved profile: which devices use it, by name, or that a tap loads it.
+pub fn profile_use(devices: &[String]) -> String {
+    if devices.is_empty() { "Tap to load".into() } else { format!("Used for {}", devices.join(", ")) }
+}
+
+// ---- server profiles ----
+
+/// The saved servers and which one is in use.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct ServerList {
+    pub servers: Vec<SavedServer>,
+    pub active_server_id: String,
+}
+
+/// `profile` made the server in use: it replaces the saved one with its id, or joins the end.
+pub fn servers_activate(list: ServerList, profile: SavedServer) -> ServerList {
+    let id = profile.id.clone();
+    let mut servers: Vec<SavedServer> = list.servers.into_iter().filter(|s| s.id != id).collect();
+    servers.push(profile);
+    ServerList { servers, active_server_id: id }
+}
+
+/// A saved profile changed in place; which one is in use does not change.
+pub fn servers_update(list: ServerList, profile: SavedServer) -> ServerList {
+    let servers = list.servers.into_iter().map(|s| if s.id == profile.id { profile.clone() } else { s }).collect();
+    ServerList { servers, ..list }
+}
+
+/// A profile removed. Removing the one in use puts the first one left in its place, or none.
+pub fn servers_remove(list: ServerList, id: &str) -> ServerList {
+    let was_active = list.active_server_id == id;
+    let servers: Vec<SavedServer> = list.servers.into_iter().filter(|s| s.id != id).collect();
+    let active_server_id = if was_active { servers.first().map(|s| s.id.clone()).unwrap_or_default() } else { list.active_server_id };
+    ServerList { servers, active_server_id }
+}
+
+/// Whose rows in the app's database are open: the active profile's, and "default" before there is
+/// one (the id the single server from before profiles was given).
+pub fn server_db_id(active_server_id: &str) -> String {
+    if active_server_id.is_empty() { "default".into() } else { active_server_id.to_string() }
+}
+
+/// A fresh profile id: eight hex digits, like the start of a random UUID.
+pub fn new_server_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(N.fetch_add(1, Ordering::Relaxed));
+    h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos()));
+    format!("{:08x}", h.finish() as u32)
+}
+
+/// Extra HTTP headers as typed, one per line, "Name: value". A line without a colon or a name is
+/// skipped; name and value are trimmed; a name given twice keeps its last value.
+pub fn parse_headers(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            (!k.trim().is_empty()).then(|| (k.trim().to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The headers back as the field shows them, by name so the order is always the same.
+pub fn format_headers(headers: &HashMap<String, String>) -> String {
+    let mut h: Vec<(&String, &String)> = headers.iter().collect();
+    h.sort();
+    h.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n")
+}
+
+/// An address typed without its scheme: the schemes offered in front of it, https first.
+pub fn url_schemes(url: &str) -> Vec<String> {
+    if url.is_empty() || url.contains("://") { Vec::new() } else { vec!["https://".into(), "http://".into()] }
+}
+
+/// Whether the form can be sent: an address, and a user or an API key.
+pub fn profile_ready(p: &SavedServer) -> bool {
+    !p.url.trim().is_empty() && (!p.user.trim().is_empty() || !p.api_key.trim().is_empty())
+}
+
+/// The profile as the form sends it: addresses trimmed, headers read from what was typed.
+pub fn profile_from_form(p: SavedServer, headers: &str) -> SavedServer {
+    SavedServer { url: p.url.trim().to_string(), alt_url: p.alt_url.trim().to_string(), headers: parse_headers(headers), ..p }
+}
+
 // ---- the doors ----
 
-/// The test bridge's setter; see `set_by_name`.
+/// Every enum setting's words, the band kinds and the equalizer's ranges; asked once.
 #[uniffi::export]
-pub fn setting_by_name(prefs: StoredPrefs, name: String, value: String) -> Option<SettingChange> {
-    set_by_name(&prefs, &name, &value)
+pub fn setting_labels() -> SettingLabels {
+    labels()
+}
+
+/// The settings as a fresh install has them.
+#[uniffi::export]
+pub fn settings_defaults() -> StoredPrefs {
+    StoredPrefs::default()
+}
+
+#[uniffi::export]
+pub fn eq_set_band(sound: SoundSettings, index: u32, band: SoundBand) -> SoundSettings {
+    set_band(sound, index, band)
+}
+
+#[uniffi::export]
+pub fn eq_set_auto_preamp(sound: SoundSettings, automatic: bool) -> SoundSettings {
+    set_auto_preamp(sound, automatic)
+}
+
+#[uniffi::export]
+pub fn eq_set_level(sound: SoundSettings, level: EqLevel, value: f32) -> SoundSettings {
+    set_level(sound, level, value)
+}
+
+#[uniffi::export]
+pub fn eq_effective_preamp_db(sound: SoundSettings) -> f32 {
+    sound.effective_preamp_db()
+}
+
+#[uniffi::export]
+pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<String> {
+    eq_bypass(hi_res, bit_perfect)
+}
+
+#[uniffi::export]
+pub fn eq_band_name(band: SoundBand) -> String {
+    band_label(&band)
+}
+
+#[uniffi::export]
+pub fn words_profile_use(devices: Vec<String>) -> String {
+    profile_use(&devices)
+}
+
+#[uniffi::export]
+pub fn servers_activated(list: ServerList, profile: SavedServer) -> ServerList {
+    servers_activate(list, profile)
+}
+
+#[uniffi::export]
+pub fn servers_updated(list: ServerList, profile: SavedServer) -> ServerList {
+    servers_update(list, profile)
+}
+
+#[uniffi::export]
+pub fn servers_removed(list: ServerList, id: String) -> ServerList {
+    servers_remove(list, &id)
+}
+
+#[uniffi::export]
+pub fn server_db(active_server_id: String) -> String {
+    server_db_id(&active_server_id)
+}
+
+#[uniffi::export]
+pub fn server_new_id() -> String {
+    new_server_id()
+}
+
+#[uniffi::export]
+pub fn server_headers_text(headers: HashMap<String, String>) -> String {
+    format_headers(&headers)
+}
+
+#[uniffi::export]
+pub fn server_url_schemes(url: String) -> Vec<String> {
+    url_schemes(&url)
+}
+
+#[uniffi::export]
+pub fn server_ready(profile: SavedServer) -> bool {
+    profile_ready(&profile)
+}
+
+#[uniffi::export]
+pub fn server_from_form(profile: SavedServer, headers: String) -> SavedServer {
+    profile_from_form(profile, &headers)
 }
 
 #[uniffi::export]
@@ -1123,6 +1566,183 @@ mod tests {
         assert_eq!(set_by_name(&p, "autoFillBasis", "era").unwrap().prefs.auto_fill_basis, 3);
         assert_eq!(set_by_name(&p, "autoFillBasis", "mood"), None);
         assert_eq!(set_by_name(&p, "nope", "1"), None);
+    }
+
+    #[test]
+    fn every_row_of_the_settings_screen_sets_by_name() {
+        let p = StoredPrefs::default();
+        let set = |name: &str, v: &str| set_by_name(&p, name, v).unwrap().prefs;
+        assert_eq!(set("replayGain", "ALBUM").replay_gain, 2);
+        assert_eq!(set("replayGain", "3").replay_gain, 3);
+        assert_eq!(set_by_name(&p, "replayGain", "9"), None, "an ordinal out of range is not a value");
+        assert_eq!(set("theme", "dark").theme, 2);
+        assert_eq!(set("tapAction", "PLAY_NEXT").tap_action, 3);
+        assert_eq!(set("swipeLeft", "DOWNLOAD").swipe_left, 4);
+        assert_eq!(set("wifi", "320:mp3").wifi, SavedQuality { bit_rate: 320, format: "mp3".into() });
+        assert_eq!(set("mobile", "0:").mobile, SavedQuality::default());
+        assert_eq!(set_by_name(&p, "download", "flac"), None);
+        assert_eq!(set("preampDb", "20").preamp_db, 6.0);
+        assert_eq!(set("accent", "4280191205").accent, 0xFF1E88E5);
+        assert_eq!(set("speed", "0.75").speed, 0.75);
+        assert_eq!(set("lyricsSize", "7").lyrics_size, 2);
+        assert_eq!(set("autoMixMaxTempoPct", "2.0").auto_mix_max_tempo_pct, 2.0);
+    }
+
+    #[test]
+    fn the_lyrics_lookup_and_the_lookups_switch_go_together() {
+        let p = StoredPrefs::default();
+        let on = set_by_name(&p, "lyricsLrclib", "true").unwrap().prefs;
+        assert!(on.lyrics_lrclib && on.third_party_lookups, "lyrics online switches lookups on");
+        let off = set_by_name(&on, "lyricsLrclib", "false").unwrap().prefs;
+        assert!(!off.lyrics_lrclib && off.third_party_lookups, "and off leaves the lookups alone");
+        let all_off = set_by_name(&on, "thirdPartyLookups", "false").unwrap().prefs;
+        assert!(!all_off.lyrics_lrclib && !all_off.third_party_lookups);
+        let all_on = set_by_name(&all_off, "thirdPartyLookups", "true").unwrap().prefs;
+        assert!(all_on.lyrics_lrclib && all_on.third_party_lookups);
+    }
+
+    #[test]
+    fn the_active_servers_own_settings() {
+        let a = SavedServer { id: "a".into(), ..SavedServer::default() };
+        let b = SavedServer { id: "b".into(), ..SavedServer::default() };
+        let p = StoredPrefs { servers: vec![a, b], active_server_id: "b".into(), ..StoredPrefs::default() };
+        let c = set_by_name(&p, "musicFolder", "7").unwrap();
+        assert!(c.server);
+        assert_eq!((c.prefs.servers[0].music_folder_id.as_str(), c.prefs.servers[1].music_folder_id.as_str()), ("", "7"));
+        assert_eq!(set_by_name(&p, "altMaxBitRate", "128").unwrap().prefs.servers[1].alt_max_bit_rate, 128);
+        assert_eq!(set_by_name(&StoredPrefs::default(), "musicFolder", "7"), None, "no server in use");
+        assert!(!set_by_name(&p, "mono", "1").unwrap().server);
+    }
+
+    #[test]
+    fn labels_are_the_screens_words() {
+        let l = labels();
+        assert_eq!(l.auto_fill_kinds, ["Songs", "Albums"]);
+        assert_eq!(l.auto_fill_bases, ["Similar music", "The same artist", "The same genre", "The same era"]);
+        assert_eq!(l.home_rows[0], "Favourite playlists");
+        assert_eq!(l.home_rows[7], "Favourite albums");
+        assert_eq!(l.band_channels, ["Both", "Left", "Right"]);
+        let kinds: Vec<(&str, bool, bool)> = l.band_kinds.iter().map(|k| (k.label.as_str(), k.uses_gain, k.slope)).collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Peak", true, false),
+                ("Low shelf", true, false),
+                ("High shelf", true, false),
+                ("Low pass", false, false),
+                ("High pass", false, false),
+                ("Band pass", false, false),
+                ("Notch", false, false),
+                ("All pass", false, false),
+                ("Low shelf (slope)", true, true),
+                ("High shelf (slope)", true, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_equalizer_ranges_are_the_sliders() {
+        let r = EQ_RANGES;
+        assert_eq!((r.gain.min, r.gain.max), (-12.0, 12.0));
+        assert_eq!((r.preamp.min, r.preamp.max), (-20.0, 6.0));
+        assert_eq!((r.balance.min, r.balance.max), (-1.0, 1.0));
+        assert_eq!((r.limiter.min, r.limiter.max), (-12.0, 0.0));
+        assert_eq!((r.crossfeed.min, r.crossfeed.max), (0.0, 9.0));
+        assert_eq!((r.q.min, r.q.max), (0.2, 8.0));
+        assert_eq!((r.replay_gain_preamp.min, r.replay_gain_preamp.max), (-12.0, 6.0));
+    }
+
+    #[test]
+    fn a_band_edit_stays_in_range() {
+        let s = sound();
+        let b = set_band(s.clone(), 3, SoundBand { kind: 42, freq: 5.0, gain_db: 30.0, q: 0.0, channel: 7 });
+        assert_eq!(b.eq_bands[3], SoundBand { kind: 0, freq: 20.0, gain_db: 12.0, q: 0.2, channel: 0 });
+        let ok = SoundBand { kind: 1, freq: 120.0, gain_db: -3.5, q: 0.7, channel: 2 };
+        assert_eq!(set_band(s.clone(), 0, ok).eq_bands[0], ok);
+        assert_eq!(set_band(s.clone(), 99, ok), s, "no such band");
+    }
+
+    #[test]
+    fn switching_the_automatic_pre_amp_off_keeps_the_level() {
+        let mut s = sound();
+        s.eq_enabled = true;
+        s.eq_bands[2].gain_db = 4.5;
+        assert_eq!(s.effective_preamp_db(), -4.5);
+        let manual = set_auto_preamp(s.clone(), false);
+        assert_eq!(manual.eq_preamp_db, Some(-4.5));
+        assert_eq!(set_auto_preamp(manual, true).eq_preamp_db, None);
+        assert_eq!(SoundSettings { eq_enabled: false, ..s.clone() }.effective_preamp_db(), 0.0);
+        assert_eq!(set_auto_preamp(SoundSettings { eq_enabled: false, ..s }, false).eq_preamp_db, Some(0.0));
+    }
+
+    #[test]
+    fn levels_snap_and_hold() {
+        let s = sound();
+        assert_eq!(set_level(s.clone(), EqLevel::Balance, 0.03).balance, 0.0);
+        assert_eq!(set_level(s.clone(), EqLevel::Balance, -3.0).balance, -1.0);
+        assert_eq!(set_level(s.clone(), EqLevel::Crossfeed, 0.5).crossfeed_db, 0.0);
+        assert_eq!(set_level(s.clone(), EqLevel::Crossfeed, 12.0).crossfeed_db, 9.0);
+        assert_eq!(set_level(s.clone(), EqLevel::Limiter, 2.0).limiter_threshold_db, 0.0);
+        assert_eq!(set_level(s, EqLevel::Preamp, -30.0).eq_preamp_db, Some(-20.0));
+    }
+
+    #[test]
+    fn why_the_equalizer_does_nothing() {
+        assert_eq!(eq_bypass(false, false), None);
+        assert_eq!(eq_bypass(true, true).unwrap(), "Bit-perfect USB output is active, so nothing here touches the audio.");
+        assert_eq!(eq_bypass(true, false).unwrap(), "High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound.");
+    }
+
+    #[test]
+    fn band_labels_and_profile_lines() {
+        let b = |kind: i32, channel: i32| band_label(&SoundBand { kind, freq: 1000.0, gain_db: 0.0, q: 1.0, channel });
+        assert_eq!(b(0, 0), "1k");
+        assert_eq!(b(1, 1), "1k L");
+        assert_eq!(b(8, 0), "1k ↙");
+        assert_eq!(b(2, 0), "1k ↗");
+        assert_eq!(b(9, 2), "1k R");
+        assert_eq!(b(6, 0), "1k ∿");
+        assert_eq!(profile_use(&[]), "Tap to load");
+        assert_eq!(profile_use(&["Qudelix".into(), "Phone speaker".into()]), "Used for Qudelix, Phone speaker");
+    }
+
+    #[test]
+    fn server_list_edits() {
+        let s = |id: &str, name: &str| SavedServer { id: id.into(), name: name.into(), ..SavedServer::default() };
+        let list = ServerList { servers: vec![s("a", "A"), s("b", "B")], active_server_id: "b".into() };
+        let l = servers_activate(list.clone(), s("a", "A2"));
+        assert_eq!(l.servers.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["B", "A2"], "replaced, and moved to the end");
+        assert_eq!(l.active_server_id, "a");
+        let l = servers_update(list.clone(), s("a", "A3"));
+        assert_eq!((l.servers[0].name.as_str(), l.active_server_id.as_str()), ("A3", "b"));
+        assert_eq!(servers_update(list.clone(), s("z", "Z")).servers.len(), 2, "an unknown profile is not added");
+        let l = servers_remove(list.clone(), "b");
+        assert_eq!((l.servers.len(), l.active_server_id.as_str()), (1, "a"), "the first one left takes over");
+        assert_eq!(servers_remove(list.clone(), "a").active_server_id, "b");
+        assert_eq!(servers_remove(ServerList { servers: vec![s("a", "")], active_server_id: "a".into() }, "a").active_server_id, "");
+        assert_eq!((server_db_id(""), server_db_id("x1")), ("default".into(), "x1".into()));
+        let id = new_server_id();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(new_server_id(), new_server_id());
+    }
+
+    #[test]
+    fn the_login_form() {
+        let h = parse_headers("X-Auth: a:b\n: nope\nno colon\n  CF-Id :  x  \nX-Auth: c");
+        assert_eq!(h.len(), 2);
+        assert_eq!(h["X-Auth"], "c", "the last one wins");
+        assert_eq!(h["CF-Id"], "x");
+        assert_eq!(format_headers(&parse_headers("b: 2\na: 1")), "a: 1\nb: 2");
+        assert_eq!(url_schemes("music.local"), ["https://", "http://"]);
+        assert!(url_schemes("").is_empty() && url_schemes("http://x").is_empty());
+        let p = SavedServer { url: " https://x ".into(), alt_url: " y ".into(), ..SavedServer::default() };
+        assert!(!profile_ready(&p), "a user or a key");
+        assert!(profile_ready(&SavedServer { user: "u".into(), ..p.clone() }));
+        assert!(profile_ready(&SavedServer { api_key: "k".into(), ..p.clone() }));
+        assert!(!profile_ready(&SavedServer { url: "  ".into(), user: "u".into(), ..p.clone() }));
+        let f = profile_from_form(p, "A: 1");
+        assert_eq!((f.url.as_str(), f.alt_url.as_str(), f.headers["A"].as_str()), ("https://x", "y", "1"));
     }
 
     fn sound() -> SoundSettings {

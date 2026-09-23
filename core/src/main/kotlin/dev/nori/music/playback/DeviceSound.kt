@@ -171,8 +171,8 @@ class DeviceSound(private val context: Context, private val settings: Settings, 
     private suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
 
     companion object {
-        /** The profile nori_player::device::FLAT names. */
-        const val FLAT = "Flat"
+        /** The profile nori_player::device::FLAT names, read once. */
+        val FLAT: String by lazy { dev.nori.music.ffi.deviceFlat() }
         /** Where these lived before the core kept them. */
         private const val OLD_STORE = "nori-devices"
     }

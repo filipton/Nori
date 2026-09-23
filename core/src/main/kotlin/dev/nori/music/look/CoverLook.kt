@@ -74,15 +74,22 @@ object CoverLook {
      */
     @JvmStatic external fun mix(from: IntArray, to: IntArray, t: Float, out: IntArray)
 
-    /** A page's look ([LEN] entries) and its wash, [WASH] x [WASH] pixels or null on AMOLED black. */
-    class Colours(val look: IntArray, val wash: IntArray?)
+    /** A page's look ([LEN] entries) and its wash, [WASH] x [WASH] pixels, or null on AMOLED black. */
+    class Colours(val look: IntArray, val wash: android.graphics.Bitmap?)
 
-    /** The page for a cover's [pixels] (ARGB, as `Bitmap.getPixels` gives them). Off the main thread. */
-    fun derive(pixels: IntArray, width: Int, height: Int, dark: Boolean, amoled: Boolean): Colours? {
-        val out = IntArray(LEN + WASH * WASH)
-        val washed = derive(pixels, width, height, dark, amoled, out)
-        if (out[BACKGROUND] == 0) return null
-        return Colours(out.copyOf(LEN), if (washed) out.copyOfRange(LEN, out.size) else null)
+    /**
+     * The page for a cover [bitmap] (software ARGB_8888). The core reads the bitmap where it lies and
+     * draws the wash straight into a bitmap of its own: no copy of either picture on this side. Off the
+     * main thread.
+     */
+    fun derive(bitmap: android.graphics.Bitmap, dark: Boolean, amoled: Boolean): Colours? {
+        val out = IntArray(LEN)
+        val wash = if (amoled) null else android.graphics.Bitmap.createBitmap(WASH, WASH, android.graphics.Bitmap.Config.ARGB_8888)
+        return when (deriveBitmap(bitmap, dark, amoled, out, wash)) {
+            0 -> null
+            2 -> Colours(out, wash)
+            else -> Colours(out, null)
+        }
     }
 
     /**
@@ -100,7 +107,20 @@ object CoverLook {
      *  low, container, high, highest. */
     fun amoled(): IntArray = IntArray(8).also { amoled(it) }
 
-    @JvmStatic private external fun derive(pixels: IntArray, width: Int, height: Int, dark: Boolean, amoled: Boolean, out: IntArray): Boolean
+    /**
+     * One step of the seek bar towards where the song is (`nori_look::motion::seek_step`): the new place,
+     * and the milliseconds to wait before the next step (0 the next frame, -1 stop). Primitives only.
+     */
+    /**
+     * The seek bar's two times (`nori-core stage::seek_times`) as `atS shl 32 or leftS`, whole seconds:
+     * the finger's place while [dragging], else a held seek ([heldMs] -1 for none), else the music's.
+     * Primitives only: it is asked on every frame a finger moves the bar.
+     */
+    @JvmStatic external fun seekTimes(dragging: Boolean, drag: Float, heldMs: Long, positionMs: Long, durationMs: Long): Long
+
+    @JvmStatic external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
+
+    @JvmStatic private external fun deriveBitmap(bitmap: android.graphics.Bitmap, dark: Boolean, amoled: Boolean, out: IntArray, wash: android.graphics.Bitmap?): Int
     @JvmStatic private external fun plain(roles: IntArray, out: IntArray)
     @JvmStatic private external fun tones(seed: Int, dark: Boolean, out: IntArray)
     @JvmStatic private external fun amoled(out: IntArray)

@@ -130,29 +130,36 @@ fun SongMenu(
             // top of the app, so that it outlives the row or the player that asked for it.
             val marks by actions.starMarks.collectAsState()
             val starred = marks.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
-            Item(
-                if (starred) "Remove from favourites" else "Add to favourites",
-                if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-            ) { actions.star(song, !starred); onDismiss() }
-            Item("Play next", Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
-            Item("Add to queue", Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
-            Item("Add to playlist…", Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
-            if (song.id in downloads.doneIds) Item("Remove download", Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
-            else if (song.id in downloads.pendingIds) Item("Stop download", Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
-            else Item("Download", Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
-            song.albumId?.let { id -> Item("Go to album", Icons.Filled.Album) { nav.album(id); onDismiss() } }
-            if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a ->
-                Item("Go to ${a.name}", Icons.Filled.Person) {
-                    nav.artist(a.id, Artist(a.id, a.name, null, null, 0u, false, false)); onDismiss()
-                }
+            val download = when (song.id) {
+                in downloads.doneIds -> dev.nori.music.ffi.SongDownload.DONE
+                in downloads.pendingIds -> dev.nori.music.ffi.SongDownload.PENDING
+                else -> dev.nori.music.ffi.SongDownload.NONE
             }
-            else song.artistId?.let { id ->
-                Item("Go to artist", Icons.Filled.Person) {
-                    nav.artist(id, Artist(id, song.artist, song.coverArt, null, 0u, false, false)); onDismiss()
+            // What the menu offers, in what order and in what words, is the core's (`menus::song_menu`);
+            // this draws each line with its icon and does what it names.
+            val items = remember(song, starred, download, player != null) { dev.nori.music.ffi.songMenu(song, starred, download, player != null) }
+            @Composable fun line(i: dev.nori.music.ffi.SongMenuItem) = when (val a = i.action) {
+                is dev.nori.music.ffi.SongAction.Favourite -> Item(i.label, if (a.on) Icons.Filled.FavoriteBorder else Icons.Filled.Favorite) { actions.star(song, a.on); onDismiss() }
+                dev.nori.music.ffi.SongAction.PlayNext -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.SongAction.AddToQueue -> Item(i.label, Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.SongAction.AddToPlaylist -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
+                dev.nori.music.ffi.SongAction.RemoveDownload -> Item(i.label, Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
+                dev.nori.music.ffi.SongAction.StopDownload -> Item(i.label, Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.SongAction.Download -> Item(i.label, Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
+                is dev.nori.music.ffi.SongAction.GoToAlbum -> Item(i.label, Icons.Filled.Album) { nav.album(a.id); onDismiss() }
+                // The song's own cover stands in for a lone artist's until their page has one.
+                is dev.nori.music.ffi.SongAction.GoToArtist -> Item(i.label, Icons.Filled.Person) {
+                    nav.artist(a.id, Artist(a.id, a.name, song.coverArt.takeIf { song.artists.size <= 1 }, null, 0u, false, false)); onDismiss()
                 }
+                dev.nori.music.ffi.SongAction.AddToLibrary -> Item(i.label, Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
+                dev.nori.music.ffi.SongAction.SleepTimer -> Item(i.label, Icons.Filled.Bedtime) { sleeping = true }
+                dev.nori.music.ffi.SongAction.StartRadio -> Item(i.label, Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
+                dev.nori.music.ffi.SongAction.InstantMix -> Item(i.label, Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
+                dev.nori.music.ffi.SongAction.ExcludeFromMixes -> Item(i.label, Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
+                dev.nori.music.ffi.SongAction.Share -> Item(i.label, Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
+                dev.nori.music.ffi.SongAction.Details -> Item(i.label, Icons.Filled.Info) { details = true }
             }
-            if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})", Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
-            player?.let { Item("Sleep timer…", Icons.Filled.Bedtime) { sleeping = true } }
+            items.forEach { if (!it.more) line(it) }
             Hairline(startIndent = Space.gutter)
             val turn by animateFloatAsState(if (more) 180f else 0f, label = "more")
             Row(
@@ -169,13 +176,7 @@ fun SongMenu(
                 )
             }
             AnimatedVisibility(more, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-                Column {
-                    Item("Start radio from this song", Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
-                    if (!song.isExternal) Item("Instant mix", Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
-                    if (!song.isExternal) Item("Exclude from mixes", Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
-                    if (!song.isExternal) Item("Share link", Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
-                    Item("Details", Icons.Filled.Info) { details = true }
-                }
+                Column { items.forEach { if (it.more) line(it) } }
             }
         }
     }
@@ -190,10 +191,9 @@ private fun SleepMenu(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () 
         Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
             SectionTitle("Sleep timer")
             val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
-            if (running) Item("Off") { player.sleep(0); onDone() }
-            for (m in listOf(15, 30, 45, 60)) Item("$m minutes") { player.sleep(m); onDone() }
-            Item("End of track") { player.sleep(0, endOfTrack = true); onDone() }
-            for (n in listOf(2, 3, 5, 10)) Item("After $n songs") { player.sleep(0, songs = n); onDone() }
+            // The choices are the core's (`menus::sleep_choices`); "Off" is all zeros.
+            val choices = remember(running) { dev.nori.music.ffi.sleepChoices(running) }
+            choices.forEach { c -> Item(c.label) { player.sleep(c.minutes.toInt(), c.endOfTrack, c.songs.toInt()); onDone() } }
         }
     }
 }

@@ -14,6 +14,14 @@ api() { local m="$1"; shift; local s=nori$RANDOM; local t
   t=$(printf '%s%s' "$PASS" "$s" | md5sum | cut -d' ' -f1)
   curl -s "$URL/rest/$m?u=$USER&t=$t&s=$s&v=1.16.1&c=nori&f=json$*"
 }
+# The network back on, and the server reachable from the phone again: the emulator's Wi-Fi takes anywhere
+# from two seconds to twenty to come back, and a check made before it has is testing the Wi-Fi, not the app.
+online() {
+  adb shell svc wifi enable; adb shell svc data enable
+  local host; host=$(printf '%s' "$URL" | sed -E 's#https?://##; s#[/:].*##')
+  for _ in $(seq 30); do adb shell "ping -c 1 -W 1 $host" >/dev/null 2>&1 && break; sleep 1; done
+  sleep 2
+}
 json() { python3 -c "import sys,json;d=json.load(sys.stdin)['subsonic-response'];print(eval('d$1',{'d':d}))" 2>/dev/null; }
 # What the screen itself reports, read out of the accessibility tree rather than guessed at from a
 # screenshot: a label to assert on, and a node to press where the UI says the button is.
@@ -101,10 +109,16 @@ echo "-- the album page answers for its own queue"
 # the middle and resets the position these checks compare.
 "$app" wake >/dev/null
 aid=""
+# Not the album of the song playing now: its pill rightly reads Pause before anything is tapped.
+playing_title=$(field title)
 for a in $(api getAlbumList2 "&type=recent&size=25" | python3 -c "
 import sys,json
 for x in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
     if not x['id'].startswith('ext-') and x.get('songCount',0) >= 2: print(x['id'])"); do
+  api getAlbum "&id=$a" | python3 -c "
+import sys,json
+t='''$playing_title'''
+sys.exit(0 if any(x.get('title')==t for x in json.load(sys.stdin)['subsonic-response']['album']['song']) else 1)" && continue
   d=$(api getAlbum "&id=$a" | python3 -c "import sys,json;print(min(x.get('duration',0) for x in json.load(sys.stdin)['subsonic-response']['album']['song']))" 2>/dev/null)
   [ "${d:-0}" -ge 60 ] && { aid=$a; break; }
 done
@@ -143,32 +157,47 @@ adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null
 pid=$(adb shell pidof dev.nori.music | tr -d '\r')
 state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/$pid state:[a-z]+" | grep -oE "state:[a-z]+" | tail -1)
 check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
-adb shell svc wifi enable; adb shell svc data enable; sleep 6
+online
 
 echo "-- the offline bridge"
 # A long library album, started while online and paused at once. Offline, a skip past what was fetched
 # ahead cannot play; with the bridge on, downloads play instead, and the album comes back with the network.
 "$app" set bridgeOffline true >/dev/null
-bid=$(api getAlbumList2 "&type=random&size=60" | python3 -c "
+# Nothing of the album may already be on the phone: a song in the stream cache plays offline, rightly,
+# and then there is nothing to bridge. The other checks play some records over and over.
+"$app" set clearStreamCache true >/dev/null
+# ...and none of it downloaded: a downloaded song plays offline, rightly, and the download checks below
+# keep fetching whole albums. What the phone holds is read out of the app's own database.
+dl=$(mktemp -d)
+for f in nori.db nori.db-wal nori.db-shm; do adb exec-out run-as dev.nori.music cat files/$f > "$dl/$f" 2>/dev/null; done
+python3 -c "
+import sqlite3
+c=sqlite3.connect('$dl/nori.db')
+print('\n'.join(r[0] for r in c.execute('select id from downloads')))" > "$dl/held" 2>/dev/null
+bid=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
-    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 10: print(a['id']); break")
-if [ -n "$bid" ]; then
-  titles=$(api getAlbum "&id=$bid" | python3 -c "
+    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 10: print(a['id'])" | while read -r a; do
+  api getAlbum "&id=$a" | python3 -c "
 import sys,json
-for s in json.load(sys.stdin)['subsonic-response']['album']['song']: print(s['title'])")
+held=set(open('$dl/held').read().split())
+s=json.load(sys.stdin)['subsonic-response']['album']['song']
+print('$a' if not any(x['id'] in held for x in s) else '')"; done | grep . | head -1)
+rm -rf "$dl"
+if [ -n "$bid" ]; then
   "$app" play "album:$bid" >/dev/null; sleep 4; "$app" do pause >/dev/null; sleep 1
   adb shell svc wifi disable; adb shell svc data disable; sleep 3
   for _ in 1 2 3 4 5 6; do "$app" do next >/dev/null; sleep 1; done
   sleep 12
-  parked=$(printf '%s\n' "$titles" | sed -n 7p)
+  # The song that could not play is wherever the failure caught up with the skips.
+  parked=$(field parkedId)
   echo "     now: $(field title) (bridging=$(field bridging)), parked: $parked"
   check "downloads stand in while the server is out of reach" test "$(field bridging)" = "True"
   check "and they play" test "$(field playing)" = "True"
-  adb shell svc wifi enable; adb shell svc data enable; sleep 15
+  online; sleep 10
   echo "     back: $(field title) (bridging=$(field bridging))"
   check "the album comes back with the network" test "$(field bridging)" = "False"
-  check "at the song that could not play" test "$(field title)" = "$parked"
+  check "at the song that could not play" test -n "$parked" -a "$(field songId)" = "$parked"
   "$app" do pause >/dev/null
 else
   echo "     (no library album of ten songs found)"

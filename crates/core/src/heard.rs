@@ -6,7 +6,7 @@
 use jni::objects::JClass;
 use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
-use nori_player::heard::HeardTracker;
+use nori_player::heard::{HeardTracker, Playhead, Seen};
 use parking_lot::Mutex;
 
 use crate::automix::engine_jni::HEARD;
@@ -17,6 +17,8 @@ const MS_BITS: u32 = 43;
 struct Clock {
     t: HeardTracker,
     rev: u64,
+    /// The place the seek bar last showed.
+    head: Playhead,
 }
 
 fn tracker<'a>(h: jlong) -> Option<&'a Mutex<Clock>> {
@@ -25,7 +27,7 @@ fn tracker<'a>(h: jlong) -> Option<&'a Mutex<Clock>> {
 
 #[no_mangle]
 pub extern "system" fn Java_dev_nori_music_playback_HeardJni_create(_: JNIEnv, _: JClass) -> jlong {
-    Box::into_raw(Box::new(Mutex::new(Clock { t: HeardTracker::new(), rev: u64::MAX }))) as jlong
+    Box::into_raw(Box::new(Mutex::new(Clock { t: HeardTracker::new(), rev: u64::MAX, head: Playhead::new() }))) as jlong
 }
 
 #[no_mangle]
@@ -44,14 +46,53 @@ pub extern "system" fn Java_dev_nori_music_playback_HeardJni_at(
     _: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong,
 ) -> jlong {
     let Some(t) = tracker(h) else { return position_ms.max(0) };
-    let heard = HEARD.lock();
     let mut c = t.lock();
+    let s = seen(&mut c, now_ms, playing, on, next, position_ms);
+    pack(s, s.ms)
+}
+
+/// [`Java_dev_nori_music_playback_HeardJni_at`] for the seek bar itself, whose page shows queue index
+/// `shown` (-1: nothing): the same answer, but the place is the one the bar shows - held while the ear
+/// has moved to a song the page has not followed to yet (`nori_player::heard::Playhead`). Asked every
+/// frame the bar is drawn; primitives only, nothing allocated.
+#[no_mangle]
+pub extern "system" fn Java_dev_nori_music_playback_PlayheadJni_position(
+    _: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong, shown: jint,
+) -> jlong {
+    let Some(t) = tracker(h) else { return position_ms.max(0) };
+    let mut c = t.lock();
+    let s = seen(&mut c, now_ms, playing, on, next, position_ms);
+    let Clock { t, head, .. } = &mut *c;
+    let ms = head.show(t, s, usize::try_from(shown).ok(), now_ms);
+    pack(s, ms)
+}
+
+/// Where the seek bar is while nothing can be asked (the app reconnecting to the player): the last place
+/// shown, run on from then if the music was `playing`.
+#[no_mangle]
+pub extern "system" fn Java_dev_nori_music_playback_PlayheadJni_runOn(_: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean) -> jlong {
+    tracker(h).map_or(0, |t| t.lock().head.run_on(now_ms, playing != 0))
+}
+
+fn seen(c: &mut Clock, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong) -> Seen {
+    let heard = HEARD.lock();
     let rev = crate::playlist::playlist_rev();
     if c.rev != rev {
         c.rev = rev;
         c.t.set_queue(crate::playlist::with(|p| crate::queue::durations(p.ids())));
     }
-    let s = c.t.at_index(&heard, now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms);
+    c.t.at_index(&heard, now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms)
+}
+
+fn pack(s: Seen, ms: i64) -> jlong {
     let index = s.index.map_or(0, |i| i as i64 + 1);
-    (index << (MS_BITS + 1)) | ((s.changed as i64) << MS_BITS) | s.ms.clamp(0, (1 << MS_BITS) - 1)
+    (index << (MS_BITS + 1)) | ((s.changed as i64) << MS_BITS) | ms.clamp(0, (1 << MS_BITS) - 1)
+}
+
+/// The length the player page shows for its song: the heard song's own (`heard_s` seconds, -1 when the
+/// ear is where the player is), else the player's measure, else the song's tags. See
+/// `nori_player::heard::shown_duration_ms`.
+#[uniffi::export]
+pub fn shown_duration_ms(heard_s: i64, player_ms: i64, tagged_ms: i64) -> i64 {
+    nori_player::heard::shown_duration_ms((heard_s >= 0).then_some(heard_s), player_ms, tagged_ms)
 }

@@ -32,7 +32,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.SearchViewModel
-import dev.nori.music.app.vm.SearchScope
+import androidx.compose.runtime.remember
 
 @Composable
 fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
@@ -40,6 +40,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
     val downloads by actions.downloads.collectAsState()
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
+    val scopes = remember { dev.nori.music.ffi.searchScopes() }
     Column {
         LargeTitle("Search")
         SearchField(
@@ -48,12 +49,10 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
             focusKey = searchFocusKey(),
         )
         if (ui.searching) LinearProgressIndicator(Modifier.fillMaxWidth())
-        ui.error?.let { Text("Server search failed: $it — showing offline results", Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+        ui.error?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
-        if (ui.hasProviders || ui.scope != SearchScope.EVERYTHING) LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(listOf(SearchScope.EVERYTHING to "Everything", SearchScope.LIBRARY to "In library", SearchScope.PROVIDERS to "Not in library yet")) { (sc, label) ->
-                Chip(label, ui.scope == sc) { vm.setScope(sc) }
-            }
+        if (ui.scopesOffered) LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(scopes) { c -> Chip(c.label, ui.scope == c.scope) { vm.setScope(c.scope) } }
         }
         val r = ui.shown
         if (r == null) {
@@ -96,7 +95,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                     swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
                 )
             }
-            if (ui.fromServer && r.songs.isEmpty() && r.albums.isEmpty() && r.artists.isEmpty()) item { EmptyNote("Nothing found") }
+            if (ui.nothingFound) item { EmptyNote(dev.nori.music.ffi.Note.NOTHING_FOUND) }
         }
     }
 }
