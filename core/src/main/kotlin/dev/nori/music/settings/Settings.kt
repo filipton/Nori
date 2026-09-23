@@ -3,7 +3,6 @@ package dev.nori.music.settings
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
 import dev.nori.music.ffi.EqLevel
-import dev.nori.music.ffi.PrefValue
 import dev.nori.music.ffi.SavedQuality
 import dev.nori.music.ffi.SavedServer
 import dev.nori.music.ffi.ServerList
@@ -257,6 +256,16 @@ data class Prefs(
     val swipeLeft: SwipeAction,
     /** Songs the server marks explicit are skipped instead of played. */
     val skipExplicit: Boolean,
+    /**
+     * Which player plays: 0 ExoPlayer (the default), 1 nori-engine, the Rust path being measured against it
+     * ([dev.nori.music.playback.EnginePlayer]). Read when the playback service starts.
+     */
+    val playbackEngine: Int,
+    /**
+     * Covers are decoded by the core's decoder (crates/covers, through the app's `RustCoverDecoder`) rather
+     * than Android's; Coil still fetches, caches and draws them. Read per cover, so it takes effect at once.
+     */
+    val coreCovers: Boolean,
     /** Home shelves, in order; a row that is not listed is hidden. */
     val homeRows: List<HomeRow>,
     val pinnedPlaylists: List<String>,
@@ -339,7 +348,7 @@ fun Prefs.stored() = StoredPrefs(
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = theme.ordinal, amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = tapAction.ordinal, swipeRight = swipeRight.ordinal,
-    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, playbackEngine = playbackEngine, coreCovers = coreCovers, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 
@@ -360,15 +369,14 @@ fun StoredPrefs.prefs() = Prefs(
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = ThemeMode.entries[theme], amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = TapAction.entries[tapAction], swipeRight = SwipeAction.entries[swipeRight],
-    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, playbackEngine = playbackEngine, coreCovers = coreCovers, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 
 /**
  * The settings are the core's (`settings_store.rs`): it reads them once, keeps them and writes them to
  * the app's database whenever they change. The playback service needs them synchronously on start,
- * and this is a few rows read once. SharedPreferences is only read, the first time, to carry over what
- * was kept there before.
+ * and this is a few rows read once.
  */
 class Settings(private val context: Context) {
     private val state = MutableStateFlow(load())
@@ -439,19 +447,5 @@ class Settings(private val context: Context) {
         if (effect != 0u) _effects.tryEmit(effect.toInt())
     }
 
-    private fun load(): Prefs {
-        val raw = HashMap<String, PrefValue>()
-        for ((k, v) in context.getSharedPreferences("nori", Context.MODE_PRIVATE).all) {
-            raw[k] = when (v) {
-                is Boolean -> PrefValue.Flag(v)
-                is Int -> PrefValue.Number(v)
-                is Long -> PrefValue.Big(v)
-                is Float -> PrefValue.Decimal(v)
-                is String -> PrefValue.Text(v)
-                is Set<*> -> PrefValue.Texts(v.filterIsInstance<String>())
-                else -> continue
-            }
-        }
-        return settingsOpen(java.io.File(context.filesDir, dbFileName()).path, raw).prefs()
-    }
+    private fun load(): Prefs = settingsOpen(java.io.File(context.filesDir, dbFileName()).path).prefs()
 }

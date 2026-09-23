@@ -84,7 +84,7 @@ class Nori private constructor(private val context: Context) {
     val dac = BitPerfect(context)
     val outputs = Outputs(context)
     /** Each output device's own sound; built when the playback service first sees a device. */
-    val deviceSound by lazy { dev.nori.music.playback.DeviceSound(context, settings, { core }, { http }) }
+    val deviceSound by lazy { dev.nori.music.playback.DeviceSound(settings, { core }, { http }) }
     val player = PlayerConnection(context, this)
 
     /** True while requests go to the profile's second address; stream quality is capped then. */

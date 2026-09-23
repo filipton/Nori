@@ -5,13 +5,17 @@
 //! The device is asked for the stream's own rate and channels first, so nothing is resampled when it
 //! can take them (PipeWire and CoreAudio take any rate); otherwise it plays at its own and the engine
 //! converts. Paused, the stream is stopped, so the device and its thread can sleep.
+//!
+//! Which device the music goes to is told to the engine when the stream opens and whenever the system
+//! moves a stream on the default device elsewhere (cpal reports that on PipeWire, CoreAudio and
+//! WASAPI; ALSA cannot tell), with the kind cpal describes it as, so each device can have its own sound.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, Device, SampleFormat, Stream, StreamConfig};
-use nori_engine::{AudioOutput, Feed, OutputFormat};
+use cpal::{BufferSize, Device, DeviceType, ErrorKind, InterfaceType, SampleFormat, Stream, StreamConfig};
+use nori_engine::{AudioOutput, DeviceWatch, Feed, OutputFormat, OutputKind};
 
 pub struct CpalOutput {
     /// A device by name, or the system's default output.
@@ -21,12 +25,29 @@ pub struct CpalOutput {
     stream: Option<Stream>,
     /// How far ahead of the ear the device's last pull was, µs, as the device reported it.
     latency_us: Arc<AtomicU64>,
+    /// Told which device the music goes to.
+    watch: Option<Arc<DeviceWatch>>,
+}
+
+/// What the engine is told of a device: its kind as the core ranks outputs, and its name.
+fn described(device: &Device) -> Option<nori_engine::Device> {
+    let d = device.description().ok()?;
+    let kind = match (d.interface_type(), d.device_type()) {
+        (InterfaceType::Usb, _) => OutputKind::Usb,
+        (InterfaceType::Bluetooth, _) => OutputKind::Bluetooth,
+        (InterfaceType::Hdmi | InterfaceType::DisplayPort | InterfaceType::Line | InterfaceType::Spdif, _) => OutputKind::Line,
+        (_, DeviceType::Headphones | DeviceType::Headset) => OutputKind::Wired,
+        (_, DeviceType::Speaker) | (InterfaceType::BuiltIn, _) => OutputKind::Speaker,
+        (_, DeviceType::Dock) => OutputKind::Line,
+        _ => OutputKind::Other,
+    };
+    Some(nori_engine::Device { kind, name: d.name().to_string() })
 }
 
 impl CpalOutput {
     /// The system's default output device.
     pub fn new() -> CpalOutput {
-        CpalOutput { wanted: None, device: None, config: None, stream: None, latency_us: Arc::new(AtomicU64::new(0)) }
+        CpalOutput { wanted: None, device: None, config: None, stream: None, latency_us: Arc::new(AtomicU64::new(0)), watch: None }
     }
 
     /// The output device called `name` (as [`CpalOutput::devices`] lists them).
@@ -88,6 +109,9 @@ impl AudioOutput for CpalOutput {
         }
         let config = StreamConfig { channels: chosen.channels(), sample_rate: chosen.sample_rate(), buffer_size: BufferSize::Default };
         let got = OutputFormat { rate: config.sample_rate, channels: config.channels as usize };
+        if let (Some(w), Some(d)) = (&self.watch, described(&device)) {
+            w(d);
+        }
         self.device = Some(device);
         self.config = Some((config, format));
         Ok(got)
@@ -100,7 +124,17 @@ impl AudioOutput for CpalOutput {
             let t = info.timestamp();
             latency.store(t.playback.saturating_duration_since(t.callback).as_micros() as u64, Ordering::Relaxed);
         };
-        let err = |e| eprintln!("nori: the output stream failed: {e}");
+        // The system moved the stream to another default device: the engine hears which.
+        let watch = self.watch.clone().filter(|_| self.wanted.is_none());
+        let err = move |e: cpal::Error| {
+            if e.kind() == ErrorKind::DeviceChanged {
+                if let (Some(w), Some(d)) = (&watch, cpal::default_host().default_output_device().as_ref().and_then(described)) {
+                    w(d);
+                }
+                return;
+            }
+            eprintln!("nori: the output stream failed: {e}");
+        };
         let stream = match format {
             SampleFormat::F32 => device.build_output_stream(
                 config.clone(),
@@ -142,8 +176,18 @@ impl AudioOutput for CpalOutput {
         }
     }
 
+    fn watch(&mut self, changed: DeviceWatch) {
+        self.watch = Some(Arc::new(changed));
+    }
+
     fn latency_us(&self) -> u64 {
         self.latency_us.load(Ordering::Relaxed)
+    }
+
+    /// Whether the device plays float at all; PipeWire, CoreAudio and WASAPI do.
+    fn takes_float(&mut self) -> bool {
+        let Ok(device) = self.pick() else { return false };
+        device.supported_output_configs().is_ok_and(|mut c| c.any(|r| r.sample_format() == SampleFormat::F32))
     }
 
     fn close(&mut self) {

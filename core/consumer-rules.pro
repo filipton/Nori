@@ -8,6 +8,11 @@
 # the sink's down* callbacks and hostHeardChanged.
 -keep class dev.nori.music.playback.TransitionSink { *; }
 
+# The Rust player reaches these by name from native code (crates/android/src/player.rs): the bridge's
+# static methods, and a song body's buffer, length, read and close.
+-keep class dev.nori.music.playback.RustBridge { *; }
+-keep class dev.nori.music.playback.RustBody { *; }
+
 # The native library registers every JNI door by class and method name when it loads
 # (crates/android/src/lib.rs), so neither may be renamed or dropped.
 -keepclasseswithmembers class dev.nori.music.** { native <methods>; }

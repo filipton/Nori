@@ -75,6 +75,18 @@ pub fn clear() {
     with(|o| o.used.clear());
 }
 
+/// Brings the stream cache under `max_bytes`: while `space()` (what the platform's cache holds now) is
+/// over it, the next key to drop ([`next`]) is handed to `remove`. Stops when nothing is left to name.
+///
+/// Twin of `ResizableEvictor.trimLocked` (core/.../playback/MediaSources.kt), which Android keeps around
+/// media3's `SimpleCache`.
+pub fn trim(max_bytes: i64, mut space: impl FnMut() -> i64, mut remove: impl FnMut(&str)) {
+    while space() > max_bytes {
+        let Some(key) = next() else { return };
+        remove(&key);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

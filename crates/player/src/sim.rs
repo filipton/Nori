@@ -574,6 +574,11 @@ pub struct App {
     none: Option<(String, Option<Skip>)>,
     /// Whether the streaming tap measures the song playing (a measurement is slow in a debug build).
     pub measure_playing: bool,
+    /// Each song's ReplayGain volume, as the core would work it out; 1 for a song not listed.
+    pub gains: std::collections::HashMap<String, f32>,
+    /// Output devices the music went to, and the sound each is given (none: leave the sound).
+    pub outputs: Vec<String>,
+    pub device_sounds: std::collections::HashMap<String, Sound>,
 }
 
 /// No crossfade, no AutoMix: gapless.
@@ -605,6 +610,9 @@ impl App {
             now_ms: 0,
             none: None,
             measure_playing: false,
+            gains: Default::default(),
+            outputs: Vec::new(),
+            device_sounds: Default::default(),
         }
     }
 
@@ -712,6 +720,21 @@ impl pipeline::App for App {
             let rate = a.rate() as u32;
             self.store(id, a, frames, rate, " ahead");
         }
+    }
+
+    fn transitions_off(&mut self, off: bool) {
+        self.transitions_off = off;
+    }
+
+    fn output_changed(&mut self, kind: crate::outputs::OutputKind, name: &str) -> Option<(String, Option<Sound>)> {
+        let key = crate::outputs::key(kind, name);
+        self.outputs.push(key.clone());
+        let sound = self.device_sounds.get(&key).cloned();
+        Some((key, sound))
+    }
+
+    fn gain(&mut self, _index: usize, id: &str) -> f32 {
+        self.gains.get(id).copied().unwrap_or(1.0)
     }
 }
 

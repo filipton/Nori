@@ -169,22 +169,6 @@ impl AlbumSort {
             AlbumSort::ByYear => "byYear",
         }
     }
-
-    /// The name it is kept under in the list settings; these were the Kotlin enum's names, and settings
-    /// saved by earlier versions still say them.
-    fn kept_as(self) -> &'static str {
-        match self {
-            AlbumSort::Newest => "NEWEST",
-            AlbumSort::Recent => "RECENT",
-            AlbumSort::Frequent => "FREQUENT",
-            AlbumSort::Random => "RANDOM",
-            AlbumSort::ByName => "BY_NAME",
-            AlbumSort::ByArtist => "BY_ARTIST",
-            AlbumSort::Starred => "STARRED",
-            AlbumSort::ByGenre => "BY_GENRE",
-            AlbumSort::ByYear => "BY_YEAR",
-        }
-    }
 }
 
 /// One entry of the album grid's sort menu.
@@ -229,16 +213,16 @@ pub struct ListPref {
 const ALBUMS_SORT_KEY: &str = "albums.sort";
 const SONGS_SORT_KEY: &str = "songs.sort";
 
-/// The album grid's order as it was left (A–Z the first time).
+/// The album grid's order as it was left (A–Z the first time), kept under the server's name for it.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sort_saved(prefs: std::collections::HashMap<String, String>) -> AlbumSort {
-    prefs.get(ALBUMS_SORT_KEY).and_then(|n| AlbumSort::ALL.into_iter().find(|s| s.kept_as() == n)).unwrap_or(AlbumSort::ByName)
+    prefs.get(ALBUMS_SORT_KEY).and_then(|n| AlbumSort::ALL.into_iter().find(|s| s.api() == n)).unwrap_or(AlbumSort::ByName)
 }
 
 /// The list setting that remembers the album grid's order.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sort_kept(sort: AlbumSort) -> ListPref {
-    ListPref { key: ALBUMS_SORT_KEY.into(), value: sort.kept_as().into() }
+    ListPref { key: ALBUMS_SORT_KEY.into(), value: sort.api().into() }
 }
 
 /// The songs list's order as it was left (by title the first time), by [`song_sorts`] name.
@@ -445,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn album_orders_are_kept_by_their_old_names() {
+    fn album_orders_are_kept_by_their_server_names() {
         use std::collections::HashMap;
         let labels: Vec<(AlbumSort, String)> = album_sorts().into_iter().map(|o| (o.sort, o.label)).collect();
         assert_eq!(labels[0], (AlbumSort::ByName, "A–Z".to_string()));
@@ -453,9 +437,9 @@ mod tests {
         assert_eq!(album_sort_api(AlbumSort::ByArtist), "alphabeticalByArtist");
         assert_eq!(album_sort_saved(HashMap::new()), AlbumSort::ByName);
         let kept = album_sort_kept(AlbumSort::Frequent);
-        assert_eq!((kept.key.as_str(), kept.value.as_str()), ("albums.sort", "FREQUENT"));
+        assert_eq!((kept.key.as_str(), kept.value.as_str()), ("albums.sort", "frequent"));
         assert_eq!(album_sort_saved(HashMap::from([(kept.key, kept.value)])), AlbumSort::Frequent);
-        assert_eq!(album_sort_saved(HashMap::from([("albums.sort".to_string(), "BY_YEAR".to_string())])), AlbumSort::ByYear);
+        assert_eq!(album_sort_saved(HashMap::from([("albums.sort".to_string(), "byYear".to_string())])), AlbumSort::ByYear);
         assert_eq!(song_sort_saved(HashMap::new()), "TITLE");
         assert_eq!(song_sort_saved(HashMap::from([("songs.sort".to_string(), "PLAYS".to_string())])), "PLAYS");
         assert_eq!(song_sort_saved(HashMap::from([("songs.sort".to_string(), "GONE".to_string())])), "TITLE");

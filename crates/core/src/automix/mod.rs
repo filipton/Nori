@@ -2,6 +2,7 @@
 //! analysis, planning and per-sample work itself lives in the player crate (`nori_player::automix`),
 //! shared with every platform.
 
+pub mod ahead;
 pub mod host;
 pub mod store;
 pub mod planner;

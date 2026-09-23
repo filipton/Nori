@@ -168,6 +168,38 @@ pub fn count(c: &Connection) -> rusqlite::Result<u32> {
     c.query_row("SELECT count(*) FROM autoeq", [], |r| r.get(0))
 }
 
+/// The AutoEQ index or one of its presets, read from `url` (`Core::autoeq_index_url`,
+/// `Core::autoeq_preset_url`) through the platform's transport: an error status with nothing in it
+/// fails, and the body is read as UTF-8 with anything malformed replaced, the way the JVM reads it. What
+/// comes back goes to `Core::autoeq_store` or `Core::device_adopt`.
+///
+/// Twin of `Http.get(..).decodeToString()` as `SettingsViewModel.downloadAutoEqIndex` and
+/// `DeviceSound.adopt` fetch them (app/.../vm/SettingsViewModel.kt, core/.../playback/DeviceSound.kt);
+/// Android keeps OkHttp for the request.
+pub async fn fetch_text(transport: &dyn crate::transport::Transport, url: String) -> Result<String, crate::transport::NetError> {
+    Ok(text(&crate::transport::get(transport, url, 0).await?))
+}
+
+/// A body as text, the way Kotlin's `decodeToString` reads it on the JVM: UTF-8, each bad stretch one
+/// U+FFFD by UTF-8's own rule, except a surrogate written out (ED A0..BF, with its last byte when that is
+/// a continuation byte), which the JVM takes as one bad character where the rule makes two or three.
+pub fn text(body: &[u8]) -> String {
+    let surrogate = |b: &[u8]| b.len() >= 2 && b[0] == 0xED && (0xA0..=0xBF).contains(&b[1]);
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while !rest.is_empty() {
+        if surrogate(rest) {
+            out.push('\u{FFFD}');
+            rest = &rest[if rest.get(2).is_some_and(|b| b & 0xC0 == 0x80) { 3 } else { 2 }..];
+            continue;
+        }
+        let end = (1..rest.len()).find(|&i| surrogate(&rest[i..])).unwrap_or(rest.len());
+        out.push_str(&String::from_utf8_lossy(&rest[..end]));
+        rest = &rest[end..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -45,12 +45,13 @@ pub(crate) static LYRICS: Class = Class {
     ],
 };
 
-/// A software ARGB_8888 `Bitmap`'s own memory, read and written in place through Android's bitmap API
-/// (libjnigraphics): no copy of the picture into a Java array, and none across into Rust. Locked for as
-/// long as the value lives. Anything else - another format, a hardware bitmap, a size that does not
-/// add up - is refused, and the caller gets nothing rather than a guess.
+/// A software ARGB_8888 `Bitmap`'s own memory (or RGB_565, where the caller says it takes one), read and
+/// written in place through Android's bitmap API (libjnigraphics): no copy of the picture into a Java
+/// array, and none across into Rust. Locked for as long as the value lives. Anything else - another
+/// format, a hardware bitmap, a size that does not add up - is refused, and the caller gets nothing
+/// rather than a guess.
 #[cfg(target_os = "android")]
-mod bitmap {
+pub(crate) mod bitmap {
     use jni::objects::JObject;
     use jni::JNIEnv;
     use std::ffi::c_void;
@@ -64,6 +65,7 @@ mod bitmap {
         flags: u32,
     }
     const RGBA_8888: i32 = 1;
+    const RGB_565: i32 = 4;
 
     #[link(name = "jnigraphics")]
     extern "C" {
@@ -79,21 +81,37 @@ mod bitmap {
         pub width: usize,
         pub height: usize,
         pub stride: usize,
+        /// Two bytes a pixel, RGB_565 (only from `new_or_565`), rather than ARGB_8888's four.
+        pub rgb565: bool,
     }
 
     impl Locked {
         pub fn new(env: &JNIEnv, bitmap: &JObject) -> Option<Locked> {
+            Locked::lock(env, bitmap, false)
+        }
+
+        /// An ARGB_8888 Bitmap or an RGB_565 one; `rgb565` says which.
+        pub fn new_or_565(env: &JNIEnv, bitmap: &JObject) -> Option<Locked> {
+            Locked::lock(env, bitmap, true)
+        }
+
+        fn lock(env: &JNIEnv, bitmap: &JObject, take_565: bool) -> Option<Locked> {
             let (e, o) = (env.get_raw(), bitmap.as_raw());
             if o.is_null() {
                 return None;
             }
             let mut info = Info { width: 0, height: 0, stride: 0, format: 0, flags: 0 };
             // SAFETY: `e` is this call's live JNIEnv and `o` a non-null Bitmap reference it holds.
-            if unsafe { AndroidBitmap_getInfo(e, o, &mut info) } != 0 || info.format != RGBA_8888 {
+            if unsafe { AndroidBitmap_getInfo(e, o, &mut info) } != 0 {
                 return None;
             }
+            let rgb565 = match info.format {
+                RGBA_8888 => false,
+                RGB_565 if take_565 => true,
+                _ => return None,
+            };
             let (width, height, stride) = (info.width as usize, info.height as usize, info.stride as usize);
-            if width == 0 || height == 0 || stride < width * 4 {
+            if width == 0 || height == 0 || stride < width * if rgb565 { 2 } else { 4 } {
                 return None;
             }
             let mut addr: *mut c_void = std::ptr::null_mut();
@@ -101,20 +119,32 @@ mod bitmap {
             if unsafe { AndroidBitmap_lockPixels(e, o, &mut addr) } != 0 || addr.is_null() {
                 return None;
             }
-            Some(Locked { env: e, obj: o, px: addr as *mut u8, width, height, stride })
+            Some(Locked { env: e, obj: o, px: addr as *mut u8, width, height, stride, rgb565 })
+        }
+
+        /// The bytes of one row's pixels.
+        fn row_bytes(&self) -> usize {
+            self.width * if self.rgb565 { 2 } else { 4 }
         }
 
         pub fn row(&self, y: usize) -> &[u8] {
             assert!(y < self.height);
-            // SAFETY: the locked pixels are `height` rows `stride` bytes apart, each at least `width * 4`
-            // bytes long (checked in `new`), and `y` is one of them.
-            unsafe { std::slice::from_raw_parts(self.px.add(y * self.stride), self.width * 4) }
+            // SAFETY: the locked pixels are `height` rows `stride` bytes apart, each at least `row_bytes`
+            // long (checked in `lock`), and `y` is one of them.
+            unsafe { std::slice::from_raw_parts(self.px.add(y * self.stride), self.row_bytes()) }
         }
 
         pub fn row_mut(&mut self, y: usize) -> &mut [u8] {
             assert!(y < self.height);
             // SAFETY: as in `row`, and `&mut self` keeps the row to one writer.
-            unsafe { std::slice::from_raw_parts_mut(self.px.add(y * self.stride), self.width * 4) }
+            unsafe { std::slice::from_raw_parts_mut(self.px.add(y * self.stride), self.row_bytes()) }
+        }
+
+        /// All the rows at once, `stride` bytes apart, the last one only as long as its pixels.
+        pub fn pixels_mut(&mut self) -> &mut [u8] {
+            // SAFETY: as in `row`: the last row starts `(height - 1) * stride` bytes in and holds
+            // `row_bytes`, and `&mut self` keeps the pixels to one writer.
+            unsafe { std::slice::from_raw_parts_mut(self.px, (self.height - 1) * self.stride + self.row_bytes()) }
         }
     }
 

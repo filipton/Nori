@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.LibraryMusic
 import androidx.compose.material.icons.outlined.Lyrics
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PlayCircle
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -216,6 +217,20 @@ fun SettingsScreen(vm: SettingsViewModel) {
                         Column(Modifier.weight(1f).padding(start = 14.dp)) {
                             Text(g.title, style = MaterialTheme.typography.bodyLarge)
                             Text(g.summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Hairline(startIndent = Space.gutter + 36.dp)
+                }
+            }
+            // Only the perf build has a recorder, and with it this page (docs/perf-build.md).
+            if (dev.nori.music.app.PerfHooks.recorder != null) item(key = "perf") {
+                Column(Modifier.clickable { nav.go("perf") }) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Outlined.Speed, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
+                        Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                            Text("Performance", style = MaterialTheme.typography.bodyLarge)
+                            Text("Battery, CPU, wakeups and frames, as recorded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }

@@ -50,17 +50,33 @@ crates/core/    Rust, platform-free: the app's state, an rlib a desktop or termi
                 the core decides, and reacts to its own state (a settings change reaches the planner
                 and the sound chain by itself).
 crates/engine/  Rust, platform-free: the whole player for a platform without one (package nori-engine):
-                songs loaded in bursts per `load_control` through a client's ByteSource (source.rs),
-                demuxed with symphonia's format readers and decoded by decode.rs (demux.rs), the shared
-                pipeline on one engine thread that sleeps between bursts (engine.rs), and a lock-free
-                ring a sound card pulls from (output.rs: the AudioOutput trait a client implements).
-                library.rs says where songs are, wav.rs renders to a file, and the `core` feature
-                (core.rs) plays the core's queue with its planner, settings and stream addresses.
-                tests/engine.rs checks it against sim.rs sample for sample. No JNI, no uniffi.
+                songs loaded in bursts per `load_control` through a client's ByteSource, teed into the
+                stream cache (source.rs), demuxed with symphonia's format readers, opened off the engine's
+                thread while their bytes come, and decoded by decode.rs to 16-bit or float (demux.rs;
+                an MP4's gapless numbers from mp4.rs), the shared pipeline on one engine thread that
+                sleeps between bursts (engine.rs: ReplayGain, high quality output, idle release, device
+                changes), and a lock-free ring a sound card pulls from (output.rs: the AudioOutput trait
+                a client implements). library.rs says where songs are, store.rs keeps songs on disk (the
+                stream cache and downloads), wav.rs renders to a file, and the `core` feature (core.rs)
+                plays the core's queue with its planner, settings, stream addresses and error run, and
+                runs downloads and AutoMix's measuring ahead from the core's bookkeeping.
+                tests/engine.rs checks it against sim.rs sample for sample; tests/core.rs over the core,
+                tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
+crates/mpris/   Rust, Linux: the desktop's media controls (MPRIS over libdbus), for nori-cli --mpris.
+crates/covers/  Rust, platform-free: cover art for a client without an image loader (package nori-covers).
+                Fetched through the core's Transport at the core's addresses, kept on disk under a size
+                limit, least recently used out first (disk.rs, the index rebuilt from the directory) and
+                decoded in memory under a byte limit (memory.rs); JPEG, PNG and WebP decoded in pure Rust
+                straight into the caller's RGBA rows at the size drawn (decode.rs, scaled by scale.rs: an
+                exact area average down, bilinear up); requests shared per cover and size, cancelled by
+                dropping their ticket, on a few worker threads (loader.rs). Android keeps Coil and
+                decodes inside it with this decoder (app `RustCoverDecoder`, through crates/android
+                covers.rs), behind the "Decode covers in the core" setting.
 crates/http/    Rust, desktop: the core's Transport and the engine's ByteSource over one ureq agent.
 crates/cli/     Rust, desktop: nori-cli, the terminal client that proves the split - log in, search,
-                queue and play through the core, the engine and output-cpal, or `--wav` to a file.
+                queue and play through the core, the engine and output-cpal, or `--wav` to a file;
+                `--download`, `--offline`, `--replay-gain`, `--hi-res`, `--mpris`.
 crates/android/ Rust, Android only: the library the app loads (package nori-android, cdylib `norimusic`, so
                 libnorimusic.so): the core with its uniffi scaffolding, and the JNI doors with primitives
                 and direct buffers on every hot path. The scaffolding is JNI too: build.rs generates it
@@ -68,8 +84,12 @@ crates/android/ Rust, Android only: the library the app loads (package nori-andr
                 dev.nori.music.ffi and uniffi comes from crates/uniffi-bindgen), and JNI_OnLoad hands it
                 the JavaVM and the app's class loader. The doors are one module per group (decoder.rs, dsp.rs,
                 stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps read and written in
-                place - playlist.rs, settings.rs, transfers.rs, stream_cache.rs). Doors only convert;
-                anything they decide belongs in the core. JNI_OnLoad registers every door with
+                place - covers.rs, playlist.rs, settings.rs, transfers.rs, stream_cache.rs, player.rs). Doors
+                only convert; anything they decide belongs in the core. track.rs is nori-engine's output on
+                Android (the engine's ring poured into an AudioTrack in bursts, from a thread of its own,
+                tested on a simulated track), and player.rs the Rust playback path around it: the engine
+                over the core's queue, a song's bytes and the AudioTrack asked of Kotlin's `RustBridge`.
+                JNI_OnLoad registers every door with
                 RegisterNatives (lib.rs): no door is exported by a `Java_` name (only the generated uniffi
                 functions are, as their Kotlin expects), doors whose Kotlin signature is primitives only
                 are `@CriticalNative` (no JNIEnv, no class), and short ones
@@ -83,7 +103,9 @@ crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.
 core/           Android library, no UI: net/, data/ (Library = the repository), playback/
                 (media3 service, DAC, scrobbling; RustAudio.kt puts the core's decoder ahead of
                 MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
-                speed/pitch and silence skipping),
+                speed/pitch and silence skipping; RustPlayer.kt is the second path, nori-engine as a
+                media3 player, chosen by the "Playback engine" setting at service start - ExoPlayer
+                stays the default until the Rust one measures at least as well),
                 downloads/, settings/, Nori.kt (object graph)
 app/            the UI only: vm/ (ViewModels, all logic and state) and ui/ (Compose, draws state)
 tools/          dev-server.sh: a local Navidrome with generated music for testing
@@ -110,6 +132,7 @@ cargo test -p nori-engine                           # the desktop player on real
 cargo run --release -p nori-cli -- --url http://localhost:4533 --user admin --password admin \
     --search Noise --songs 2 --start 570 --crossfade 6 --wav out.wav   # a render through the whole client
 tools/dev-server.sh                                 # Navidrome at http://10.0.2.2:4533 from the emulator, admin/admin
+tools/twins.sh                                      # the Kotlin originals of the core's twins, run for their test vectors
 ```
 
 Run `cargo test` and a build before committing.
@@ -120,6 +143,12 @@ Run `cargo test` and a build before committing.
 emulator, `tools/apk.sh --install` to push it straight to whatever is connected. It lands in
 `build/nori-music-<version>-<abi>.apk` and prints which ABIs are inside. It is signed with the release
 key when `keystore.properties` is there (see below), otherwise with the Android debug key.
+
+`./gradlew :app:assemblePerf -PrustTargets=arm64-v8a` builds the **perf** build: a release build with
+a recorder of battery, CPU, wakeups, allocations, memory and frames and a Performance page in
+settings, installed beside the normal app as "Nori perf". See `docs/perf-build.md`. Its code lives in
+`app/src/perf` (the recorder) and `app/src/bench` (the benchmarks, shared with the debug build), and
+reaches the app only through `PerfHooks`, which is empty in every other build.
 
 ## Releasing
 

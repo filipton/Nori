@@ -247,6 +247,27 @@ fn shuffle_plays_every_song_once_in_the_order_of_its_seed() {
 }
 
 #[test]
+fn an_edit_ahead_of_the_song_playing_leaves_the_player_on_it_and_the_next_one_is_the_queue_s() {
+    let s = songs(4, 12.0);
+    let mut p = Player::new(queue(&s));
+    p.play_from(1);
+    // A second in: the song after it is not being read yet (that starts ten seconds before the end).
+    p.run_for(1_500);
+    let extra = music(2.0, 200);
+    p.tracks.push(track("x", &extra));
+    // One song before the one playing, and one straight after it: every index the player holds moves.
+    p.queue.insert(0, vec!["y".into()], Hand::No);
+    p.tracks.push(track("y", &extra));
+    p.queue.add(vec!["x".into()], Hand::Next);
+    p.queue_changed();
+    assert_eq!(p.current_id().as_deref(), Some("s1"), "still on the song playing");
+    assert!(p.run_to_end(60_000));
+    let heard = p.sink.heard_samples();
+    let joined: Vec<i16> = [&s[1], &extra, &s[2], &s[3]].iter().flat_map(|v| v.iter().copied()).collect();
+    assert!(heard == joined, "the song playing whole, then the one added to play next, then the rest");
+}
+
+#[test]
 fn shuffle_switched_on_keeps_the_song_playing_first_and_play_next_next() {
     let s = songs(6, 2.0);
     let mut p = Player::new(queue(&s));

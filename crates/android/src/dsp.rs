@@ -5,6 +5,7 @@
 use jni::objects::{JByteBuffer, JClass, JFloatArray, JIntArray};
 use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
+use std::sync::atomic::{AtomicU32, Ordering};
 use nori_core::dsp::SoundChain;
 
 use crate::{native, region_ptr, Class};
@@ -14,7 +15,7 @@ pub(crate) static CLASS: Class = Class {
     methods: &[
         native!(c"create", c"(II)J", create),
         native!(c"destroy", c"(J)V", destroy),
-        native!(c"gainReductionDb", c"(J)F", gain_reduction_db),
+        native!(c"meter", c"()F", meter),
         native!(c"delayFrames", c"(J)I", delay_frames),
         native!(c"reset", c"(J)V", reset),
         native!(c"process", c"(JLjava/nio/ByteBuffer;ILjava/nio/ByteBuffer;III)Z", process),
@@ -38,15 +39,22 @@ extern "system" fn create(rate: jint, channels: jint) -> jlong {
 }
 
 extern "system" fn destroy(handle: jlong) {
+    METER.store(0, Ordering::Relaxed);
     if handle != 0 {
         // SAFETY: the handle came from `create` and Kotlin destroys it once.
         drop(unsafe { Box::from_raw(handle as *mut SoundChain) });
     }
 }
 
-/// The limiter meter: peak gain reduction in dB in the last buffer, 0 when it is off or idle. Lock-free, poll freely.
-extern "system" fn gain_reduction_db(handle: jlong) -> jfloat {
-    chain(handle).map_or(0.0, SoundChain::gain_reduction_db)
+/// The limiter meter, kept outside any chain: the screen polls it from the UI thread while the playback
+/// thread replaces its chain on a seek, and a handle read on one thread and freed on the other was a
+/// use-after-free. The chain that processed last writes it; a reset clears it.
+static METER: AtomicU32 = AtomicU32::new(0);
+
+/// Peak gain reduction in dB over the last buffer processed, 0 when the limiter is off or idle. Needs no
+/// handle, so it is safe from any thread at any time.
+extern "system" fn meter() -> jfloat {
+    f32::from_bits(METER.load(Ordering::Relaxed))
 }
 
 /// How many frames the chain holds back; the stage drains that much at the end of a stream.
@@ -58,6 +66,7 @@ extern "system" fn reset(handle: jlong) {
     if let Some(c) = chain(handle) {
         c.reset();
     }
+    METER.store(0, Ordering::Relaxed);
 }
 
 /// Filters `bytes` bytes from `input[in_pos..]` into `output[out_pos..]`; both are direct buffers.
@@ -89,6 +98,7 @@ extern "system" fn process(
         },
         _ => return 0,
     }
+    METER.store(c.gain_reduction_db().to_bits(), Ordering::Relaxed);
     1
 }
 

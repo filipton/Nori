@@ -57,6 +57,26 @@ impl HeardAt {
         let index = self.index.map_or(0, |i| i as i64 + 1);
         (index << (MS_BITS + 1)) | ((self.changed as i64) << MS_BITS) | self.ms.clamp(0, (1 << MS_BITS) - 1)
     }
+
+    /// [`pack`](Self::pack) read back. Twin of `PlayerConnection.read` (core/.../playback/PlayerConnection.kt).
+    pub fn unpack(r: i64) -> HeardAt {
+        let index = (r as u64 >> (MS_BITS + 1)) as i64 - 1;
+        HeardAt { index: (index >= 0).then_some(index as usize), changed: (r >> MS_BITS) & 1 != 0, ms: r & ((1 << MS_BITS) - 1) }
+    }
+}
+
+/// Which queue row the now playing page shows while the ear is on another song than the player (a held
+/// ending, a mix): the ear's `heard` row, or none when the player's own current row stands. When the
+/// queue was just read again (`reread`), the row is found by the song's id in the new list (`ids_now`),
+/// since positions moved with the edit; a song no longer there, or one that is the player's own song
+/// (`playing`), shows as the player says.
+///
+/// Twin of the `heardIndex` worked out in `PlayerConnection.publish` (core/.../playback/PlayerConnection.kt),
+/// which Android keeps: it runs on each player event, and its lists are the ones Compose draws.
+pub fn shown_index<'a>(heard: Option<usize>, reread: bool, ids_before: &[&'a str], ids_now: &[&'a str], playing: Option<&str>) -> Option<usize> {
+    let at = heard?;
+    let at = if reread { ids_now.iter().position(|id| Some(id) == ids_before.get(at))? } else { at };
+    (ids_now.get(at).copied() != playing).then_some(at)
 }
 
 /// The tracker, and the revision of the core's queue it was last given (crates/core/src/playlist.rs).

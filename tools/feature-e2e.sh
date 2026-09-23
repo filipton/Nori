@@ -213,10 +213,13 @@ check "tapping the download notification opens the queue" test "$(field route)" 
 echo "-- downloads run side by side and survive a force stop"
 # A library album of at least six songs, none of them provider tracks (streaming one of those makes
 # octo-fiesta fetch it), with nothing of it downloaded yet.
-aid=$(api getAlbumList2 "&type=random&size=40" | python3 -c "
+# Albums with any song downloaded already are left out: every run downloads one, so a random pick
+# of albums this suite has fetched before would report nothing to do.
+held=$(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select distinct json_extract(json,'\$.albumId') from items where kind=2 and id in (select song_id from downloads)\"" 2>/dev/null | tr -d '\r')
+aid=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
-    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 6: print(a['id'])" | while read -r a; do
+    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 6: print(a['id'])" | grep -vxF -e "${held:-none}" | while read -r a; do
   api getAlbum "&id=$a" | python3 -c "
 import sys,json
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
@@ -233,7 +236,7 @@ if [ -n "$aid" ]; then
     active=$(field dlActive)
     [ "${active:-0}" -ge 2 ] && break
   done
-  echo "     $active downloading at once, parallel setting $(adb shell run-as dev.nori.music cat shared_prefs/nori.xml 2>/dev/null | grep -o 'parallelDownloads" value="[0-9]*' | grep -o '[0-9]*$')"
+  echo "     $active downloading at once, parallel setting $(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select json_extract(value,'\$.i') from settings where key='parallelDownloads'\"" 2>/dev/null | tr -d '\r')"
   check "several songs download at once ($active)" test "${active:-0}" -ge 2
   # The download notification carries speed and ETA, under its own id: it used to share the
   # playback notification's id (1001) and replace the now-playing notification while downloading.

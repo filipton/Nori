@@ -4,14 +4,16 @@
 //! lock, so the device thread cannot be held up by anything the player does.
 //!
 //! The ring holds float samples at the device's rate and channel count. The engine's output below the
-//! sound chain ([`RingTrack`]) converts the chain's 16-bit audio into it, resampling only when the
-//! device would not take the stream's own rate, and keeps the map from ring frames back to song time
-//! that the playhead is read through.
+//! sound chain ([`RingTrack`]) converts the chain's audio (16-bit, or float for high quality output)
+//! into it, resampling only when the device would not take the stream's own rate, and keeps the map
+//! from ring frames back to song time that the playhead is read through.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::Thread;
+
+pub use nori_player::outputs::OutputKind;
 
 use nori_player::automix::resample::Resampler;
 use nori_player::burst::{BUFFER_US, LOW_US};
@@ -25,9 +27,23 @@ pub struct OutputFormat {
     pub channels: usize,
 }
 
+/// Where the music goes: the kind of device, and the name it gives itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Device {
+    pub kind: OutputKind,
+    pub name: String,
+}
+
+/// Called by an output whenever the device the music goes to changes (from any thread).
+pub type DeviceWatch = Box<dyn Fn(Device) + Send + Sync>;
+
 /// A sound card, or anything that takes the music the way one does (a file). Called only from the
 /// engine's thread; the device's own thread only ever calls [`Feed::pull`].
 pub trait AudioOutput: Send {
+    /// From now on `changed` is told which device the music goes to: once when the output knows, and
+    /// again whenever the system moves it (headphones plugged in, a Bluetooth device connected), so
+    /// the core can give each device its own sound. An output that cannot tell says nothing.
+    fn watch(&mut self, _changed: DeviceWatch) {}
     /// Picks the device's format, as close to `want` as it goes. Nothing plays yet.
     fn open(&mut self, want: OutputFormat) -> Result<OutputFormat, String>;
     /// From now on the device pulls every buffer it plays from `feed`; it starts paused.
@@ -37,6 +53,34 @@ pub trait AudioOutput: Send {
     fn resume(&mut self);
     /// How long a sample pulled now takes to be heard, µs.
     fn latency_us(&self) -> u64;
+    /// Whether the device plays float samples as they are ([`Feed::pull`]) rather than 16-bit ones
+    /// ([`Feed::pull_i16`]). With high quality output on, songs are then decoded and carried to it in
+    /// float; otherwise the chain runs in 16 bits, as Android's does without float output.
+    fn takes_float(&mut self) -> bool {
+        false
+    }
+    /// The music the ring held was dropped (a seek, a jump): what the device itself still holds of it is
+    /// stale too. Called on the engine's thread after the ring let it go; an output with a buffer of its
+    /// own worth hearing (seconds, not milliseconds) wakes its thread here, and [`Feed::flushed`] says
+    /// where the new music starts.
+    fn flush(&mut self) {}
+    /// A volume fade from `from` (or wherever the volume is) to `target` over `ms`. An output whose device
+    /// holds seconds of music runs it at the device (its own volume), where it is heard when asked for,
+    /// and says true; otherwise the ring runs it on the samples it hands out.
+    fn ramp(&mut self, _from: Option<f32>, _target: f32, _ms: i64) -> bool {
+        false
+    }
+    /// Whether the device still holds music it took from the ring and has not played: with a buffer of
+    /// seconds, the music is not over when the ring runs empty.
+    fn holding(&self) -> bool {
+        false
+    }
+    /// Whether the device takes the ring's music in bursts of seconds rather than a steady trickle. The
+    /// ring then does not run down between its pulls, so the engine sleeps until the pull that crosses
+    /// the low mark wakes it, with no timer guessing when that will be.
+    fn bursts(&self) -> bool {
+        false
+    }
     /// Lets the device go.
     fn close(&mut self);
 }
@@ -46,6 +90,9 @@ pub trait AudioOutput: Send {
 pub const WAKE_LOW_US: i64 = LOW_US - 250_000;
 /// The ring's room beyond the sink's deep buffer: the resampler's rounding and a device's first pull.
 const SLACK_US: i64 = 2_000_000;
+/// Volume changes waiting in the ring at once: one per song start, and twelve seconds of ring hold
+/// more than this many songs only when they are a second or two long.
+const SWITCHES: usize = 8;
 
 /// Shared between the engine's thread (the only writer) and the device's (the only reader).
 pub(crate) struct Ring {
@@ -70,6 +117,16 @@ pub(crate) struct Ring {
     gain_target: AtomicU32,
     ramp_frames: AtomicU32,
     ramp_gen: AtomicU32,
+    /// The ReplayGain volume, under the fade, and a count that moves when it is set outright.
+    level: AtomicU32,
+    level_gen: AtomicU32,
+    /// Volume changes at ring frames, each song's from the frame it starts at: a small queue the
+    /// writer fills before it publishes those frames, so the reader can never play one at the wrong
+    /// level. Entries `switch_from..switch_tail` are live (a flush moves `switch_from` on).
+    switch_at: [AtomicU64; SWITCHES],
+    switch_level: [AtomicU32; SWITCHES],
+    switch_tail: AtomicU64,
+    switch_from: AtomicU64,
     /// The music is over: running dry now is the end, not an underrun.
     ended: AtomicBool,
     /// Pulls that found the ring short while music was due.
@@ -95,6 +152,12 @@ impl Ring {
             gain_target: AtomicU32::new(1f32.to_bits()),
             ramp_frames: AtomicU32::new(0),
             ramp_gen: AtomicU32::new(0),
+            level: AtomicU32::new(1f32.to_bits()),
+            level_gen: AtomicU32::new(0),
+            switch_at: std::array::from_fn(|_| AtomicU64::new(0)),
+            switch_level: std::array::from_fn(|_| AtomicU32::new(0)),
+            switch_tail: AtomicU64::new(0),
+            switch_from: AtomicU64::new(0),
             ended: AtomicBool::new(false),
             underruns: AtomicU64::new(0),
         }
@@ -125,11 +188,27 @@ pub struct Feed {
     target: f32,
     step: f32,
     gen: u32,
+    /// The ReplayGain volume as the reader has it, the setting it came from, and the next volume
+    /// change still to reach.
+    level: f32,
+    level_gen: u32,
+    switch_head: u64,
+    /// The flush the last pull saw, and whether one happened since [`Feed::flushed`] was last asked.
+    seen: u64,
+    flushed: bool,
 }
 
 impl Feed {
     fn new(ring: Arc<Ring>) -> Feed {
-        Feed { ring, gain: 1.0, target: 1.0, step: 0.0, gen: 0 }
+        let level = f32::from_bits(ring.level.load(Ordering::Acquire));
+        Feed { ring, gain: 1.0, target: 1.0, step: 0.0, gen: 0, level, level_gen: 0, switch_head: 0, seen: 0, flushed: false }
+    }
+
+    /// Whether the ring was flushed since this was last asked, as the pulls found it: the frames the
+    /// last pull returned (if any) are then the new music's, and what the device held from before it
+    /// should go. A pull never mixes the two.
+    pub fn flushed(&mut self) -> bool {
+        std::mem::take(&mut self.flushed)
     }
 
     pub fn format(&self) -> OutputFormat {
@@ -153,7 +232,13 @@ impl Feed {
         let ch = r.channels;
         let want = (out.len() / ch) as u64;
         let w = r.write.load(Ordering::Acquire);
-        let at = r.read_at();
+        // Read after the write position: a pull that sees music written after a flush sees the flush.
+        let discard = r.discard.load(Ordering::Acquire);
+        if discard != self.seen {
+            self.seen = discard;
+            self.flushed = true;
+        }
+        let at = r.read.load(Ordering::Acquire).max(discard);
         let n = w.saturating_sub(at).min(want);
         let gen = r.ramp_gen.load(Ordering::Acquire);
         if gen != self.gen {
@@ -166,7 +251,24 @@ impl Feed {
             let frames = r.ramp_frames.load(Ordering::Relaxed);
             self.step = if frames == 0 { self.target - self.gain } else { (self.target - self.gain) / frames as f32 };
         }
+        let level_gen = r.level_gen.load(Ordering::Acquire);
+        if level_gen != self.level_gen {
+            self.level_gen = level_gen;
+            self.level = f32::from_bits(r.level.load(Ordering::Relaxed));
+        }
+        // The volume changes queued for frames in the ring; the write position was read first, so
+        // every change for a frame up to it is visible too.
+        let tail = r.switch_tail.load(Ordering::Acquire);
+        self.switch_head = self.switch_head.max(r.switch_from.load(Ordering::Acquire));
+        let next = |head: u64| if head < tail { r.switch_at[head as usize % SWITCHES].load(Ordering::Relaxed) } else { u64::MAX };
+        let mut switch = next(self.switch_head);
         for i in 0..n {
+            while at + i >= switch {
+                self.level = f32::from_bits(r.switch_level[self.switch_head as usize % SWITCHES].load(Ordering::Relaxed));
+                self.switch_head += 1;
+                switch = next(self.switch_head);
+            }
+            let level = self.level;
             if self.gain != self.target {
                 self.gain += self.step;
                 if (self.step > 0.0 && self.gain > self.target) || (self.step < 0.0 && self.gain < self.target) || self.step == 0.0 {
@@ -176,7 +278,7 @@ impl Feed {
             let slot = ((at + i) % r.frames) as usize * ch;
             let o = i as usize * ch;
             for c in 0..ch {
-                out[o + c] = conv(f32::from_bits(r.slots[slot + c].load(Ordering::Relaxed)) * self.gain);
+                out[o + c] = conv(f32::from_bits(r.slots[slot + c].load(Ordering::Relaxed)) * self.gain * level);
             }
         }
         out[n as usize * ch..].fill(S::default());
@@ -225,6 +327,12 @@ pub(crate) struct RingTrack {
     from: (u64, f64),
     written: (u64, f64),
     playing: bool,
+    /// The ReplayGain volume, kept for a device opened later, and the songs' volumes still to be put
+    /// at the frames they start at, by where they start in song time since the flush.
+    level: f32,
+    starts: VecDeque<(f64, f32)>,
+    /// Whether the device plays float, once asked.
+    float: Option<bool>,
     /// Why the device would not open, until the engine has said so.
     pub failed: Option<String>,
 }
@@ -244,8 +352,30 @@ impl RingTrack {
             from: (0, 0.0),
             written: (0, 0.0),
             playing: false,
+            level: 1.0,
+            starts: VecDeque::with_capacity(SWITCHES),
+            float: None,
             failed: None,
         }
+    }
+
+    /// The device is let go (a long pause); the next stream opens it again.
+    pub(crate) fn release(&mut self) {
+        if self.device.take().is_some() {
+            self.output.close();
+        }
+        self.ring = None;
+        self.format = None;
+        self.resampler = None;
+        self.marks.clear();
+        self.from = (0, 0.0);
+        self.written = (0, 0.0);
+        self.starts.clear();
+    }
+
+    /// Whether the device plays float samples as they are; asked of it once.
+    pub(crate) fn takes_float(&mut self) -> bool {
+        *self.float.get_or_insert_with(|| self.output.takes_float())
     }
 
     /// Music in the ring, µs of the device's time.
@@ -260,6 +390,11 @@ impl RingTrack {
         self.output.latency_us() as i64
     }
 
+    /// The device pulls in bursts ([`AudioOutput::bursts`]).
+    pub(crate) fn bursts(&self) -> bool {
+        self.output.bursts()
+    }
+
     /// The engine goes to sleep until the ring holds no more than `us` of music.
     pub(crate) fn wake_at(&self, us: i64) {
         if let Some(r) = &self.ring {
@@ -268,11 +403,46 @@ impl RingTrack {
         }
     }
 
-    /// A volume fade from `from` (or wherever the volume is) to `target` over `ms`, run by the device
-    /// thread from its next pull.
-    pub(crate) fn ramp(&self, from: Option<f32>, target: f32, ms: i64) {
+    /// A volume fade from `from` (or wherever the volume is) to `target` over `ms`: run by the device
+    /// when it says it does fades itself, otherwise by the device thread from its next pull.
+    pub(crate) fn ramp(&mut self, from: Option<f32>, target: f32, ms: i64) {
         if let Some(r) = &self.ring {
-            r.ramp(from, target, ms);
+            if !self.output.ramp(from, target, ms) {
+                r.ramp(from, target, ms);
+            }
+        }
+    }
+
+    /// The ReplayGain volume from the next pull on, under whatever fade is running (the settings
+    /// changed); the volumes set for songs still to start stay.
+    pub(crate) fn set_level(&mut self, level: f32) {
+        self.level = level;
+        if let Some(r) = &self.ring {
+            r.level.store(level.to_bits(), Ordering::Relaxed);
+            r.level_gen.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Puts the volume changes of songs starting within what is about to be written (`media` more
+    /// song frames over `frames` ring frames) into the ring's queue, ahead of the frames themselves.
+    fn queue_starts(&mut self, r: &Ring, frames: u64, media: f64) {
+        let (at, from) = self.written;
+        while let Some(&(start, level)) = self.starts.front() {
+            if start > from + media {
+                break;
+            }
+            self.starts.pop_front();
+            let k = if media > 0.0 { ((start - from) / media).clamp(0.0, 1.0) } else { 0.0 };
+            let frame = self.base + at + (frames as f64 * k).round() as u64;
+            let tail = r.switch_tail.load(Ordering::Relaxed);
+            let slot = tail as usize % SWITCHES;
+            // A slot the reader has not passed yet is never written over.
+            if tail >= SWITCHES as u64 && r.switch_at[slot].load(Ordering::Relaxed) >= r.read_at() {
+                continue;
+            }
+            r.switch_at[slot].store(frame, Ordering::Relaxed);
+            r.switch_level[slot].store(level.to_bits(), Ordering::Relaxed);
+            r.switch_tail.store(tail + 1, Ordering::Release);
         }
     }
 
@@ -318,6 +488,8 @@ impl Track for RingTrack {
             });
             match opened {
                 Ok((d, ring)) => {
+                    ring.level.store(self.level.to_bits(), Ordering::Relaxed);
+                    ring.level_gen.fetch_add(1, Ordering::Release);
                     self.device = Some(d);
                     self.ring = Some(ring);
                     self.base = 0;
@@ -357,18 +529,24 @@ impl Track for RingTrack {
             }
             n
         };
-        let frames = match self.resampler.as_mut() {
-            None => put(w, &mut data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)),
-            Some(rs) => {
+        let floats = |b: &[u8]| f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        let frames = match (self.resampler.as_mut(), f.encoding) {
+            (None, Encoding::Pcm16) => put(w, &mut data.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)),
+            (None, Encoding::Float) => put(w, &mut data.chunks_exact(4).map(floats)),
+            (Some(rs), _) => {
                 let in_frames = data.len() / f.frame_bytes();
                 let need = ((in_frames as u64 * d.rate as u64 / f.rate as u64) as usize + 4) * ch * 4;
                 if self.converted.len() < need {
                     self.converted.resize(need, 0);
                 }
-                let Some((_, made)) = rs.process(data, Encoding::PCM_16, &mut self.converted, Encoding::FLOAT) else { return };
-                put(w, &mut self.converted[..made].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])))
+                let Some((_, made)) = rs.process(data, f.encoding.media3(), &mut self.converted, Encoding::FLOAT) else { return };
+                put(w, &mut self.converted[..made].chunks_exact(4).map(floats))
             }
         };
+        // The volume of a song starting in these frames is queued before the frames are published.
+        if !self.starts.is_empty() {
+            self.queue_starts(&r, frames, media);
+        }
         r.write.store(w + frames, Ordering::Release);
         self.written.0 += frames;
         self.written.1 += media;
@@ -390,7 +568,7 @@ impl Track for RingTrack {
     }
 
     fn is_empty(&self) -> bool {
-        self.ring.as_ref().is_none_or(|r| r.filled() == 0)
+        self.ring.as_ref().is_none_or(|r| r.filled() == 0) && !self.output.holding()
     }
 
     fn flush(&mut self) {
@@ -398,15 +576,25 @@ impl Track for RingTrack {
             let w = r.write.load(Ordering::Relaxed);
             r.discard.store(w, Ordering::Release);
             r.ended.store(false, Ordering::Release);
+            r.switch_from.store(r.switch_tail.load(Ordering::Relaxed), Ordering::Release);
             self.base = w;
+            self.output.flush();
         }
         self.marks.clear();
         self.from = (0, 0.0);
         self.written = (0, 0.0);
+        self.starts.clear();
         if let (Some(f), Some(d)) = (self.format, self.device) {
             if self.resampler.is_some() {
                 self.resampler = Resampler::new(f.rate as i32, f.channels as i32, d.rate as i32, d.channels as i32);
             }
+        }
+    }
+
+    fn song_starts(&mut self, media: f64, level: f32) {
+        // More songs waiting to start than the queue holds happens only with songs of a second or two.
+        if self.starts.len() < SWITCHES {
+            self.starts.push_back((media, level));
         }
     }
 
@@ -478,6 +666,59 @@ mod tests {
         let mut out = vec![1f32; 10];
         assert_eq!(feed.lock().as_mut().unwrap().pull(&mut out), 0);
         assert!(out.iter().all(|&v| v == 0.0), "silence when there is nothing");
+    }
+
+    #[test]
+    fn a_pull_says_when_the_music_before_it_was_flushed() {
+        let feed = Arc::new(parking_lot::Mutex::new(None));
+        let mut t = RingTrack::new(Box::new(Hand(feed.clone())));
+        t.open(F);
+        t.write(&pcm(&[1000; 100]), 100.0);
+        let mut f = feed.lock().take().unwrap();
+        let mut out = vec![0f32; 10];
+        f.pull(&mut out);
+        assert!(!f.flushed(), "nothing was dropped yet");
+        t.flush();
+        t.write(&pcm(&[-1000; 100]), 100.0);
+        assert_eq!(f.pull(&mut out), 10);
+        assert!(f.flushed(), "the pull after a flush says so");
+        assert!(out.iter().all(|&v| v < 0.0), "and holds only the new music");
+        f.pull(&mut out);
+        assert!(!f.flushed(), "once");
+    }
+
+    #[test]
+    fn a_songs_volume_is_queued_before_its_frames_are_there_to_be_pulled() {
+        let feed = Arc::new(parking_lot::Mutex::new(None));
+        let mut t = RingTrack::new(Box::new(Hand(feed.clone())));
+        t.open(F);
+        t.song_starts(0.0, 1.0);
+        t.write(&pcm(&[16384; 100]), 100.0);
+        // The next song starts 50 frames into the next write, and is known before it is written.
+        t.song_starts(150.0, 0.5);
+        t.write(&pcm(&[16384; 100]), 100.0);
+        t.song_starts(250.0, 0.25);
+        let mut out = vec![0f32; 300];
+        let mut f = feed.lock();
+        let f = f.as_mut().unwrap();
+        // Pulled in pieces that straddle the change, as a device's periods do.
+        assert_eq!(f.pull(&mut out[..120]), 120);
+        assert_eq!(f.pull(&mut out[120..]), 80);
+        assert!(out[..150].iter().all(|&v| v == 0.5), "the first song at full volume");
+        assert!(out[150..200].iter().all(|&v| v == 0.25), "the next at its own, from its very first frame");
+        t.write(&pcm(&[16384; 100]), 100.0);
+        assert_eq!(f.pull(&mut out[..100]), 100);
+        assert!(out[..50].iter().all(|&v| v == 0.25) && out[50..100].iter().all(|&v| v == 0.125), "and the one after");
+        // A flush drops what was queued for frames that will never play.
+        t.song_starts(400.0, 0.1);
+        t.flush();
+        t.write(&pcm(&[16384; 100]), 100.0);
+        assert_eq!(f.pull(&mut out[..100]), 100);
+        assert!(out[..100].iter().all(|&v| v == 0.125));
+        t.set_level(1.0);
+        t.write(&pcm(&[16384; 10]), 10.0);
+        f.pull(&mut out[..10]);
+        assert_eq!(out[0], 0.5, "the settings changed: at once");
     }
 
     #[test]

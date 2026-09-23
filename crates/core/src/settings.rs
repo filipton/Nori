@@ -1,10 +1,8 @@
-//! The settings as they are stored. On Android that is SharedPreferences rather than a database: the
-//! playback service needs its settings synchronously when it starts, before any database is open, and
-//! this is one small file read once. So everything here is a free function with no database: the
-//! platform hands over what it has stored, as it is, and gets one checked record back (defaults,
-//! ranges and old layouts dealt with); saving is one call that says what to write. The wire formats
-//! (the band list, a sound profile's JSON, a server profile's JSON) live here too, so another player
-//! reading the same store gets the same settings.
+//! The settings as they are stored, one value per key (settings_store.rs keeps them in the app's
+//! database). Everything here is a free function with no database: what is stored goes in as it is and
+//! one checked record comes back (defaults and ranges dealt with); saving is one call that says what to
+//! write. The wire formats (the band list, a sound profile's JSON, a server profile's JSON) live here
+//! too, so another player reading the same store gets the same settings.
 
 use std::collections::HashMap;
 
@@ -12,9 +10,8 @@ use serde_json::{Map, Value};
 
 use crate::{EqKind, NamedPreset};
 
-/// One stored value, as the platform's key-value store holds it.
+/// One stored value.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum PrefValue {
     Flag { v: bool },
     Number { v: i32 },
@@ -22,14 +19,6 @@ pub enum PrefValue {
     Decimal { v: f32 },
     Text { v: String },
     Texts { v: Vec<String> },
-}
-
-/// What to write back: every value, and the keys that go.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct PrefsWrite {
-    pub put: HashMap<String, PrefValue>,
-    pub remove: Vec<String>,
 }
 
 /// One equalizer filter. `kind` is an `EqKind` ordinal (the order is the wire format, so it must not
@@ -154,6 +143,12 @@ pub struct StoredPrefs {
     pub swipe_right: i32,
     pub swipe_left: i32,
     pub skip_explicit: bool,
+    /// Which player plays: ExoPlayer (0, the default) or nori-engine (1, the Rust path being measured
+    /// against it). Read when the playback service starts.
+    pub playback_engine: i32,
+    /// Covers are decoded by the core's own decoder (nori-covers) instead of the platform's: on (the
+    /// default) where it measured faster; off hands every cover to the platform's decoder again.
+    pub core_covers: bool,
     /// `HomeRow` ordinals, in order; a row that is not listed is hidden.
     pub home_rows: Vec<i32>,
     pub pinned_playlists: Vec<String>,
@@ -267,6 +262,8 @@ const REPLAY_GAIN_MODES: [&str; 4] = ["OFF", "TRACK", "ALBUM", "AUTO"];
 const THEME_MODES: [&str; 3] = ["SYSTEM", "LIGHT", "DARK"];
 const TAP_ACTION_NAMES: [&str; 4] = ["PLAY_LIST", "PLAY_ONE", "QUEUE", "PLAY_NEXT"];
 const SWIPE_ACTION_NAMES: [&str; 5] = ["NONE", "QUEUE", "PLAY_NEXT", "FAVOURITE", "DOWNLOAD"];
+/// The players the "Playback engine" setting chooses between.
+const PLAYBACK_ENGINE_NAMES: [&str; 2] = ["EXOPLAYER", "RUST"];
 const THEMES: i32 = THEME_MODES.len() as i32;
 const TAP_ACTIONS: i32 = TAP_ACTION_NAMES.len() as i32;
 const SWIPE_ACTIONS: i32 = SWIPE_ACTION_NAMES.len() as i32;
@@ -290,10 +287,6 @@ const HOME_ROW_TITLES: [&str; 8] = [
 const BAND_KIND_LABELS: [&str; BAND_KINDS as usize] =
     ["Peak", "Low shelf", "High shelf", "Low pass", "High pass", "Band pass", "Notch", "All pass", "Low shelf (slope)", "High shelf (slope)"];
 const BAND_CHANNEL_LABELS: [&str; BAND_CHANNELS as usize] = ["Both", "Left", "Right"];
-
-/// Where the left swipe is stored. It used to default to Play next and be saved along with everything
-/// else, so a new key is what gives existing installs the new default (the left swipe favourites).
-const SWIPE_LEFT: &str = "swipeLeft3";
 
 /// The ten default bands: peaking filters an octave apart.
 pub fn graphic() -> Vec<SoundBand> {
@@ -378,6 +371,8 @@ impl Default for StoredPrefs {
             swipe_right: 1,
             swipe_left: 3,
             skip_explicit: false,
+            playback_engine: 0,
+            core_covers: true,
             home_rows: (0..HOME_ROWS.len() as i32).collect(),
             pinned_playlists: Vec::new(),
             list_prefs: HashMap::new(),
@@ -438,34 +433,18 @@ pub(crate) fn kotlin_float(v: f32) -> String {
     }
 }
 
-// ---- JSON read the forgiving way the stored JSON was always read ----
+// ---- JSON read with a default for what is missing ----
 
 fn opt_bool(o: &Map<String, Value>, k: &str) -> bool {
-    match o.get(k) {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::String(s)) => s.eq_ignore_ascii_case("true"),
-        _ => false,
-    }
-}
-
-fn num(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.trim().parse().ok(),
-        _ => None,
-    }
+    o.get(k).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn opt_f64(o: &Map<String, Value>, k: &str, fallback: f64) -> f64 {
-    o.get(k).and_then(num).unwrap_or(fallback)
+    o.get(k).and_then(Value::as_f64).unwrap_or(fallback)
 }
 
 fn opt_i32(o: &Map<String, Value>, k: &str) -> i32 {
-    match o.get(k) {
-        Some(Value::Number(n)) => n.as_i64().map(|i| i as i32).or_else(|| n.as_f64().map(|f| f as i32)).unwrap_or(0),
-        Some(Value::String(s)) => s.trim().parse::<f64>().map(|f| f as i32).unwrap_or(0),
-        _ => 0,
-    }
+    o.get(k).and_then(Value::as_i64).map_or(0, |i| i as i32)
 }
 
 fn text(v: &Value) -> String {
@@ -491,7 +470,7 @@ pub fn sound_from(json: &str) -> Option<SoundSettings> {
     let o = v.as_object()?;
     // A pre-amp that is there must be a number: null or anything else and the sound is not read.
     let eq_preamp_db = match o.get("eqPreampDb") {
-        Some(v) => Some(num(v)? as f32),
+        Some(v) => Some(v.as_f64()? as f32),
         None => None,
     };
     Some(SoundSettings {
@@ -610,36 +589,23 @@ impl Raw<'_> {
         }
     }
 
-    /// Before profiles existed there was one server in three keys; it becomes the profile "default".
+    /// The server profiles; a list that does not read, or a server without an id, loses the whole list.
     fn servers(&self) -> Vec<SavedServer> {
-        if let Some(json) = self.text("servers") {
-            let list: Option<Vec<SavedServer>> =
-                serde_json::from_str::<Value>(json).ok().and_then(|v| v.as_array().map(|a| a.iter().map(server_from).collect())).flatten();
-            return list.unwrap_or_default();
-        }
-        let url = self.text("serverUrl").unwrap_or_default();
-        if url.is_empty() {
-            return Vec::new();
-        }
-        vec![SavedServer {
-            id: "default".to_string(),
-            url: url.to_string(),
-            user: self.text("user").unwrap_or_default().to_string(),
-            password: self.text("password").unwrap_or_default().to_string(),
-            ..SavedServer::default()
-        }]
+        let Some(json) = self.text("servers") else { return Vec::new() };
+        let list: Option<Vec<SavedServer>> =
+            serde_json::from_str::<Value>(json).ok().and_then(|v| v.as_array().map(|a| a.iter().map(server_from).collect())).flatten();
+        list.unwrap_or_default()
     }
 }
 
 /// Everything stored, as it is, into the settings: defaults for what is missing or of the wrong type,
-/// ranges enforced, older layouts carried over.
+/// ranges enforced.
 pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
     let r = Raw(raw);
     let d = StoredPrefs::default();
-    let legacy = r.text("serverUrl").is_some_and(|u| !u.is_empty());
     StoredPrefs {
         servers: r.servers(),
-        active_server_id: r.text("activeServerId").map(str::to_string).unwrap_or_else(|| if legacy { "default".to_string() } else { String::new() }),
+        active_server_id: r.text("activeServerId").map(str::to_string).unwrap_or_default(),
         wifi: r.quality("wifi", &d.wifi),
         mobile: r.quality("mobile", &d.mobile),
         download: r.quality("download", &d.download),
@@ -711,8 +677,10 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         player_colours: r.flag("playerColours", true),
         tap_action: r.ordinal("tapAction", TAP_ACTIONS, d.tap_action),
         swipe_right: r.ordinal("swipeRight", SWIPE_ACTIONS, d.swipe_right),
-        swipe_left: r.ordinal(SWIPE_LEFT, SWIPE_ACTIONS, d.swipe_left),
+        swipe_left: r.ordinal("swipeLeft", SWIPE_ACTIONS, d.swipe_left),
         skip_explicit: r.flag("skipExplicit", false),
+        playback_engine: r.ordinal("playbackEngine", PLAYBACK_ENGINE_NAMES.len() as i32, 0),
+        core_covers: r.flag("coreCovers", true),
         home_rows: r.text("homeRows").map_or(d.home_rows, |s| {
             s.split(',').filter_map(|n| HOME_ROWS.iter().position(|r| *r == n)).map(|i| i as i32).collect()
         }),
@@ -721,8 +689,8 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
     }
 }
 
-/// Everything to write for these settings. The single-server keys from before profiles go.
-pub fn save(p: &StoredPrefs) -> PrefsWrite {
+/// Everything to write for these settings.
+pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     let mut put = HashMap::with_capacity(96);
     let mut flag = |k: &str, v: bool| put.insert(k.to_string(), PrefValue::Flag { v });
     flag("previousAlwaysSkips", p.previous_always_skips);
@@ -762,6 +730,7 @@ pub fn save(p: &StoredPrefs) -> PrefsWrite {
     flag("ignoreSystemMotion", p.ignore_system_motion);
     flag("playerColours", p.player_colours);
     flag("skipExplicit", p.skip_explicit);
+    flag("coreCovers", p.core_covers);
     let mut int = |k: &str, v: i32| put.insert(k.to_string(), PrefValue::Number { v });
     for (n, q) in [("wifi", &p.wifi), ("mobile", &p.mobile), ("download", &p.download)] {
         int(&format!("{n}BitRate"), q.bit_rate);
@@ -783,7 +752,8 @@ pub fn save(p: &StoredPrefs) -> PrefsWrite {
     int("theme", p.theme);
     int("tapAction", p.tap_action);
     int("swipeRight", p.swipe_right);
-    int(SWIPE_LEFT, p.swipe_left);
+    int("swipeLeft", p.swipe_left);
+    int("playbackEngine", p.playback_engine);
     let mut float = |k: &str, v: f32| put.insert(k.to_string(), PrefValue::Decimal { v });
     float("preampDb", p.preamp_db);
     float("untaggedGainDb", p.untagged_gain_db);
@@ -809,11 +779,7 @@ pub fn save(p: &StoredPrefs) -> PrefsWrite {
     text("pinnedPlaylists", p.pinned_playlists.join("\n"));
     text("listPrefs", serde_json::to_string(&p.list_prefs).unwrap_or_else(|_| "{}".to_string()));
     put.insert("accent".to_string(), PrefValue::Big { v: p.accent });
-    let mut remove: Vec<String> = ["serverUrl", "user", "password"].into_iter().map(str::to_string).collect();
-    if p.eq_preamp_db.is_none() {
-        remove.push("eqPreampDb".to_string());
-    }
-    PrefsWrite { put, remove }
+    put
 }
 
 /// What a change by name did: the settings after it, whether the stream cache has to shrink to a new
@@ -918,6 +884,8 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "profilePerOutput" => n.profile_per_output = on,
         "weightedShuffle" => n.weighted_shuffle = on,
         "skipExplicit" => n.skip_explicit = on,
+        "playbackEngine" => n.playback_engine = named(&PLAYBACK_ENGINE_NAMES)?,
+        "coreCovers" => n.core_covers = on,
         "skipOnError" => n.skip_on_error = on,
         "theme" => n.theme = named(&THEME_MODES)?,
         "accent" => n.accent = value.trim().parse::<i64>().unwrap_or(p.accent),
@@ -1220,8 +1188,7 @@ pub fn servers_remove(list: ServerList, id: &str) -> ServerList {
     ServerList { servers, active_server_id }
 }
 
-/// Whose rows in the app's database are open: the active profile's, and "default" before there is
-/// one (the id the single server from before profiles was given).
+/// Whose rows in the app's database are open: the active profile's, and "default" before there is one.
 pub fn server_db_id(active_server_id: &str) -> String {
     if active_server_id.is_empty() { "default".into() } else { active_server_id.to_string() }
 }
@@ -1407,14 +1374,14 @@ pub fn eq_reset_bands(sound: SoundSettings) -> SoundSettings {
     SoundSettings { eq_bands: graphic(), eq_preamp_db: None, ..sound }
 }
 
-/// Which of the app's own files are the app's database: `nori.db` (and an old `nori-<id>.db`) with its write-ahead
-/// log and shared memory. Indices into `names`.
+/// Which of the app's own files are the app's database: `nori.db` with its write-ahead log and shared
+/// memory. Indices into `names`.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn storage_index_files(names: Vec<String>) -> Vec<u32> {
     names
         .iter()
         .enumerate()
-        .filter(|(_, n)| n.starts_with("nori") && (n.ends_with(".db") || n.ends_with("-wal") || n.ends_with("-shm")))
+        .filter(|(_, n)| n.strip_prefix(crate::client::DB_FILE).is_some_and(|rest| ["", "-wal", "-shm"].contains(&rest)))
         .map(|(i, _)| i as u32)
         .collect()
 }
@@ -1462,16 +1429,13 @@ mod tests {
         p.list_prefs = [("albums".to_string(), "grid".to_string())].into();
         p.accent = 0xFF112233;
         p.theme = 2;
-        let w = save(&p);
-        assert!(w.remove.contains(&"serverUrl".to_string()) && !w.remove.contains(&"eqPreampDb".to_string()));
-        assert_eq!(load(&w.put), p);
-        let w = save(&StoredPrefs { eq_preamp_db: None, ..p });
-        assert!(w.remove.contains(&"eqPreampDb".to_string()) && !w.put.contains_key("eqPreampDb"));
+        assert_eq!(load(&save(&p)), p);
+        assert!(!save(&StoredPrefs { eq_preamp_db: None, ..p }).contains_key("eqPreampDb"));
     }
 
     #[test]
     fn values_out_of_range_are_brought_back() {
-        let p = load(&raw(&[("parallelDownloads", n(40)), ("coversAhead", n(-1)), ("replayGain", n(9)), ("theme", n(7)), ("tapAction", n(-2)), (SWIPE_LEFT, n(5))]));
+        let p = load(&raw(&[("parallelDownloads", n(40)), ("coversAhead", n(-1)), ("replayGain", n(9)), ("theme", n(7)), ("tapAction", n(-2)), ("swipeLeft", n(5))]));
         assert_eq!(p.parallel_downloads, 10);
         assert_eq!(p.covers_ahead, 0);
         assert_eq!(p.replay_gain, 3);
@@ -1484,28 +1448,14 @@ mod tests {
     }
 
     #[test]
-    fn the_old_single_server_becomes_the_default_profile() {
-        let p = load(&raw(&[("serverUrl", t("http://10.0.2.2:4533")), ("user", t("admin")), ("password", t("pw"))]));
-        assert_eq!(p.active_server_id, "default");
-        assert_eq!(p.servers.len(), 1);
-        assert_eq!((p.servers[0].id.as_str(), p.servers[0].user.as_str(), p.servers[0].password.as_str()), ("default", "admin", "pw"));
-        // Once there is a list, the old keys are ignored.
-        let p = load(&raw(&[("serverUrl", t("http://old")), ("servers", t("[]")), ("activeServerId", t(""))]));
-        assert!(p.servers.is_empty());
-        assert_eq!(p.active_server_id, "");
+    fn the_server_list_reads_whole_or_not_at_all() {
+        let p = load(&raw(&[("servers", t(r#"[{"id":"a","legacyAuth":true,"altMaxBitRate":128}]"#)), ("activeServerId", t("a"))]));
+        assert_eq!((p.servers.len(), p.active_server_id.as_str()), (1, "a"));
+        assert!(p.servers[0].legacy_auth);
+        assert_eq!(p.servers[0].alt_max_bit_rate, 128);
         // A list that does not read, or a server without an id, loses the whole list.
         assert!(load(&raw(&[("servers", t(r#"[{"id":"a"},{"name":"x"}]"#))])).servers.is_empty());
         assert!(load(&raw(&[("servers", t("nope"))])).servers.is_empty());
-        let old = load(&raw(&[("servers", t(r#"[{"id":"a","legacyAuth":"true","altMaxBitRate":"128"}]"#))]));
-        assert!(old.servers[0].legacy_auth);
-        assert_eq!(old.servers[0].alt_max_bit_rate, 128);
-    }
-
-    #[test]
-    fn the_left_swipe_moved_to_a_new_key() {
-        assert_eq!(load(&raw(&[("swipeLeft", n(2))])).swipe_left, 3);
-        assert_eq!(load(&raw(&[(SWIPE_LEFT, n(2))])).swipe_left, 2);
-        assert!(save(&StoredPrefs::default()).put.contains_key(SWIPE_LEFT));
     }
 
     #[test]
@@ -1554,15 +1504,13 @@ mod tests {
     }
 
     #[test]
-    fn a_sound_is_read_forgivingly() {
+    fn a_sound_takes_defaults_for_what_is_missing() {
         let s = sound_from("{}").unwrap();
         assert_eq!(s.eq_bands, graphic());
         assert_eq!(s.limiter_threshold_db, -1.0);
         assert_eq!(s.eq_preamp_db, None);
         assert_eq!(sound_from(r#"{"replayGain":7}"#).unwrap().replay_gain, 3);
         assert_eq!(sound_from(r#"{"replayGain":-1}"#).unwrap().replay_gain, 0);
-        assert_eq!(sound_from(r#"{"crossfeedDb":"2.5","eqEnabled":"TRUE"}"#).unwrap().crossfeed_db, 2.5);
-        assert!(sound_from(r#"{"eqEnabled":"TRUE"}"#).unwrap().eq_enabled);
         assert_eq!(sound_from(r#"{"eqPreampDb":"x"}"#), None, "a pre-amp that is not a number");
         assert_eq!(sound_from(r#"{"eqPreampDb":null}"#), None);
         assert_eq!(sound_from("not json"), None);
@@ -1583,6 +1531,11 @@ mod tests {
         assert!(set_by_name(&p, "limiter", "TRUE").unwrap().prefs.limiter);
         assert!(set_by_name(&p, "mono", "1").unwrap().prefs.mono);
         assert!(!set_by_name(&StoredPrefs { mono: true, ..p.clone() }, "mono", "yes").unwrap().prefs.mono);
+        assert_eq!(set_by_name(&p, "playbackEngine", "rust").unwrap().prefs.playback_engine, 1, "tools/app.sh set playbackEngine rust");
+        assert_eq!(load(&save(&StoredPrefs { playback_engine: 1, ..p.clone() })).playback_engine, 1, "kept");
+        assert!(p.core_covers && load(&HashMap::new()).core_covers, "covers are decoded in the core unless switched off");
+        assert!(!set_by_name(&p, "coreCovers", "false").unwrap().prefs.core_covers);
+        assert!(!load(&save(&StoredPrefs { core_covers: false, ..p.clone() })).core_covers, "kept");
         assert_eq!(set_by_name(&p, "parallelDownloads", "99").unwrap().prefs.parallel_downloads, 10);
         assert_eq!(set_by_name(&p, "coversAhead", "x").unwrap().prefs.covers_ahead, 3, "unreadable keeps the value");
         let cache = set_by_name(&p, "cacheMb", "10").unwrap();
@@ -1812,7 +1765,7 @@ mod tests {
 
     #[test]
     fn index_files_are_the_databases() {
-        let names = ["nori-abc.db", "nori-abc.db-wal", "nori-abc.db-shm", "nori.db-journal", "certs", "other.db", "nori-x.db.bak"].map(String::from).to_vec();
+        let names = ["nori.db", "nori.db-wal", "nori.db-shm", "nori.db-journal", "certs", "other.db", "nori.db.bak"].map(String::from).to_vec();
         assert_eq!(storage_index_files(names), [0, 1, 2]);
     }
 }

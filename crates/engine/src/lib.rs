@@ -10,8 +10,10 @@
 pub mod demux;
 mod engine;
 pub mod library;
+mod mp4;
 pub mod output;
 pub mod source;
+pub mod store;
 pub mod wav;
 
 #[cfg(feature = "core")]
@@ -23,8 +25,9 @@ mod no_alloc;
 pub use engine::{Config, Engine, Event, Settings, State, Status};
 pub use library::{Library, Located, Source, Sources};
 pub use nori_player::pipeline::{App, Queue, Sound};
-pub use output::{AudioOutput, Feed, OutputFormat};
+pub use output::{AudioOutput, Device, DeviceWatch, Feed, OutputFormat, OutputKind};
 pub use source::{Body, ByteSource, Loader, Window};
+pub use store::{Order, Recent, Store};
 pub use wav::WavOutput;
 
 /// A playlist kept by the client and shared with the engine: edit it, then [`Engine::queue_changed`].

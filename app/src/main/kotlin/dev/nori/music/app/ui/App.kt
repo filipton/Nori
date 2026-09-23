@@ -234,9 +234,12 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"parkedId":"${dev.nori.music.ffi.playlistBridgeState().parked.orEmpty()}","songId":"${dev.nori.music.ffi.playlistBridgeState().current.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.nori.music.playback.Equalizer.active != null},"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
-                    """"mixing":${dev.nori.music.playback.TransitionSink.mixing},""" +
+                    // Whichever player plays: the Rust one answers from its own engine and output.
+                    dev.nori.music.playback.PlaybackService.rustPlayer.let { r ->
+                        """"engine":"${if (r != null) "rust" else "exo"}","mixing":${r?.mixing ?: dev.nori.music.playback.TransitionSink.mixing},"""
+                    } +
                     """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.downloadSpeedEta()[1]},""" +
-                    """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten},""" +
+                    """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten},""" +
                     // Everything the app's Java side has allocated since it started, for allocation checks.
                     """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
                     dev.nori.music.Nori.get(context).dac.state.value.let { d ->
@@ -259,6 +262,11 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                 dev.nori.music.app.TestHooks.set = null
                 dev.nori.music.app.TestHooks.play = null
             }
+        }
+
+        // The perf build's recorder starts a new stretch when the player goes up or away. See PerfHooks.
+        dev.nori.music.app.PerfHooks.recorder?.let { r ->
+            LaunchedEffect(sheet, r) { androidx.compose.runtime.snapshotFlow { sheet.isOpen }.collect(r::playerOpen) }
         }
 
         // Read from a snapshot observer, not in composition, so a request does not recompose the app.
@@ -329,6 +337,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     page("smart/{id}") { SmartScreen(it.arguments!!.getString("id")!!, actions) }
                     page("smartEdit/{id}") { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) }
                     page("stats") { StatsScreen() }
+                    page("perf") { dev.nori.music.app.PerfHooks.recorder?.Page() }
                     page("downloads") { DownloadsScreen(actions) }
                     page("folder/{id}") { FolderScreen(it.arguments!!.getString("id")!!, actions) }
                     page("decade/{year}") { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) }

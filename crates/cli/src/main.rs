@@ -8,26 +8,26 @@
 //! ```
 //!
 //! Without `--wav` it plays on the default sound card and reads commands: `play`, `pause`, `next`,
-//! `prev`, `seek <s>`, `crossfade <s>|off`, `automix on|off`, `pos`, `positions on|off`, `search <q>`,
-//! `queue`, `quit`. With `--wav` it renders the queue to a file, as a sound card would have played it,
-//! and exits at the end.
+//! `prev`, `seek <s>`, `crossfade <s>|off`, `automix on|off`, `gain off|track|album|auto`, `pos`,
+//! `positions on|off`, `search <q>`, `queue`, `quit`. With `--wav` it renders the queue to a file, as a
+//! sound card would have played it, and exits at the end.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreQueue};
-use nori_engine::{AudioOutput, Config, Engine, Event, State, WavOutput};
+use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
+use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, State, Store, WavOutput};
 use nori_http::Http;
 use nori_output_cpal::CpalOutput;
 use norimusic::client::{Client, NetProfile};
 use norimusic::settings::StoredPrefs;
-use norimusic::settings_store::{settings_open, settings_put, APPLY_AUDIO, REPLAN};
+use norimusic::settings_store::{settings_open, settings_put, APPLY_AUDIO, APPLY_GAIN, REPLAN};
 use norimusic::transport::Transport;
 use norimusic::{Core, Param, ServerConfig, Song};
 
@@ -55,6 +55,16 @@ struct Args {
     automix: bool,
     /// Crossfade between songs of one album played in order too (the setting keeps them gapless).
     mix_albums: bool,
+    /// ReplayGain: off, track, album or auto (the setting's own numbering, 0 to 3).
+    replay_gain: Option<i32>,
+    /// High quality output: float from the decoder to the device (or the file) when it takes it.
+    hi_res: bool,
+    /// Download the songs found before playing them.
+    download: bool,
+    /// No network: no login, audio never asked for, and the queue is the downloaded songs.
+    offline: bool,
+    /// The desktop's media controls (MPRIS, Linux).
+    mpris: bool,
     wav: Option<PathBuf>,
     pace: f64,
     device: Option<String>,
@@ -63,11 +73,18 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: nori-cli --url URL --user USER --password PASSWORD [--search QUERY] [--songs N] [--start SECONDS]\n\
-         \x20               [--crossfade SECONDS] [--automix] [--mix-albums] [--wav OUT.wav [--pace X]] [--device NAME] [--devices]\n\
+         \x20               [--crossfade SECONDS] [--automix] [--mix-albums] [--replay-gain off|track|album|auto] [--hi-res]\n\
+         \x20               [--download] [--offline] [--mpris]\n\
+         \x20               [--wav OUT.wav [--pace X]] [--device NAME] [--devices]\n\
          \x20               [--data DIR]\n\
          The url, user and password may also come from NORI_URL, NORI_USER and NORI_PASSWORD."
     );
     std::process::exit(2)
+}
+
+/// A ReplayGain mode as the setting numbers it.
+fn gain_mode(v: &str) -> Option<i32> {
+    ["off", "track", "album", "auto"].iter().position(|m| *m == v).map(|m| m as i32)
 }
 
 fn args() -> Args {
@@ -83,6 +100,11 @@ fn args() -> Args {
         crossfade: None,
         automix: false,
         mix_albums: false,
+        replay_gain: None,
+        hi_res: false,
+        download: false,
+        offline: false,
+        mpris: false,
         wav: None,
         pace: 16.0,
         device: None,
@@ -101,6 +123,11 @@ fn args() -> Args {
             "--crossfade" => a.crossfade = Some(v().parse().unwrap_or_else(|_| usage())),
             "--automix" => a.automix = true,
             "--mix-albums" => a.mix_albums = true,
+            "--replay-gain" => a.replay_gain = Some(gain_mode(&v()).unwrap_or_else(|| usage())),
+            "--hi-res" => a.hi_res = true,
+            "--download" => a.download = true,
+            "--offline" => a.offline = true,
+            "--mpris" => a.mpris = true,
             "--wav" => a.wav = Some(v().into()),
             "--pace" => a.pace = v().parse().unwrap_or_else(|_| usage()),
             "--device" => a.device = Some(v()),
@@ -119,14 +146,32 @@ fn args() -> Args {
     a
 }
 
+/// The audio side of the network: every request counted, and none made at all when offline.
+struct Audio {
+    http: Arc<Http>,
+    offline: bool,
+    requests: AtomicU64,
+}
+
+impl ByteSource for Audio {
+    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+        if self.offline {
+            return Err("offline".into());
+        }
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.http.open(url, from)
+    }
+}
+
 /// The client and everything it keeps.
 struct Cli {
     core: Arc<Core>,
     http: Arc<Http>,
     prefs: StoredPrefs,
-    engine: Engine,
+    engine: Arc<Engine>,
     /// The queue as it was last set, for titles.
     songs: Vec<Song>,
+    downloader: Arc<Downloader>,
 }
 
 impl Cli {
@@ -148,12 +193,29 @@ impl Cli {
         self.engine.play_at(0, start_ms);
     }
 
+    /// Queues `songs` for download and starts fetching them.
+    fn download(&self, songs: &[Song]) {
+        match self.core.download_queue(songs.to_vec()) {
+            Ok(q) => println!("downloading {} ({} asked again)", q.fresh.len(), q.again.len()),
+            Err(e) => println!("download failed: {e}"),
+        }
+        self.downloader.start(self.prefs.parallel_downloads.max(1) as usize);
+    }
+
+    /// The settings as the core keeps them now: a device's own sound may have been loaded since.
+    fn kept(&self) -> StoredPrefs {
+        norimusic::settings_store::settings_current().unwrap_or_else(|| self.prefs.clone())
+    }
+
     /// New settings: kept by the core, and whatever they change applied.
     fn put(&mut self, prefs: StoredPrefs) {
         let effects = settings_put(prefs.clone());
         self.prefs = prefs;
         if effects & APPLY_AUDIO != 0 {
             self.engine.set_settings(settings(&self.prefs));
+        }
+        if effects & APPLY_GAIN != 0 {
+            self.engine.gain_changed();
         }
         if effects & REPLAN != 0 {
             self.engine.replan();
@@ -180,41 +242,61 @@ fn main() {
     let http = Http::new();
     let client = Client::new(core.clone(), http.clone());
     client.set_profile(NetProfile { url: a.url.clone(), ..Default::default() });
-    if let Err(e) = block_on(client.login(config, String::new())) {
+    if a.offline {
+        // Nothing is asked of the server: the songs are the ones on the disk.
+    } else if let Err(e) = block_on(client.login(config, String::new())) {
         eprintln!("login failed: {e}");
         std::process::exit(1);
     }
-    let mut prefs = settings_open(db, HashMap::new()).unwrap_or_else(|e| panic!("the settings: {e}"));
+    let mut prefs = settings_open(db).unwrap_or_else(|e| panic!("the settings: {e}"));
     prefs.crossfade_sec = a.crossfade.unwrap_or(prefs.crossfade_sec);
     prefs.auto_mix = a.automix;
     prefs.crossfade_keep_albums = !a.mix_albums;
+    prefs.replay_gain = a.replay_gain.unwrap_or(prefs.replay_gain);
+    prefs.hi_res = a.hi_res;
     settings_put(prefs.clone());
 
     let output: Box<dyn AudioOutput> = match (&a.wav, &a.device) {
+        (Some(path), _) if a.hi_res => Box::new(WavOutput::new(path, a.pace).in_float()),
         (Some(path), _) => Box::new(WavOutput::new(path, a.pace)),
         (None, Some(name)) => Box::new(CpalOutput::with_device(name)),
         (None, None) => Box::new(CpalOutput::new()),
     };
     let (tx, events): (_, Receiver<Event>) = channel();
-    let library = CoreLibrary { client: client.clone(), bytes: http.clone(), metered: false };
-    let engine = Engine::start(library, CoreApp::new(), CoreQueue, output, Config { memory_mb: 256, settings: settings(&prefs) }, move |e| {
+    // Songs on disk: the stream cache (held to the setting's size) and downloads.
+    let store = Store::open(a.data.join("music"), prefs.cache_mb.max(0) as u64 * 1024 * 1024, Box::new(CoreOrder)).unwrap_or_else(|e| panic!("the music directory: {e}"));
+    let audio = Arc::new(Audio { http: http.clone(), offline: a.offline, requests: AtomicU64::new(0) });
+    let downloader = Downloader::new(core.clone(), client.clone(), audio.clone(), store.clone());
+    // With AutoMix on, the songs coming up that are on the disk are measured ahead.
+    let app = CoreApp::new().measuring(Measurer::new(core.clone(), client.clone(), store.clone())).per_device(core.clone());
+    let library = CoreLibrary { client: client.clone(), bytes: audio.clone(), metered: false, store: Some(store) };
+    let engine = Engine::start(library, app, CoreQueue, output, Config { memory_mb: 256, settings: settings(&prefs), ..Config::default() }, move |e| {
         let _ = tx.send(e);
     });
-    let mut cli = Cli { core, http, prefs, engine, songs: Vec::new() };
-    println!("logged in to {} as {}; crossfade {} s, AutoMix {}", a.url, a.user, cli.prefs.crossfade_sec, if cli.prefs.auto_mix { "on" } else { "off" });
+    let mut cli = Cli { core, http, prefs, engine: Arc::new(engine), songs: Vec::new(), downloader };
+    let how = if a.offline { "offline" } else { "logged in" };
+    println!("{how} to {} as {}; crossfade {} s, AutoMix {}", a.url, a.user, cli.prefs.crossfade_sec, if cli.prefs.auto_mix { "on" } else { "off" });
 
-    if let Some(q) = &a.search {
-        match cli.search(q) {
-            Ok(found) if !found.is_empty() => {
-                let found: Vec<Song> = found.into_iter().take(a.songs).collect();
-                for i in 0..found.len() {
-                    println!("  {i}: {}", title(&found, i));
-                }
-                cli.queue(found, (a.start_s * 1000.0) as i64);
+    let found = match (&a.search, a.offline) {
+        (_, true) => Ok(cli.core.downloads(true).unwrap_or_default()),
+        (Some(q), false) => cli.search(q),
+        (None, false) => Ok(Vec::new()),
+    };
+    match found {
+        Ok(found) if !found.is_empty() => {
+            let found: Vec<Song> = found.into_iter().take(a.songs).collect();
+            for i in 0..found.len() {
+                println!("  {i}: {}", title(&found, i));
             }
-            Ok(_) => println!("nothing found for {q:?}"),
-            Err(e) => println!("search failed: {e}"),
+            if a.download {
+                cli.download(&found);
+                cli.downloader.wait();
+            }
+            cli.queue(found, (a.start_s * 1000.0) as i64);
         }
+        Ok(_) if a.search.is_some() || a.offline => println!("nothing found"),
+        Ok(_) => {}
+        Err(e) => println!("search failed: {e}"),
     }
 
     if a.wav.is_some() {
@@ -233,7 +315,7 @@ fn main() {
             }
         }
         let s = cli.engine.status();
-        println!("ended; underruns {}", s.underruns);
+        println!("ended; underruns {}; audio requests {}", s.underruns, audio.requests.load(Ordering::Relaxed));
         cli.engine.stop();
         return;
     }
@@ -241,13 +323,25 @@ fn main() {
     // Playing: events are printed as they come, commands read from the terminal.
     let songs = Arc::new(shown::Titles::default());
     let shown = songs.clone();
+    // The desktop's media controls, when asked for.
+    let desktop = a.mpris.then(|| {
+        let controls = Arc::new(desktop::Desktop { engine: cli.engine.clone(), titles: songs.clone() });
+        nori_mpris::Mpris::start("nori", controls).map_err(|e| println!("no media controls: {e}")).ok()
+    });
+    let desktop = desktop.flatten();
     std::thread::spawn(move || {
         for e in events {
+            if matches!(e, Event::Song { .. } | Event::State(_)) {
+                if let Some(d) = &desktop {
+                    d.changed();
+                }
+            }
             match e {
                 Event::Song { index, .. } => println!("now: {}", shown.title(index)),
                 Event::State(s) => println!("{s:?}"),
                 Event::Position { index, ms } => println!("  {} at {}", shown.title(index), clock(ms)),
                 Event::Error { id, message } => println!("error: {id} {message}"),
+                Event::Output { name } => println!("output: {name}"),
             }
         }
     });
@@ -267,12 +361,20 @@ fn main() {
             },
             "crossfade" => {
                 let secs = if rest == "off" { 0 } else { rest.parse().unwrap_or(6) };
-                let p = StoredPrefs { crossfade_sec: secs, ..cli.prefs.clone() };
+                let p = StoredPrefs { crossfade_sec: secs, ..cli.kept() };
                 cli.put(p);
                 println!("crossfade {secs} s");
             }
+            "gain" => match gain_mode(rest) {
+                Some(m) => {
+                    let p = StoredPrefs { replay_gain: m, ..cli.kept() };
+                    cli.put(p);
+                    println!("ReplayGain {rest}");
+                }
+                None => println!("gain off|track|album|auto"),
+            },
             "automix" => {
-                let p = StoredPrefs { auto_mix: rest != "off", ..cli.prefs.clone() };
+                let p = StoredPrefs { auto_mix: rest != "off", ..cli.kept() };
                 cli.put(p);
                 println!("AutoMix {}", if cli.prefs.auto_mix { "on" } else { "off" });
             }
@@ -293,6 +395,10 @@ fn main() {
                 Ok(_) => println!("nothing found"),
                 Err(e) => println!("search failed: {e}"),
             },
+            "download" => {
+                let songs = cli.songs.clone();
+                cli.download(&songs);
+            }
             "queue" => {
                 for i in 0..cli.songs.len() {
                     println!("  {i}: {}", title(&cli.songs, i));
@@ -300,7 +406,7 @@ fn main() {
             }
             "q" | "quit" | "exit" => break,
             "" => {}
-            _ => println!("play, pause, next, prev, seek <s>, crossfade <s>|off, automix on|off, pos, positions on|off, search <q>, queue, quit"),
+            _ => println!("play, pause, next, prev, seek <s>, crossfade <s>|off, automix on|off, gain off|track|album|auto, pos, positions on|off, search <q>, queue, quit"),
         }
     }
     cli.engine.stop();
@@ -320,6 +426,58 @@ mod shown {
 
         pub fn title(&self, index: usize) -> String {
             super::title(&self.0.lock().unwrap(), index)
+        }
+
+        pub fn song(&self, index: usize) -> Option<norimusic::Song> {
+            self.0.lock().unwrap().get(index).cloned()
+        }
+    }
+}
+
+/// The desktop's media controls drive the engine, and read what plays from it.
+mod desktop {
+    use std::sync::Arc;
+
+    use nori_engine::{Engine, State};
+    use nori_mpris::{Controls, Now};
+
+    pub struct Desktop {
+        pub engine: Arc<Engine>,
+        pub titles: Arc<super::shown::Titles>,
+    }
+
+    impl Controls for Desktop {
+        fn play(&self) {
+            self.engine.play();
+        }
+        fn pause(&self) {
+            self.engine.pause();
+        }
+        fn toggle(&self) {
+            self.engine.toggle();
+        }
+        fn next(&self) {
+            self.engine.next();
+        }
+        fn previous(&self) {
+            self.engine.previous();
+        }
+        fn seek(&self, ms: i64) {
+            self.engine.seek(ms);
+        }
+        fn now(&self) -> Now {
+            let s = self.engine.status();
+            let song = s.index.and_then(|i| self.titles.song(i)).unwrap_or_default();
+            Now {
+                playing: s.state == State::Playing,
+                loaded: s.state == State::Paused,
+                index: s.index,
+                title: song.title,
+                artist: song.artist,
+                album: song.album,
+                length_ms: song.duration as i64 * 1000,
+                position_ms: s.position_now(),
+            }
         }
     }
 }

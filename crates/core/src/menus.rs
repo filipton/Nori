@@ -212,6 +212,14 @@ pub fn download_entry(songs: u32, missing: u32) -> DownloadEntry {
     }
 }
 
+/// The songs of a page not downloaded yet, as positions in `songs` in order: what a [`download_entry`]
+/// of [`DownloadAct::Missing`] fetches. `done` answers for one song id.
+///
+/// Twin of the `missing` list in `downloadEntry` (app/.../ui/DetailScreens.kt), which Android keeps.
+pub fn download_missing<'a>(songs: impl IntoIterator<Item = &'a str>, done: impl Fn(&str) -> bool) -> Vec<usize> {
+    songs.into_iter().enumerate().filter(|(_, id)| !done(id)).map(|(i, _)| i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

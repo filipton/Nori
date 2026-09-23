@@ -71,8 +71,8 @@ impl Sound {
 
 /// What the sink writes into and reads its playhead from: an AudioTrack's buffer on a phone, a ring a
 /// sound card pulls from on a desktop, a list of pieces on a virtual clock in the tests. Everything is
-/// in the sink's format (16-bit interleaved at the stream's rate); the track converts if its device
-/// wants something else.
+/// in the sink's format (interleaved at the stream's rate, 16-bit or float as the stream comes); the
+/// track converts if its device wants something else.
 pub trait Track {
     /// The sink's format from now on (a new stream shape, or the sink built again).
     fn open(&mut self, format: Format);
@@ -89,6 +89,10 @@ pub trait Track {
     fn flush(&mut self);
     fn play(&mut self);
     fn pause(&mut self);
+    /// A song starts where the track reaches `media` frames past the last flush, and plays at volume
+    /// `level` (its ReplayGain) from that frame on. Told before any of the song is written, so a track
+    /// that applies it can put it on the exact frame.
+    fn song_starts(&mut self, _media: f64, _level: f32) {}
 }
 
 /// media3's AudioSink with nori's processors in it, over a [`Track`]. Its clock is media3's: the
@@ -131,6 +135,8 @@ pub struct Sink<T: Track> {
     carry: f64,
     samples_in: Vec<i16>,
     samples_out: Vec<i16>,
+    floats_in: Vec<f32>,
+    floats_out: Vec<f32>,
     stage: Vec<u8>,
     stage2: Vec<u8>,
     /// The source has ended: running dry now is the end of the music, not a gap.
@@ -167,6 +173,8 @@ impl<T: Track> Sink<T> {
             carry: 0.0,
             samples_in: Vec::new(),
             samples_out: Vec::new(),
+            floats_in: Vec::new(),
+            floats_out: Vec::new(),
             stage: Vec::new(),
             stage2: Vec::new(),
             source_ended: false,
@@ -203,6 +211,13 @@ impl<T: Track> Sink<T> {
         self.track.flush();
     }
 
+    /// Frames of the song the track will have played when the clock reads `pts_us`, counted from the
+    /// last flush as [`Track::played_media`] counts them; none before the first buffer.
+    pub fn media_frames(&self, pts_us: i64) -> Option<f64> {
+        let f = self.format.filter(|_| !self.needs_init)?;
+        Some((pts_us - self.start_media_us) as f64 * f.rate as f64 / 1_000_000.0)
+    }
+
     pub fn queued_us(&self) -> i64 {
         self.format.map_or(0, |f| f.us(self.track.queued_bytes()))
     }
@@ -221,9 +236,10 @@ impl<T: Track> Sink<T> {
 
     fn build_stages(&mut self) {
         let Some(f) = self.format else { return };
-        self.silence = self.skip_silence.then(|| SilenceSkipper::new(f.rate, f.channels));
+        // media3's silence skipping takes 16-bit audio only, and stands aside for float.
+        self.silence = (self.skip_silence && f.encoding == Encoding::Pcm16).then(|| SilenceSkipper::new(f.rate, f.channels));
         self.speed = speed_active(self.speed_pitch.0, self.speed_pitch.1).then(|| {
-            let mut s = SpeedPitch::new(f.rate, f.channels, Encoding::Pcm16);
+            let mut s = SpeedPitch::new(f.rate, f.channels, f.encoding);
             s.set(self.speed_pitch.0, self.speed_pitch.1);
             s.flush();
             s
@@ -322,7 +338,16 @@ impl<T: Track> Sink<T> {
         self.carry += frames as f64;
         let mut data = std::mem::take(&mut self.stage);
         data.clear();
+        let float = self.format.is_some_and(|f| f.encoding == Encoding::Float);
         match self.eq.as_mut().filter(|e| !e.is_identity()) {
+            Some(eq) if float => {
+                self.floats_in.clear();
+                self.floats_in.extend(input.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
+                self.floats_out.resize(self.floats_in.len(), 0.0);
+                eq.process_f32(&self.floats_in, &mut self.floats_out);
+                self.gain_reduction_db = self.gain_reduction_db.max(eq.gain_reduction_db());
+                data.extend(self.floats_out.iter().flat_map(|v| v.to_le_bytes()));
+            }
             Some(eq) => {
                 self.samples_in.clear();
                 self.samples_in.extend(input.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])));
@@ -506,15 +531,23 @@ impl<T: Track> Downstream for Sink<T> {
     }
 }
 
-/// One song opened for reading: decoded buffers of 16-bit interleaved samples, one at a time.
+/// One song opened for reading: decoded buffers of interleaved samples (16-bit, or float for high
+/// quality output), one at a time.
 pub trait Reading {
     fn format(&self) -> Format;
     /// The song's length, µs, as far as it is known (exactly, once it has been read to its end).
     fn duration_us(&self) -> i64;
-    /// Whether the next buffer can be read without waiting (its bytes have arrived). A reading that
-    /// is not ready is asked again on the next turn.
-    fn ready(&self) -> bool {
+    /// Whether the reading can go on without waiting: it is open (a platform may open a song whose
+    /// bytes are still on their way off its own thread) and the next buffer's bytes have arrived. A
+    /// reading that is not ready is asked again on the next turn, and nothing else is asked of it
+    /// before this has said yes once.
+    fn ready(&mut self) -> bool {
         true
+    }
+    /// Why the song will not play on: it could not be opened, or its bytes stopped coming for good
+    /// (it was read to its "end" early). Asked once it is ready, and once it is read to its end.
+    fn error(&self) -> Option<(PlaybackError, String)> {
+        None
     }
     /// The next buffer; false at the end of the song.
     fn fill(&mut self) -> bool;
@@ -547,6 +580,33 @@ pub trait App: Host {
     fn window(&mut self, window: Vec<WindowSong>, shuffling: bool);
     /// Measures what it has not measured of `ids`, the songs coming up.
     fn measure_ahead<S: Songs>(&mut self, _songs: &mut S, _ids: &[String]) {}
+    /// The music goes to another output device (`kind`, called `name` by the system): the name it is
+    /// known by, and the sound to play it with when the device has one of its own (a profile bound to
+    /// it). `None` when the app does not follow devices.
+    fn output_changed(&mut self, _kind: crate::outputs::OutputKind, _name: &str) -> Option<(String, Option<Sound>)> {
+        None
+    }
+    /// Songs were measured since this was last asked (by a job of the app's own, in the background):
+    /// a plan made without them is asked for again.
+    fn measured(&mut self) -> bool {
+        false
+    }
+    /// Whether the output forbids touching the samples (bit-perfect or high quality output): the
+    /// planner stands every transition down (`AudioPolicy::transitions_off`).
+    fn transitions_off(&mut self, _off: bool) {}
+    /// A song would not play: what to do, when the app keeps the run of failures itself (the core does,
+    /// `rules::queue_error`). `None` leaves it to the player's own count.
+    fn on_error(&mut self, _kind: PlaybackError, _has_next: bool) -> Option<OnError> {
+        None
+    }
+    /// Music is coming out of the output: a run of songs that would not play is broken. Not merely a
+    /// new song, since the skip a failure makes is one too.
+    fn playing(&mut self) {}
+    /// The volume song `id` (queue index `index`) plays at under ReplayGain, 0..1. A platform applies
+    /// it as its output's volume from the moment the song starts, as Android sets the player's.
+    fn gain(&mut self, _index: usize, _id: &str) -> f32 {
+        1.0
+    }
 }
 
 /// Where the playlist is kept: the player's own, or the core's.
@@ -555,6 +615,11 @@ pub trait Queue {
     /// The player moved to `index` by itself (a song ended, a jump).
     fn moved_to(&mut self, index: usize);
     fn set_repeat(&mut self, mode: u8);
+    /// Arriving on queue (list) index `index` now would skip straight past it: an explicit song, with
+    /// the user's setting to skip them and somewhere to go (the core's `playlist_transition`).
+    fn skips(&self, _index: usize) -> bool {
+        false
+    }
 }
 
 impl Queue for Playlist {
@@ -586,11 +651,21 @@ struct Reader<R> {
     r: R,
     pos: usize,
     ended: bool,
+    /// The last turn found its next buffer's bytes still on their way.
+    waiting: bool,
+}
+
+/// A song opened to be read from `from_ms` that is not ready yet: it starts reading once it is.
+struct Opening<R> {
+    index: usize,
+    from_ms: i64,
+    offset_us: i64,
+    r: R,
 }
 
 impl<R: Reading> Reader<R> {
     fn new(index: usize, offset_us: i64, r: R) -> Reader<R> {
-        Reader { index, offset_us, r, pos: 0, ended: false }
+        Reader { index, offset_us, r, pos: 0, ended: false, waiting: false }
     }
 
     fn fill(&mut self) -> bool {
@@ -625,6 +700,10 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     /// Whether the songs coming up are measured whenever the queue moves (with AutoMix on).
     pub measure_on_move: bool,
     reading: Option<Reader<S::Reading>>,
+    /// A song to read after a jump, a seek or a rebuild, still opening.
+    opening: Option<Opening<S::Reading>>,
+    /// Where the song being read started, until the output's clock has moved past it: music is heard.
+    heard_from: Option<i64>,
     /// The song after the one being read, opened as soon as that one is read to its end: which queue
     /// index, and what opening it gave.
     next: Option<(usize, Result<S::Reading, String>)>,
@@ -646,10 +725,16 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     /// The run of songs that would not play, and whether the user lets the player skip them.
     pub errors: ErrorRun,
     pub skip_on_error: bool,
-    /// A song that would not play, found while reading ahead; its error is raised when playback gets there.
-    failed: Option<(usize, String)>,
+    /// A song that would not play, found while reading ahead (or one that stopped half way); its error
+    /// is raised when playback gets there.
+    failed: Option<(usize, PlaybackError, String)>,
+    /// Playback stopped at this song because it would not play: nothing is read until a jump, and a
+    /// play tries the song again, as a platform's player does after an error.
+    stopped: Option<usize>,
     /// The last turn stopped at its budget of buffers with the output still taking them.
     hungry: bool,
+    /// The queue's ids as the player last followed it: an edit is read against them.
+    ids: Vec<String>,
 }
 
 impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
@@ -669,6 +754,8 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             read_ahead_us: READ_AHEAD_US,
             measure_on_move: true,
             reading: None,
+            opening: None,
+            heard_from: None,
             next: None,
             periods: Vec::new(),
             playing: false,
@@ -683,8 +770,11 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             errors: ErrorRun::new(),
             skip_on_error: true,
             failed: None,
+            stopped: None,
             hungry: false,
+            ids: Vec::new(),
         };
+        p.ids = p.queue.read(|q| q.ids().to_vec());
         p.sync_queue();
         p
     }
@@ -695,7 +785,22 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     }
 
     fn next_of(&self, i: usize) -> Option<usize> {
-        self.queue.read(|q| q.next_of(i, q.repeat()))
+        self.queue.read(|q| q.next_of(i, q.repeat())).map(|n| self.playable(n))
+    }
+
+    /// `i`, or the first song after it that arriving on would not skip.
+    fn playable(&self, i: usize) -> usize {
+        let mut at = i;
+        for _ in 0..self.queue.read(|q| q.len()) {
+            if !self.queue.skips(at) {
+                return at;
+            }
+            match self.queue.read(|q| q.next_of(at, q.repeat())) {
+                Some(n) if n != i => at = n,
+                _ => return at,
+            }
+        }
+        at
     }
 
     /// Calls into the engine as the JNI glue does: the output below fed in bursts, on this clock.
@@ -711,16 +816,53 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.call(|e, d, a| e.configure(d, a, s, t));
     }
 
-    /// Starts reading song `i` (opened as `r`, from `from_ms`) on a fresh timeline, after a flush.
-    fn start_reading(&mut self, i: usize, from_ms: i64, offset_us: i64, r: S::Reading) {
+    /// Song `i` (opened as `r`) is read from `from_ms` on a fresh timeline, after a flush: at once
+    /// when it is ready, or once it is. False when it failed at once (and the player has moved on).
+    fn begin(&mut self, i: usize, from_ms: i64, offset_us: i64, mut r: S::Reading) -> bool {
+        self.reading = None;
+        self.next = None;
+        self.opening = None;
+        // Where the player stands while the song opens; its length comes with it.
+        self.periods = vec![Period { index: i, offset_us, duration_us: 0 }];
+        self.position_us = offset_us + from_ms * 1000;
+        self.source_ended = false;
+        if r.ready() {
+            return self.start_reading(i, from_ms, offset_us, r);
+        }
+        self.opening = Some(Opening { index: i, from_ms, offset_us, r });
+        true
+    }
+
+    /// The song waiting to open, if it has: read from here on, or failed.
+    fn opened(&mut self) {
+        let Some(o) = self.opening.as_mut() else { return };
+        if !o.r.ready() {
+            return;
+        }
+        let o = self.opening.take().expect("checked");
+        self.start_reading(o.index, o.from_ms, o.offset_us, o.r);
+    }
+
+    /// Starts reading song `i` (opened as `r`, and ready) from `from_ms` on a fresh timeline; false
+    /// when it would not open after all.
+    fn start_reading(&mut self, i: usize, from_ms: i64, offset_us: i64, r: S::Reading) -> bool {
+        if let Some((kind, why)) = r.error() {
+            self.fail(i, kind, why);
+            return false;
+        }
         let (format, duration_us) = (r.format(), r.duration_us());
         self.reading = Some(Reader::new(i, offset_us, r));
         self.next = None;
         self.periods = vec![Period { index: i, offset_us, duration_us }];
         self.position_us = offset_us + from_ms * 1000;
+        self.heard_from = Some(self.position_us);
         self.source_ended = false;
         self.configure(i, format);
         self.engine.set_output_stream_offset_us(offset_us);
+        // A fresh timeline: the song's volume from its first frame.
+        let level = self.app.gain(i, &self.id_at(i));
+        self.sink.track.song_starts(0.0, level);
+        true
     }
 
     /// A timeline for a new start, past everything played so far.
@@ -734,20 +876,24 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.resume();
     }
 
-    /// Queue index `i` from `from_ms`, without touching whether it plays.
+    /// Queue index `i` from `from_ms`, without touching whether it plays. A song that arriving on skips
+    /// (an explicit one) gives way to the first after it that does not.
     pub fn jump(&mut self, i: usize, from_ms: i64) {
+        self.stopped = None;
+        let i = self.playable(i);
         let id = self.id_at(i);
         let r = match self.tracks.open(&id, from_ms) {
             Ok(r) => r,
-            Err(why) => return self.fail(i, why),
+            Err(why) => return self.fail(i, PlaybackError::Other, why),
         };
         let offset = self.fresh_offset();
         self.call(|e, _, a| e.flush(a));
         self.burst.restart();
         self.sink.flush();
         self.queue.moved_to(i);
-        self.start_reading(i, from_ms, offset, r);
-        self.set_current(i);
+        if self.begin(i, from_ms, offset, r) {
+            self.set_current(i);
+        }
     }
 
     pub fn resume(&mut self) {
@@ -757,6 +903,10 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     }
 
     pub fn pause(&mut self) {
+        // The place is taken from the clock as it stops: the last turn may have been a burst ago.
+        if self.playing {
+            self.follow_clock();
+        }
         self.burst.restart();
         self.sink.pause();
         self.playing = false;
@@ -767,6 +917,30 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
 
     pub fn playing(&self) -> bool {
         self.playing
+    }
+
+    /// Lets everything go that a long pause does not need - the engine's held audio, the output's
+    /// buffer, the song being read - and says where the player was (queue index, ms), for a
+    /// [`Player::jump`] there when music is asked for again. The output is opened again then.
+    pub fn release(&mut self) -> Option<(usize, i64)> {
+        // Where the ear is now: the last turn may have been a while before the pause.
+        let ended = self.source_ended;
+        let now = self.call(|e, d, a| e.position_us(d, a, ended));
+        if now != POSITION_NOT_SET {
+            self.position_us = now;
+        }
+        let at = self.current.map(|i| (i, self.position_ms()));
+        self.call(|e, _, a| e.reset(a));
+        self.burst.restart();
+        let (capacity, dsp) = (self.sink.capacity_us, self.sink.dsp);
+        self.sink.rebuild(capacity, dsp, self.sound.clone());
+        self.sink.set_stages(self.speed.0, self.speed.1, self.skip_silence);
+        self.reading = None;
+        self.opening = None;
+        self.next = None;
+        self.failed = None;
+        self.source_ended = false;
+        at
     }
 
     /// Next, as the button does it.
@@ -799,12 +973,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         let offset = self.periods.iter().find(|p| p.index == i).map_or_else(|| self.fresh_offset(), |p| p.offset_us);
         let r = match self.tracks.open(&self.id_at(i), ms) {
             Ok(r) => r,
-            Err(why) => return self.fail(i, why),
+            Err(why) => return self.fail(i, PlaybackError::Other, why),
         };
         self.call(|e, _, a| e.flush(a));
         self.burst.restart();
         self.sink.flush();
-        self.start_reading(i, ms, offset, r);
+        self.begin(i, ms, offset, r);
     }
 
     /// New sound settings. The equalizer follows them live; a processor joining or leaving the chain
@@ -866,11 +1040,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             let offset = self.fresh_offset();
             let r = match self.tracks.open(&self.id_at(i), at_ms.max(0)) {
                 Ok(r) => r,
-                Err(why) => return self.fail(i, why),
+                Err(why) => return self.fail(i, PlaybackError::Other, why),
             };
-            let f = r.format();
-            self.start_reading(i, at_ms.max(0), offset, r);
-            self.app.log(&format!("AudioTrack {} Hz buffer={}", f.rate, f.bytes(capacity)));
+            self.begin(i, at_ms.max(0), offset, r);
+            if let Some(f) = self.reading.as_ref().map(|r| r.r.format()) {
+                self.app.log(&format!("AudioTrack {} Hz buffer={}", f.rate, f.bytes(capacity)));
+            }
         }
     }
 
@@ -886,31 +1061,65 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.engine.replan();
     }
 
-    /// Song `i` would not play (`why`): skipped as the platform's error handler does
-    /// (`queue::ErrorRun`), or playback stops there.
-    fn fail(&mut self, i: usize, why: String) {
+    /// Song `i` would not play (`why`): skipped as the platform's error handler does (the app's run of
+    /// failures, or `queue::ErrorRun`), or playback stops there.
+    fn fail(&mut self, i: usize, kind: PlaybackError, why: String) {
         let id = self.id_at(i);
         let next = self.next_of(i);
         self.failures.push((id.clone(), why));
-        match self.errors.failed(PlaybackError::Other, false, false, self.skip_on_error, next.is_some()) {
-            OnError::Skip => {
+        let decided = match self.app.on_error(kind, next.is_some()) {
+            Some(d) => d,
+            None => self.errors.failed(kind, false, false, self.skip_on_error, next.is_some()),
+        };
+        match (decided, next) {
+            (OnError::Skip, Some(n)) => {
                 self.app.log(&format!("{id} will not play: skipped"));
-                self.jump(next.expect("a skip has somewhere to go"), 0);
+                self.jump(n, 0);
             }
             _ => {
                 self.app.log(&format!("{id} will not play: stopped"));
+                self.stopped = Some(i);
                 self.call(|e, _, a| e.reset(a));
                 self.sink.flush();
                 self.sink.pause();
                 self.playing = false;
                 self.reading = None;
+                self.opening = None;
                 self.next = None;
             }
         }
     }
 
-    /// The queue changed here (songs added, shuffle): the planner's window and the seek bar follow.
+    /// The queue changed here (songs added, removed or moved, shuffle): the planner's window and the
+    /// seek bar follow. What the player holds by queue index - the song it is on, the one being read,
+    /// the one opening, the streams handed to the output - is found again by its id, nearest to where
+    /// it was, since an edit before it moves it. A song opened ahead that is no longer the one after is
+    /// let go, and the right one opened when it is due, as media3 drops a period the edit replaced.
     pub fn queue_changed(&mut self) {
+        let ids = self.queue.read(|q| q.ids().to_vec());
+        let old = std::mem::replace(&mut self.ids, ids);
+        if !old.is_empty() && old != self.ids {
+            let new = &self.ids;
+            let at = |i: usize| moved(&old, new, i).unwrap_or_else(|| i.min(new.len().saturating_sub(1)));
+            self.current = self.current.map(at);
+            if let Some(r) = self.reading.as_mut() {
+                r.index = at(r.index);
+            }
+            if let Some(o) = self.opening.as_mut() {
+                o.index = at(o.index);
+            }
+            for p in self.periods.iter_mut() {
+                p.index = at(p.index);
+            }
+            if let Some(f) = self.failed.as_mut() {
+                f.0 = at(f.0);
+            }
+            let after = self.reading.as_ref().and_then(|r| self.next_of(r.index));
+            match self.next.as_mut() {
+                Some(n) if moved(&old, &self.ids, n.0).is_some_and(|i| Some(i) == after) => n.0 = after.expect("checked"),
+                _ => self.next = None,
+            }
+        }
         self.sync_queue();
     }
 
@@ -955,8 +1164,6 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         }
         let first = self.current.is_none();
         self.current = Some(i);
-        // A song that starts breaks a run of songs that would not.
-        self.errors.played();
         self.queue.moved_to(i);
         self.changes.push((self.now_ms, i));
         self.sync_queue();
@@ -976,6 +1183,11 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// The song the player is on: the stream the output's clock has reached.
     pub fn current(&self) -> Option<usize> {
         self.current
+    }
+
+    /// The song playback stopped at because it would not play; none once anything was jumped to.
+    pub fn stopped_at(&self) -> Option<usize> {
+        self.stopped
     }
 
     pub fn current_id(&self) -> Option<String> {
@@ -1033,18 +1245,31 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.hungry
     }
 
-    /// The song being read is waiting for its bytes.
+    /// The song being read is waiting for its bytes, or still opening.
     pub fn starved(&self) -> bool {
-        self.reading.as_ref().is_some_and(|r| !r.left() && !r.ended && !r.r.ready())
+        self.opening.is_some() || self.reading.as_ref().is_some_and(|r| !r.left() && !r.ended && r.waiting)
     }
 
     /// One turn of the renderer at `now_ms`: the position is read, and the output is offered audio
     /// until it refuses.
     pub fn turn(&mut self, now_ms: i64) {
         self.now_ms = now_ms;
+        self.opened();
         if !self.playing {
             return;
         }
+        self.follow_clock();
+        self.render();
+        // The error of a song that would not play surfaces once the song before it has played out, as
+        // media3 raises it when playback reaches it.
+        if self.failed.is_some() && self.ended() {
+            let (n, kind, why) = self.failed.take().expect("checked");
+            self.fail(n, kind, why);
+        }
+    }
+
+    /// The position from the output's clock, and the song it is in.
+    fn follow_clock(&mut self) {
         let ended = self.source_ended;
         let at = self.call(|e, d, a| e.position_us(d, a, ended));
         if at != POSITION_NOT_SET {
@@ -1052,13 +1277,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             if let Some(p) = self.periods.iter().rev().find(|p| self.position_us >= p.offset_us).copied() {
                 self.set_current(p.index);
             }
-        }
-        self.render();
-        // The error of a song that would not play surfaces once the song before it has played out, as
-        // media3 raises it when playback reaches it.
-        if self.failed.is_some() && self.ended() {
-            let (n, why) = self.failed.take().expect("checked");
-            self.fail(n, why);
+            // Music is heard: that breaks a run of songs that would not play.
+            if self.heard_from.is_some_and(|from| at > from) {
+                self.heard_from = None;
+                self.errors.played();
+                self.app.playing();
+            }
         }
     }
 
@@ -1106,11 +1330,19 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
                 return true;
             }
             if !r.ended {
-                if !r.r.ready() {
+                r.waiting = !r.r.ready();
+                if r.waiting {
                     return false;
                 }
                 if r.fill() {
                     continue;
+                }
+                // Its bytes stopped coming for good: the song fails where it stopped, once what was
+                // read of it has played.
+                if let Some((kind, why)) = r.r.error() {
+                    if self.failed.is_none() {
+                        self.failed = Some((r.index, kind, why));
+                    }
                 }
             }
             let (i, end) = (r.index, r.offset_us + r.r.duration_us());
@@ -1124,17 +1356,35 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
                 let opened = self.tracks.open(&self.id_at(n), 0);
                 self.next = Some((n, opened));
             }
-            if let Some((_, Err(why))) = &self.next {
-                self.failed = Some((n, why.clone()));
+            let failed = match self.next.as_mut() {
+                Some((_, Err(why))) => Some((PlaybackError::Other, why.clone())),
+                Some((_, Ok(r))) => r.ready().then(|| r.error()).flatten(),
+                None => None,
+            };
+            if let Some((kind, why)) = failed {
+                self.failed = Some((n, kind, why));
                 self.next = None;
                 return false;
             }
             if self.position_us == POSITION_NOT_SET || self.position_us < end - self.read_ahead_us {
                 return false;
             }
+            // Still opening, or its first bytes on their way: the song before plays out meanwhile, and
+            // the player is woken when they come.
+            if self.next.as_mut().is_some_and(|(_, r)| r.as_mut().is_ok_and(|r| !r.ready())) {
+                if let Some(r) = self.reading.as_mut() {
+                    r.waiting = true;
+                }
+                return false;
+            }
             let Some((_, Ok(next))) = self.next.take() else { unreachable!("an opened song is waiting") };
-            // The next song: its format announced, then its first buffer is a new stream.
+            // The next song: its format announced, then its first buffer is a new stream. Its volume
+            // comes in on the frame it starts at, set before any of it is written.
             let (format, duration_us) = (next.format(), next.duration_us());
+            if let Some(media) = self.sink.media_frames(end) {
+                let level = self.app.gain(n, &self.id_at(n));
+                self.sink.track.song_starts(media, level);
+            }
             self.configure(n, format);
             self.call(|e, d, a| e.handle_discontinuity(d, a));
             self.engine.set_output_stream_offset_us(end);
@@ -1142,4 +1392,11 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             self.periods.push(Period { index: n, offset_us: end, duration_us });
         }
     }
+}
+
+/// Where the song at index `i` of `old` is in `new`: the same id, nearest to where it was (a song can
+/// be in the queue twice). None when it was taken out.
+fn moved(old: &[String], new: &[String], i: usize) -> Option<usize> {
+    let id = old.get(i)?;
+    new.iter().enumerate().filter(|(_, n)| *n == id).map(|(j, _)| j).min_by_key(|&j| j.abs_diff(i))
 }

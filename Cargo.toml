@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/android", "crates/cli", "crates/core", "crates/engine", "crates/http", "crates/look", "crates/output-cpal", "crates/player", "crates/text", "crates/uniffi-bindgen", "crates/uniffi-jni-runtime"]
+members = ["crates/android", "crates/cli", "crates/core", "crates/covers", "crates/engine", "crates/http", "crates/look", "crates/mpris", "crates/output-cpal", "crates/player", "crates/text", "crates/uniffi-bindgen", "crates/uniffi-jni-runtime"]
 
 [workspace.package]
 version = "0.3.3"
@@ -23,5 +23,8 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 opt-level = 3
-panic = "abort"
+# Unwind, not abort: a panic in the core reached through uniffi then comes out in Kotlin as an exception
+# the caller can catch (runCatching around a measure, a page read), instead of ending the app. It costs
+# unwind tables in the library, nothing per call.
+panic = "unwind"
 strip = true

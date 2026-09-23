@@ -14,7 +14,8 @@
 //!   when a screen asked for them. Each is one timed sleep, computed, never a ticking timer.
 //!
 //! Paused, stopped or at the end of the queue, it sleeps until a command comes, and the device is
-//! paused so it can sleep too.
+//! paused so it can sleep too. Paused long enough (the core's idle release, five minutes on Android),
+//! it wakes once more to let the device and the song's bytes go; play opens them again where it was.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
@@ -22,13 +23,15 @@ use std::sync::Arc;
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
+use nori_player::pcm::Encoding;
 use nori_player::pipeline::{App, Player, Queue, Sound};
+use nori_player::policy::{audio_policy, AudioPrefs, OutputState};
 use nori_player::queue::previous_restarts;
-use nori_player::transport::{load_control, pause_fade, play_fade, switch_dip, Switch};
+use nori_player::transport::{load_control, pause_fade, play_fade, switch_dip, Switch, IDLE_RELEASE_MS};
 use parking_lot::Mutex;
 
 use crate::library::{Library, Sources};
-use crate::output::{AudioOutput, RingTrack, WAKE_LOW_US};
+use crate::output::{AudioOutput, Device, RingTrack, WAKE_LOW_US};
 
 /// What the settings ask of the sound, as the engine applies it.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,12 +42,25 @@ pub struct Settings {
     pub skip_silence: bool,
     /// The fade on play, pause and switches, ms (0 off).
     pub fade_ms: i32,
+    /// High quality output: songs decoded to float and taken to a device that plays float as they are,
+    /// with nothing touching the samples on the way (no equalizer, transitions or silence skipping,
+    /// as `nori_player::policy` says). A device that takes 16-bit only gets the 16-bit chain.
+    pub hi_res: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { sound: Sound::default(), speed: 1.0, pitch: 1.0, skip_silence: false, fade_ms: 0 }
+        Settings { sound: Sound::default(), speed: 1.0, pitch: 1.0, skip_silence: false, fade_ms: 0, hi_res: false }
     }
+}
+
+/// The settings as the policy let them through to the player.
+#[derive(Clone, PartialEq)]
+struct Applied {
+    sound: Sound,
+    speed: (f32, f32),
+    skip_silence: bool,
+    untouched: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +84,8 @@ pub enum Event {
     /// A song would not play (it is skipped, or playback stops, as the queue's rules say), or the
     /// output would not open (`id` empty).
     Error { id: String, message: String },
+    /// The music goes to another output device now, by the name the core keeps devices under.
+    Output { name: String },
 }
 
 /// The engine as it last looked, for a screen to read at any time without waking it.
@@ -84,6 +102,10 @@ pub struct Status {
     pub mixing: bool,
     /// Pulls that found the output's buffer short while music was due: a gap each.
     pub underruns: u64,
+    /// Times the output was let go after a long pause.
+    pub releases: u64,
+    /// A jump, skip or seek is waiting out its dip: the place is still the one before it.
+    pub switching: bool,
 }
 
 impl Status {
@@ -103,11 +125,14 @@ pub struct Config {
     /// (`nori_player::transport::load_control`).
     pub memory_mb: u32,
     pub settings: Settings,
+    /// Paused this long, the output and the song's bytes are let go, ms
+    /// (`nori_player::transport::IDLE_RELEASE_MS`).
+    pub idle_release_ms: i64,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { memory_mb: 256, settings: Settings::default() }
+        Config { memory_mb: 256, settings: Settings::default(), idle_release_ms: IDLE_RELEASE_MS }
     }
 }
 
@@ -123,7 +148,9 @@ enum Command {
     Replan,
     QueueChanged,
     Repeat(u8),
+    Gain,
     Positions(Option<Duration>),
+    Device(Device),
     Stop,
 }
 
@@ -140,7 +167,7 @@ enum Switched {
 pub struct Engine {
     tx: Sender<Command>,
     thread: Thread,
-    join: Option<JoinHandle<()>>,
+    join: Mutex<Option<JoinHandle<()>>>,
     status: Arc<Mutex<Status>>,
 }
 
@@ -165,18 +192,29 @@ impl Engine {
             speed: 1.0,
             mixing: false,
             underruns: 0,
+            releases: 0,
+            switching: false,
         }));
         let shared = status.clone();
+        let devices = tx.clone();
         let join = std::thread::Builder::new()
             .name("nori-engine".into())
             .spawn(move || {
                 let me = std::thread::current();
+                let mut output = output;
+                // The output says where the music goes whenever that changes, on a thread of its own.
+                let wake = me.clone();
+                output.watch(Box::new(move |d| {
+                    if devices.send(Command::Device(d)).is_ok() {
+                        wake.unpark();
+                    }
+                }));
                 let songs = Sources::new(library, load_control(config.memory_mb), me);
                 let player = Player::build(songs, queue, app, RingTrack::new(output));
-                Worker::new(player, rx, events, shared, config.settings).run();
+                Worker::new(player, rx, events, shared, config.settings, config.idle_release_ms).run();
             })
             .expect("a thread for the engine");
-        Engine { tx, thread: join.thread().clone(), join: Some(join), status }
+        Engine { tx, thread: join.thread().clone(), join: Mutex::new(Some(join)), status }
     }
 
     fn send(&self, c: Command) {
@@ -236,6 +274,11 @@ impl Engine {
         self.send(Command::Repeat(mode));
     }
 
+    /// The ReplayGain settings changed: the volume of the song playing is asked for again.
+    pub fn gain_changed(&self) {
+        self.send(Command::Gain);
+    }
+
     /// Position events this often while music plays, or none (the default: an idle screen is not woken).
     pub fn position_updates(&self, every: Option<Duration>) {
         self.send(Command::Positions(every));
@@ -246,9 +289,10 @@ impl Engine {
     }
 
     /// Stops the thread and lets the output go.
-    pub fn stop(&mut self) {
+    pub fn stop(&self) {
         self.send(Command::Stop);
-        if let Some(j) = self.join.take() {
+        let join = self.join.lock().take();
+        if let Some(j) = join {
             let _ = j.join();
         }
     }
@@ -267,6 +311,7 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event)> {
     status: Arc<Mutex<Status>>,
     started: Instant,
     settings: Settings,
+    applied: Option<Applied>,
     state: State,
     /// A pause waiting for its fade to end.
     pause_at: Option<i64>,
@@ -276,12 +321,19 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event)> {
     up_ms: i64,
     /// The song last reported.
     heard: Option<usize>,
+    /// The ReplayGain settings changed: the song playing's volume is asked for again.
+    gain_changed: bool,
     positions: Option<i64>,
     next_position: i64,
+    /// Paused: when the output is let go, and after that, where the player was.
+    idle_release_ms: i64,
+    idle_at: Option<i64>,
+    released: Option<(usize, i64)>,
+    releases: u64,
 }
 
 impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
-    fn new(p: Player<Sources<L>, RingTrack, A, Q>, rx: Receiver<Command>, events: E, status: Arc<Mutex<Status>>, settings: Settings) -> Self {
+    fn new(p: Player<Sources<L>, RingTrack, A, Q>, rx: Receiver<Command>, events: E, status: Arc<Mutex<Status>>, settings: Settings, idle_release_ms: i64) -> Self {
         let mut w = Worker {
             p,
             rx,
@@ -289,14 +341,20 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             status,
             started: Instant::now(),
             settings: Settings::default(),
+            applied: None,
             state: State::Idle,
             pause_at: None,
             switches: VecDeque::new(),
             switch_at: None,
             up_ms: 0,
             heard: None,
+            gain_changed: false,
             positions: None,
             next_position: 0,
+            idle_release_ms,
+            idle_at: None,
+            released: None,
+            releases: 0,
         };
         w.apply(settings);
         w
@@ -317,6 +375,10 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             }
             let now = self.now();
             self.due(now);
+            self.follow_gain();
+            if self.p.app.measured() {
+                self.p.engine.replan();
+            }
             // The burst's count of what the device holds is kept from the clock it reads, and misses
             // whatever played before its first reading; the ring knows exactly. At the low mark the
             // count starts again, so a burst always begins when the ring says it is time.
@@ -338,8 +400,39 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     fn set_state(&mut self, s: State) {
         if self.state != s {
             self.state = s;
+            self.idle_at = (s == State::Paused).then(|| self.now() + self.idle_release_ms);
             (self.events)(Event::State(s));
         }
+    }
+
+    /// Paused a long while: the device and the song's bytes go, so nothing holds the sound card or the
+    /// memory; the place in the queue and the song stays.
+    fn release(&mut self) {
+        self.idle_at = None;
+        if self.p.playing() || self.released.is_some() {
+            return;
+        }
+        self.released = self.p.release();
+        self.p.sink.track.release();
+        self.p.tracks.let_go();
+        self.releases += 1;
+    }
+
+    /// After a release, the song is opened again where it was.
+    fn reopen(&mut self) {
+        if let Some((i, ms)) = self.released.take() {
+            self.p.jump(i, ms);
+        }
+    }
+
+    /// The output device changed: the core picks its sound (a profile bound to it), which is applied.
+    fn device(&mut self, d: Device) {
+        let Some((name, sound)) = self.p.app.output_changed(d.kind, &d.name) else { return };
+        if let Some(sound) = sound {
+            let s = Settings { sound, ..self.settings.clone() };
+            self.apply(s);
+        }
+        (self.events)(Event::Output { name });
     }
 
     fn command(&mut self, c: Command) {
@@ -362,24 +455,48 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             Command::Replan => self.p.engine.replan(),
             Command::QueueChanged => self.p.queue_changed(),
             Command::Repeat(m) => self.p.set_repeat(m),
+            Command::Gain => self.gain_changed = true,
             Command::Positions(every) => {
                 self.positions = every.map(|d| d.as_millis().max(1) as i64);
                 self.next_position = now;
             }
+            Command::Device(d) => self.device(d),
             Command::Stop => {}
         }
     }
 
+    /// The settings, through the audio policy Android applies: high quality output on a device that
+    /// plays float keeps the samples untouched, which stands the sound chain, silence skipping, the
+    /// pinned output format and every transition down. Songs opened from now on are decoded for it.
     fn apply(&mut self, s: Settings) {
-        if s.sound != self.settings.sound {
-            self.p.set_sound(s.sound.clone());
+        let hi_res = s.hi_res && self.p.sink.track.takes_float();
+        let prefs = AudioPrefs { dsp: s.sound.on(), skip_silence: s.skip_silence, offload: false, crossfade_s: 0, auto_mix: false, speed: s.speed, pitch: s.pitch };
+        let policy = audio_policy(&prefs, &OutputState { hi_res, ..Default::default() });
+        let now = Applied {
+            sound: if policy.untouched { Sound::default() } else { s.sound.clone() },
+            speed: (s.speed, s.pitch),
+            skip_silence: policy.skip_silence,
+            untouched: policy.untouched,
+        };
+        // The player starts out with the defaults' sound; the output's say is given once at least.
+        let first = self.applied.is_none();
+        let was = self.applied.take().unwrap_or(Applied { sound: Sound::default(), speed: (1.0, 1.0), skip_silence: false, untouched: false });
+        if first || was.untouched != now.untouched {
+            self.p.tracks.encoding = if hi_res { Encoding::Float } else { Encoding::Pcm16 };
+            self.p.engine.lock_rate = policy.lock_rate;
+            self.p.app.transitions_off(policy.transitions_off);
+            self.p.engine.replan();
         }
-        if (s.speed, s.pitch) != (self.settings.speed, self.settings.pitch) {
+        if was.sound != now.sound {
+            self.p.set_sound(now.sound.clone());
+        }
+        if was.speed != now.speed {
             self.p.set_speed(s.speed, s.pitch);
         }
-        if s.skip_silence != self.settings.skip_silence {
-            self.p.set_skip_silence(s.skip_silence);
+        if was.skip_silence != now.skip_silence {
+            self.p.set_skip_silence(now.skip_silence);
         }
+        self.applied = Some(now);
         self.settings = s;
     }
 
@@ -403,7 +520,12 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         if self.p.playing() && self.state == State::Playing {
             return;
         }
-        if self.p.current().is_none() || self.state == State::Ended {
+        self.reopen();
+        if let Some(i) = self.p.stopped_at() {
+            // Stopped at a song that would not play, nothing is being read: resuming would run the
+            // clock over silence. It is tried again.
+            self.p.jump(i, 0);
+        } else if self.p.current().is_none() || self.state == State::Ended {
             let at = self.p.queue.read(|q| q.current()).or(self.p.current()).unwrap_or(0);
             if self.p.queue.read(|q| q.is_empty()) {
                 return;
@@ -449,6 +571,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
 
     fn run_switches(&mut self) {
         let dipped = self.switch_at.take().is_some();
+        if !self.switches.is_empty() {
+            self.reopen();
+        }
         while let Some(s) = self.switches.pop_front() {
             let wants_music = !matches!(s, Switched::Seek(_));
             match s {
@@ -484,6 +609,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     }
 
     fn due(&mut self, now: i64) {
+        if self.idle_at.is_some_and(|t| now >= t) {
+            self.release();
+        }
         if self.pause_at.is_some_and(|t| now >= t) {
             self.pause_at = None;
             self.p.pause();
@@ -491,6 +619,22 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         if self.switch_at.is_some_and(|t| now >= t) {
             self.run_switches();
         }
+    }
+
+    /// Each song's ReplayGain volume is put on the frame it starts at by the player itself (the ring
+    /// takes it before any of the song's frames). Only a change of the settings is applied here, to
+    /// the song playing, at once, as Android sets the player's volume.
+    fn follow_gain(&mut self) {
+        if !std::mem::take(&mut self.gain_changed) {
+            return;
+        }
+        let level = self.p.current().map_or(1.0, |i| self.gain_of(i));
+        self.p.sink.track.set_level(level);
+    }
+
+    fn gain_of(&mut self, i: usize) -> f32 {
+        let id = self.p.id_at(i);
+        self.p.app.gain(i, &id)
     }
 
     fn check(&mut self) {
@@ -516,6 +660,11 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     }
 
     fn report(&mut self, now: i64) {
+        if self.released.is_some() {
+            // Let go: the place last reported stands.
+            self.status.lock().releases = self.releases;
+            return;
+        }
         if self.p.current().is_none() {
             return;
         }
@@ -541,6 +690,8 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             s.speed = self.p.speed().0;
             s.mixing = self.p.mixing();
             s.underruns = self.p.sink.track.underruns();
+            s.releases = self.releases;
+            s.switching = self.switch_at.is_some();
         }
         if let (Some(every), Some(i), State::Playing) = (self.positions, index, self.state) {
             if now >= self.next_position {
@@ -558,6 +709,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             at(t - now);
         }
         if let Some(t) = self.switch_at {
+            at(t - now);
+        }
+        if let Some(t) = self.idle_at {
             at(t - now);
         }
         if !self.p.playing() {
@@ -579,8 +733,12 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             at(1_000);
         } else if fill > WAKE_LOW_US {
             track.wake_at(WAKE_LOW_US);
-            // The device's pull wakes the thread at the low mark; this is in case its clock runs slow.
-            at((fill - WAKE_LOW_US) / 1000 + 250);
+            // The device's pull wakes the thread at the low mark; this is in case its clock runs slow. A
+            // device that pulls in bursts leaves the ring standing between them, so a timer from the
+            // ring's fill would only wake the thread for nothing once a burst.
+            if !track.bursts() {
+                at((fill - WAKE_LOW_US) / 1000 + 250);
+            }
         } else {
             // The burst's own count (which sees what the device holds too) did not agree yet.
             at(200);

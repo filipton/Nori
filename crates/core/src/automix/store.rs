@@ -112,36 +112,6 @@ pub fn missing(c: &Connection, ids: &[String]) -> rusqlite::Result<Vec<String>> 
     Ok(out)
 }
 
-/// Brings an older database up to the current schema: the overlap-window columns (v2) and the
-/// intro and outro beat grids (v3; v4 only redoes the rows a cut-short measurement stored as whole). Old rows keep their
-/// version and are redone by `analysis_missing`; the defaults only keep them readable until then.
-pub fn migrate(c: &Connection) -> rusqlite::Result<()> {
-    let cols: Vec<String> = c
-        .prepare("PRAGMA table_info(track_analysis)")?
-        .query_map([], |r| r.get(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (col, typ) in [
-        ("outro_vocal", "REAL"),
-        ("intro_vocal", "REAL"),
-        ("outro_centroid", "REAL"),
-        ("intro_centroid", "REAL"),
-        ("outro_bpm", "REAL"),
-        ("outro_bpm_confidence", "REAL"),
-        ("outro_beat_offset_ms", "REAL"),
-        ("outro_stability", "REAL"),
-        ("outro_downbeat_phase", "INTEGER"),
-        ("intro_bpm", "REAL"),
-        ("intro_bpm_confidence", "REAL"),
-        ("intro_beat_offset_ms", "REAL"),
-        ("intro_stability", "REAL"),
-        ("intro_downbeat_phase", "INTEGER"),
-    ] {
-        if !cols.iter().any(|c| c == col) {
-            c.execute_batch(&format!("ALTER TABLE track_analysis ADD COLUMN {col} {typ} NOT NULL DEFAULT 0"))?;
-        }
-    }
-    Ok(())
-}
 /// A song measured as it plays: fed from the playback path buffer by buffer, then finished into the store
 /// ([`Core::analysis_finish_stream`]). It crosses to the platform as a handle, since the platform both feeds
 /// it and hands it to the store.

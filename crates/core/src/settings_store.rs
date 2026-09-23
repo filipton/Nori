@@ -1,14 +1,13 @@
 //! The settings, owned here: read once when the app starts, kept in memory, and written back to the
 //! app's database (`settings`, one row per key, the app's and not a server's) whenever they change. The
-//! platform hands over what it kept before (its old key-value store) the first time, and after that
-//! only shows and changes them. Codec, defaults and ranges are settings.rs's.
+//! platform only shows and changes them. Codec, defaults and ranges are settings.rs's.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 use crate::settings::{load, save, set_band, set_level, EqLevel, PrefValue, SoundBand, StoredPrefs};
@@ -57,31 +56,55 @@ fn read(c: &Connection) -> rusqlite::Result<HashMap<String, PrefValue>> {
 
 /// Every value these settings store, in one transaction; keys no longer written go.
 fn write(c: &mut Connection, prefs: &StoredPrefs) -> rusqlite::Result<()> {
-    let w = save(prefs);
+    let put = save(prefs);
     let tx = c.transaction()?;
     tx.execute("DELETE FROM settings", [])?;
     {
         let mut st = tx.prepare("INSERT INTO settings(key, value) VALUES(?1, ?2)")?;
-        for (k, v) in &w.put {
+        for (k, v) in &put {
             st.execute(params![k, to_json(v)])?;
         }
     }
     tx.commit()
 }
 
-/// The settings kept in the app's database at `db_path`. The first time there are none, `legacy` (what
-/// the platform kept until now) becomes them.
+/// The settings kept in the app's database at `db_path`. The first time there are none, the defaults
+/// become them.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn settings_open(db_path: String, legacy: HashMap<String, PrefValue>) -> crate::Result<StoredPrefs> {
+pub fn settings_open(db_path: String) -> crate::Result<StoredPrefs> {
     let mut c = db::open_app(&db_path)?;
     let raw = read(&c)?;
-    let prefs = load(if raw.is_empty() { &legacy } else { &raw });
+    let prefs = load(&raw);
     if raw.is_empty() {
         write(&mut c, &prefs)?;
     }
     *KEPT.write() = Some(Kept { db: Arc::new(Mutex::new(c)), prefs: prefs.clone() });
     changed(&prefs);
     Ok(prefs)
+}
+
+/// One of the app's own values (`app_kv`), read from the database the settings are kept in; none before
+/// the settings are open.
+pub(crate) fn app_value(key: &str) -> Option<String> {
+    let db = KEPT.read().as_ref()?.db.clone();
+    let c = db.lock();
+    c.query_row("SELECT value FROM app_kv WHERE key=?1", [key], |r| r.get(0)).optional().ok().flatten()
+}
+
+/// The app's database the settings were opened from, for the few app-wide tables kept beside them
+/// (perf_log.rs); none before the settings are open.
+pub(crate) fn app_db() -> Option<Arc<Mutex<Connection>>> {
+    KEPT.read().as_ref().map(|k| k.db.clone())
+}
+
+/// One of the app's own values kept, written on the core's background thread.
+pub(crate) fn keep_app_value(key: &'static str, value: String) {
+    let Some(db) = KEPT.read().as_ref().map(|k| k.db.clone()) else { return };
+    background::run(move || {
+        if let Err(e) = db.lock().execute("INSERT OR REPLACE INTO app_kv(key, value) VALUES(?1, ?2)", params![key, value]) {
+            alog::info(&format!("{key}: could not write: {e}"));
+        }
+    });
 }
 
 /// [`settings_put`]'s answer: what the platform's player has to apply again. The sound chain and the
@@ -202,6 +225,12 @@ fn changed(prefs: &StoredPrefs) {
     crate::dsp::settings_changed(prefs);
 }
 
+/// The settings as they are kept now, for a Rust client that edits them and puts them back; none
+/// before the app opened them.
+pub fn settings_current() -> Option<StoredPrefs> {
+    current()
+}
+
 /// The settings as they are now, for the core's own decisions; none before the app opened them.
 pub(crate) fn current() -> Option<StoredPrefs> {
     with_prefs(StoredPrefs::clone)
@@ -252,7 +281,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nori-settings-edit-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        settings_open(dir.join("nori.db").display().to_string(), HashMap::new()).unwrap();
+        settings_open(dir.join("nori.db").display().to_string()).unwrap();
         let band = current().unwrap().eq_bands[2];
         let (effect, kept) = edit_band(2, SoundBand { gain_db: 99.0, ..band }).unwrap();
         assert_eq!(effect, 0, "the sound chain follows its bands by itself");
@@ -267,20 +296,39 @@ mod tests {
     }
 
     #[test]
-    fn the_old_store_is_taken_once_then_the_database_is_the_settings() {
+    fn the_known_outputs_are_kept_with_the_settings() {
+        let _turn = OPEN.lock();
+        let dir = std::env::temp_dir().join(format!("nori-outputs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nori.db").display().to_string();
+        settings_open(path.clone()).unwrap();
+        let speaker = crate::outputs::outputs_speaker();
+        assert_eq!(crate::outputs::outputs_known(), [speaker.clone()], "the speaker the first time");
+        let seen = crate::outputs::outputs_refresh(vec![8], vec!["Buds".into()], vec![speaker.clone()], None);
+        assert_eq!(seen.known.unwrap(), ["Bluetooth: Buds", speaker.as_str()]);
+        // Written on the background thread; a job behind it has seen it done.
+        let (tx, rx) = std::sync::mpsc::channel();
+        background::run(move || tx.send(()).unwrap());
+        rx.recv().unwrap();
+        settings_open(path).unwrap();
+        assert_eq!(crate::outputs::outputs_known(), ["Bluetooth: Buds", speaker.as_str()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_defaults_first_then_the_database_is_the_settings() {
         let _turn = OPEN.lock();
         let dir = std::env::temp_dir().join(format!("nori-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nori.db").display().to_string();
-        let mut legacy = HashMap::new();
-        legacy.insert("fadeMs".to_string(), PrefValue::Number { v: 250 });
-        assert_eq!(settings_open(path.clone(), legacy.clone()).unwrap().fade_ms, 250);
+        assert_eq!(settings_open(path.clone()).unwrap(), StoredPrefs::default());
         let mut p = current().unwrap();
         p.fade_ms = 400;
         // Written straight away here rather than through the background thread.
         write(&mut KEPT.read().as_ref().unwrap().db.lock(), &p).unwrap();
-        assert_eq!(settings_open(path, legacy).unwrap().fade_ms, 400, "the database wins over the old store");
+        assert_eq!(settings_open(path).unwrap().fade_ms, 400, "what was saved comes back");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

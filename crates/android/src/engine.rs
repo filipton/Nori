@@ -36,6 +36,7 @@ pub(crate) static CLASS: Class = Class {
         native!(c"position", c"(JLdev/nori/music/playback/TransitionSink;JZJ)J", position),
         native!(c"playToEnd", c"(JLdev/nori/music/playback/TransitionSink;J)Z", play_to_end),
         native!(c"status", c"(J)Ljava/nio/ByteBuffer;", status),
+        native!(c"bytesWritten", c"()J", bytes_written),
         native!(c"mixing", c"()Z", mixing),
         native!(c"setBurst", c"(JZ)V", set_burst),
         native!(c"restartBurst", c"(J)V", restart_burst),
@@ -155,7 +156,10 @@ impl Downstream for Down<'_, '_> {
                         // A wrapper over this very memory: moved back to where this chunk starts.
                         Some(i) => {
                             let (_, _, g) = self.wrappers.swap_remove(i);
-                            self.env.call_method(g.as_obj(), "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)]).map(|_| g)
+                            self.env.call_method(g.as_obj(), "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)]).and_then(|v| v.l()).map(|moved| {
+                                let _ = self.env.delete_local_ref(moved);
+                                g
+                            })
                         }
                         // SAFETY: `data` is a chunk of the engine's pool, whose memory stays where it is while
                         // the engine lives; the wrapper is only offered to the output while that chunk is
@@ -163,10 +167,16 @@ impl Downstream for Down<'_, '_> {
                         None => unsafe { self.env.new_direct_byte_buffer(data.as_ptr() as *mut u8, data.len()) }.and_then(|b| {
                             // A buffer made here starts big-endian, as Java's do; media3 checks for
                             // little-endian (native) and throws otherwise.
+                            // Every local reference made here is let go before returning: a mix can drain many
+                            // chunks in one call, and they would pile up until it returned.
                             let native = self.env.call_static_method("java/nio/ByteOrder", "nativeOrder", "()Ljava/nio/ByteOrder;", &[])?.l()?;
-                            self.env.call_method(&b, "order", "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;", &[JValue::Object(&native)])?;
-                            self.env.call_method(&b, "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)])?;
-                            self.env.new_global_ref(b)
+                            let same = self.env.call_method(&b, "order", "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;", &[JValue::Object(&native)])?.l()?;
+                            let moved = self.env.call_method(&b, "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)])?.l()?;
+                            let g = self.env.new_global_ref(&b);
+                            for local in [native, same, moved, b.into()] {
+                                let _ = self.env.delete_local_ref(local);
+                            }
+                            g
                         }),
                     };
                     // One offered and not taken whole stays current; the one before it is done with.
@@ -248,12 +258,18 @@ fn with<'e, R>(
     let mut app_env = unsafe { env.unsafe_clone() };
     // The one thing that still reaches Kotlin: a page on screen follows the ear at once.
     let mut heard_changed = || {
+        // Never call into Java with an exception pending (a sink write that threw): that is undefined,
+        // and the exception the player needs to see would be lost.
+        if app_env.exception_check().unwrap_or(true) {
+            return;
+        }
         let _ = app_env.call_method(sink, "hostHeardChanged", "()V", &[]);
     };
     let mut app = CoreHost { now_ms, heard_changed: &mut heard_changed as &mut dyn FnMut() };
     let mut burst = h.burst.lock();
     let r = f(&mut e, &mut Fed::new(&mut down, &mut burst, now_ms), &mut app);
     h.status[1].store(burst.bytes_written as i64, Ordering::Relaxed);
+    BYTES_WRITTEN.store(burst.bytes_written as i64, Ordering::Relaxed);
     // A Java exception is pending: let it reach the player as it is, and say nothing more.
     if down.failed || env.exception_check().unwrap_or(true) {
         return Some(r);
@@ -363,6 +379,14 @@ extern "system" fn play_to_end<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sin
 }
 
 /// A direct buffer over the engine's status words (see `Handle::status`), made once per engine.
+/// Bytes handed to the output by the engine that ran last, kept outside any engine: a test or a debug
+/// line may ask after the sink that owned the status words has been freed.
+static BYTES_WRITTEN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+extern "system" fn bytes_written() -> jlong {
+    BYTES_WRITTEN.load(Ordering::Relaxed)
+}
+
 extern "system" fn status(mut env: JNIEnv, _: JClass, h: jlong) -> jobject {
     let Some(h) = handle(h) else { return std::ptr::null_mut() };
     let p = h.status.as_ptr() as *mut u8;

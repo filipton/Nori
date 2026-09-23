@@ -182,17 +182,6 @@ impl Core {
         self.quiet_list()
     }
 
-    /// What the platform kept before these lived here (its own small store), taken over once: the quiet
-    /// devices are added, and the kept sound is taken unless one is kept already.
-    pub fn device_carry_over(&self, quiet: Vec<String>, loose: Option<String>) {
-        for output in &quiet {
-            self.set_quiet(output, true);
-        }
-        if let (Some(json), None) = (loose, self.loose()) {
-            self.set_loose(LooseChange::Store { json });
-        }
-    }
-
     /// Saves `sound` under `name` (trimmed). Saving over a profile keeps the devices it is chosen for.
     pub fn profile_save_sound(&self, name: String, sound: SoundSettings) -> Result<(), SoundError> {
         let name = name.trim().to_string();
@@ -561,12 +550,12 @@ mod tests {
     fn an_unbound_device_gets_the_sound_from_before_back() {
         let c = core();
         let kept = SoundSettings { mono: true, ..sound() };
-        c.device_carry_over(vec![], Some(sound_json(&kept)));
+        c.set_loose(LooseChange::Store { json: sound_json(&kept) });
         let a = c.arrive_as(SPEAKER.into(), &now(sound()));
         assert_eq!(a.effect.apply, Some(kept));
         assert_eq!(c.loose(), None, "used, so no longer kept");
         assert_eq!(a.curve, CurveStep::None);
-        c.device_carry_over(vec![], Some("garbage".into()));
+        c.set_loose(LooseChange::Store { json: "garbage".into() });
         let a = c.arrive_as(SPEAKER.into(), &now(sound()));
         assert_eq!((a.effect.apply, c.loose()), (None, None), "a kept sound that does not read is dropped");
         let a = c.arrive_as("Bluetooth: Buds".into(), &now(sound()));
@@ -578,7 +567,8 @@ mod tests {
     #[test]
     fn a_quiet_device_is_never_offered_a_curve() {
         let c = core();
-        c.device_carry_over(vec!["Bluetooth: Buds".into(), "Bluetooth: Buds".into()], None);
+        c.set_quiet("Bluetooth: Buds", true);
+        c.set_quiet("Bluetooth: Buds", true);
         assert_eq!(c.device_quiet(), ["Bluetooth: Buds"]);
         assert_eq!(c.arrive_as("Bluetooth: Buds".into(), &now(sound())).curve, CurveStep::None);
         c.device_forget("Bluetooth: Buds".into());
@@ -633,7 +623,7 @@ mod tests {
     #[test]
     fn choices_from_the_device_list() {
         let c = core();
-        c.device_carry_over(vec![], Some("{}".into()));
+        c.set_loose(LooseChange::Store { json: "{}".into() });
         let playing = SoundSettings { eq_enabled: true, crossfeed_db: 2.0, ..sound() };
         let s = c.assign_as("USB: K3", ChoiceKind::Flat, String::new(), true, &now(playing.clone())).unwrap();
         let flat = s.effect.apply.clone().unwrap();

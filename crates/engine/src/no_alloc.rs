@@ -65,30 +65,38 @@ impl AudioOutput for Hand {
     fn close(&mut self) {}
 }
 
-const FMT: Format = Format { rate: 44_100, channels: 2, encoding: Encoding::Pcm16 };
-
-fn tone(frames: usize) -> Vec<u8> {
-    (0..frames).flat_map(|i| {
-        let v = ((i as f64 / 44_100.0 * 440.0 * std::f64::consts::TAU).sin() * 9000.0) as i16;
-        [v.to_le_bytes(), v.to_le_bytes()].concat()
-    })
-    .collect()
+fn tone(frames: usize, enc: Encoding) -> Vec<u8> {
+    (0..frames)
+        .flat_map(|i| {
+            let v = (i as f64 / 44_100.0 * 440.0 * std::f64::consts::TAU).sin() * 9000.0 / 32768.0;
+            let one = match enc {
+                Encoding::Pcm16 => ((v * 32768.0) as i16).to_le_bytes().to_vec(),
+                Encoding::Float => (v as f32).to_le_bytes().to_vec(),
+            };
+            [one.clone(), one].concat()
+        })
+        .collect()
 }
 
 /// Buffers through the sink into the ring and out of the device, as playback runs them.
 fn steady(device_rate: u32, sound: Sound, speed: f32, skip_silence: bool) -> u64 {
+    steady_in(Encoding::Pcm16, device_rate, sound, speed, skip_silence)
+}
+
+fn steady_in(encoding: Encoding, device_rate: u32, sound: Sound, speed: f32, skip_silence: bool) -> u64 {
+    let fmt = Format { rate: 44_100, channels: 2, encoding };
     let feed = Arc::new(parking_lot::Mutex::new(None));
     let mut sink = Sink::new(nori_player::burst::BUFFER_US, sound.on(), sound, RingTrack::new(Box::new(Hand(feed.clone(), device_rate))));
     sink.set_stages(speed, 1.0, skip_silence);
-    sink.configure(&1, Some(FMT));
+    sink.configure(&1, Some(fmt));
     sink.play();
-    let data = tone(1152);
+    let data = tone(1152, encoding);
     let mut out = vec![0f32; 2048 * 2];
     let mut feed = feed.lock().take().expect("the device was started");
     let mut pts = 0i64;
     let mut turn = |sink: &mut Sink<RingTrack>, feed: &mut Feed| {
         sink.handle_buffer(&data, 0, pts);
-        pts += FMT.us(data.len());
+        pts += fmt.us(data.len());
         feed.pull(&mut out);
         sink.position_us(false);
     };
@@ -108,4 +116,12 @@ fn a_buffer_through_the_sink_and_the_ring_allocates_nothing() {
     let eq = Sound { bands: vec![Band { kind: PEAKING, freq: 1000.0, gain_db: 4.0, q: 1.0, channel: 0 }], limiter: true, ..Sound::default() };
     assert_eq!(steady(44_100, eq, 1.25, true), 0, "equalizer, limiter, silence skipping and speed");
     assert_eq!(steady(48_000, Sound::default(), 1.0, false), 0, "resampled for a device at another rate");
+}
+
+#[test]
+fn a_float_buffer_through_the_sink_and_the_ring_allocates_nothing() {
+    assert_eq!(steady_in(Encoding::Float, 44_100, Sound::default(), 1.0, false), 0, "straight through");
+    let eq = Sound { bands: vec![Band { kind: PEAKING, freq: 1000.0, gain_db: 4.0, q: 1.0, channel: 0 }], limiter: true, ..Sound::default() };
+    assert_eq!(steady_in(Encoding::Float, 44_100, eq, 1.25, true), 0, "equalizer, limiter and speed in float");
+    assert_eq!(steady_in(Encoding::Float, 48_000, Sound::default(), 1.0, false), 0, "resampled from float");
 }

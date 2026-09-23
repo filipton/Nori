@@ -109,6 +109,19 @@ fn ink_page(hsl: [f32; 3]) -> u32 {
     hsl_to_color([hsl[0], hsl[1].min(0.35), hsl[2].clamp(0.03, 0.06)])
 }
 
+/// Writes into `out` (cleared first) the key a cover's colours are kept under: [`derive`] answers
+/// differently for the same picture in a dark or light theme and on AMOLED black, so all three are part of
+/// it, and the picture is named by its address. `"<url>|<dark>|<amoled>"`, as the Android app keys them.
+///
+/// Twin of `paletteKey` (app/.../ui/CoverColors.kt), which Android keeps (string work where the cover is
+/// composed).
+pub fn palette_key(out: &mut String, url: &str, dark: bool, amoled: bool) {
+    out.clear();
+    out.push_str(url);
+    out.push_str(if dark { "|true" } else { "|false" });
+    out.push_str(if amoled { "|true" } else { "|false" });
+}
+
 /// The page for a cover of `w` x `h` ARGB pixels (as decoded for a list row), for a dark or light
 /// theme, and on AMOLED black.
 pub fn derive(pixels: &[u32], w: usize, h: usize, dark: bool, amoled: bool) -> CoverColours {

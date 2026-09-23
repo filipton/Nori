@@ -14,12 +14,20 @@ name = "norimusic"
 nori-core = { package = "norimusic-core", path = "../core" }
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
+nori-covers = { path = "../covers" }
+# The Rust playback path (player.rs, track.rs): the engine playing the core's queue into an AudioTrack.
+nori-engine = { path = "../engine", features = ["core"] }
+libc = "0.2"
 jni = { version = "0.21", default-features = false }
 parking_lot = "0.12"
 # The generated scaffolding calls into these; uniffi wants the crate that holds it to depend on every
 # crate that exports something, and on uniffi itself.
 uniffi = { workspace = true }
 uniffi-bindgen-kotlin-jni-runtime = { path = "../uniffi-jni-runtime" }
+
+[dev-dependencies]
+# track.rs's tests run the engine end to end with the simulated player's transition planner.
+nori-player = { path = "../player", features = ["synth"] }
 
 [build-dependencies]
 uniffi-bindgen-kotlin-jni = { workspace = true }

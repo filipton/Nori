@@ -90,6 +90,21 @@ pub fn band_matrix(strength: f32, kr: f32, kg: f32, kb: f32) -> [f32; 20] {
     m
 }
 
+/// The key a [`band_matrix`] made for the look's band tint is kept under, so one is made per tint and not
+/// per frame: `strength` and the three channel scales each kept to a 1/256th (finer than the blurred band
+/// can show) and packed ten bits apiece. -1 when there is no tint (`strength` 0 or less): the plain blur,
+/// with no matrix. Asked while the band is drawn, so it allocates nothing.
+///
+/// Twin of the key in `BandEffect.of` (app/.../ui/PlayerScreen.kt), which Android keeps: it is read in the
+/// draw phase, where a crossing would cost more than the key.
+pub fn band_key(strength: f32, kr: f32, kg: f32, kb: f32) -> i64 {
+    if strength <= 0.0 {
+        return -1;
+    }
+    let q = |x: f32| ((x * 256.0) as i64).clamp(0, 1023);
+    (q(strength) << 30) | (q(kr) << 20) | (q(kg) << 10) | q(kb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

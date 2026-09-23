@@ -451,7 +451,14 @@ fn sound(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     };
     let out = crate::OutputState { hi_res: p.hi_res, bit_perfect: d.bit_perfect, usb: d.device.is_some(), offload_refused: false };
     output.push(toggle("offload", "Save battery while playing", &crate::words::words_offload(prefs, out), p.offload, true));
-    vec![section("Equalizer", eq), section("Volume", volume), section("Output", output)]
+    // The Rust player, measured against ExoPlayer before it becomes anything more than a choice here.
+    let experimental = vec![
+        ordinal("playbackEngine", "Playback engine", p.playback_engine, &["ExoPlayer", "Rust"]),
+        SettingRow::Note { text: "Takes effect the next time the app starts. Rust plays through nori's own engine: no audio offload, no offline bridge and no internet radio yet.".into() },
+        // Measured faster than Android's own decoder on the phone, so on; the switch is there to compare.
+        toggle("coreCovers", "Decode covers in the core", "Covers are decoded by nori's own decoder. Off uses Android's.", p.core_covers, true),
+    ];
+    vec![section("Equalizer", eq), section("Volume", volume), section("Output", output), section("Experimental", experimental)]
 }
 
 fn look(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {

@@ -33,6 +33,8 @@ extern "system" fn seed(mut env: JNIEnv, _: JClass, keys: JObjectArray) {
         let s = JString::from(o);
         let Ok(v) = env.get_string(&s) else { return };
         held.push(String::from(v));
+        // One local reference a key, and a cache can hold thousands: each is let go as it is read.
+        let _ = env.delete_local_ref(s);
     }
     stream_cache::seed(held.iter().map(String::as_str));
 }
@@ -48,9 +50,10 @@ extern "system" fn copies(mut env: JNIEnv, _: JClass, id: JString) -> jobjectArr
     let Ok(out) = env.new_object_array(keys.len() as i32, "java/lang/String", JObject::null()) else { return std::ptr::null_mut() };
     for (i, k) in keys.iter().enumerate() {
         let Ok(s) = env.new_string(k) else { return std::ptr::null_mut() };
-        if env.set_object_array_element(&out, i as i32, s).is_err() {
+        if env.set_object_array_element(&out, i as i32, &s).is_err() {
             return std::ptr::null_mut();
         }
+        let _ = env.delete_local_ref(s);
     }
     out.into_raw()
 }

@@ -42,6 +42,8 @@ internal object TransitionEngineJni {
     @JvmStatic external fun playToEnd(h: Long, sink: TransitionSink, nowMs: Long): Boolean
     /** A direct buffer over the engine's status words, read with no call: long 0 is whether audio is queued, long 1 the bytes handed to the output. */
     @JvmStatic external fun status(h: Long): java.nio.ByteBuffer
+    /** Bytes the last engine handed to the output; needs no handle, so it is safe after a sink is freed. */
+    @JvmStatic @CriticalNative external fun bytesWritten(): Long
     @JvmStatic @CriticalNative external fun mixing(): Boolean
     /** Bursts on or off (see nori_player::burst). */
     @JvmStatic @CriticalNative external fun setBurst(h: Long, on: Boolean)

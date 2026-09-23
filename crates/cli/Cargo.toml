@@ -14,3 +14,4 @@ norimusic-core = { path = "../core", default-features = false }
 nori-engine = { path = "../engine", features = ["core"] }
 nori-output-cpal = { path = "../output-cpal" }
 nori-http = { path = "../http" }
+nori-mpris = { path = "../mpris" }

@@ -21,3 +21,9 @@ norimusic-core = { path = "../core", default-features = false, optional = true }
 
 [dev-dependencies]
 nori-player = { path = "../player", features = ["synth"] }
+# tests/core.rs: a transport for the core that is never asked.
+async-trait = "0.1"
+
+# The measuring thread's priority, lowered below everything else.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

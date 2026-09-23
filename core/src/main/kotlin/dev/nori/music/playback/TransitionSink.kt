@@ -61,20 +61,18 @@ class TransitionSink(sink: AudioSink) : ForwardingAudioSink(sink) {
         /** Called on the playback thread when the ear leaves the player, or catches up with it. */
         @Volatile var onHeardChanged: (() -> Unit)? = null
 
-        @Volatile private var current: ByteBuffer? = null
-
         /**
          * Bytes handed to the output since the sink was made. The only honest answer to "is audio actually
          * flowing?": the media session's position is not updated periodically, and a controller in the
          * background can report a stale one, so a test watching either could pass in silence.
          */
-        val bytesWritten: Long get() = current?.getLong(8) ?: 0L
+        val bytesWritten: Long get() = TransitionEngineJni.bytesWritten()
     }
 
 
     private val engine = TransitionEngineJni.create()
     /** The engine's status words, written by Rust after every call into it: asking costs no call. */
-    private val status = TransitionEngineJni.status(engine).order(java.nio.ByteOrder.nativeOrder()).also { current = it }
+    private val status = TransitionEngineJni.status(engine).order(java.nio.ByteOrder.nativeOrder())
 
     /**
      * Feeding the output in bursts (nori_player::burst): off while the output decodes by itself

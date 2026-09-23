@@ -15,8 +15,8 @@ import kotlinx.coroutines.flow.StateFlow
 /**
  * Which output the music is going to, as a stable key a sound profile can be bound to: the speaker,
  * wired headphones, each Bluetooth device by name, each USB DAC by name. The naming, the ranking and
- * the list are nori-player's (crates/player/src/outputs.rs); this lists what the audio system has and
- * keeps the list. The callback only fires when something is plugged in or paired, so this costs
+ * the list are nori-player's (crates/player/src/outputs.rs), and the core keeps the list in the app's
+ * database with the settings; this lists what the audio system has. The callback only fires when something is plugged in or paired, so this costs
  * nothing while music plays.
  */
 class Outputs(context: Context) {
@@ -25,21 +25,14 @@ class Outputs(context: Context) {
     val current: StateFlow<String> = _current
     /**
      * Every output ever seen, so a device can be given its own sound while it is unplugged. Kept across
-     * restarts (a DAC set up last week has to still be in the list); read on first use, not at startup.
+     * restarts by the core; read on first use, not at startup.
      */
-    private val store = lazy { context.getSharedPreferences("nori-outputs", Context.MODE_PRIVATE) }
-    private val _known by lazy { MutableStateFlow(outputsKnown(store.value.getStringSet("known", null).orEmpty().toList())) }
+    private val _known by lazy { MutableStateFlow(outputsKnown()) }
     val known: StateFlow<List<String>> get() = _known
 
     /** Drops a device from [known]; it comes back by itself the next time it is connected. */
     fun forget(output: String) {
-        outputsForget(_known.value, _current.value, output)?.let(::remember)
-    }
-
-    /** A list the core says has changed. */
-    private fun remember(list: List<String>) {
-        _known.value = list
-        store.value.edit().putStringSet("known", list.toSet()).apply()
+        outputsForget(_known.value, _current.value, output)?.let { _known.value = it }
     }
 
     /**
@@ -83,7 +76,7 @@ class Outputs(context: Context) {
         val devices = audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         val seen = outputsRefresh(devices.map { it.type }, devices.map { it.productName?.toString().orEmpty() }, _known.value, override)
         _current.value = seen.current
-        seen.known?.let(::remember)
+        seen.known?.let { _known.value = it }
         _usb.value = seen.usb
     }
 

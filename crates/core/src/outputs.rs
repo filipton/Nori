@@ -5,6 +5,8 @@
 use nori_player::dac::{self, DacMode};
 use nori_player::outputs::{self, OutputKind};
 
+use crate::settings_store;
+
 // Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
 pub use nori_player::dac::DacDecision;
 #[cfg(any(feature = "ffi", test))]
@@ -41,7 +43,7 @@ pub struct DacDecision {
 }
 
 /// `AudioDeviceInfo.TYPE_*`.
-fn kind(t: i32) -> OutputKind {
+pub fn kind(t: i32) -> OutputKind {
     match t {
         11 | 22 => OutputKind::Usb,          // USB_DEVICE, USB_HEADSET
         12 => OutputKind::UsbAccessory,      // USB_ACCESSORY
@@ -108,12 +110,24 @@ fn modes(rates: &[u32], encodings: &[i32]) -> Vec<DacMode> {
     rates.iter().zip(encodings).map(|(r, e)| mode(*r, *e)).collect()
 }
 
+/// Where the list of every output seen is kept (`app_kv`, a JSON list), so a device can be given its own
+/// sound while it is unplugged.
+const KNOWN: &str = "knownOutputs";
+
+fn keep(known: &[String]) {
+    settings_store::keep_app_value(KNOWN, serde_json::to_string(known).unwrap_or_default());
+}
+
 /// The output devices Android lists now, as parallel lists of `AudioDeviceInfo` types and product
-/// names, against the list of every output seen so far.
+/// names, against the list of every output seen so far. A list that changed is kept.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_refresh(types: Vec<i32>, names: Vec<String>, known: Vec<String>, fake_usb: Option<String>) -> Seen {
     let attached: Vec<(OutputKind, &str)> = types.iter().zip(&names).map(|(t, n)| (kind(*t), n.as_str())).collect();
-    outputs::refresh(&attached, &known, fake_usb.as_deref())
+    let seen = outputs::refresh(&attached, &known, fake_usb.as_deref());
+    if let Some(k) = &seen.known {
+        keep(k);
+    }
+    seen
 }
 
 /// The name the phone's own speaker goes by (`nori_player::outputs::SPEAKER`).
@@ -128,16 +142,21 @@ pub fn device_flat() -> String {
     nori_player::device::FLAT.into()
 }
 
-/// The list of outputs as it comes back from storage.
+/// Every output seen, as it was kept with the settings (a DAC set up last week is still in the list).
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn outputs_known(stored: Vec<String>) -> Vec<String> {
+pub fn outputs_known() -> Vec<String> {
+    let stored: Vec<String> = settings_store::app_value(KNOWN).and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
     outputs::initial_known(&stored)
 }
 
-/// The list without `output`, or `None` when it stays as it is.
+/// The list without `output`, kept, or `None` when it stays as it is.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_forget(known: Vec<String>, current: String, output: String) -> Option<Vec<String>> {
-    outputs::forget(&known, &current, &output)
+    let next = outputs::forget(&known, &current, &output);
+    if let Some(k) = &next {
+        keep(k);
+    }
+    next
 }
 
 /// The decision about an attached DAC; see `nori_player::dac::decide`. Modes are parallel lists of

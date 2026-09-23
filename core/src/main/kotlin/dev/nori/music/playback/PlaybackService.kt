@@ -89,10 +89,19 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_SONGS = "songs"
         /** Whether the chain is currently asking for offload; read by the test bridge, which cannot see in here. */
         @Volatile var offloadWanted = false
+        /** The Rust player while it is the one playing; read by the test bridge. */
+        @Volatile var rustPlayer: EnginePlayer? = null
+            private set
+        /** The player the running service built, "exoplayer" or "rust"; null with no service. For the perf recorder. */
+        @Volatile var engine: String? = null
+            private set
     }
 
     private lateinit var nori: Nori
-    private lateinit var player: ExoPlayer
+    /** Whichever player plays: [exo], or [rust] when the "Playback engine" setting said Rust at start. */
+    private lateinit var player: Player
+    private var exo: ExoPlayer? = null
+    private var rust: EnginePlayer? = null
     private lateinit var session: MediaLibrarySession
     /** The player as the session sees it; every change to the queue goes through here, to the core first. */
     private lateinit var controls: Controls
@@ -165,77 +174,20 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onCreate() {
         super.onCreate()
-        Equalizer.active = equalizer
         nori = Nori.get(this)
         scrobbler = Scrobbler(nori, scope)
-
-        val renderers = object : DefaultRenderersFactory(this) {
-            // The core decodes what it can (RustAudio.kt), ahead of MediaCodec, which takes the rest.
-            override fun buildAudioRenderers(
-                context: android.content.Context, extensionRendererMode: Int, mediaCodecSelector: androidx.media3.exoplayer.mediacodec.MediaCodecSelector,
-                enableDecoderFallback: Boolean, audioSink: AudioSink, eventHandler: Handler, eventListener: androidx.media3.exoplayer.audio.AudioRendererEventListener,
-                out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>,
-            ) {
-                out += RustAudioRenderer(eventHandler, eventListener, audioSink) { hiRes }
-                super.buildAudioRenderers(context, extensionRendererMode, mediaCodecSelector, enableDecoderFallback, audioSink, eventHandler, eventListener, out)
-            }
-            override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
-                TransitionSink(
-                    DefaultAudioSink.Builder(context).setAudioProcessorChain(SoundChain(equalizer))
-                        // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU, and fed in bursts (nori_player::burst).
-                        .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
-                            // Deep for bursts; shallow only while the equalizer screen is open, so that moving a band is heard at once.
-                            (if (chain.isTuning()) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
-                        }
-                        .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                        .setAudioTrackProvider(tracks).build()
-                ).also { transitionSink = it; updateBurst() }
-        }
         hiRes = nori.settings.value.hiRes
-        renderers.setEnableAudioFloatOutput(hiRes)
-        player = ExoPlayer.Builder(this, renderers)
-            // ID3 metadata is not read: the covers, tags and ReplayGain all come from the server, and a song's embedded
-            // picture (a few MB each) stayed on the heap for the song playing and the next one. The frames gapless
-            // playback needs are still read (media3's REQUIRED_ID3_FRAME_PREDICATE).
-            .setMediaSourceFactory(DefaultMediaSourceFactory(this, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)
-                .setMp3ExtractorFlags(androidx.media3.extractor.mp3.Mp3Extractor.FLAG_DISABLE_ID3_METADATA)
-                .setFlacExtractorFlags(androidx.media3.extractor.flac.FlacExtractor.FLAG_DISABLE_ID3_METADATA)).setDataSourceFactory(nori.sources.factory))
-            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
-            .setHandleAudioBecomingNoisy(true)
-            // The CPU lock only. media3's network mode would pin Wi-Fi out of power save for as long as music plays;
-            // a track is fetched in seconds and then played from memory, so the Wi-Fi lock is held just while loading.
-            .setWakeMode(C.WAKE_MODE_LOCAL)
-            // The playback thread sleeps until the renderers can make progress instead of looping every 10 ms.
-            .experimentalSetDynamicSchedulingEnabled(true)
-            .setLoadControl(
-                // Fill up to ten minutes in one go, then leave the network alone until a minute is left. The cap is a
-                // quarter of the app's heap class, at most 48 MB: a whole MP3/Opus track everywhere, FLAC in two or three fetches.
-                dev.nori.music.ffi.loadControl(getSystemService(android.app.ActivityManager::class.java).memoryClass.toUInt()).let { c ->
-                    DefaultLoadControl.Builder().setBufferDurationsMs(c[0].toInt(), c[1].toInt(), c[2].toInt(), c[3].toInt())
-                        .setTargetBufferBytes(c[4].toInt()).setPrioritizeTimeOverSizeThresholds(false).build()
-                }
-            )
-            .build()
+        // Read once, here: the two players cannot be swapped under a running session.
+        player = if (nori.settings.value.playbackEngine == 1) {
+            android.util.Log.i("nori", "playback engine: Rust")
+            EnginePlayer(this, nori).also { rust = it; rustPlayer = it }
+        } else exoPlayer().also { exo = it }
+        engine = if (rust != null) "rust" else "exoplayer"
         precacher = Precacher(nori.sources)
-        analyser = AutoMixPrefetch(nori.sources, { nori.core }) { transitionSink?.replan() }
-        offlineBridge = OfflineBridge(this, player, { nori.core }, main, ::applyEdit)
+        analyser = AutoMixPrefetch(nori.sources, { nori.core }) { transitionSink?.replan(); rust?.replan() }
+        // The bridge edits ExoPlayer's list and reads its errors; the Rust player has none yet.
+        exo?.let { offlineBridge = OfflineBridge(this, it, { nori.core }, main, ::applyEdit) }
         player.addListener(listener)
-        // A dropout is otherwise invisible: the output ran dry and the listener heard a gap, but nothing
-        // says so. Named in the log, with whether a mix was on, so "a cut on the change" has a trace.
-        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
-            override fun onAudioUnderrun(
-                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
-                bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long,
-            ) {
-                android.util.Log.w("nori", "audio underrun: ${bufferSizeMs} ms buffer, ${elapsedSinceLastFeedMs} ms since last feed, mixing=${TransitionSink.mixing}, holding=${TransitionSink.holding}")
-            }
-            override fun onAudioSinkError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, audioSinkError: Exception) {
-                android.util.Log.w("nori", "audio sink error: $audioSinkError")
-            }
-        })
-        player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
-            override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
-        })
 
         // Fired from the audio device callback (main) and from the audio track provider (playback thread);
         // the player may only be touched on the main looper.
@@ -284,6 +236,74 @@ class PlaybackService : MediaLibraryService() {
         restoreQueue()
     }
 
+    /** ExoPlayer over the core's decoder, sound chain and transition engine: the default path. */
+    private fun exoPlayer(): ExoPlayer {
+        Equalizer.active = equalizer
+        val renderers = object : DefaultRenderersFactory(this) {
+            // The core decodes what it can (RustAudio.kt), ahead of MediaCodec, which takes the rest.
+            override fun buildAudioRenderers(
+                context: android.content.Context, extensionRendererMode: Int, mediaCodecSelector: androidx.media3.exoplayer.mediacodec.MediaCodecSelector,
+                enableDecoderFallback: Boolean, audioSink: AudioSink, eventHandler: Handler, eventListener: androidx.media3.exoplayer.audio.AudioRendererEventListener,
+                out: java.util.ArrayList<androidx.media3.exoplayer.Renderer>,
+            ) {
+                out += RustAudioRenderer(eventHandler, eventListener, audioSink) { hiRes }
+                super.buildAudioRenderers(context, extensionRendererMode, mediaCodecSelector, enableDecoderFallback, audioSink, eventHandler, eventListener, out)
+            }
+            override fun buildAudioSink(context: android.content.Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink =
+                TransitionSink(
+                    DefaultAudioSink.Builder(context).setAudioProcessorChain(SoundChain(equalizer))
+                        // Formats the DSP cannot take (FLAC on most phones) are decoded on the CPU, and fed in bursts (nori_player::burst).
+                        .setAudioTrackBufferSizeProvider { min, encoding, mode, frameSize, rate, bitrate, speed ->
+                            // Deep for bursts; shallow only while the equalizer screen is open, so that moving a band is heard at once.
+                            (if (chain.isTuning()) shallowBuffer else deepBuffer).getBufferSizeInBytes(min, encoding, mode, frameSize, rate, bitrate, speed)
+                        }
+                        .setEnableFloatOutput(enableFloatOutput).setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                        .setAudioTrackProvider(tracks).build()
+                ).also { transitionSink = it; updateBurst() }
+        }
+        renderers.setEnableAudioFloatOutput(hiRes)
+        val player = ExoPlayer.Builder(this, renderers)
+            // ID3 metadata is not read: the covers, tags and ReplayGain all come from the server, and a song's embedded
+            // picture (a few MB each) stayed on the heap for the song playing and the next one. The frames gapless
+            // playback needs are still read (media3's REQUIRED_ID3_FRAME_PREDICATE).
+            .setMediaSourceFactory(DefaultMediaSourceFactory(this, DefaultExtractorsFactory().setConstantBitrateSeekingEnabled(true)
+                .setMp3ExtractorFlags(androidx.media3.extractor.mp3.Mp3Extractor.FLAG_DISABLE_ID3_METADATA)
+                .setFlacExtractorFlags(androidx.media3.extractor.flac.FlacExtractor.FLAG_DISABLE_ID3_METADATA)).setDataSourceFactory(nori.sources.factory))
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
+            .setHandleAudioBecomingNoisy(true)
+            // The CPU lock only. media3's network mode would pin Wi-Fi out of power save for as long as music plays;
+            // a track is fetched in seconds and then played from memory, so the Wi-Fi lock is held just while loading.
+            .setWakeMode(C.WAKE_MODE_LOCAL)
+            // The playback thread sleeps until the renderers can make progress instead of looping every 10 ms.
+            .experimentalSetDynamicSchedulingEnabled(true)
+            .setLoadControl(
+                // Fill up to ten minutes in one go, then leave the network alone until a minute is left. The cap is a
+                // quarter of the app's heap class, at most 48 MB: a whole MP3/Opus track everywhere, FLAC in two or three fetches.
+                dev.nori.music.ffi.loadControl(getSystemService(android.app.ActivityManager::class.java).memoryClass.toUInt()).let { c ->
+                    DefaultLoadControl.Builder().setBufferDurationsMs(c[0].toInt(), c[1].toInt(), c[2].toInt(), c[3].toInt())
+                        .setTargetBufferBytes(c[4].toInt()).setPrioritizeTimeOverSizeThresholds(false).build()
+                }
+            )
+            .build()
+        // A dropout is otherwise invisible: the output ran dry and the listener heard a gap, but nothing
+        // says so. Named in the log, with whether a mix was on, so "a cut on the change" has a trace.
+        player.addAnalyticsListener(object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+            override fun onAudioUnderrun(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long,
+            ) {
+                android.util.Log.w("nori", "audio underrun: ${bufferSizeMs} ms buffer, ${elapsedSinceLastFeedMs} ms since last feed, mixing=${TransitionSink.mixing}, holding=${TransitionSink.holding}")
+            }
+            override fun onAudioSinkError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, audioSinkError: Exception) {
+                android.util.Log.w("nori", "audio sink error: $audioSinkError")
+            }
+        })
+        player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
+            override fun onOffloadedPlayback(offloaded: Boolean) { this@PlaybackService.offloaded = offloaded; updateBurst() }
+        })
+        return player
+    }
+
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = session
 
     override fun onTaskRemoved(rootIntent: android.content.Intent?) {
@@ -292,6 +312,8 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         Equalizer.active = null
+        rustPlayer = null
+        engine = null
         persistQueue(push = false)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
         main.removeCallbacks(precache)
@@ -316,6 +338,9 @@ class PlaybackService : MediaLibraryService() {
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
             val looped = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+            // The Rust player walked the core's queue itself (explicit songs skipped, the ReplayGain volume
+            // set): this is only the song the ear arrived on.
+            if (rust != null) return arrived(item, if (looped) dev.nori.music.ffi.TrackChange.LOOPED else dev.nori.music.ffi.TrackChange.MOVED)
             // The core follows the player onto the song and says what arriving there means (an explicit
             // song skipped, a repeat loop, a new song; crates/core/src/playlist.rs playlist_transition).
             val arrival = dev.nori.music.ffi.playlistTransition(player.currentMediaItemIndex, looped)
@@ -334,6 +359,16 @@ class PlaybackService : MediaLibraryService() {
                 dev.nori.music.ffi.Onto.SONG -> scrobbler.onTrack(item?.mediaId, dev.nori.music.ffi.TrackChange.MOVED, player.isPlaying)
             }
             applyGain()
+            arrived(item, null)
+        }
+
+        /** A song reached: scrobbled as [change] (none when already told), then what follows a new song. */
+        private fun arrived(item: MediaItem?, change: dev.nori.music.ffi.TrackChange?) {
+            if (change != null) {
+                refreshButtons()
+                scrobbler.onTrack(item?.mediaId, change, player.isPlaying)
+                if (change == dev.nori.music.ffi.TrackChange.LOOPED) return
+            }
             scheduleSave()
             autoFill()
             if (nori.settings.value.bridgeOffline) offlineBridge?.onTrack()
@@ -342,7 +377,7 @@ class PlaybackService : MediaLibraryService() {
             // A few seconds in, the current track has been fetched and the radio is still up: fetch ahead now.
             main.removeCallbacks(precache)
             main.postDelayed(precache, timings.precacheAfterMs)
-            if (dev.nori.music.ffi.sleepSongChanged()) player.pauseAtEndOfMediaItems = true
+            if (dev.nori.music.ffi.sleepSongChanged()) pauseAtEnd(true)
         }
 
         override fun onIsLoadingChanged(isLoading: Boolean) {
@@ -354,12 +389,12 @@ class PlaybackService : MediaLibraryService() {
             if (isPlaying) dev.nori.music.ffi.queuePlaying()
             // Paused is silent: the deep buffer comes back at once rather than waiting a song, and the
             // rebuild carries any other pending swap with it.
-            if (!isPlaying && !player.playWhenReady && chain.paused()) reconfigureSink(urgent = true)
+            if (!isPlaying && !player.playWhenReady && exo != null && chain.paused()) reconfigureSink(urgent = true)
             announce()
             scrobbler.onPlaying(isPlaying)
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
             main.removeCallbacks(idleRelease)
-            if (!isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_IDLE) main.postDelayed(idleRelease, timings.idleReleaseMs)
+            if (!isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_IDLE && exo != null) main.postDelayed(idleRelease, timings.idleReleaseMs)
         }
 
         override fun onShuffleModeEnabledChanged(on: Boolean) { refreshUpcoming(); refreshButtons() }
@@ -379,6 +414,9 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            // The Rust player skips or stops by the core's rules itself; what reaches here is its output
+            // or the engine failing to start, which trying again would not change.
+            if (rust != null) { android.util.Log.w("nori", "rust player: $error"); return }
             // What to do is nori_player::queue::on_error's call: an output that refuses the offloaded
             // stream goes back to the CPU path, a network failure goes to the offline bridge when it is on,
             // anything else skips a few and then stops.
@@ -450,6 +488,12 @@ class PlaybackService : MediaLibraryService() {
 
     private fun updateBurst() { transitionSink?.bursting = chain.bursting(offloaded) }
 
+    /** Pause once the song playing ends (the sleep timer's "end of this song"). */
+    private fun pauseAtEnd(on: Boolean) {
+        exo?.pauseAtEndOfMediaItems = on
+        rust?.pauseAtEndOfItem = on
+    }
+
     private fun announce() {
         val m = player.currentMediaItem?.mediaMetadata
         sendBroadcast(android.content.Intent(ACTION_STATE).setPackage(packageName)
@@ -463,6 +507,7 @@ class PlaybackService : MediaLibraryService() {
      * waits for the next track boundary, where the swap is inaudible.
      */
     private fun reconfigureSink(urgent: Boolean = false) {
+        if (exo == null) return
         if (player.playbackState == Player.STATE_IDLE || urgent) {
             if (player.playbackState != Player.STATE_IDLE) {
                 android.util.Log.i("nori", "chain swap now")
@@ -475,6 +520,8 @@ class PlaybackService : MediaLibraryService() {
 
     /** The planner reads the transition settings itself (crates/core/src/automix/planner.rs); only the output's say is handed over. */
     private fun setupTransitions() {
+        // The Rust player hands the planner the output's say itself, and asks again.
+        rust?.let { return it.replan() }
         dev.nori.music.ffi.transitionSetup(transitionsOff)
         transitionSink?.replan()
     }
@@ -486,6 +533,14 @@ class PlaybackService : MediaLibraryService() {
      */
     private fun applyAudio(p: Prefs) {
         nori.dac.setEnabled(p.bitPerfect)
+        // The Rust player puts the same policy over its own chain (nori-engine's `apply`): it is handed the
+        // settings, and takes offload, speed, silence skipping and the transitions from them.
+        rust?.let { r ->
+            r.applySettings()
+            main.removeCallbacks(measure)
+            main.postDelayed(measure, timings.measureAfterSettingsMs)
+            return
+        }
         val usb = nori.outputs.usb.value
         val a = dev.nori.music.ffi.audioApply(
             dev.nori.music.ffi.OutputState(hiRes = hiRes, bitPerfect = nori.dac.state.value.bitPerfect, usb = usb, offloadRefused = offloadRefused),
@@ -496,7 +551,7 @@ class PlaybackService : MediaLibraryService() {
         setupTransitions()
         // The pinned output rate stands down with everything else that touches samples.
         transitionSink?.lockRate = policy.lockRate
-        player.skipSilenceEnabled = policy.skipSilence
+        exo?.skipSilenceEnabled = policy.skipSilence
         // Speed and pitch ride the player's parameters, which the sink's own stretcher hears live - no
         // rebuild, no gap; an offloaded track is the exception the rebuild rule covers.
         player.playbackParameters = androidx.media3.common.PlaybackParameters(a.speed, a.pitch)
@@ -540,11 +595,15 @@ class PlaybackService : MediaLibraryService() {
      * its own queue; it says when it changed.
      */
     private fun refreshUpcoming() {
+        // The Rust player follows the core's window itself whenever it is told the queue changed.
+        if (rust != null) return
         if (dev.nori.music.ffi.playlistWindow()) transitionSink?.replan()
     }
 
     /** ReplayGain as plain volume: costs nothing and survives offload. Attenuation only. */
     private fun applyGain() {
+        // The Rust player sets each song's level on its first sample; it only needs telling the settings changed.
+        rust?.let { return it.gainChanged() }
         // The level is the core's decision (nori_player::policy::replay_gain over its queue and settings).
         targetVolume = dev.nori.music.ffi.playlistGain(nori.dac.state.value.bitPerfect)
         if (fade == null) player.volume = targetVolume
@@ -570,8 +629,9 @@ class PlaybackService : MediaLibraryService() {
     }
 
     /** What the session (notification, headset, our UI, Android Auto) actually controls: the player plus the configured manners. */
-    private inner class Controls(p: ExoPlayer) : androidx.media3.common.ForwardingPlayer(p) {
-        private val ms get() = nori.settings.value.fadeMs
+    private inner class Controls(p: Player) : androidx.media3.common.ForwardingPlayer(p) {
+        /** The Rust player runs the fades itself, at its track's volume, from the same settings. */
+        private val ms get() = if (rust != null) 0 else nori.settings.value.fadeMs
 
         // How each control sounds is decided in nori-player (nori_player::transport); this runs the fades.
         override fun play() {
@@ -611,6 +671,7 @@ class PlaybackService : MediaLibraryService() {
 
         /** Down first, then the switch, then back up (the dip is nori_player::transport::switch_dip's). */
         private fun softly(switch: Switch, action: () -> Unit) {
+            if (rust != null) return action()
             val dip = dev.nori.music.ffi.switchDip(ms, switch, wrappedPlayer.isPlaying) ?: run { action(); return }
             takePending()
             softPending = action
@@ -734,10 +795,12 @@ class PlaybackService : MediaLibraryService() {
 
     /** The core's play order, while shuffling, written into the player: copied by the core straight into the array the order is made from. */
     private fun order(c: dev.nori.music.ffi.QueueChange) {
+        // The Rust player's timeline reads the core's order itself.
+        val exo = exo ?: return
         if (!c.shuffled) return
-        val order = IntArray(player.mediaItemCount)
+        val order = IntArray(exo.mediaItemCount)
         if (PlaylistJni.order(order) != order.size) return
-        player.setShuffleOrder(DefaultShuffleOrder(order, SystemClock.elapsedRealtime()))
+        exo.setShuffleOrder(DefaultShuffleOrder(order, SystemClock.elapsedRealtime()))
     }
 
     /**
@@ -747,6 +810,8 @@ class PlaybackService : MediaLibraryService() {
      * that differs is sent whole.
      */
     private fun follow() {
+        // The Rust player's list is only ever changed through the core, so there is nothing to catch.
+        if (rust != null) return
         val t = player.currentTimeline
         val count = player.mediaItemCount
         val shuffling = player.shuffleModeEnabled
@@ -867,7 +932,7 @@ class PlaybackService : MediaLibraryService() {
                 val alarms = getSystemService(AlarmManager::class.java)
                 alarms.cancel(sleepAlarm)
                 // The songs still to go are counted in the core (rules.rs sleep_set, sleep_song_changed).
-                player.pauseAtEndOfMediaItems = dev.nori.music.ffi.sleepSet(args.getInt(ARG_SONGS).coerceAtLeast(0).toUInt(), args.getBoolean(ARG_END_OF_TRACK))
+                pauseAtEnd(dev.nori.music.ffi.sleepSet(args.getInt(ARG_SONGS).coerceAtLeast(0).toUInt(), args.getBoolean(ARG_END_OF_TRACK)))
                 val minutes = args.getInt(ARG_MINUTES)
                 // An alarm, not a Handler: with offloaded playback the CPU sleeps and uptime stops counting.
                 if (minutes > 0) dev.nori.music.ffi.sleepDelay(minutes.toUInt()).let { (delay, slack) ->
@@ -886,7 +951,8 @@ class PlaybackService : MediaLibraryService() {
             }
             if (command.customAction == CMD_SHUFFLE) controls.shuffleModeEnabled = !player.shuffleModeEnabled
             if (command.customAction == CMD_FILL_NEXT) fillThenNext()
-            if (command.customAction == CMD_TUNING) {
+            // The Rust player has no shallow buffer to trade for: the equalizer is heard after what it has buffered.
+            if (command.customAction == CMD_TUNING && exo != null) {
                 val on = args.getBoolean(ARG_ON)
                 // Shallow buffer makes a band move audible within ~0.5 s instead of up to the deep
                 // 10 s AudioTrack fill. Rebuilding mid-track is a stop/prepare gap, so while music

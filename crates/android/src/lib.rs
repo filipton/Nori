@@ -22,17 +22,20 @@ extern crate nori_core as norimusic_core;
 
 include!(concat!(env!("OUT_DIR"), "/uniffi_bindgen_kotlin_jni.uniffi.rs"));
 
+mod covers;
 mod decoder;
 mod dsp;
 mod engine;
 mod heard;
 mod look;
+mod player;
 mod playlist;
 mod seek;
 mod settings;
 mod stages;
 mod store;
 mod stream_cache;
+mod track;
 mod transfers;
 
 /// One Kotlin class and the natives it declares.
@@ -60,7 +63,8 @@ macro_rules! native {
 }
 pub(crate) use native;
 
-static CLASSES: [&Class; 16] = [
+static CLASSES: [&Class; 18] = [
+    &covers::CLASS,
     &decoder::CLASS,
     &dsp::CLASS,
     &engine::CLASS,
@@ -68,6 +72,7 @@ static CLASSES: [&Class; 16] = [
     &heard::PLAYHEAD,
     &look::COVER,
     &look::LYRICS,
+    &player::CLASS,
     &playlist::CLASS,
     &seek::CLASS,
     &settings::EQ_WORDS,

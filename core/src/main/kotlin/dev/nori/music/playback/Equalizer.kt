@@ -15,8 +15,11 @@ object Dsp {
 
     @JvmStatic @CriticalNative external fun create(sampleRate: Int, channels: Int): Long
     @JvmStatic @CriticalNative external fun destroy(handle: Long)
-    /** Peak gain reduction over the last buffer, in dB. Reads an atomic, so the UI never waits on the audio thread. */
-    @JvmStatic @CriticalNative external fun gainReductionDb(handle: Long): Float
+    /**
+     * Peak gain reduction over the last buffer processed, in dB. An atomic of its own, not the chain's: the
+     * UI reads it while the playback thread may be freeing that chain, so no handle is passed.
+     */
+    @JvmStatic @CriticalNative external fun meter(): Float
     /** Frames the chain holds back (the limiter's look-ahead), drained at the end of a stream. */
     @JvmStatic @CriticalNative external fun delayFrames(handle: Long): Int
     @JvmStatic @CriticalNative external fun reset(handle: Long)
@@ -53,7 +56,7 @@ class Equalizer : BaseAudioProcessor() {
     }
 
     /** What the limiter is doing right now, for a meter. 0 when it is off or idle. */
-    val gainReductionDb: Float get() = handle.takeIf { it != 0L }?.let { Dsp.gainReductionDb(it) } ?: 0f
+    val gainReductionDb: Float get() = if (handle != 0L) Dsp.meter() else 0f
 
     override fun onConfigure(format: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
         if (!enabled) return AudioProcessor.AudioFormat.NOT_SET

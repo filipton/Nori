@@ -107,6 +107,56 @@ pub fn cover_neighbours(index: i32, previous: i32, next: i32, ahead: i32, len: u
     out
 }
 
+/// Whether the cover address `url` is an octo-fiesta provider item's (see [`CoverRules::provider_prefixes`]):
+/// such a cover is never stored, since the provider redraws it under the same id once the item is in the
+/// library. Asked for every cover a list draws, so it only looks, and allocates nothing.
+///
+/// Twin of `isProviderCover` (app/.../ui/Components.kt), which Android keeps: a string test where the
+/// cover is composed costs less than a crossing into the core would.
+pub fn is_provider_cover(url: &str) -> bool {
+    url.match_indices("&id=").any(|(at, mark)| {
+        let id = &url[at + mark.len()..];
+        PROVIDER_PREFIXES.iter().any(|p| id.starts_with(p))
+    })
+}
+
+/// Writes the address of cover `id` at `size` into `out` (cleared first): the signed `getCoverArt`
+/// prefix (`Core::url_prefix`, asked once per server and address), then the id and the size, exactly as
+/// the Android app builds it, so every client asks the server for the same renditions and the same
+/// cache keys. The id is escaped the way Android's `Uri.encode` escapes it, which leaves `!'()*` alone
+/// where `api::encode` escapes them: the two must not be mixed for one cover. A list builds thousands
+/// of these, so the caller keeps `out` and nothing is allocated once it has grown.
+///
+/// Twin of `Library.coverUrl` (core/.../data/Library.kt), which Android keeps (plain string work per
+/// row, cheaper than a crossing).
+pub fn cover_url_into(out: &mut String, prefix: &str, id: &str, size: i32) {
+    use std::fmt::Write;
+    out.clear();
+    out.push_str(prefix);
+    out.push_str("&id=");
+    uri_encode(out, id);
+    out.push_str("&size=");
+    let _ = write!(out, "{size}");
+}
+
+/// Android's `Uri.encode(s)`: letters, digits and `_-!.~'()*` stay, every other character goes as its
+/// UTF-8 bytes in upper-case `%XX`.
+fn uri_encode(out: &mut String, s: &str) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || "_-!.~'()*".contains(c) {
+            out.push(c);
+        } else {
+            let mut utf8 = [0u8; 4];
+            for &b in c.encode_utf8(&mut utf8).as_bytes() {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 15) as usize] as char);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

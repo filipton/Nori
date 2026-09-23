@@ -1,0 +1,144 @@
+setup_extracted	-	-
+setup_format	-	-
+setup_extracted	_	_
+setup_format	_	_
+setup_extracted	1210	1210
+setup_format	1210	1210
+setup_extracted	010203,04,_,0506	010203040506
+setup_format	010203,04,_,0506	010203040506
+setup_extracted	_,_	_
+setup_format	_,_	_
+codecs	-	-
+codecs	2	mp4a.40.2
+codecs	5	mp4a.40.5
+codecs	29	mp4a.40.29
+codecs	0	mp4a.40.0
+codecs	-1	mp4a.40.-1
+measuring_buffer	-	65536
+measuring_buffer	-1	8192
+measuring_buffer	0	8192
+measuring_buffer	1	8192
+measuring_buffer	4096	8192
+measuring_buffer	8191	8192
+measuring_buffer	8192	8192
+measuring_buffer	8193	8193
+measuring_buffer	65536	65536
+measuring_buffer	1000000	1000000
+decoder_buffer	-1	65536
+decoder_buffer	0	0
+decoder_buffer	1	1
+decoder_buffer	4096	4096
+decoder_buffer	65536	65536
+decoder_buffer	1000000	1000000
+grown	8192	-1	8192
+grown	8192	0	8192
+grown	8192	8192	8192
+grown	8192	8193	8193
+grown	8192	65536	65536
+grown	8192	70000	70000
+grown	65536	-1	65536
+grown	65536	0	65536
+grown	65536	8192	65536
+grown	65536	8193	65536
+grown	65536	65536	65536
+grown	65536	70000	70000
+encoding	audio/raw	-1	0
+encoding	audio/raw	0	0
+encoding	audio/raw	1	0
+encoding	audio/raw	2	2
+encoding	audio/raw	3	0
+encoding	audio/raw	4	4
+encoding	audio/raw	21	0
+encoding	audio/raw	22	0
+encoding	audio/raw	268435456	0
+encoding	audio/raw	536870912	0
+encoding	audio/mpeg	-1	0
+encoding	audio/mpeg	0	0
+encoding	audio/mpeg	1	0
+encoding	audio/mpeg	2	0
+encoding	audio/mpeg	3	0
+encoding	audio/mpeg	4	0
+encoding	audio/mpeg	21	0
+encoding	audio/mpeg	22	0
+encoding	audio/mpeg	268435456	0
+encoding	audio/mpeg	536870912	0
+encoding	audio/flac	-1	0
+encoding	audio/flac	0	0
+encoding	audio/flac	1	0
+encoding	audio/flac	2	0
+encoding	audio/flac	3	0
+encoding	audio/flac	4	0
+encoding	audio/flac	21	0
+encoding	audio/flac	22	0
+encoding	audio/flac	268435456	0
+encoding	audio/flac	536870912	0
+encoding	-	-1	0
+encoding	-	0	0
+encoding	-	1	0
+encoding	-	2	0
+encoding	-	3	0
+encoding	-	4	0
+encoding	-	21	0
+encoding	-	22	0
+encoding	-	268435456	0
+encoding	-	536870912	0
+configs	0	0
+configs	1	0,1
+configs	2	0,1,2
+configs	3	0,1,2,3
+configs	4	0,1,2,3,4
+configs	5	0,1,2,3,4,5
+configs	6	0,1,2,3,4,5,6
+configs	7	0,1,2,3,4,5,6,7
+configs	8	0,1,2,3,4,5,6,7,8
+configs	9	0,1,2,3,4,5,6,7,8,9
+configs	10	0,1,2,3,4,5,6,7,8,9,10
+configs	11	0,1,2,3,4,5,6,7,8,9,10,11
+configs	12	0,1,2,3,4,5,6,7,8,9,10,11,12
+configs	13	0,1,2,3,4,5,6,7,8,9,10,11,12,13
+configs	14	0,1,2,3,4,5,6,7,8,9,10,11,12,13,14
+configs	15	0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+configs	16	0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+configs	17	1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+configs	18	2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
+configs	19	3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+configs	20	4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20
+configs	21	5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21
+configs	22	6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22
+configs	23	7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
+configs	24	8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24
+configs	25	9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25
+configs	26	10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26
+configs	27	11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27
+configs	28	12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28
+configs	29	13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29
+configs	30	14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30
+configs	31	15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+configs	32	16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32
+configs	33	17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33
+configs	34	18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34
+configs	35	19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35
+configs	36	20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36
+configs	37	21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37
+configs	38	22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38
+configs	39	23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39
+configs	40	_
+configs	41	40
+configs	42	40,41
+configs	43	40,41,42
+configs	44	40,41,42,43
+configs	45	40,41,42,43,44
+configs	46	40,41,42,43,44,45
+configs	47	40,41,42,43,44,45,46
+configs	48	40,41,42,43,44,45,46,47
+configs	49	40,41,42,43,44,45,46,47,48
+configs	50	40,41,42,43,44,45,46,47,48,49
+configs	51	40,41,42,43,44,45,46,47,48,49,50
+configs	52	40,41,42,43,44,45,46,47,48,49,50,51
+configs	53	40,41,42,43,44,45,46,47,48,49,50,51,52
+configs	54	40,41,42,43,44,45,46,47,48,49,50,51,52,53
+configs	55	40,41,42,43,44,45,46,47,48,49,50,51,52,53,54
+configs	56	40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55
+configs	57	40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56
+configs	58	41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57
+configs	59	42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58

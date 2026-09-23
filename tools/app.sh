@@ -4,6 +4,7 @@
 #   tools/app.sh play "search:noise 1"    play a song by id, album, or first search hit
 #   tools/app.sh set limiter true         flip one setting
 #   tools/app.sh state                    one JSON line: route, playback, key settings
+#   tools/app.sh engine rust|exoplayer    the player the service builds (set playbackEngine), app restarted
 # Needs the app running (tools/app.sh launch). Answers come back from logcat, tag noritest.
 set -uo pipefail
 pkg=${NORI_PKG:-dev.nori.music}
@@ -25,6 +26,8 @@ send() {
 case "${1:-}" in
   launch) adb shell monkey -p $pkg -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; sleep 4; send state ;;
   open|play|state|set|login|do) send "$@" ;;
+  # The service reads the setting when it starts: the app is stopped and launched again with it.
+  engine) send set playbackEngine "${2:?rust or exoplayer}" && adb shell am force-stop $pkg && "$0" launch ;;
   wake) adb shell input keyevent 224 >/dev/null; adb shell wm dismiss-keyguard >/dev/null 2>&1; sleep 1 ;;
-  *) echo "usage: app.sh launch|open <route>|play <ref>|do <action>|login <url|user|pass>|set <name> <value>|state|wake" >&2; exit 2 ;;
+  *) echo "usage: app.sh launch|open <route>|play <ref>|do <action>|login <url|user|pass>|set <name> <value>|engine rust|exoplayer|state|wake" >&2; exit 2 ;;
 esac

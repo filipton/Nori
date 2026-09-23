@@ -99,6 +99,21 @@ impl<'a, D: Downstream> Fed<'a, D> {
     }
 }
 
+impl<D: Downstream> Fed<'_, D> {
+    /// After a discontinuity the output may move its clock on any offer, even one it takes nothing
+    /// from (a start-time resync is applied when the buffer is first seen): until audio has gone in,
+    /// the clock is read again after every offer, so the transition engine measures the jump. With
+    /// bursting off (tuning, offload) the same holds.
+    fn after_offer(&mut self, used: usize) {
+        if self.resynced {
+            self.position = None;
+            if used > 0 {
+                self.resynced = false;
+            }
+        }
+    }
+}
+
 impl<D: Downstream> Downstream for Fed<'_, D> {
     type Config = D::Config;
 
@@ -112,6 +127,7 @@ impl<D: Downstream> Downstream for Fed<'_, D> {
     fn handle_buffer(&mut self, data: &[u8], from: usize, pts_us: i64) -> (bool, usize) {
         if !self.burst.enabled {
             let r = self.down.handle_buffer(data, from, pts_us);
+            self.after_offer(r.1);
             self.burst.bytes_written += r.1 as u64;
             return r;
         }
@@ -125,9 +141,7 @@ impl<D: Downstream> Downstream for Fed<'_, D> {
             self.burst.filling = true;
         }
         let (taken, used) = self.down.handle_buffer(data, from, pts_us);
-        if used > 0 && std::mem::take(&mut self.resynced) {
-            self.position = None;
-        }
+        self.after_offer(used);
         self.burst.bytes_written += used as u64;
         if let Some(f) = self.burst.format.filter(|f| f.frame_bytes() > 0 && f.rate > 0) {
             self.burst.written_us += (used / f.frame_bytes()) as i64 * 1_000_000 / f.rate as i64;

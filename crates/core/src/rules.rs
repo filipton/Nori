@@ -290,6 +290,38 @@ pub fn load_control(memory_class_mb: u32) -> Vec<i64> {
     t::load_control(memory_class_mb).to_vec()
 }
 
+/// What the precacher fetches, in order, of the songs [`queue_precache`] names: those that can be fetched
+/// at all (`queue_fetchable`), less those the download queue is already fetching (`downloading`): a song
+/// on its way into the downloads arrives for good, and pulling it into the rolling cache too keeps it
+/// twice. A song already downloaded is passed over when its turn comes, since that can change meanwhile.
+///
+/// Twin of `Precacher.update` with `PlaybackService.precacheAhead` (core/.../playback/Precacher.kt,
+/// PlaybackService.kt), which Android keeps around media3's `CacheWriter`.
+pub fn precache_list(ids: Vec<String>, downloading: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut ids = crate::queue::queue_fetchable(ids);
+    ids.retain(|id| !downloading(id));
+    ids
+}
+
+// ---- the volume slider -------------------------------------------------------------------------------------
+
+/// The output's volume step for a slider at `fraction` (0..1) of an output with steps 0..=`max`: the
+/// nearest step, not the one below - truncating made the bar jump back a notch every time it was let
+/// go. Halves go to the even step, as Kotlin's `round` does. None when the output has no steps.
+///
+/// Twin of `PlayerViewModel.setVolumeFraction` (app/.../vm/PlayerViewModel.kt), which Android keeps next to
+/// its `AudioManager`.
+pub fn volume_step(fraction: f32, max: i32) -> Option<i32> {
+    (max > 0).then(|| ((fraction.clamp(0.0, 1.0) * max as f32).round_ties_even() as i32).clamp(0, max))
+}
+
+/// Where the slider stands for step `step` of 0..=`max`; 0 for an output with no steps.
+///
+/// Twin of `PlayerViewModel.volumeFraction` (app/.../vm/PlayerViewModel.kt).
+pub fn volume_fraction(step: i32, max: i32) -> f32 {
+    if max > 0 { step as f32 / max as f32 } else { 0.0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

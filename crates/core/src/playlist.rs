@@ -204,6 +204,21 @@ pub fn playlist_transition(index: i32, looped: bool) -> Onto {
     a
 }
 
+/// Whether arriving on list index `index` now would skip it, as [`playlist_transition`] would decide
+/// there: a player that walks the queue itself asks before it reads the song, so none of it is heard.
+pub fn playlist_skips(index: usize) -> bool {
+    let skip_explicit = crate::rules::prefs(|p| p.skip_explicit);
+    if !skip_explicit {
+        return false;
+    }
+    let (id, has_next) = with(|p| {
+        let repeat = if p.repeat() == nori_player::playlist::REPEAT_ONE { nori_player::playlist::REPEAT_ALL } else { p.repeat() };
+        (p.ids().get(index).cloned(), p.next_of(index, repeat).is_some())
+    });
+    let explicit = id.is_some_and(|id| queue::queue_flags(id) & queue::EXPLICIT != 0);
+    nori_player::queue::arrival(true, skip_explicit, explicit, has_next, false) == Onto::Skip
+}
+
 /// Java's `String.hashCode`, over the UTF-16 the platform keeps the id in.
 fn java_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
@@ -296,6 +311,17 @@ pub fn playlist_window() -> bool {
 /// say; `bit_perfect` whether the output takes the samples untouched.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_gain(bit_perfect: bool) -> f32 {
+    gain_at(None, bit_perfect)
+}
+
+/// The volume the song at list index `index` will play at once the player gets there, as
+/// [`playlist_gain`] works it out for the current one: a player that knows where the next song starts
+/// in its output sets its volume for that moment ahead of time.
+pub fn playlist_gain_of(index: usize, bit_perfect: bool) -> f32 {
+    gain_at(Some(index), bit_perfect)
+}
+
+fn gain_at(index: Option<usize>, bit_perfect: bool) -> f32 {
     let Some(s) = crate::settings_store::current() else { return 1.0 };
     let mode = match s.replay_gain {
         1 => crate::GainMode::Track,
@@ -306,7 +332,12 @@ pub fn playlist_gain(bit_perfect: bool) -> f32 {
     let (preamp_db, untagged_db) = (s.preamp_db, s.untagged_gain_db);
     let (before, current, after, shuffling) = with(|p| {
         let id = |i: Option<usize>| i.map(|i| p.ids()[i].clone());
-        (id(p.previous()), p.current_id().map(str::to_string), id(p.next()), p.shuffling())
+        // As `Playlist::previous` and `next` walk from the current song: repeat one counts as all.
+        let repeat = if p.repeat() == nori_player::playlist::REPEAT_ONE { nori_player::playlist::REPEAT_ALL } else { p.repeat() };
+        match index.filter(|&i| i < p.len()) {
+            Some(i) => (id(p.previous_of(i, repeat)), Some(p.ids()[i].clone()), id(p.next_of(i, repeat)), p.shuffling()),
+            None => (id(p.previous()), p.current_id().map(str::to_string), id(p.next()), p.shuffling()),
+        }
     });
     queue::queue_gain(before, current, after, mode, preamp_db, untagged_db, bit_perfect, shuffling)
 }

@@ -26,6 +26,7 @@ pub mod profiles;
 pub mod settings;
 pub mod settings_store;
 pub mod settings_schema;
+pub mod perf_log;
 pub mod fmt;
 pub mod pages;
 pub mod smart;
@@ -47,6 +48,7 @@ pub mod stream_cache;
 pub mod playlist;
 pub mod library;
 pub mod menus;
+pub mod rows;
 pub mod stage;
 
 use std::sync::Arc;
@@ -317,7 +319,6 @@ impl Core {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
         let db = db::open(&db_path, &server)?;
-        automix::store::migrate(&db)?;
         let held = transfers::Held::load(&db)?;
         let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()), held: Mutex::new(held) });
         // The newest core is the one the app is using: the audio path finds the database through it.
@@ -587,7 +588,7 @@ impl Core {
             position: u64,
         }
         let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-        // A queue saved by an older build (or edited since) may point past its end: the last song then.
+        // A saved queue that points past its end plays its last song.
         let index = q.index.min(q.songs.len().saturating_sub(1) as u32);
         // Kept for the queue it is about to become, so the platform does not hand the songs straight back.
         crate::queue::queue_register(q.songs.clone());

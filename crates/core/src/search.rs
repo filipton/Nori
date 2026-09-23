@@ -245,6 +245,25 @@ impl Core {
     }
 }
 
+/// How long live search waits after the last keystroke before it asks the server: at once for a blank
+/// field (which only clears the results), otherwise the user's `delay_ms`.
+///
+/// Twin of the `debounce` in `SearchViewModel` (app/.../vm/SearchViewModel.kt), which Android keeps: it
+/// is the argument of a coroutine operator, asked on the main thread per keystroke.
+pub fn live_delay_ms(query: &str, delay_ms: i64) -> i64 {
+    if query.chars().all(kotlin_whitespace) { 0 } else { delay_ms }
+}
+
+/// Kotlin's `Char.isWhitespace` on the JVM, which `isBlank` goes by: Java's whitespace or a Unicode space
+/// separator. That is not Rust's `char::is_whitespace` - the four ASCII separators U+001C-U+001F count,
+/// U+0085 does not - and a blank field must be blank to both.
+pub fn kotlin_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t'..='\r' | '\u{1c}'..='\u{20}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

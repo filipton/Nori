@@ -101,6 +101,17 @@ impl Client {
     }
 }
 
+/// The rows of page `page` of `page_size` a browser asks for, out of `len`: what the platform hands back
+/// for one request; empty past the end.
+///
+/// Twin of the paging in `PlaybackService.Callback.onGetChildren` and `onGetSearchResult`
+/// (core/.../playback/PlaybackService.kt, `drop(page * pageSize).take(pageSize)`), which Android keeps on
+/// its media3 lists.
+pub fn page(len: usize, page: u32, page_size: u32) -> std::ops::Range<usize> {
+    let from = (page as usize).saturating_mul(page_size as usize).min(len);
+    from..from.saturating_add(page_size as usize).min(len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

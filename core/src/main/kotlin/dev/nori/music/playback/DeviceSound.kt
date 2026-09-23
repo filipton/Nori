@@ -1,6 +1,5 @@
 package dev.nori.music.playback
 
-import android.content.Context
 import dev.nori.music.ffi.AutoEqEntry
 import dev.nori.music.ffi.ChoiceKind
 import dev.nori.music.ffi.Core
@@ -33,7 +32,7 @@ import kotlinx.coroutines.withContext
  * Driven by [Outputs.current] from the playback service, so it works with the app's screens closed.
  * It adds no listener of its own: it runs once per device change, never while music plays.
  */
-class DeviceSound(private val context: Context, private val settings: Settings, private val core: () -> Core, private val http: () -> Http) {
+class DeviceSound(private val settings: Settings, private val core: () -> Core, private val http: () -> Http) {
     private val lock = Mutex()
 
     /** Something to tell the user about the device that just connected. */
@@ -63,23 +62,7 @@ class DeviceSound(private val context: Context, private val settings: Settings, 
     suspend fun refresh() {
         val c = io { core() }
         _profiles.value = io { runCatching { c.profiles() }.getOrDefault(emptyList()) }
-        _quiet.value = io { carryOver(c); c.deviceQuiet() }
-    }
-
-    @Volatile private var carried = false
-
-    /**
-     * What an earlier version kept in its own small store (the devices never to be offered a curve, the
-     * sound from before a device took over) handed to the core once, and the store removed.
-     */
-    private fun carryOver(c: Core) {
-        if (carried) return
-        carried = true
-        val old = context.getSharedPreferences(OLD_STORE, Context.MODE_PRIVATE)
-        if (old.all.isEmpty()) return
-        c.deviceCarryOver(old.getStringSet("quiet", null).orEmpty().toList(), old.getString("looseSound", null))
-        old.edit().clear().commit()
-        context.deleteSharedPreferences(OLD_STORE)
+        _quiet.value = io { c.deviceQuiet() }
     }
 
     /** The output that music now goes to. */
@@ -88,7 +71,7 @@ class DeviceSound(private val context: Context, private val settings: Settings, 
     private suspend fun arrive(output: String) {
         // A notice is about the device that just arrived; one left unseen for an earlier device is stale.
         _notice.value = null
-        val a = io { core().also(::carryOver).deviceArrive(output) }
+        val a = io { core().deviceArrive(output) }
         perform(output, a.effect)
         val entry = a.entry ?: return
         if (a.curve == CurveStep.OFFER) {
@@ -174,7 +157,5 @@ class DeviceSound(private val context: Context, private val settings: Settings, 
     companion object {
         /** The profile nori_player::device::FLAT names, read once. */
         val FLAT: String by lazy { dev.nori.music.ffi.deviceFlat() }
-        /** Where these lived before the core kept them. */
-        private const val OLD_STORE = "nori-devices"
     }
 }

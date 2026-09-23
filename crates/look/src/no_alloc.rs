@@ -69,3 +69,19 @@ fn asking_the_lyrics_where_they_are_allocates_nothing() {
     std::hint::black_box(seen);
     assert_eq!(n, 0);
 }
+
+#[test]
+fn the_keys_asked_while_drawing_allocate_nothing() {
+    let url = "https://m.example/rest/getCoverArt.view?id=al-1&size=320";
+    let mut key = String::with_capacity(256);
+    let mut seen = 0i64;
+    let n = allocations(|| {
+        for i in 0..1_000 {
+            let t = i as f32 / 1_000.0;
+            seen ^= crate::sleeve::band_key(t, 1.0, 0.9 * t, 0.5);
+            crate::cover::palette_key(&mut key, url, i % 2 == 0, i % 3 == 0);
+        }
+    });
+    std::hint::black_box((seen, &key));
+    assert_eq!(n, 0);
+}

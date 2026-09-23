@@ -3,6 +3,8 @@
 //! demuxer reads - up to the core's `load_control` high mark in one go - then closes the connection and
 //! sleeps until the demuxer has come within the low mark of the end of what is there. A song that fits
 //! the memory cap (most do) is fetched whole in its first burst, so the radio wakes once per song.
+//! Given a stream cache entry to fill, the loader writes each burst into it as it comes; a song heard
+//! again then plays from the disk and the network is not asked at all.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -11,6 +13,8 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 use symphonia::core::io::MediaSource;
+
+use crate::store::Writer;
 
 /// A response body being read: where in the resource it starts (the offset asked for, or nought when
 /// the server would not do ranges), the whole resource's length when known, and the bytes.
@@ -115,13 +119,13 @@ pub struct Loader(Arc<Loaded>);
 
 impl Loader {
     /// Starts loading `url` through `source` on a thread of its own, sized by `load` and the song's
-    /// tagged length.
-    pub fn start(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>) -> Arc<Loader> {
+    /// tagged length, writing what it fetches into `keep` when given one.
+    pub fn start(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Writer>) -> Arc<Loader> {
         let loaded = Arc::new(Loaded { state: Mutex::new(State::default()), cv: Condvar::new() });
         let l = loaded.clone();
         std::thread::Builder::new()
             .name("nori-load".into())
-            .spawn(move || l.run(&*source, &url, load, duration_ms))
+            .spawn(move || l.run(&*source, &url, load, duration_ms, keep))
             .expect("a thread for loading");
         Arc::new(Loader(loaded))
     }
@@ -134,6 +138,38 @@ impl Loader {
     /// Bytes held in memory.
     pub fn held(&self) -> usize {
         self.0.state.lock().data.len()
+    }
+
+    /// The whole song is in memory: nothing read from it can wait.
+    pub fn complete(&self) -> bool {
+        let s = self.0.state.lock();
+        s.base == 0 && s.at_end() && s.error.is_none()
+    }
+
+    /// Waits, on the caller's own thread, until the whole song is in memory. False when it never will
+    /// be: its connection failed, or it is larger than one burst fetches.
+    pub(crate) fn wait_whole(&self) -> bool {
+        let l = &*self.0;
+        let mut s = l.state.lock();
+        loop {
+            if s.error.is_some() || s.closed {
+                return false;
+            }
+            if s.base == 0 && s.at_end() {
+                return true;
+            }
+            if s.window.is_some_and(|w| s.len.is_some_and(|len| len > w.high)) {
+                return false;
+            }
+            s.blocked = true;
+            l.cv.wait_for(&mut s, Duration::from_millis(200));
+            s.blocked = false;
+        }
+    }
+
+    /// Why the connection gave up for good, once it has.
+    pub fn error(&self) -> Option<String> {
+        self.0.state.lock().error.clone()
     }
 
     /// Whether the next read can be answered at once; if not, `engine` is woken when it can.
@@ -159,7 +195,7 @@ impl Drop for Loader {
 }
 
 impl Loaded {
-    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>) {
+    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>, mut keep: Option<Writer>) {
         let mut body: Option<Box<dyn Read + Send>> = None;
         let mut chunk = vec![0u8; CHUNK];
         let mut failures = 0;
@@ -176,12 +212,18 @@ impl Loaded {
                         s.data.clear();
                         s.done = false;
                         s.error = None;
+                        // A jump past what was loaded leaves a gap the cache entry cannot have.
+                        keep = None;
                     }
                     let w = s.window.unwrap_or_else(|| Window::for_song(load, duration_ms, s.len));
                     if s.at_end() {
-                        // The whole song is here: the connection goes, the network sleeps.
+                        // The whole song is here: the connection goes, the network sleeps, and the cache
+                        // has it for next time.
                         body = None;
                         s.done = true;
+                        if let (Some(k), Some(len), None) = (keep.take(), s.len, &s.error) {
+                            k.finish(len);
+                        }
                         self.wake(&mut s);
                     } else if body.is_some() && s.ahead() < w.high {
                         break;
@@ -234,6 +276,7 @@ impl Loaded {
             }
             let got = body.as_mut().expect("a body is open").read(&mut chunk);
             let mut s = self.state.lock();
+            let mut took = 0;
             match got {
                 Ok(0) => {
                     body = None;
@@ -245,11 +288,17 @@ impl Loaded {
                     failures = 0;
                     if s.end() == from && s.restart.is_none() {
                         s.data.extend_from_slice(&chunk[..n]);
+                        took = n;
                     }
                 }
                 Err(_) => body = None,
             }
             self.wake(&mut s);
+            drop(s);
+            // Written with the lock let go: the demuxer reads on meanwhile.
+            if took > 0 && keep.as_mut().is_some_and(|k| !k.write(from, &chunk[..took])) {
+                keep = None;
+            }
         }
     }
 
@@ -403,7 +452,7 @@ mod tests {
     #[test]
     fn it_fetches_up_to_the_high_mark_then_leaves_the_network_alone_until_the_low_mark() {
         let s = server(1_000_000);
-        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(10_000));
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(10_000), None);
         let mut r = l.reader();
         let first = settled(&s);
         assert!((400_000..400_000 + CHUNK as u64).contains(&first), "one burst to the high mark: {first}");
@@ -429,7 +478,7 @@ mod tests {
     #[test]
     fn a_song_that_fits_the_window_is_fetched_whole_in_one_request() {
         let s = server(300_000);
-        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000));
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000), None);
         assert_eq!(settled(&s), 300_000);
         let mut r = l.reader();
         let all = read(&mut r, 300_000);
@@ -440,7 +489,7 @@ mod tests {
     #[test]
     fn a_seek_past_what_is_loaded_fetches_from_there() {
         let s = server(5_000_000);
-        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(50_000));
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(50_000), None);
         settled(&s);
         let mut r = l.reader();
         r.seek(SeekFrom::Start(4_000_000)).unwrap();

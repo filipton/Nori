@@ -64,6 +64,22 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
+        // A release build with the recorder in it, for measuring on a real phone without adb
+        // (docs/perf-build.md). Minified and not debuggable like a release, so what it measures is what
+        // a release costs; installed beside the normal app under its own id and name.
+        create("perf") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".perf"
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+        }
+    }
+
+    // The benchmarks: run over adb in a debug build (TestBridge), from the Performance page in a perf build.
+    sourceSets {
+        getByName("debug").kotlin.srcDir("src/bench/kotlin")
+        getByName("perf").kotlin.srcDir("src/bench/kotlin")
     }
 
     compileOptions {
