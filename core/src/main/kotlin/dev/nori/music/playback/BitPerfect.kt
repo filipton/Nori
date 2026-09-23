@@ -11,6 +11,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import dev.nori.music.ffi.DacStep
+import dev.nori.music.ffi.dacDecide
+import dev.nori.music.ffi.dacMock
+import dev.nori.music.ffi.dacTrackLine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -62,20 +66,13 @@ interface DacSource {
          * exercises is the decision - which mode is picked, and what the user is told when none can be.
          */
         fun mock(spec: String): DacSource {
-            val name = spec.substringBefore('@', "Mock DAC").ifEmpty { "Mock DAC" }
-            val modes = spec.substringAfter('@', "").split(',').mapNotNull { mode ->
-                val rate = mode.substringBefore('/').trim().toIntOrNull() ?: return@mapNotNull null
-                val encoding = when (mode.substringAfter('/', "16").trim()) {
-                    "16" -> AudioFormat.ENCODING_PCM_16BIT
-                    "24" -> AudioFormat.ENCODING_PCM_24BIT_PACKED
-                    "32" -> AudioFormat.ENCODING_PCM_32BIT
-                    "float" -> AudioFormat.ENCODING_PCM_FLOAT
-                    else -> return@mapNotNull null
-                }
-                AudioFormat.Builder().setSampleRate(rate).setEncoding(encoding)
+            // The spec is read by the core (dac_mock); only the framework's format objects are made here.
+            val m = dacMock(spec)
+            val modes = m.rates.indices.map { i ->
+                AudioFormat.Builder().setSampleRate(m.rates[i].toInt()).setEncoding(m.encodings[i])
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO).build()
             }
-            val port = DacPort(-1, name, modes, null)
+            val port = DacPort(-1, m.name, modes, null)
             return object : DacSource {
                 override fun find() = port
                 // A mock cannot ask the framework for anything, so it grants whatever it advertised.
@@ -159,7 +156,7 @@ class BitPerfect(context: Context) {
 
     /** What the AudioTrack was opened with, recorded after the fact so the user can check it. */
     fun onTrack(rate: Int, pcmEncoding: Int, offloaded: Boolean) {
-        val line = "%.1f kHz / %d bit%s".format(rate / 1000.0, bits(pcmEncoding), if (offloaded) ", offloaded to the audio chip" else "")
+        val line = dacTrackLine(rate.coerceAtLeast(0).toUInt(), pcmEncoding, offloaded)
         if (_state.value.track != line) _state.value = _state.value.copy(track = line)
     }
 
@@ -173,53 +170,41 @@ class BitPerfect(context: Context) {
         if (before != _state.value.bitPerfect) onChanged()
     }
 
-    private fun label(f: AudioFormat) = "%.1f kHz / %d bit".format(f.sampleRate / 1000.0, bits(f.encoding))
-
     /**
-     * The whole decision, kept free of the audio system so it can be tested. Every exit clears the preferred
-     * mixer attributes first: attributes left pointing at a format the AudioTrack will not be opened with are
-     * how this ends up routed somewhere silent.
+     * Asks the core (nori_player::dac::decide) which mode fits, whether the one held already does, and what
+     * to show, then does what it says. Every exit but keeping the held mode clears the preferred mixer
+     * attributes first: attributes left pointing at a format the AudioTrack will not be opened with are how
+     * this ends up routed somewhere silent.
      */
     private fun decide(port: DacPort?): DacState {
         if (port == null) { clear(); return DacState() }
-        val name = port.name
-        val playing = if (sampleRate == 0) null else "%.1f kHz / %d bit".format(sampleRate / 1000.0, bits(encoding))
         val track = _state.value.track
-        if (Build.VERSION.SDK_INT < 34) {
-            clear()
-            return DacState(name, blockedBy = "bit-perfect output needs Android 14 or newer", playing = playing, track = track)
+        val held = applied?.takeIf { it.id == port.id }
+        val d = dacDecide(
+            enabled, Build.VERSION.SDK_INT >= 34, port.name,
+            port.modes.map { it.sampleRate.toUInt() }, port.modes.map { it.encoding }, sampleRate.toUInt(), encoding,
+            held?.modes?.map { it.sampleRate.toUInt() }, held?.modes?.map { it.encoding }, _state.value.bitPerfect,
+        )
+        return when (val step = d.step) {
+            DacStep.Keep -> _state.value.copy(modes = d.modes, playing = d.playing, track = track)
+            DacStep.Release -> {
+                d.blockedBy?.let { Log.w("BitPerfect", "no usable bit-perfect mode: $it") }
+                clear()
+                DacState(d.device, supported = d.supported, modes = d.modes, blockedBy = d.blockedBy, playing = d.playing, track = track)
+            }
+            is DacStep.Prefer -> {
+                clear()
+                val ok = runCatching { source.prefer(port, port.modes[step.index.toInt()]) }.getOrElse { Log.w("BitPerfect", "prefer refused", it); false }
+                applied = port.takeIf { ok }
+                DacState(d.device, ok, sampleRate, d.bits.toInt(), true, d.modes, if (ok) null else d.refused, d.playing, track)
+            }
         }
-        val modes = port.modes
-        val labels = modes.map(::label)
-        // Which mode fits, or why none does, is nori-player's call (nori_player::dac).
-        fun mode(rate: Int, enc: Int) = dev.nori.music.ffi.DacMode(rate.toUInt(), bits(enc).toUInt(), enc == AudioFormat.ENCODING_PCM_FLOAT)
-        val choice = dev.nori.music.ffi.dacChoice(enabled, modes.map { mode(it.sampleRate, it.encoding) }, mode(sampleRate, encoding))
-        val match = modes.getOrNull(choice.useIndex)
-        if (match == null) {
-            choice.blockedBy?.let { Log.w("BitPerfect", "no usable bit-perfect mode: $it") }
-            clear()
-            return DacState(name, supported = modes.isNotEmpty(), modes = labels, blockedBy = choice.blockedBy, playing = playing, track = track)
-        }
-        if (applied?.id == port.id && applied?.modes?.contains(match) == true && _state.value.bitPerfect) {
-            return _state.value.copy(modes = labels, playing = playing, track = track)
-        }
-        clear()
-        val ok = runCatching { source.prefer(port, match) }.getOrElse { Log.w("BitPerfect", "prefer refused", it); false }
-        applied = port.takeIf { ok }
-        return DacState(name, ok, sampleRate, bits(encoding), true, labels, if (ok) null else "the system refused the preferred mixer attributes", playing, track)
     }
 
     private fun clear() {
         val port = applied ?: return
         applied = null
         runCatching { source.release(port) }.onFailure { Log.w("BitPerfect", "release failed", it) }
-    }
-
-    private fun bits(enc: Int) = when (enc) {
-        AudioFormat.ENCODING_PCM_16BIT -> 16
-        AudioFormat.ENCODING_PCM_24BIT_PACKED -> 24
-        AudioFormat.ENCODING_PCM_32BIT, AudioFormat.ENCODING_PCM_FLOAT -> 32
-        else -> 0
     }
 
     /** The real audio system. */
@@ -233,7 +218,8 @@ class BitPerfect(context: Context) {
                     .filter { it.mixerBehavior == AudioMixerAttributes.MIXER_BEHAVIOR_BIT_PERFECT }
                     .map { it.format }
             } else emptyList()
-            return DacPort(d.id, d.productName?.toString()?.trim().orEmpty().ifEmpty { "USB DAC" }, modes, d)
+            // The name as the device gives it; the core trims it and names a nameless one.
+            return DacPort(d.id, d.productName?.toString().orEmpty(), modes, d)
         }
 
         override fun prefer(port: DacPort, format: AudioFormat): Boolean {

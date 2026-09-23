@@ -3,11 +3,22 @@ package dev.nori.music.net
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
+import dev.nori.music.ffi.CoreException
+import dev.nori.music.ffi.FailureKind
+import dev.nori.music.ffi.HostPort
+import dev.nori.music.ffi.NetException
+import dev.nori.music.ffi.Transport
+import dev.nori.music.ffi.TransportException
+import dev.nori.music.ffi.TransportResponse
+import dev.nori.music.ffi.Trouble
+import dev.nori.music.ffi.describeError
+import dev.nori.music.ffi.netPolicy
+import dev.nori.music.ffi.serverHost
 import dev.nori.music.settings.ServerProfile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
@@ -25,48 +36,34 @@ import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** Sent with every request, as public APIs like LRCLIB ask. */
-const val USER_AGENT = "nori-music/0.1 (+https://github.com/filipton/nori-music)"
+/** The words come from the core; read once, when the first one is thrown. */
+private val meteredText by lazy { describeError(Trouble.Network(FailureKind.METERED), "") }
 
 /** The server is only allowed on unmetered networks and this is not one. */
-class MeteredNetworkException : IOException("This server is set to Wi-Fi only")
+class MeteredNetworkException : IOException(meteredText)
 
 /**
  * One connection pool for everything: API calls, cover art and audio all ride
  * the same HTTP/2 connection to the server, so the radio wakes once, not three times.
  * The clients are rebuilt when the server profile changes (headers, TLS); callers
  * go through [callFactory] / [streamFactory] so they always use the current ones.
+ * How the clients are tuned (pool, request caps, timeouts) is the core's [netPolicy], with the reasons.
  */
 class Http(private val context: Context) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
-    private val pool = ConnectionPool(4, 20, TimeUnit.SECONDS)
-
-    /**
-     * OkHttp allows five requests per host by default and shares one dispatcher between every client
-     * built from the same one. A grid of covers therefore queues five at a time behind whatever else is
-     * running - including a provider stream that octo-fiesta can hold open for minutes - which is what
-     * made artwork crawl on a real server while it looked instant on a small local one. HTTP/2
-     * multiplexes them over the single connection anyway, so a higher cap costs no extra sockets.
-     */
-    private val dispatcher = Dispatcher().apply { maxRequestsPerHost = 24; maxRequests = 48 }
-
-    /**
-     * Long streams get their own dispatcher so they cannot occupy the slots the UI needs. Room for the
-     * most downloads the setting allows (10) plus the song playing and the one being fetched ahead:
-     * media3's OkHttp source queues on this dispatcher, so a lower cap would quietly override
-     * "Downloads at once".
-     */
-    private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = 16; maxRequests = 24 }
+    private val policy = netPolicy()
+    private val pool = ConnectionPool(policy.poolMaxIdle.toInt(), policy.poolKeepAliveMs.toLong(), TimeUnit.MILLISECONDS)
+    private val dispatcher = Dispatcher().apply { maxRequestsPerHost = policy.maxRequestsPerHost.toInt(); maxRequests = policy.maxRequests.toInt() }
+    private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = policy.streamMaxRequestsPerHost.toInt(); maxRequests = policy.streamMaxRequests.toInt() }
     @Volatile private var profile: ServerProfile? = null
+
+    /** Where the profile's addresses point, parsed once by the core; each request is compared with these. */
+    @Volatile private var serverHosts: Array<HostPort> = emptyArray()
 
     @Volatile var api: OkHttpClient = build(null)
         private set
 
-    /**
-     * octo-fiesta answers a stream request for a provider track only once the
-     * whole file is downloaded on its side, so the first byte can take minutes.
-     */
-    @Volatile var stream: OkHttpClient = api.newBuilder().dispatcher(streamDispatcher).readTimeout(4, TimeUnit.MINUTES).build()
+    @Volatile var stream: OkHttpClient = streamClient(api)
         private set
 
     val callFactory = Call.Factory { api.newCall(it) }
@@ -80,33 +77,41 @@ class Http(private val context: Context) {
 
     fun configure(next: ServerProfile?) {
         val old = profile
+        serverHosts = if (next == null) emptyArray() else listOfNotNull(serverHost(next.url), serverHost(next.altUrl)).toTypedArray()
         profile = next
         // Only TLS settings need new clients; headers and the Wi-Fi rule are read per request.
         if (old?.allowSelfSigned != next?.allowSelfSigned || old?.clientCert != next?.clientCert || old?.clientCertPassword != next?.clientCertPassword) {
             api = build(next)
-            stream = api.newBuilder().readTimeout(4, TimeUnit.MINUTES).build()
+            stream = streamClient(api)
         }
+    }
+
+    private fun streamClient(api: OkHttpClient) =
+        api.newBuilder().dispatcher(streamDispatcher).readTimeout(policy.streamReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS).build()
+
+    /** Whether [url] goes to the music server: only that gets the profile's headers and its Wi-Fi-only rule. */
+    private fun toServer(url: okhttp3.HttpUrl): Boolean {
+        for (h in serverHosts) if (h.port.toInt() == url.port && h.host.equals(url.host, ignoreCase = true)) return true
+        return false
     }
 
     private fun build(p: ServerProfile?): OkHttpClient {
         val b = OkHttpClient.Builder()
             .dispatcher(dispatcher)
-            // Idle connections close after 20 s, while the radio is still up from the request that used them. The default
-            // five minutes means every track fetch is followed, minutes later, by a lone FIN that wakes the modem again.
             .connectionPool(pool)
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(policy.connectTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            .readTimeout(policy.readTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .addInterceptor { chain ->
                 val now = profile
                 val request = chain.request()
-                // Only the music server gets the profile's rules and headers; third parties (LRCLIB, AutoEQ) must not
-                // receive a reverse-proxy token, and are not subject to the server's Wi-Fi-only setting.
-                val toServer = now != null && (sameHost(request.url, now.url) || sameHost(request.url, now.altUrl))
-                if (toServer && now!!.wifiOnly && metered) throw MeteredNetworkException()
+                // Third parties (LRCLIB, AutoEQ) must not receive a reverse-proxy token, and are not subject to the
+                // server's Wi-Fi-only setting.
+                val toServer = now != null && toServer(request.url)
+                if (toServer && now.wifiOnly && metered) throw MeteredNetworkException()
                 chain.proceed(request.newBuilder().apply {
                     // Public services ask clients to identify themselves; some reject OkHttp's default outright.
-                    header("User-Agent", USER_AGENT)
-                    if (toServer) now!!.headers.forEach { (k, v) -> header(k, v) }
+                    header("User-Agent", policy.userAgent)
+                    if (toServer) now.headers.forEach { (k, v) -> header(k, v) }
                 }.build())
             }
         if (p != null && (p.allowSelfSigned || p.clientCert.isNotEmpty())) tls(b, p)
@@ -136,8 +141,8 @@ class Http(private val context: Context) {
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }
 
-    /** Cancelling the coroutine cancels the call, which is what makes live search cheap. */
-    suspend fun get(url: String, timeoutMs: Long = 0): ByteArray = suspendCancellableCoroutine { cont ->
+    /** The status and the whole body. Cancelling the coroutine cancels the call, which is what makes live search cheap. */
+    suspend fun exchange(url: String, timeoutMs: Long = 0): TransportResponse = suspendCancellableCoroutine { cont ->
         val client = if (timeoutMs > 0) api.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build() else api
         val call = client.newCall(Request.Builder().url(url).build())
         cont.invokeOnCancellation { call.cancel() }
@@ -148,40 +153,90 @@ class Http(private val context: Context) {
 
             override fun onResponse(call: Call, response: Response) {
                 try {
-                    // octo-fiesta reports auth failures as 401 with a normal Subsonic error body, so the body is read either way.
                     val body = response.use { it.body.bytes() }
-                    if (body.isEmpty() && !response.isSuccessful) throw IOException("HTTP ${response.code}")
-                    cont.resume(body)
+                    cont.resume(TransportResponse(response.code.toUShort(), body))
                 } catch (e: IOException) {
                     if (cont.isActive) cont.resumeWithException(e)
                 }
             }
         })
     }
+
+    /**
+     * A GET for callers outside the core's client (AutoEQ). octo-fiesta reports auth failures as 401 with a
+     * normal Subsonic error body, so the body is read either way; only an empty error answer is a failure.
+     */
+    suspend fun get(url: String, timeoutMs: Long = 0): ByteArray {
+        val r = exchange(url, timeoutMs)
+        if (r.body.isEmpty() && r.status.toInt() !in 200..299) throw IOException("HTTP ${r.status}")
+        return r.body
+    }
+
+    /** The core's door to the network: one GET, with the platform's exceptions sorted into kinds. */
+    fun transport(onAddressChanged: () -> Unit): Transport = object : Transport {
+        override suspend fun get(url: String, timeoutMs: UInt): TransportResponse = try {
+            exchange(url, timeoutMs.toLong())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw TransportException.Failed(failureKind(e), e.message)
+        }
+
+        override fun addressChanged() = onAddressChanged()
+    }
 }
 
-/** Whether [url] goes to the server written as [address] (scheme optional, as people type it). */
-private fun sameHost(url: okhttp3.HttpUrl, address: String): Boolean {
-    if (address.isBlank()) return false
-    val parsed = (if ("://" in address) address else "https://$address").toHttpUrlOrNull() ?: return false
-    return parsed.host.equals(url.host, ignoreCase = true) && parsed.port == url.port
+/** Which kind of failure the platform's exception is; the core decides what each kind means. */
+fun failureKind(e: Throwable): FailureKind = when (e) {
+    is MeteredNetworkException -> FailureKind.METERED
+    is java.net.UnknownHostException -> FailureKind.UNKNOWN_HOST
+    is java.net.ConnectException -> FailureKind.CONNECT
+    is java.net.NoRouteToHostException -> FailureKind.NO_ROUTE
+    is java.net.SocketTimeoutException -> FailureKind.TIMEOUT
+    is java.io.InterruptedIOException -> FailureKind.INTERRUPTED
+    is javax.net.ssl.SSLPeerUnverifiedException, is javax.net.ssl.SSLHandshakeException -> FailureKind.TLS
+    is java.net.UnknownServiceException -> FailureKind.CLEARTEXT
+    is IOException -> FailureKind.IO
+    else -> FailureKind.OTHER
+}
+
+/**
+ * A failure from the core's client as the exception the platform would have thrown itself, so callers keep
+ * telling network trouble ([IOException]) from a refusal ([CoreException]) the way they always did.
+ */
+fun NetException.lift(): Exception = when (this) {
+    is NetException.Transport -> when (kind) {
+        FailureKind.METERED -> MeteredNetworkException()
+        FailureKind.UNKNOWN_HOST -> java.net.UnknownHostException(detail)
+        FailureKind.CONNECT -> java.net.ConnectException(detail)
+        FailureKind.NO_ROUTE -> java.net.NoRouteToHostException(detail)
+        FailureKind.TIMEOUT -> java.net.SocketTimeoutException(detail)
+        FailureKind.INTERRUPTED -> java.io.InterruptedIOException(detail)
+        FailureKind.TLS -> javax.net.ssl.SSLHandshakeException(detail.orEmpty())
+        FailureKind.CLEARTEXT -> java.net.UnknownServiceException(detail)
+        FailureKind.IO -> IOException(detail)
+        FailureKind.OTHER -> IllegalStateException(detail)
+    }
+    is NetException.Api -> CoreException.Api(code, reason)
+    is NetException.Parse -> CoreException.Parse(reason)
+    is NetException.Db -> CoreException.Db(reason)
+}
+
+/** Runs a call into the core's client, turning its failures into the platform's exceptions. */
+inline fun <T> lifted(block: () -> T): T = try {
+    block()
+} catch (e: NetException) {
+    throw e.lift()
 }
 
 /** What went wrong, in words a person can act on. */
-fun describeConnectionError(e: Throwable): String = when (e) {
-    is MeteredNetworkException -> e.message!!
-    is java.net.UnknownHostException -> "Server not found. Check the address."
-    is java.net.ConnectException -> "Nothing is answering at that address. Is the port right, and is the server running?"
-    is java.net.SocketTimeoutException -> "The server did not answer in time."
-    is javax.net.ssl.SSLPeerUnverifiedException, is javax.net.ssl.SSLHandshakeException ->
-        "The server's certificate was not accepted. If it is self-signed, turn on \"Accept self-signed certificate\"; if it needs a client certificate, import one."
-    is java.net.UnknownServiceException -> "Cleartext HTTP was refused; use https://"
-    is dev.nori.music.ffi.CoreException.Api -> when (e.code) {
-        40 -> "Wrong user name or password."
-        41 -> "This server does not support token authentication."
-        50 -> "This user is not allowed to do that."
-        else -> e.reason
+fun describeConnectionError(e: Throwable): String {
+    val trouble = when (e) {
+        is NetException -> return describeConnectionError(e.lift())
+        is CoreException.Api -> Trouble.Api(e.code, e.reason)
+        is CoreException.Parse -> Trouble.Parse
+        is CoreException -> Trouble.Other
+        else -> Trouble.Network(failureKind(e))
     }
-    is dev.nori.music.ffi.CoreException.Parse -> "That address answered, but not like a Subsonic server. Check the URL (and any reverse-proxy path)."
-    else -> e.message ?: e.javaClass.simpleName
+    return describeError(trouble, e.message ?: e.javaClass.simpleName)
 }

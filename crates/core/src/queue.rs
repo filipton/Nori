@@ -24,7 +24,7 @@ fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
     f(STORE.lock().get_or_insert_with(|| Store { songs: HashMap::new() }))
 }
 
-const RADIO_PREFIX: &str = "radio:";
+pub(crate) const RADIO_PREFIX: &str = "radio:";
 
 /// Songs about to be queued. One call per list.
 #[uniffi::export]
@@ -72,9 +72,13 @@ fn window_song(s: &Store, id: &str) -> WindowSong {
     }
 }
 
+/// Each of `ids` with its length in ms (0 when the song is not known), for the heard tracker.
+pub(crate) fn durations(ids: &[String]) -> Vec<(String, i64)> {
+    with(|s| ids.iter().map(|id| (id.clone(), s.songs.get(id).map_or(0, |(song, _)| song.duration as i64 * 1000))).collect())
+}
+
 /// The transition planner's window by id: the song before the current one, then the current one and
 /// those after it, in play order.
-#[uniffi::export]
 pub fn queue_window(ids: Vec<String>, shuffling: bool) {
     let window = with(|s| ids.iter().map(|id| window_song(s, id)).collect());
     crate::automix::planner::transition_window(window, shuffling);
@@ -83,7 +87,6 @@ pub fn queue_window(ids: Vec<String>, shuffling: bool) {
 /// The volume `current` plays at under ReplayGain, between the songs before and after it in play
 /// order (album mode keeps an album played in order at its own levels). See `nori_player::policy`.
 /// Nothing playing, or a radio stream, plays at full volume.
-#[uniffi::export]
 pub fn queue_gain(
     before: Option<String>, current: Option<String>, after: Option<String>, mode: crate::GainMode, preamp_db: f32, untagged_db: f32,
     bit_perfect: bool, shuffling: bool,
@@ -105,10 +108,9 @@ pub fn queue_gain(
     })
 }
 
-#[uniffi::export]
 impl Core {
     /// Saves the queue for next time from its ids (radio streams are left out: they do not come back).
-    pub fn queue_save(&self, ids: Vec<String>, index: u32, position_ms: u64) -> crate::Result<()> {
+    pub(crate) fn queue_save(&self, ids: Vec<String>, index: u32, position_ms: u64) -> crate::Result<()> {
         let (songs, index) = with(|s| {
             let mut kept = Vec::with_capacity(ids.len());
             let mut at = 0;
@@ -149,7 +151,6 @@ pub fn queue_flags(id: String) -> u32 {
 }
 
 /// The albums the queued songs `ids` come from (each once).
-#[uniffi::export]
 pub fn queue_albums(ids: Vec<String>) -> Vec<String> {
     with(|s| {
         let mut seen = std::collections::HashSet::new();

@@ -51,9 +51,8 @@ internal object HeardJni {
 
     @JvmStatic external fun create(): Long
     @JvmStatic external fun destroy(h: Long)
-    @JvmStatic external fun setQueue(h: Long, ids: Array<String>, durationsMs: LongArray)
     /** `(index + 1) << 44 | changed << 43 | ms`; index -1 means the player's own word stands. */
-    @JvmStatic external fun at(h: Long, nowMs: Long, playing: Boolean, on: Int, positionMs: Long): Long
+    @JvmStatic external fun at(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long): Long
 }
 
 /** Making a seek stick; see crates/core/src/seek.rs. */

@@ -40,9 +40,8 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
         .flatMapLatest { song ->
-            val p = nori.settings.value
             val found = if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
-            else nori.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
+            else nori.library.lyricsFor(song)
             found.map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) }
                 .onStart { emit(Load.Loading) }
                 .catch { emit(Load.Failed(it.message ?: it.javaClass.simpleName)) }
@@ -54,26 +53,23 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
         // seconds. Same sizes and requests as the player and the rows, so a warmed cover is a cache hit.
         // How far ahead is the user's (Settings, "Covers fetched ahead"); already-cached ones cost a
         // memory lookup and nothing else.
+        // Which positions, in which order, is the core's (`cover_neighbours`); it is asked only when the
+        // queue, the playing song or a skip's target moves, not on every play/pause or buffering change.
         viewModelScope.launch {
-            kotlinx.coroutines.flow.combine(state, nori.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead ->
-                // Both neighbours first, as a skip would reach them (shuffle included), and then outwards
-                // in both directions a step at a time. Backwards as well as forwards: going back through
-                // a queue is as ordinary as going on, and with only the one song behind warmed, the
-                // second swipe back always waited on the server.
-                val out = ArrayList<Int>()
-                out += s.previousIndex
-                out += s.nextIndex
-                for (d in 2..ahead) { out += s.index + d; out += s.index - d }
-                out.take(if (ahead == 0) 1 else ahead * 2)
-                    .distinct().filter { it != s.index }.mapNotNull { s.queue.getOrNull(it)?.coverArt }
-            }.distinctUntilChanged()
+            kotlinx.coroutines.flow.combine(state, nori.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead -> s to ahead }
+                .distinctUntilChanged { (a, x), (b, y) ->
+                    a.queue === b.queue && a.index == b.index && a.previousIndex == b.previousIndex && a.nextIndex == b.nextIndex && x == y
+                }
+                .map { (s, ahead) ->
+                    dev.nori.music.ffi.coverNeighbours(s.index, s.previousIndex, s.nextIndex, ahead, s.queue.size.toUInt())
+                        .mapNotNull { s.queue[it.toInt()].coverArt }
+                }.distinctUntilChanged()
                 .collect { arts ->
                     val context = getApplication<Application>()
                     val loader = coil3.SingletonImageLoader.get(context)
-                    arts.filterNot { it.startsWith("ext-") || it.startsWith("pl-") }.forEach { art ->
-                        for (size in intArrayOf(320, 800)) {
-                            loader.enqueue(coil3.request.ImageRequest.Builder(context).data(nori.library.coverUrl(art, size)).size(size).build())
-                        }
+                    for (want in dev.nori.music.ffi.coverWants(arts, UInt.MAX_VALUE)) {
+                        val size = want.size.toInt()
+                        loader.enqueue(coil3.request.ImageRequest.Builder(context).data(nori.library.coverUrl(want.id, size)).size(size).build())
                     }
                 }
         }

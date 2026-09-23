@@ -77,10 +77,22 @@ impl HeardTracker {
         self.ear.at(&self.queue, h, p)
     }
 
-    /// [`HeardTracker::at`] with the player's song given as its index in the queue.
-    pub fn at_index(&mut self, h: &Heard, now_ms: i64, playing: bool, on: Option<usize>, position_ms: i64) -> Seen {
-        let on = on.and_then(|i| self.queue.get(i)).map(|(id, _)| id.as_str());
-        self.ear.at(&self.queue, h, PlayerNow { now_ms, playing, on, position_ms })
+    /// [`HeardTracker::at`] with the player's song given as its index in the queue (`on`), and the index
+    /// the player goes to next. A song can be queued more than once, so the heard one is placed where the
+    /// ear can be: the player's next song when that is it, else the nearest earlier copy (the song it just
+    /// left), else the last one.
+    pub fn at_index(&mut self, h: &Heard, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64) -> Seen {
+        let on_id = on.and_then(|i| self.queue.get(i)).map(|(id, _)| id.as_str());
+        let mut seen = self.ear.at(&self.queue, h, PlayerNow { now_ms, playing, on: on_id, position_ms });
+        if let Some(first) = seen.index {
+            let id = self.queue[first].0.as_str();
+            let is = |i: usize| self.queue.get(i).is_some_and(|(q, _)| q == id);
+            seen.index = next
+                .filter(|&n| is(n))
+                .or_else(|| on.and_then(|cur| (0..cur).rev().find(|&i| is(i))))
+                .or_else(|| (0..self.queue.len()).rev().find(|&i| is(i)));
+        }
+        seen
     }
 }
 
@@ -178,6 +190,17 @@ mod tests {
 
     fn now(ms: i64, on: &str, pos: i64) -> PlayerNow<'_> {
         PlayerNow { now_ms: ms, playing: true, on: Some(on), position_ms: pos }
+    }
+
+    #[test]
+    fn a_song_queued_twice_is_heard_at_the_copy_the_ear_can_be_at() {
+        let mut t = HeardTracker::new();
+        t.set_queue(["a", "b", "a", "b"].map(|id| (id.to_string(), 200_000)));
+        // Held on the ending of `a`; the player is on the second `b` (3), and its next song is none.
+        let s = t.at_index(&holding(190_000_000, 0), 1_000, true, Some(3), None, 0);
+        assert_eq!(s.index, Some(2), "the nearest earlier copy: the song just left");
+        let s = t.at_index(&holding(190_000_000, 0), 1_000, true, Some(1), Some(2), 0);
+        assert_eq!(s.index, Some(2), "the player's next song, when it is that one");
     }
 
     #[test]

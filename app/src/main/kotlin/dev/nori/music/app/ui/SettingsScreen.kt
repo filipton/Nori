@@ -143,7 +143,7 @@ private fun <T> Choice(title: String, value: T, options: List<Pair<T, String>>, 
 private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         shape = CardShape,
-        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.07f).over(MaterialTheme.colorScheme.background),
+        color = LocalLook.current.color(dev.nori.music.look.CoverLook.FORM),
         contentColor = MaterialTheme.colorScheme.onSurface,
         modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp),
     ) { Column(content = content) }
@@ -308,14 +308,12 @@ private fun StorageRows(vm: SettingsViewModel) {
 fun SettingsScreen(vm: SettingsViewModel) {
     val nav = LocalNav.current
     var query by remember { mutableStateOf("") }
+    // Titles first, then anything whose explanation mentions it: searching "oled" should find AMOLED
+    // black, and "gapless" the switch that keeps an album gapless (nori-core's `TextIndex::ranked`).
+    val search = remember { lazy { dev.nori.music.ffi.TextIndex(index.map { listOf(it.title, it.hint) }) } }
     val hits = remember(query) {
         val q = query.trim()
-        when {
-            q.isBlank() -> emptyList()
-            // Titles first, then anything whose explanation mentions it: searching "oled" should find
-            // AMOLED black, and "gapless" the switch that keeps an album gapless.
-            else -> index.filter { it.title.contains(q, true) } + index.filter { !it.title.contains(q, true) && it.hint.contains(q, true) }
-        }
+        if (q.isBlank()) emptyList() else search.value.ranked(q).map { index[it.toInt()] }
     }
     Column {
         LargeTitle("Settings")
@@ -470,30 +468,23 @@ private fun GroupContent(id: String, vm: SettingsViewModel) {
                 Toggle("High quality output", "Plays 24-bit files in full. Turns the equalizer off. Starts with the next song.", p.hiRes) { on -> vm.update { it.copy(hiRes = on) } }
                 Toggle(
                     "Bit perfect USB DAC",
-                    when {
-                        dac.bitPerfect -> "On: ${dac.device}, ${dac.sampleRate / 1000.0} kHz, ${dac.bits}-bit."
-                        dac.blockedBy != null -> "${dac.device ?: "USB DAC"}: ${dac.blockedBy}"
-                        dac.device != null && dac.supported -> "${dac.device} connected. Starts with the music."
-                        dac.device != null -> "${dac.device} connected, but this phone can't do bit perfect with it."
-                        else -> "Sends the file to a USB DAC unchanged. Skips the equalizer and volume levelling. Android 14 and later."
-                    },
+                    dev.nori.music.ffi.wordsBitPerfect(dac.device, dac.bitPerfect, dac.sampleRate.toUInt(), dac.bits.toUInt(), dac.blockedBy, dac.supported),
                     p.bitPerfect,
                 ) { on -> vm.update { it.copy(bitPerfect = on) } }
                 // What is actually going out, rather than what was asked for: the one line that settles "is it
                 // even reaching the DAC?" without a cable to a laptop.
-                val detail = listOfNotNull(
-                    dac.modes.takeIf { it.isNotEmpty() }?.let { "Offers " + it.joinToString(", ") },
-                    dac.playing?.let { "playing $it" },
-                    dac.track?.let { "output $it" },
-                )
-                if (detail.isNotEmpty()) note(detail.joinToString("  ·  "))
+                dev.nori.music.ffi.wordsDacDetail(dac.modes, dac.playing, dac.track)?.let { note(it) }
                 Toggle(
                     "Save battery while playing",
-                    when {
-                        dac.device != null -> "Not available while a USB DAC is connected."
-                        p.offload && (p.dsp || p.crossfadeSec > 0 || p.skipSilence || p.speed != 1f) -> "Paused now: the equalizer or another effect is on."
-                        else -> "The audio chip decodes instead of the processor. Pauses while effects are on."
-                    },
+                    // The settings and output the playback service hands the same rule. A DAC stands in
+                    // for "anything USB", and a refused offload is the service's own to know.
+                    dev.nori.music.ffi.wordsOffload(
+                        dev.nori.music.ffi.AudioPrefs(
+                            dsp = p.dsp, skipSilence = p.skipSilence, offload = p.offload, crossfadeS = p.crossfadeSec,
+                            autoMix = p.autoMix, speed = p.speed, pitch = p.pitch,
+                        ),
+                        dev.nori.music.ffi.OutputState(hiRes = p.hiRes, bitPerfect = dac.bitPerfect, usb = dac.device != null, offloadRefused = false),
+                    ),
                     p.offload,
                 ) { on -> vm.update { it.copy(offload = on) } }
             }

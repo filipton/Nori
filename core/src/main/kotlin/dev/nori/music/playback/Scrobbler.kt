@@ -14,14 +14,10 @@ import kotlinx.coroutines.launch
 class Scrobbler(private val nori: Nori, private val scope: CoroutineScope) {
     fun onPlaying(playing: Boolean) = dev.nori.music.ffi.scrobblePlaying(playing, SystemClock.elapsedRealtime())
 
-    /** [nextId] is null when playback ends. */
+    /** [nextId] is null when playback ends. Whether to record and send, and when a play counts, the core reads from the settings. */
     fun onTrack(nextId: String?, playing: Boolean) {
-        val p = nori.settings.value
         val wall = System.currentTimeMillis()
-        val send = dev.nori.music.ffi.scrobbleTrack(
-            nextId, playing, SystemClock.elapsedRealtime(), wall, java.util.TimeZone.getDefault().getOffset(wall),
-            p.tasteModel, p.scrobble, p.scrobblePercent,
-        )
+        val send = dev.nori.music.ffi.scrobbleTrack(nextId, playing, SystemClock.elapsedRealtime(), wall, java.util.TimeZone.getDefault().getOffset(wall))
         if (send.submitId == null && send.nowPlayingId == null) return
         scope.launch(Dispatchers.IO) {
             // Both are writes: made offline, they wait in the pending queue and keep their original time.

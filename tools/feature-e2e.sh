@@ -145,6 +145,36 @@ state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:
 check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
 adb shell svc wifi enable; adb shell svc data enable; sleep 6
 
+echo "-- the offline bridge"
+# A long library album, started while online and paused at once. Offline, a skip past what was fetched
+# ahead cannot play; with the bridge on, downloads play instead, and the album comes back with the network.
+"$app" set bridgeOffline true >/dev/null
+bid=$(api getAlbumList2 "&type=random&size=60" | python3 -c "
+import sys,json
+for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
+    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 10: print(a['id']); break")
+if [ -n "$bid" ]; then
+  titles=$(api getAlbum "&id=$bid" | python3 -c "
+import sys,json
+for s in json.load(sys.stdin)['subsonic-response']['album']['song']: print(s['title'])")
+  "$app" play "album:$bid" >/dev/null; sleep 4; "$app" do pause >/dev/null; sleep 1
+  adb shell svc wifi disable; adb shell svc data disable; sleep 3
+  for _ in 1 2 3 4 5 6; do "$app" do next >/dev/null; sleep 1; done
+  sleep 12
+  parked=$(printf '%s\n' "$titles" | sed -n 7p)
+  echo "     now: $(field title) (bridging=$(field bridging)), parked: $parked"
+  check "downloads stand in while the server is out of reach" test "$(field bridging)" = "True"
+  check "and they play" test "$(field playing)" = "True"
+  adb shell svc wifi enable; adb shell svc data enable; sleep 15
+  echo "     back: $(field title) (bridging=$(field bridging))"
+  check "the album comes back with the network" test "$(field bridging)" = "False"
+  check "at the song that could not play" test "$(field title)" = "$parked"
+  "$app" do pause >/dev/null
+else
+  echo "     (no library album of ten songs found)"
+fi
+"$app" set bridgeOffline false >/dev/null
+
 echo "-- the download queue"
 # The notification's tap is this intent; the app is already running, so it arrives as a new intent.
 "$app" open home >/dev/null; sleep 2

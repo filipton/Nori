@@ -2,12 +2,12 @@
 //! from the media3 AudioProcessor. The chain itself is `nori_player::dsp`; this only moves bytes and
 //! handles across. It must not allocate, copy or serialise anything on the process path.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use jni::objects::{JByteBuffer, JClass, JFloatArray, JIntArray};
-use jni::sys::{jboolean, jfloat, jint, jlong};
+use jni::sys::{jfloat, jint, jlong};
 use jni::JNIEnv;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 pub use nori_player::dsp::*;
 
@@ -18,44 +18,105 @@ const PCM_FLOAT: jint = 4; // C.ENCODING_PCM_FLOAT
 struct Handle {
     eq: Mutex<Equalizer>,
     reduction_db: AtomicU32,
+    /// The [`CHAIN_GEN`] this handle's equalizer was last set up for.
+    applied: AtomicU64,
+}
+
+/// The most bands a chain carries: the parametric editor's own limit, with room to spare.
+const MAX_BANDS: usize = 64;
+
+/// The sound chain the settings ask for, kept here so the audio thread picks a change up by itself: the
+/// settings store rebuilds it on every change ([`settings_changed`]) and bumps [`CHAIN_GEN`]; each handle
+/// sets its equalizer up again on its next buffer when the generation moved. Nothing crosses from the
+/// platform, and the audio thread reads this only when something did change.
+struct Chain {
+    bands: [Band; MAX_BANDS],
+    count: usize,
+    preamp_db: f64,
+    crossfeed_db: f64,
+    balance: f64,
+    mono: bool,
+    threshold_db: f64,
+    release_ms: f64,
+    lookahead_ms: f64,
+}
+
+const NO_BAND: Band = Band { kind: 0, freq: 0.0, gain_db: 0.0, q: 0.0, channel: 0 };
+static CHAIN: RwLock<Chain> = RwLock::new(Chain {
+    bands: [NO_BAND; MAX_BANDS],
+    count: 0,
+    preamp_db: 0.0,
+    crossfeed_db: 0.0,
+    balance: 0.0,
+    mono: false,
+    threshold_db: -1.0,
+    release_ms: 100.0,
+    lookahead_ms: 0.0,
+});
+static CHAIN_GEN: AtomicU64 = AtomicU64::new(1);
+
+/// The limiter's release, and its lookahead when it is on.
+const LIMITER_RELEASE_MS: f64 = 120.0;
+const LIMITER_LOOKAHEAD_MS: f64 = 5.0;
+
+/// The pre-amp in effect: the one set, or the automatic one for these bands; none with the equalizer off.
+pub fn effective_preamp_db(s: &crate::settings::StoredPrefs) -> f32 {
+    if !s.eq_enabled {
+        return 0.0;
+    }
+    s.eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(s.eq_bands.iter().map(|b| (b.kind, b.gain_db))))
+}
+
+/// The settings changed: the chain they ask for, for every handle's next buffer.
+pub(crate) fn settings_changed(s: &crate::settings::StoredPrefs) {
+    let mut c = CHAIN.write();
+    let bands = if s.eq_enabled { &s.eq_bands[..s.eq_bands.len().min(MAX_BANDS)] } else { &[][..] };
+    let mut next = Chain {
+        bands: [NO_BAND; MAX_BANDS],
+        count: bands.len(),
+        preamp_db: effective_preamp_db(s) as f64,
+        crossfeed_db: s.crossfeed_db as f64,
+        balance: s.balance as f64,
+        mono: s.mono,
+        threshold_db: s.limiter_threshold_db as f64,
+        release_ms: LIMITER_RELEASE_MS,
+        lookahead_ms: if s.limiter { LIMITER_LOOKAHEAD_MS } else { 0.0 },
+    };
+    for (i, b) in bands.iter().enumerate() {
+        next.bands[i] = Band { kind: b.kind, freq: b.freq as f64, gain_db: b.gain_db as f64, q: b.q as f64, channel: b.channel };
+    }
+    let same = c.count == next.count
+        && c.bands[..c.count].iter().zip(&next.bands[..next.count]).all(|(a, b)| (a.kind, a.freq, a.gain_db, a.q, a.channel) == (b.kind, b.freq, b.gain_db, b.q, b.channel))
+        && (c.preamp_db, c.crossfeed_db, c.balance, c.mono, c.threshold_db, c.release_ms, c.lookahead_ms)
+            == (next.preamp_db, next.crossfeed_db, next.balance, next.mono, next.threshold_db, next.release_ms, next.lookahead_ms);
+    if !same {
+        *c = next;
+        CHAIN_GEN.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Sets `eq` up for the chain the settings ask for, if it changed since `applied`.
+fn follow_chain(eq: &mut Equalizer, applied: &AtomicU64) {
+    let g = CHAIN_GEN.load(Ordering::Acquire);
+    if applied.load(Ordering::Relaxed) == g {
+        return;
+    }
+    let c = CHAIN.read();
+    eq.configure(&c.bands[..c.count], c.preamp_db, c.crossfeed_db);
+    eq.configure_output(c.balance, c.mono, c.threshold_db, c.release_ms, c.lookahead_ms);
+    applied.store(g, Ordering::Relaxed);
 }
 
 #[no_mangle]
 pub extern "system" fn Java_dev_nori_music_playback_Dsp_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
     let eq = Mutex::new(Equalizer::new(rate.max(1) as u32, channels.max(1) as usize));
-    Box::into_raw(Box::new(Handle { eq, reduction_db: AtomicU32::new(0) })) as jlong
+    Box::into_raw(Box::new(Handle { eq, reduction_db: AtomicU32::new(0), applied: AtomicU64::new(0) })) as jlong
 }
 
 #[no_mangle]
 pub extern "system" fn Java_dev_nori_music_playback_Dsp_destroy(_: JNIEnv, _: JClass, handle: jlong) {
     if handle != 0 {
         drop(unsafe { Box::from_raw(handle as *mut Handle) });
-    }
-}
-
-/// `bands` is flat: kind, frequency, gain dB, Q (slope S for the slope shelves), channel for each band.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_configure(env: JNIEnv, _: JClass, handle: jlong, bands: JFloatArray, preamp_db: jfloat, crossfeed_db: jfloat) {
-    if handle == 0 {
-        return;
-    }
-    let n = env.get_array_length(&bands).unwrap_or(0).clamp(0, 5 * 64) as usize;
-    let mut flat = vec![0f32; n];
-    if env.get_float_array_region(&bands, 0, &mut flat).is_err() {
-        return;
-    }
-    let bands: Vec<Band> =
-        flat.chunks_exact(5).map(|b| Band { kind: b[0] as i32, freq: b[1] as f64, gain_db: b[2] as f64, q: b[3] as f64, channel: b[4] as i32 }).collect();
-    unsafe { &*(handle as *const Handle) }.eq.lock().configure(&bands, preamp_db as f64, crossfeed_db as f64);
-}
-
-/// `balance` is -1 (hard left) to 1 (hard right); `lookahead_ms` at or below 0 turns the limiter off.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_configureOutput(
-    _: JNIEnv, _: JClass, handle: jlong, balance: jfloat, mono: jboolean, threshold_db: jfloat, release_ms: jfloat, lookahead_ms: jfloat,
-) {
-    if handle != 0 {
-        unsafe { &*(handle as *const Handle) }.eq.lock().configure_output(balance as f64, mono != 0, threshold_db as f64, release_ms as f64, lookahead_ms as f64);
     }
 }
 
@@ -71,7 +132,9 @@ pub extern "system" fn Java_dev_nori_music_playback_Dsp_gainReductionDb(_: JNIEn
 #[no_mangle]
 pub extern "system" fn Java_dev_nori_music_playback_Dsp_reset(_: JNIEnv, _: JClass, handle: jlong) {
     if handle != 0 {
-        unsafe { &*(handle as *const Handle) }.eq.lock().reset();
+        let h = unsafe { &*(handle as *const Handle) };
+        h.eq.lock().reset();
+        h.applied.store(0, Ordering::Relaxed);
     }
 }
 
@@ -87,6 +150,7 @@ pub extern "system" fn Java_dev_nori_music_playback_Dsp_process(
     }
     let h = unsafe { &*(handle as *const Handle) };
     let mut eq = h.eq.lock();
+    follow_chain(&mut eq, &h.applied);
     let (src, dst, bytes) = unsafe { (src.add(in_pos as usize), dst.add(out_pos as usize), bytes as usize) };
     // Android direct buffers are 8-byte aligned and positions are whole frames; stay safe anyway.
     match encoding {
@@ -110,6 +174,57 @@ pub fn eq_presets() -> Vec<crate::NamedPreset> {
 }
 
 /// Which parts of the chain may run, from the settings and the output; see `nori_player::policy`.
+/// What the output did with the settings last time, so the next change can tell what moved.
+struct Applied {
+    speed: f32,
+    pitch: f32,
+    offload: bool,
+    processor: bool,
+}
+
+static APPLIED: Mutex<Applied> = Mutex::new(Applied { speed: 1.0, pitch: 1.0, offload: false, processor: false });
+
+/// Everything the platform applies to its player when the settings or the output change, in one call.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AudioApply {
+    pub policy: crate::AudioPolicy,
+    pub speed: f32,
+    pub pitch: f32,
+    /// Whether that rebuilds the output now, at the next song boundary or not at all.
+    pub rebuild: crate::Rebuild,
+}
+
+/// The settings (the core's own) against the output as it is now (`offloaded`: the chip is decoding the
+/// song playing): which parts of the chain may run (`nori_player::policy`) and whether the output must be
+/// rebuilt for it (`nori_player::transport::rebuild`). The sound chain itself follows the settings by
+/// itself ([`settings_changed`]).
+#[uniffi::export]
+pub fn audio_apply(output: crate::OutputState, offloaded: bool) -> AudioApply {
+    let s = crate::settings_store::current().unwrap_or_default();
+    let prefs = crate::AudioPrefs {
+        dsp: nori_player::sound::sound_on(s.eq_enabled, s.crossfeed_db, s.balance, s.mono, s.limiter),
+        skip_silence: s.skip_silence,
+        offload: s.offload,
+        crossfade_s: s.crossfade_sec,
+        auto_mix: s.auto_mix,
+        speed: s.speed,
+        pitch: s.pitch,
+    };
+    let policy = nori_player::policy::audio_policy(&prefs, &output);
+    let mut a = APPLIED.lock();
+    let change = crate::ChainChange {
+        offloaded,
+        offload: policy.offload,
+        offload_changed: a.offload != policy.offload,
+        usb: output.usb,
+        offload_refused: output.offload_refused,
+        tempo_changed: a.speed != s.speed || a.pitch != s.pitch,
+        processor_changed: a.processor != policy.processor_in_chain,
+    };
+    *a = Applied { speed: s.speed, pitch: s.pitch, offload: policy.offload, processor: policy.processor_in_chain };
+    AudioApply { policy, speed: s.speed, pitch: s.pitch, rebuild: nori_player::transport::rebuild(change) }
+}
+
 #[uniffi::export]
 pub fn audio_policy(prefs: crate::AudioPrefs, output: crate::OutputState) -> crate::AudioPolicy {
     nori_player::policy::audio_policy(&prefs, &output)
@@ -182,4 +297,33 @@ pub extern "system" fn Java_dev_nori_music_playback_Dsp_autoPreampDb(env: JNIEnv
         return 0.0;
     }
     nori_player::dsp::auto_preamp_db(k[..n].iter().copied().zip(g[..n].iter().copied()))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    #[test]
+    fn a_settings_change_reaches_the_equalizer_on_its_next_buffer() {
+        let mut s = crate::settings::StoredPrefs::default();
+        s.eq_enabled = true;
+        s.eq_bands = vec![crate::settings::SoundBand { kind: 0, freq: 1000.0, gain_db: 6.0, q: 1.0, channel: 0 }];
+        s.eq_preamp_db = Some(-3.0);
+        settings_changed(&s);
+        let g = CHAIN_GEN.load(Ordering::Acquire);
+        settings_changed(&s);
+        assert_eq!(CHAIN_GEN.load(Ordering::Acquire), g, "the same chain again is no change");
+        {
+            let c = CHAIN.read();
+            assert_eq!((c.count, c.preamp_db, c.lookahead_ms), (1, -3.0, 0.0));
+        }
+        let mut eq = Equalizer::new(48_000, 2);
+        let applied = AtomicU64::new(0);
+        follow_chain(&mut eq, &applied);
+        assert_eq!(applied.load(Ordering::Relaxed), g);
+        s.eq_enabled = false;
+        settings_changed(&s);
+        assert_eq!(CHAIN.read().count, 0, "the equalizer off leaves no bands, and no pre-amp");
+        assert_eq!(CHAIN.read().preamp_db, 0.0);
+    }
 }

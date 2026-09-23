@@ -1,6 +1,5 @@
 package dev.nori.music.playback
 
-import androidx.media3.common.MediaItem
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheWriter
@@ -19,11 +18,11 @@ class Precacher(private val sources: MediaSources) {
     private var running: Future<*>? = null
     @Volatile private var writer: CacheWriter? = null
 
-    fun update(upcoming: List<MediaItem>, skip: (String) -> Boolean = { false }) {
+    fun update(upcoming: List<String>, skip: (String) -> Boolean = { false }) {
         cancel()
         // A song the download queue is already fetching arrives permanently; pulling it into the
         // rolling cache too keeps it twice.
-        val ids = dev.nori.music.ffi.queueFetchable(upcoming.map { it.mediaId }).filterNot(skip)
+        val ids = dev.nori.music.ffi.queueFetchable(upcoming).filterNot(skip)
         if (ids.isEmpty()) return
         running = worker.submit {
             for (id in ids) {

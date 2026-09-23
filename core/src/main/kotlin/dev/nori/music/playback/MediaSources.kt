@@ -14,7 +14,8 @@ import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import dev.nori.music.ffi.Core
+import dev.nori.music.ffi.Client
+import dev.nori.music.ffi.StreamQuality
 import dev.nori.music.net.Http
 import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Quality
@@ -67,8 +68,8 @@ class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
  * by URL, so a replayed track costs no radio time at all.
  */
 @UnstableApi
-class MediaSources(context: Context, private val coreOf: () -> Core, private val http: Http, private val settings: Settings, private val onSecondAddress: () -> Boolean = { false }) {
-    private val core get() = coreOf()
+class MediaSources(context: Context, private val clientOf: () -> Client, private val http: Http, private val settings: Settings) {
+    private val client get() = clientOf()
     val database = StandaloneDatabaseProvider(context)
     val streamEvictor = ResizableEvictor(settings.value.cacheMb * 1024L * 1024L)
     val streamCache = SimpleCache(File(context.cacheDir, "stream"), streamEvictor, database)
@@ -97,17 +98,21 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
     fun resolve(dataSpec: DataSpec): DataSpec {
         applyStreamLimit()
         val id = dataSpec.uri.lastPathSegment!!
-        if (id in downloaded) return dataSpec.buildUpon().setUri(Uri.parse(downloadUrl(id))).setKey(downloadKey(id)).build()
-        var q = if (http.metered) settings.value.mobile else settings.value.wifi
-        // Through the profile's second (usually public) address an optional ceiling applies on top.
-        val cap = settings.value.server?.altMaxBitRate ?: 0
-        if (onSecondAddress() && cap > 0 && (q.bitRate == 0 || q.bitRate > cap)) q = Quality(cap, q.format.ifEmpty { "opus" })
-        return dataSpec.buildUpon().setUri(Uri.parse(core.streamUrl(id, q.bitRate.toUInt(), q.format))).setKey("$id:${q.key}").build()
+        // A download is the permanent copy; for anything else the core picks the quality (the network the
+        // phone is on, the second address's cap) and the cache key.
+        val target = if (id in downloaded) client.downloadTarget(id, settings.value.download.ffi())
+        else settings.value.let { client.streamTarget(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
+        return dataSpec.buildUpon().setUri(Uri.parse(target.url)).setKey(target.key).build()
     }
 
-    fun downloadKey(id: String) = "dl:$id"
+    /** The key [resolve] would give a song that is not downloaded, without building its URL. */
+    fun streamKey(id: String): String = settings.value.let { client.streamKey(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
 
-    fun downloadUrl(id: String): String = settings.value.download.let { core.streamUrl(id, it.bitRate.toUInt(), it.format) }
+    private fun Quality.ffi() = StreamQuality(bitRate.coerceAtLeast(0).toUInt(), format)
+
+    fun downloadKey(id: String) = dev.nori.music.ffi.downloadKey(id)
+
+    fun downloadUrl(id: String): String = client.downloadTarget(id, settings.value.download.ffi()).url
 
     /**
      * The limit follows the setting without a restart; checked whenever a track is opened, so the
@@ -133,10 +138,10 @@ class MediaSources(context: Context, private val coreOf: () -> Core, private val
      * the permanent copy; the streamed one is the same bytes twice. Call off the main thread.
      */
     fun dropStreamCopies(id: String) {
-        for (key in runCatching { streamCache.keys }.getOrDefault(emptySet())) {
-            // Keys are "$id:<quality>" and the quality never holds a colon, so this is exact.
-            if (key.substringBeforeLast(':') == id) runCatching { streamCache.removeResource(key) }
-        }
+        val keys = runCatching { streamCache.keys }.getOrDefault(emptySet())
+        if (keys.isEmpty()) return
+        // The key grammar is the core's; it picks this song's copies out of the cache's keys.
+        for (key in dev.nori.music.ffi.streamCopies(id, keys.toList())) runCatching { streamCache.removeResource(key) }
     }
 
     /** Empties the streamed-music cache; downloads, covers and the index stay. Call off the main thread. */

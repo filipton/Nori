@@ -11,6 +11,8 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.composed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -79,6 +81,7 @@ import androidx.compose.ui.semantics.toggleableState
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.role
 import dev.nori.music.app.R
+import dev.nori.music.look.CoverLook
 
 /**
  * The look of the app in one file: radii, spacing, type and the handful of shapes every screen is
@@ -155,31 +158,22 @@ val NoriTypography = Typography().run {
 }
 
 /**
- * The colours a page wears, taken from its artwork. [edge] is what the bottom of the cover actually
- * is, so the picture can dissolve into the page without a seam; [background] is the page under it.
+ * The colours a page wears, taken from its artwork: its whole [look] as nori-look dressed it (see
+ * [Look]), and the wash - the cover blurred and pulled towards the page, drawn stretched over the page so
+ * the colours vary the way the artwork's do instead of settling into one average.
+ *
+ * Two palettes are the same when their looks are and they share a wash.
  */
-data class PagePalette(
-    val edge: Color,
-    val background: Color,
-    val onBackground: Color,
-    val onBackgroundVariant: Color,
-    val accent: Color,
-    val tinted: Boolean = true,
-    /**
-     * The cover at sixteen pixels a side, to be drawn stretched over the page: the colours vary the
-     * way the artwork's do instead of settling into one average. See `CoverColors.washOf`.
-     */
-    val wash: androidx.compose.ui.graphics.ImageBitmap? = null,
-    /**
-     * What the sleeve's soft bottom averages out to: the mean of the wash's last [MELT] of rows, the
-     * ones that show through where the records are rubbed out (PlayerScreen's `rubOutBottom`). See
-     * `PagePalette.meltColour`.
-     */
-    val washEdge: Color = Color.Unspecified,
-)
-
-/** The colour the sleeve's soft bottom wears by itself; [PagePalette.edge] until a wash says better. */
-val PagePalette.meltColour: Color get() = if (washEdge.isSpecified) washEdge else edge
+@androidx.compose.runtime.Immutable
+class PagePalette(val look: IntArray, val wash: androidx.compose.ui.graphics.ImageBitmap? = null) {
+    val fixed = FixedLook(look)
+    /** What the bottom of the cover is, so the picture can dissolve into the page without a seam. */
+    val edge: Color get() = Color(look[CoverLook.EDGE])
+    /** The page under it. */
+    val background: Color get() = Color(look[CoverLook.BACKGROUND])
+    override fun equals(other: Any?): Boolean = other is PagePalette && other.wash == wash && other.look.contentEquals(look)
+    override fun hashCode(): Int = look.contentHashCode() * 31 + (wash?.hashCode() ?: 0)
+}
 
 val LocalPalette = staticCompositionLocalOf<PagePalette?> { null }
 
@@ -194,30 +188,6 @@ val LocalStarMarks = staticCompositionLocalOf<Map<String, Boolean>> { emptyMap()
 fun Map<String, Boolean>.effectiveStar(kind: dev.nori.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
     get("${kind.param}:$id") ?: snapshot
 
-/** The page wash: the cover's own bottom colour at the top, easing into the page colour. */
-fun pageBrush(palette: PagePalette, endY: Float, startY: Float = 0f): Brush = Brush.verticalGradient(
-    0f to palette.edge,
-    0.18f to blend(palette.edge, palette.background, 0.55f),
-    0.42f to blend(palette.edge, palette.background, 0.88f),
-    1f to palette.background,
-    startY = startY, endY = endY,
-)
-
-/**
- * The player's page: the cover itself, sixteen-times enlarged and smoothed, so the colours vary the way
- * the record's do instead of settling into one average - which is what Apple Music does and why their
- * page matches the sleeve so exactly. The seam goes over the top of it, so the artwork still runs out
- * rather than stopping.
- *
- * The player only. An album page has a list scrolling over it and an artwork that fades out under the
- * parallax, and every edge those give the wash is one more thing for it to disagree with: the cover
- * squashed into the header, a line where the block ended, a slab of seam colour left behind when the
- * picture above it faded. It keeps `pageBrush`, which has none of those problems.
- *
- * Static: one 4 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers the whole
- * page - the seam is opaque down to [SEAM_OPAQUE] and gone by [SEAM_END], so each is clipped to where
- * it shows.
- */
 /**
  * The player's page, aligned to its sleeve. The cover is drawn at the sleeve's own scale behind it, so
  * the blurred copy and the sharp one are the same picture at the same size; above and below, the
@@ -226,54 +196,55 @@ fun pageBrush(palette: PagePalette, endY: Float, startY: Float = 0f): Brush = Br
  * into the page instead of ending on one. Stretched over the screen instead, the wash showed the middle
  * of the cover where the sleeve ended, and the hue jumped across a line.
  */
-fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHeight: Float, endY: Float) {
+fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
+    palette: PagePalette, sleeveBottom: Float, sleeveHeight: Float,
+): androidx.compose.ui.draw.DrawResult {
+    val endY = size.height
     val wash = palette.wash
-    if (wash == null) {
-        drawRect(palette.background, size = Size(size.width, endY))
-        return
-    }
+    val page = palette.background
+    if (wash == null) return onDrawBehind { drawRect(page, size = Size(size.width, endY)) }
     val w = size.width.toInt().coerceAtLeast(1)
     val bottom = sleeveBottom.coerceIn(1f, endY)
-    val top = (bottom - sleeveHeight).coerceAtLeast(0f)
-    // Rounded edges rather than rounded heights, so the three bands abut exactly with no row of page
-    // colour showing between them.
-    fun band(srcY: Int, srcH: Int, y0: Int, y1: Int) {
-        if (y1 <= y0) return
-        drawImage(
-            wash,
-            srcOffset = IntOffset(0, srcY), srcSize = IntSize(WASH_ROWS, srcH),
-            dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
-            filterQuality = FilterQuality.Low,
-        )
-    }
-    band(0, 1, 0, top.toInt())
-    band(0, WASH_ROWS, top.toInt(), bottom.toInt())
-    band(WASH_ROWS - 1, 1, bottom.toInt(), endY.toInt())
+    val top = (bottom - sleeveHeight).coerceAtLeast(0f).toInt()
     // The last row, carried down, is the right colour where it meets the sleeve and wrong everywhere
     // below it: the same stripes at the same strength all the way to the bottom edge. Apple's page
     // darkens and calms as it goes down - at y 2000 of `w4` it is still their red, but deeper and more
     // even than under the artwork. So the stripes give way, slowly at first, to a deeper page colour,
     // and arrive at it exactly at the bottom edge of the screen, where there is nothing to meet.
-    if (endY - bottom > 1f) {
-        // The page ends on its own colour, not on a darkened version of it. Taking a third of the way
-        // to black off the bottom was barely visible while every page was dark; now that a bright
-        // record gets a bright page it split the screen in two - the record's colour across the top
-        // and something close to black under the controls. The gradient below still calms the stripes;
-        // it no longer changes how light the page is.
-        val floor = palette.background
-        drawRect(
-            Brush.verticalGradient(
-                // The colours stay through the controls and settle into one only towards the bottom:
-                // the owner liked them under the transport and did not want them gone, just ended.
-                0f to floor.copy(alpha = 0f),
-                0.45f to floor.copy(alpha = 0.22f),
-                0.80f to floor.copy(alpha = 0.75f),
-                1f to floor,
-                startY = bottom, endY = endY,
-            ),
-            topLeft = Offset(0f, bottom),
-            size = Size(size.width, endY - bottom),
-        )
+    //
+    // The page ends on its own colour, not on a darkened version of it. Taking a third of the way
+    // to black off the bottom was barely visible while every page was dark; now that a bright
+    // record gets a bright page it split the screen in two - the record's colour across the top
+    // and something close to black under the controls. The gradient below still calms the stripes;
+    // it no longer changes how light the page is. Made once per page and sleeve, not per frame.
+    val look = palette.look
+    val floor = if (endY - bottom > 1f) Brush.verticalGradient(
+        // The colours stay through the controls and settle into one only towards the bottom:
+        // the owner liked them under the transport and did not want them gone, just ended.
+        0f to Color(look[CoverLook.FLOOR_0]),
+        0.45f to Color(look[CoverLook.FLOOR_22]),
+        0.80f to Color(look[CoverLook.FLOOR_75]),
+        1f to page,
+        startY = bottom, endY = endY,
+    ) else null
+    val floorTop = Offset(0f, bottom)
+    val floorSize = Size(size.width, endY - bottom)
+    return onDrawBehind {
+        // Rounded edges rather than rounded heights, so the three bands abut exactly with no row of page
+        // colour showing between them.
+        fun band(srcY: Int, srcH: Int, y0: Int, y1: Int) {
+            if (y1 <= y0) return
+            drawImage(
+                wash,
+                srcOffset = IntOffset(0, srcY), srcSize = IntSize(WASH_ROWS, srcH),
+                dstOffset = IntOffset(0, y0), dstSize = IntSize(w, y1 - y0),
+                filterQuality = FilterQuality.Low,
+            )
+        }
+        band(0, 1, 0, top)
+        band(0, WASH_ROWS, top, bottom.toInt())
+        band(WASH_ROWS - 1, 1, bottom.toInt(), endY.toInt())
+        if (floor != null) drawRect(floor, topLeft = floorTop, size = floorSize)
     }
 }
 
@@ -283,62 +254,8 @@ fun DrawScope.drawSleeveWash(palette: PagePalette, sleeveBottom: Float, sleeveHe
  */
 const val MELT = 0.19f
 
-fun DrawScope.drawPageWash(palette: PagePalette, endY: Float, seam: Boolean = true) {
-    val wash = palette.wash
-    if (wash == null) {
-        drawRect(pageBrush(palette, endY))
-        return
-    }
-    // Without a seam over it the whole texture is drawn, top rows included: the player's sleeve starts
-    // a little below the top of the screen, and what shows above it is the same cover, softened.
-    val from = if (seam) (WASH_ROWS * SEAM_OPAQUE).toInt() else 0
-    val top = (endY * from / WASH_ROWS).toInt()
-    drawImage(
-        wash,
-        srcOffset = IntOffset(0, from), srcSize = IntSize(WASH_ROWS, WASH_ROWS - from),
-        dstOffset = IntOffset(0, top),
-        dstSize = IntSize(size.width.toInt().coerceAtLeast(1), (endY.toInt() - top).coerceAtLeast(1)),
-        filterQuality = FilterQuality.Low,
-    )
-    if (!seam) return
-    // Same stops as pageBrush, but ending transparent: what is under it is the wash, not a flat colour.
-    drawRect(
-        Brush.verticalGradient(
-            0f to palette.edge,
-            0.18f to blend(palette.edge, palette.background, 0.55f),
-            0.42f to blend(palette.edge, palette.background, 0.88f),
-            0.66f to palette.background.copy(alpha = 0f),
-            1f to palette.background.copy(alpha = 0f),
-            startY = 0f, endY = endY,
-        ),
-        size = Size(size.width, endY * SEAM_END),
-    )
-}
-
-/** Matches `CoverColors.WASH_OUT`: the wash texture is this many pixels a side. */
-private const val WASH_ROWS = 128
-/** Where the seam stops being opaque: the player's artwork covers everything above this. */
-private const val SEAM_OPAQUE = 0.42f
-private const val SEAM_END = 0.68f
-
-/**
- * The player's wash: the same colours, but dimmed at the top, because there the artwork is a card in
- * the middle of the screen rather than the ceiling of the page.
- */
-fun playerBrush(palette: PagePalette, endY: Float): Brush = Brush.verticalGradient(
-    0f to blend(palette.edge, palette.background, 0.30f),
-    0.45f to blend(palette.edge, palette.background, 0.72f),
-    1f to palette.background,
-    startY = 0f, endY = endY,
-)
-
-/** Mixes two opaque colours; cheaper and clearer at call sites than compositing an alpha layer. */
-fun blend(a: Color, b: Color, t: Float): Color = Color(
-    a.red + (b.red - a.red) * t, a.green + (b.green - a.green) * t, a.blue + (b.blue - a.blue) * t, 1f,
-)
-
-/** An opaque version of a translucent colour over a known background, so no layer is needed to draw it. */
-fun Color.over(background: Color): Color = blend(background, copy(alpha = 1f), alpha)
+/** The wash texture is this many pixels a side (nori_look's `WASH_OUT`). */
+private const val WASH_ROWS = CoverLook.WASH
 
 /**
  * A hairline in the Apple sense: a dim line that starts where the text starts and never reaches the
@@ -386,9 +303,11 @@ fun LargeTitle(text: String, modifier: Modifier = Modifier, trailing: @Composabl
 @Composable
 fun Caption(text: String, modifier: Modifier = Modifier, align: TextAlign = TextAlign.Start, caps: Boolean = true) {
     if (text.isEmpty()) return
-    Text(
-        if (caps) text.uppercase() else text, modifier, style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = align, maxLines = 2, overflow = TextOverflow.Ellipsis,
+    // The page's quieter text colour, read while drawing (the player's page moves under it).
+    val look = LocalLook.current
+    LookText(
+        if (caps) remember(text) { text.uppercase() } else text, { look.color(CoverLook.ON_VARIANT) }, modifier,
+        style = MaterialTheme.typography.labelSmall, textAlign = align, maxLines = 2, overflow = TextOverflow.Ellipsis,
     )
 }
 
@@ -404,19 +323,10 @@ fun PillButton(
     text: String, icon: ImageVector?, onClick: () -> Unit, modifier: Modifier = Modifier,
     prominent: Boolean = false, enabled: Boolean = true,
 ) {
-    val scheme = MaterialTheme.colorScheme
-    // 0 on a dark page, 1 on paper: how far to lean into the high-contrast treatment.
-    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
-    val container = if (prominent) {
-        androidx.compose.ui.graphics.lerp(scheme.primary, Color(0xFF1A1A1A), paper)
-    } else {
-        scheme.onSurface.copy(alpha = 0.12f + 0.05f * paper).over(scheme.background)
-    }
-    val content = if (prominent) {
-        androidx.compose.ui.graphics.lerp(scheme.onPrimary, Color.White, paper)
-    } else {
-        androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper)
-    }
+    // The plates lean darker as the page gets paler, continuously (nori_look::dress): looked up.
+    val look = LocalLook.current
+    val container = look.color(if (prominent) CoverLook.PILL else CoverLook.PILL_PLATE)
+    val content = look.color(if (prominent) CoverLook.PILL_INK else CoverLook.TINT_INK)
     Surface(
         onClick = onClick, enabled = enabled, shape = PillShape, color = container, contentColor = content,
         modifier = modifier.heightIn(min = 42.dp),
@@ -433,24 +343,6 @@ fun PillButton(
 
 
 /**
- * The same colours part way from [a] to [b]. Everything a page takes from the record - the text, the
- * accent, the plates behind the controls - travels with the wash rather than switching over when the
- * song does, so the whole screen changes as one thing.
- */
-fun mixPalette(a: PagePalette, b: PagePalette, t: Float): PagePalette = when {
-    t <= 0f -> a
-    t >= 1f -> b
-    else -> a.copy(
-        edge = androidx.compose.ui.graphics.lerp(a.edge, b.edge, t),
-        background = androidx.compose.ui.graphics.lerp(a.background, b.background, t),
-        onBackground = androidx.compose.ui.graphics.lerp(a.onBackground, b.onBackground, t),
-        onBackgroundVariant = androidx.compose.ui.graphics.lerp(a.onBackgroundVariant, b.onBackgroundVariant, t),
-        accent = androidx.compose.ui.graphics.lerp(a.accent, b.accent, t),
-        washEdge = androidx.compose.ui.graphics.lerp(a.meltColour, b.meltColour, t),
-    )
-}
-
-/**
  * Dresses everything inside in the colours of one cover: the page colour becomes the surface, the
  * cover's accent becomes the primary, and text colours are chosen to read on it. Screens keep using
  * `MaterialTheme.colorScheme`, so nothing below needs to know where the colours came from.
@@ -458,38 +350,50 @@ fun mixPalette(a: PagePalette, b: PagePalette, t: Float): PagePalette = when {
 @Composable
 fun TintedTheme(palette: PagePalette?, content: @Composable () -> Unit) {
     val base = MaterialTheme.colorScheme
-    val scheme = androidx.compose.runtime.remember(palette, base) {
-        palette?.let {
-            base.copy(
-                background = it.background, surface = it.background,
-                onBackground = it.onBackground, onSurface = it.onBackground, onSurfaceVariant = it.onBackgroundVariant,
-                surfaceVariant = it.onBackground.copy(alpha = 0.10f).over(it.background),
-                surfaceContainer = it.onBackground.copy(alpha = 0.07f).over(it.background),
-                surfaceContainerHigh = it.onBackground.copy(alpha = 0.11f).over(it.background),
-                primary = it.accent, onPrimary = if (it.accent.luminance() < 0.5f) Color.White else Color(0xFF0D0D0D),
-                secondaryContainer = it.onBackground.copy(alpha = 0.14f).over(it.background), onSecondaryContainer = it.onBackground,
-                outlineVariant = it.onBackground.copy(alpha = 0.14f).over(it.background),
-            )
-        } ?: base
-    }
+    val scheme = androidx.compose.runtime.remember(palette, base) { palette?.let { base.dressedIn(it.fixed) } ?: base }
     MaterialTheme(colorScheme = scheme) {
         androidx.compose.runtime.CompositionLocalProvider(
             LocalContentColor provides scheme.onSurface,
             LocalPalette provides palette,
+            LocalLook provides (palette?.fixed ?: LocalLook.current),
         ) { content() }
     }
 }
 
-/** Status bar icons follow the colour of the page they sit on, and go back to the app's when it leaves. */
+/** This scheme with the page's roles put in from [l]. */
+private fun androidx.compose.material3.ColorScheme.dressedIn(l: Look): androidx.compose.material3.ColorScheme {
+    val on = l.color(CoverLook.ON)
+    return copy(
+        background = l.color(CoverLook.BACKGROUND), surface = l.color(CoverLook.BACKGROUND),
+        onBackground = on, onSurface = on, onSurfaceVariant = l.color(CoverLook.ON_VARIANT),
+        surfaceVariant = l.color(CoverLook.SURFACE_VARIANT),
+        surfaceContainer = l.color(CoverLook.SURFACE_CONTAINER),
+        surfaceContainerHigh = l.color(CoverLook.SURFACE_CONTAINER_HIGH),
+        primary = l.color(CoverLook.ACCENT), onPrimary = l.color(CoverLook.ON_PRIMARY),
+        secondaryContainer = l.color(CoverLook.SECONDARY_CONTAINER), onSecondaryContainer = on,
+        outlineVariant = l.color(CoverLook.OUTLINE_VARIANT),
+    )
+}
+
+/**
+ * Status bar icons follow the colour of the page they sit on, and go back to the app's when it leaves.
+ * The look says which (a light page gets dark icons); a page that is changing colour is followed as it
+ * goes, without recomposing anything.
+ */
 @Composable
-fun SystemBarIcons(background: Color) {
+fun SystemBarIcons(look: Look) {
     val view = androidx.compose.ui.platform.LocalView.current
-    androidx.compose.runtime.DisposableEffect(background) {
-        val window = (view.context as? android.app.Activity)?.window
-        val controller = window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
+    val controller = remember(view) {
+        (view.context as? android.app.Activity)?.window?.let { androidx.core.view.WindowCompat.getInsetsController(it, view) }
+    }
+    androidx.compose.runtime.DisposableEffect(controller) {
         val before = controller?.isAppearanceLightStatusBars
-        controller?.isAppearanceLightStatusBars = background.luminance() > 0.5f
         onDispose { if (before != null) controller.isAppearanceLightStatusBars = before }
+    }
+    LaunchedEffect(controller, look) {
+        if (controller == null) return@LaunchedEffect
+        androidx.compose.runtime.snapshotFlow { look.argb(CoverLook.STATUS_LIGHT) != 0 }
+            .collect { controller.isAppearanceLightStatusBars = it }
     }
 }
 
@@ -531,7 +435,7 @@ fun SearchField(
         }
     }
     Surface(
-        shape = PillShape, color = scheme.onSurface.copy(alpha = 0.08f).over(scheme.background),
+        shape = PillShape, color = LocalLook.current.color(CoverLook.FIELD),
         contentColor = scheme.onSurface, modifier = modifier.fillMaxWidth(),
     ) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -562,7 +466,7 @@ fun Chip(label: String, selected: Boolean, modifier: Modifier = Modifier, onClic
     val scheme = MaterialTheme.colorScheme
     Surface(
         onClick = onClick, shape = PillShape,
-        color = if (selected) scheme.primary else scheme.onSurface.copy(alpha = 0.08f).over(scheme.background),
+        color = if (selected) scheme.primary else LocalLook.current.color(CoverLook.FIELD),
         contentColor = if (selected) scheme.onPrimary else scheme.onSurface,
         modifier = modifier,
     ) {
@@ -647,7 +551,7 @@ fun FormField(
     keyboardOptions: androidx.compose.foundation.text.KeyboardOptions = androidx.compose.foundation.text.KeyboardOptions.Default,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val filled = scheme.onSurface.copy(alpha = 0.07f).over(scheme.background)
+    val filled = LocalLook.current.color(CoverLook.FORM)
     androidx.compose.material3.OutlinedTextField(
         value, onValueChange, modifier, label = label, placeholder = placeholder, supportingText = supportingText,
         singleLine = singleLine, minLines = minLines,
@@ -740,25 +644,16 @@ fun CircleButton(
     enabled: Boolean = true, selected: Boolean = false, lit: Boolean = false,
     iconModifier: Modifier = Modifier, onClick: () -> Unit,
 ) {
-    val scheme = MaterialTheme.colorScheme
     // Keep the plate and icon at full strength while disabled: washing them out made Shuffle look
-    // absent on a dark page, so the row still "popped" when Play became tappable.
-    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
-    val plate = when {
-        lit -> scheme.primary
-        selected -> androidx.compose.ui.graphics.lerp(
-            scheme.primary.copy(alpha = 0.28f).over(scheme.background),
-            scheme.onSurface.copy(alpha = 0.14f).over(scheme.background),
-            paper,
-        )
-        // Lighter on paper than on a dark page, not heavier: at 16 % black the heart and "..." discs
-        // read as grey slabs on a white page. Eight percent is still a disc, just a quiet one.
-        else -> scheme.onSurface.copy(alpha = 0.12f - 0.04f * paper).over(scheme.background)
-    }
+    // absent on a dark page, so the row still "popped" when Play became tappable. The plates are the
+    // look's (nori_look::dress): lighter on paper than on a dark page, not heavier - at 16 % black the
+    // heart and "..." discs read as grey slabs on a white page.
+    val look = LocalLook.current
+    val plate = look.color(when { lit -> CoverLook.ACCENT; selected -> CoverLook.CIRCLE_SELECTED; else -> CoverLook.CIRCLE_PLATE })
     Surface(
         onClick = onClick, enabled = enabled, shape = androidx.compose.foundation.shape.CircleShape,
         color = plate,
-        contentColor = if (lit) scheme.onPrimary else androidx.compose.ui.graphics.lerp(scheme.primary, scheme.onSurface, paper),
+        contentColor = look.color(if (lit) CoverLook.ON_PRIMARY else CoverLook.TINT_INK),
         modifier = modifier.size(46.dp),
     ) { Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, description, Modifier.size(20.dp).then(iconModifier)) } }
 }
@@ -889,7 +784,7 @@ fun NoriSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifier
         if (checked) 1f else 0f, androidx.compose.animation.core.tween(if (reduceMotion()) 0 else 180), label = "switch",
     )
     val on = scheme.primary
-    val off = scheme.onSurface.copy(alpha = 0.16f).over(scheme.background)
+    val off = LocalLook.current.color(CoverLook.SWITCH_OFF)
     val track = androidx.compose.ui.graphics.lerp(off, on, t).let { if (enabled) it else it.copy(alpha = 0.4f) }
     Box(
         modifier.size(width = 51.dp, height = 31.dp)
@@ -913,11 +808,8 @@ fun NoriSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifier
     )
 }
 
-/**
- * A decibel figure with its sign, one decimal. `-0.0f` is a real float - the automatic pre-amp is
- * minus the largest boost, and minus nothing is negative zero - and `"%+.1f"` prints it as "-0.0 dB".
- */
-fun signedDb(db: Float): String = "%+.1f".format(if (db == 0f) 0f else db)
+/** A decibel figure with its sign, one decimal, never "-0.0" (nori-core's `fmt::signed_db`). */
+fun signedDb(db: Float): String = dev.nori.music.ffi.signedDb(db)
 
 
 /**
@@ -927,7 +819,9 @@ fun signedDb(db: Float): String = "%+.1f".format(if (db == 0f) 0f else db)
  * in rather than appearing. Only animates while it is on screen; with reduce motion it holds still.
  */
 @Composable
-fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp = 7.dp, color: Color = MaterialTheme.colorScheme.onSurface) {
+fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp = 7.dp, color: Color = Color.Unspecified) {
+    // The page's text colour, read while drawing: a page changing colour under it only redraws the dots.
+    val look = LocalLook.current
     val plain = AppMotion.reduce
     val appear = remember { androidx.compose.animation.core.Animatable(0f) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
@@ -942,12 +836,13 @@ fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp 
     androidx.compose.foundation.Canvas(modifier.size(dot * 4.4f, dot).graphicsLayer { alpha = appear.value }) {
         val r = size.height / 2f
         val gap = (size.width - size.height * 3f) / 2f
+        val ink = if (color.isSpecified) color else look.color(dev.nori.music.look.CoverLook.ON)
         for (i in 0..2) {
             // Each dot swells and brightens in turn, a third of a cycle behind the one before it.
             val t = phase?.value?.let { ((it - i / 3f) % 1f + 1f) % 1f } ?: 0.5f
             val pulse = 0.5f - 0.5f * kotlin.math.cos(t * 2f * Math.PI.toFloat())
             drawCircle(
-                color.copy(alpha = 0.22f + 0.5f * pulse),
+                ink.copy(alpha = 0.22f + 0.5f * pulse),
                 radius = r * (0.78f + 0.22f * pulse),
                 center = androidx.compose.ui.geometry.Offset(r + i * (size.height + gap), r),
             )
@@ -961,7 +856,7 @@ fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp 
  * in, so a cover that comes from the cache never shimmers. Draw-phase only: a running sheen redraws
  * one layer and recomposes nothing, and when [active] goes false it stops entirely.
  */
-fun Modifier.loadingSheen(active: Boolean, color: Color): Modifier = if (!active) this else composed {
+fun Modifier.loadingSheen(active: Boolean): Modifier = if (!active) this else composed {
     val appear = remember { androidx.compose.animation.core.Animatable(0f) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
         kotlinx.coroutines.delay(250)
@@ -976,20 +871,28 @@ fun Modifier.loadingSheen(active: Boolean, color: Color): Modifier = if (!active
         ),
         label = "sheen",
     )
-    drawWithContent {
-        drawContent()
-        val a = appear.value
-        if (a <= 0f) return@drawWithContent
-        if (sweep == null) { drawRect(color.copy(alpha = 0.05f * a)); return@drawWithContent }
+    val look = LocalLook.current
+    drawWithCache {
+        // One band, made once per size and colour and slid across by translation: the band used to be a
+        // new gradient on every frame of every loading cover.
+        val color = look.color(dev.nori.music.look.CoverLook.ON)
         val band = size.width * 0.9f
-        val x = -band + sweep.value * (size.width + band * 2f)
-        drawRect(
-            Brush.linearGradient(
-                0f to Color.Transparent, 0.5f to color.copy(alpha = 0.10f * a), 1f to Color.Transparent,
-                start = androidx.compose.ui.geometry.Offset(x - band / 2f, 0f),
-                end = androidx.compose.ui.geometry.Offset(x + band / 2f, size.height),
-            ),
+        val sheen = Brush.linearGradient(
+            0f to Color.Transparent, 0.5f to color.copy(alpha = 0.10f), 1f to Color.Transparent,
+            start = androidx.compose.ui.geometry.Offset(-band / 2f, 0f),
+            end = androidx.compose.ui.geometry.Offset(band / 2f, size.height),
         )
+        val still = color.copy(alpha = 0.05f)
+        onDrawWithContent {
+            drawContent()
+            val a = appear.value
+            if (a <= 0f) return@onDrawWithContent
+            if (sweep == null) { drawRect(still, alpha = a); return@onDrawWithContent }
+            val x = -band + sweep.value * (size.width + band * 2f)
+            translate(left = x) {
+                drawRect(sheen, topLeft = androidx.compose.ui.geometry.Offset(-x, 0f), size = size, alpha = a)
+            }
+        }
     }
 }
 
@@ -1005,7 +908,11 @@ fun Modifier.loadingSheen(active: Boolean, color: Color): Modifier = if (!active
  * on and off with every press.
  */
 @Composable
-fun PlayPauseGlyph(playing: Boolean, buffering: Boolean, size: androidx.compose.ui.unit.Dp, spinner: androidx.compose.ui.unit.Dp) {
+fun PlayPauseGlyph(
+    playing: Boolean, buffering: Boolean, size: androidx.compose.ui.unit.Dp, spinner: androidx.compose.ui.unit.Dp,
+    /** The glyph's colour read while drawing; the content colour when null. */
+    tint: androidx.compose.ui.graphics.ColorProducer? = null,
+) {
     var busy by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(buffering) {
         if (buffering) kotlinx.coroutines.delay(300)
@@ -1025,9 +932,11 @@ fun PlayPauseGlyph(playing: Boolean, buffering: Boolean, size: androidx.compose.
     ) { g ->
         Box(Modifier.size(size), Alignment.Center) {
             when (g) {
-                2 -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
-                1 -> androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.Pause, "Pause", Modifier.fillMaxSize())
-                else -> androidx.compose.material3.Icon(androidx.compose.material.icons.Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize())
+                2 -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = tint?.invoke() ?: androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
+                1 -> if (tint != null) LookIcon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize(), tint)
+                    else androidx.compose.material3.Icon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize())
+                else -> if (tint != null) LookIcon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize(), tint)
+                    else androidx.compose.material3.Icon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize())
             }
         }
     }

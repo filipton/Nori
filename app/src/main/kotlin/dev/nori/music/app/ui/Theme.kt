@@ -41,7 +41,20 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
     val density = remember(system, scale) {
         if (scale == 1f) system else androidx.compose.ui.unit.Density(system.density * scale, system.fontScale)
     }
-    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density) {
+    // Everything dressed in the theme's own colours - the plates behind the buttons, the chrome, the
+    // status bar - worked out once per scheme in Rust (nori_look::dress) and only looked up after.
+    val look = remember(scheme) {
+        FixedLook(
+            dev.nori.music.look.CoverLook.plain(
+                intArrayOf(
+                    scheme.background.toArgb(), scheme.onSurface.toArgb(), scheme.onSurfaceVariant.toArgb(), scheme.primary.toArgb(),
+                    scheme.onPrimary.toArgb(), scheme.surfaceVariant.toArgb(), scheme.surfaceContainer.toArgb(),
+                    scheme.surfaceContainerHigh.toArgb(), scheme.secondaryContainer.toArgb(), scheme.outlineVariant.toArgb(),
+                ),
+            ),
+        )
+    }
+    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density, LocalLook provides look) {
         MaterialTheme(colorScheme = scheme, typography = NoriTypography, content = content)
     }
 }
@@ -63,7 +76,8 @@ private const val REFERENCE_WIDTH_DP = 411f
 
 /** A light or dark scheme from one colour: tones of the same hue, worked out in Rust (`nori_look::theme::seeded`). */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {
-    val t = dev.nori.music.look.CoverLook.tones(seed.toArgb(), dark).map { Color(it) }
+    val tones = dev.nori.music.look.CoverLook.tones(seed.toArgb(), dark)
+    val t = List(tones.size) { Color(tones[it]) }
     return if (dark) darkColorScheme(
         primary = t[0], onPrimary = t[1], primaryContainer = t[2], onPrimaryContainer = t[3],
         secondary = t[4], secondaryContainer = t[5], onSecondaryContainer = t[6],
@@ -75,8 +89,12 @@ private fun seeded(seed: Color, dark: Boolean): ColorScheme {
     )
 }
 
-private fun ColorScheme.black() = copy(
-    background = Color.Black, surface = Color.Black, surfaceDim = Color.Black,
-    surfaceContainerLowest = Color.Black, surfaceContainerLow = Color(0xFF0A0A0A), surfaceContainer = Color(0xFF111111),
-    surfaceContainerHigh = Color(0xFF181818), surfaceContainerHighest = Color(0xFF202020),
-)
+/** AMOLED black: the dark surfaces nori_look puts in their place (`dress::AMOLED`), so those pixels are off. */
+private fun ColorScheme.black(): ColorScheme {
+    val a = dev.nori.music.look.CoverLook.amoled()
+    return copy(
+        background = Color(a[0]), surface = Color(a[1]), surfaceDim = Color(a[2]),
+        surfaceContainerLowest = Color(a[3]), surfaceContainerLow = Color(a[4]), surfaceContainer = Color(a[5]),
+        surfaceContainerHigh = Color(a[6]), surfaceContainerHighest = Color(a[7]),
+    )
+}

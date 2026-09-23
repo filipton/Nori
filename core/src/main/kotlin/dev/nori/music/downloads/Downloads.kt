@@ -24,6 +24,8 @@ import androidx.media3.exoplayer.offline.DownloaderFactory
 import androidx.media3.exoplayer.scheduler.Scheduler
 import dev.nori.music.Nori
 import dev.nori.music.ffi.Core
+import dev.nori.music.ffi.DownloadKnown
+import dev.nori.music.ffi.DownloadQueued
 import dev.nori.music.ffi.Song
 import dev.nori.music.playback.MediaSources
 import dev.nori.music.settings.Settings
@@ -113,14 +115,13 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         }
     }
 
-    /** How many songs download at once, from the setting. */
-    fun parallel() = settings.value.parallelDownloads.coerceIn(1, 10)
+    /** How many songs download at once, from the setting (its range is the core's). */
+    fun parallel() = settings.value.parallelDownloads
 
     /** Whether the queue has been handed back to media3 in this process; see [resume]. */
     @Volatile private var resumed = false
 
     init {
-        DownloadsJni.setup(settings.value.download.bitRate)
         io.execute { publish(); reconcile() }
     }
 
@@ -140,46 +141,34 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /**
-     * Brings the Rust index and media3's queue back into agreement after the process died:
-     * - finished in media3 but not recorded here (the process went between the two): recorded now;
-     * - never reached media3 (the add was still in flight): asked for again;
-     * - failed: marked failed, so the song reads as failed rather than waiting;
-     * - queued or interrupted mid-download: the download service is started, which starts the manager,
-     *   which restores and resumes them.
+     * Brings the Rust index and media3's queue back into agreement after the process died. What each
+     * song left pending needs is the core's (`download_recover`); this reads media3's table for it and
+     * does what it says: the finished ones' streamed copies go, the failed ones show how far they got,
+     * the lost ones are asked for again, and when anything is queued or was interrupted the download
+     * service is started, which starts the manager, which restores and resumes them.
      */
     private fun reconcile() {
-        val pending = _state.value.pending
+        val pending = _state.value.pendingIds
         if (pending.isEmpty()) { resumed = true; return }
-        val stored = runCatching {
+        val known = runCatching {
             DefaultDownloadIndex(sources.database).getDownloads().use { c ->
-                buildMap { while (c.moveToNext()) c.download.let { put(it.request.id, it) } }
-            }
-        }.getOrDefault(emptyMap())
-        var failed = 0
-        val lost = ArrayList<Song>()
-        var finished = false
-        var unfinished = false
-        for (s in pending) {
-            val d = stored[s.id]
-            when (d?.state) {
-                null, Download.STATE_REMOVING -> lost += s
-                Download.STATE_COMPLETED -> { core.downloadDone(s.id); finished = true; sources.dropStreamCopies(s.id) }
-                Download.STATE_FAILED -> {
-                    progress.getOrPut(s.id) { MutableStateFlow(DownloadsJni.restoreFailed(s.id, d.contentLength, d.bytesDownloaded)) }
-                    failed++
+                buildList {
+                    while (c.moveToNext()) c.download.let { if (it.request.id in pending) add(DownloadKnown(it.request.id, it.state, it.contentLength, it.bytesDownloaded)) }
                 }
-                else -> unfinished = true
             }
-        }
-        if (finished) publish()
-        if (failed > 0) main.post { refreshMarks() }
-        if (!unfinished && lost.isEmpty()) { resumed = true; return }
-        Log.i(TAG, "resuming: ${pending.size} pending, ${lost.size} asked for again, $failed failed")
+        }.getOrDefault(emptyList())
+        val r = runCatching { core.downloadRecover(known) }.getOrElse { Log.w(TAG, "could not recover the queue", it); return }
+        for (id in r.finished) sources.dropStreamCopies(id)
+        if (r.finished.isNotEmpty()) publish()
+        for (f in r.failed) progress.getOrPut(f.id) { MutableStateFlow(f.progress) }
+        if (r.failed.isNotEmpty()) main.post { refreshMarks() }
+        if (!r.unfinished && r.lost.isEmpty()) { resumed = true; return }
+        Log.i(TAG, "resuming: ${pending.size} pending, ${r.lost.size} asked for again, ${r.failed.size} failed")
         main.post {
             resumed = runCatching {
                 // The first intent brings the service - and with it the manager and its restored queue - up.
-                if (lost.isEmpty()) DownloadService.start(context, DownloadWorker::class.java)
-                for (s in lost) DownloadService.sendAddDownload(context, DownloadWorker::class.java, request(s), false)
+                if (r.lost.isEmpty()) DownloadService.start(context, DownloadWorker::class.java)
+                for (id in r.lost) DownloadService.sendAddDownload(context, DownloadWorker::class.java, request(id), false)
             }.onFailure { Log.w(TAG, "could not start the download service yet", it) }.isSuccess
         }
     }
@@ -221,19 +210,19 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /**
-     * Queues what is not downloaded yet. A song the index calls pending but the queue is not working on
-     * (failed, or lost to a process that died before media3 heard of it) is asked for again rather than
-     * skipped, so the download button always does something.
+     * Queues what is not downloaded yet. Which songs are new and which are asked for again is the core's
+     * (`download_queue`); one asked again that media3 is still working on is left to it.
      */
-    fun download(songs: List<Song>) = io.execute {
-        DownloadsJni.setup(settings.value.download.bitRate)
-        val st = _state.value
-        val fresh = songs.filter { it.id !in st.doneIds && it.id !in st.pendingIds }.distinctBy { it.id }
-        val again = songs.filter { it.id in st.pendingIds }
-        for (s in fresh) core.downloadAdd(s)
-        if (fresh.isNotEmpty()) publish()
-        val requests = fresh.map(::request)
-        val retries = again.map(::request)
+    fun download(songs: List<Song>) = io.execute { queued(runCatching { core.downloadQueue(songs) }) }
+
+    /** Every song of the offline index, in one call to the core; sync the library first so the index is complete. */
+    fun downloadLibrary() = io.execute { queued(runCatching { core.downloadQueueLibrary() }) }
+
+    private fun queued(result: Result<DownloadQueued>) {
+        val q = result.getOrElse { Log.w(TAG, "could not queue downloads", it); return }
+        if (q.fresh.isNotEmpty()) publish()
+        val requests = q.fresh.map(::request)
+        val retries = q.again.map(::request)
         main.post {
             for (r in requests) add(r)
             for (r in retries) if (!manager.currentDownloads.any { it.request.id == r.id }) { unmark(listOf(r.id)); add(r) }
@@ -245,9 +234,9 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         if (songs.isEmpty()) return
         unmark(songs.map { it.id })
         io.execute {
-            for (s in songs) core.downloadAdd(s)
+            val q = runCatching { core.downloadQueue(songs) }.getOrElse { Log.w(TAG, "could not retry downloads", it); return@execute }
             publish()
-            val requests = songs.map(::request)
+            val requests = (q.fresh + q.again).map(::request)
             main.post { requests.forEach(::add) }
         }
     }
@@ -258,8 +247,8 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     /** What the song is and how much it should weigh the core knows from its own downloads table. */
-    private fun request(s: Song): DownloadRequest =
-        DownloadRequest.Builder(s.id, Uri.parse(sources.downloadUrl(s.id))).setCustomCacheKey(sources.downloadKey(s.id)).build()
+    private fun request(id: String): DownloadRequest =
+        DownloadRequest.Builder(id, Uri.parse(sources.downloadUrl(id))).setCustomCacheKey(sources.downloadKey(id)).build()
 
     fun remove(ids: List<String>) = ids.forEach { DownloadService.sendRemoveDownload(context, DownloadWorker::class.java, it, false) }
 
@@ -392,11 +381,9 @@ internal object DownloadsJni {
     const val DRAINED = 2
     const val MARKS = 4
 
-    @JvmStatic external fun setup(downloadKbps: Int)
     @JvmStatic external fun followed(id: String, state: Int, now: Long): Int
     @JvmStatic external fun removed(id: String): Int
     @JvmStatic external fun unmark(id: String): Int
-    @JvmStatic external fun restoreFailed(id: String, length: Long, bytes: Long): Float
     @JvmStatic external fun startFraction(id: String): Float
     @JvmStatic external fun open(id: String, now: Long): Int
     /** Per chunk: the progress to show, or NaN when it has not moved enough to draw. */

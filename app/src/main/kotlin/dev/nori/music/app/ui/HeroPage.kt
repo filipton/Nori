@@ -1,5 +1,7 @@
 package dev.nori.music.app.ui
 
+import dev.nori.music.look.CoverLook
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -105,7 +107,7 @@ fun HeroPage(
 
     TintedTheme(palette) {
         val scheme = MaterialTheme.colorScheme
-        SystemBarIcons(scheme.background)
+        SystemBarIcons(LocalLook.current)
         PageTint(palette)
         Box(Modifier.fillMaxSize().drawBehind { drawRect(scheme.background) }) {
             val list = rememberLazyListState()
@@ -124,11 +126,9 @@ fun HeroPage(
                                 },
                         ) {
                             Cover(coverUrl, 0.dp, Modifier.fillMaxSize())
-                            val edge = palette?.edge ?: scheme.background
-                            val page = palette?.background ?: scheme.background
+                            val look = LocalLook.current
                             Box(
-                                Modifier.fillMaxSize().drawWithContent {
-                                    drawContent()
+                                Modifier.fillMaxSize().drawWithCache {
                                     // The whole dissolve happens inside the artwork, and finishes on the
                                     // page colour rather than on the cover's edge colour. It used to stop
                                     // on the edge colour and leave a second gradient below to carry on -
@@ -136,17 +136,21 @@ fun HeroPage(
                                     // page scrolls, squeezing it into a few dozen pixels, and a colour
                                     // ramp that steep across the full width is a line. The picture has
                                     // its own height to do this in, and ending on the page colour means
-                                    // there is nothing left to hand over to.
-                                    drawRect(
-                                        Brush.verticalGradient(
-                                            0.60f to Color.Transparent,
-                                            0.76f to edge.copy(alpha = 0.40f),
-                                            0.88f to blend(edge, page, 0.55f).copy(alpha = 0.86f),
-                                            1f to page,
-                                        ),
+                                    // there is nothing left to hand over to. The stops are the look's
+                                    // (nori_look::dress), made into brushes once per size.
+                                    val dissolve = Brush.verticalGradient(
+                                        0.60f to Color.Transparent,
+                                        0.76f to look.color(CoverLook.HERO_EDGE),
+                                        0.88f to look.color(CoverLook.HERO_MID),
+                                        1f to look.color(CoverLook.BACKGROUND),
                                     )
                                     // Just enough shade under the status bar for white icons on a pale cover.
-                                    drawRect(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 0.16f to Color.Transparent))
+                                    val shade = Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 0.16f to Color.Transparent)
+                                    onDrawWithContent {
+                                        drawContent()
+                                        drawRect(dissolve)
+                                        drawRect(shade)
+                                    }
                                 },
                             )
                         } else if (art != null) Box(

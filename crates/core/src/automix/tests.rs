@@ -7,7 +7,7 @@ use crate::Core;
 
 #[test]
 fn analysis_is_stored_and_reported_missing() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     assert_eq!(core.analysis_get("a".into()).unwrap(), None);
     assert_eq!(core.analysis_missing(vec!["a".into(), "b".into()]).unwrap(), vec!["a".to_string(), "b".to_string()]);
     let s = Synth::new(120.0);
@@ -33,7 +33,8 @@ fn a_v1_database_migrates_to_v2() {
         c.execute_batch("CREATE TABLE track_analysis(song_id TEXT PRIMARY KEY, analysis_version INTEGER NOT NULL, duration_ms INTEGER NOT NULL, bpm REAL NOT NULL, bpm_confidence REAL NOT NULL, beat_offset_ms REAL NOT NULL, stability REAL NOT NULL, downbeat_phase INTEGER NOT NULL, downbeat_confidence REAL NOT NULL, lufs REAL NOT NULL, key INTEGER NOT NULL, key_confidence REAL NOT NULL, silence_start_ms INTEGER NOT NULL, silence_end_ms INTEGER NOT NULL, mixramp_start_ms INTEGER NOT NULL, mixramp_end_ms INTEGER NOT NULL, intro_end_ms INTEGER NOT NULL, outro_start_ms INTEGER NOT NULL, analysed_ms INTEGER NOT NULL) WITHOUT ROWID").unwrap();
         c.execute("INSERT INTO track_analysis VALUES('v1', 1, 240000, 128.0, 0.9, 120.0, 0.9, 0, 0.8, -9.0, 8, 0.8, 100, 238500, 400, 236000, 15000, 220000, 0)", []).unwrap();
     }
-    let core = Core::new(path.clone()).unwrap();
+    // The old file was the default server's.
+    let core = Core::new(path.clone(), "default".into()).unwrap();
     let a = core.analysis_get("v1".into()).unwrap().unwrap();
     assert_eq!((a.bpm, a.outro_vocal, a.intro_centroid), (128.0, 0.0, 0.0));
     assert_eq!(core.analysis_missing(vec!["v1".into()]).unwrap(), vec!["v1".to_string()]);
@@ -43,7 +44,7 @@ fn a_v1_database_migrates_to_v2() {
 #[test]
 fn the_streaming_handle_finishes_into_the_store() {
     use ::jni::sys::jlong;
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     // The handle a JNI create would return, built the same way.
     let s = Synth::new(128.0);
     let x = s.render();

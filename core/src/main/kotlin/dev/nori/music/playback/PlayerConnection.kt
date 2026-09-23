@@ -115,13 +115,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * nori-player (crates/player/src/heard.rs), so any app on it shows the same.
      */
     private fun heard(c: MediaController): Boolean {
-        val queue = _state.value.queue
-        if (queue !== clockQueue) {
-            clockQueue = queue
-            HeardJni.setQueue(clock, Array(queue.size) { queue[it].id }, LongArray(queue.size) { queue[it].duration.toLong() * 1000 })
-        }
-        // One call, primitives only: this runs every frame the seek bar is drawn.
-        val r = HeardJni.at(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.currentPosition)
+        // One call, primitives only: this runs every frame the seek bar is drawn. The queue is the core's own.
+        val r = HeardJni.at(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, c.currentPosition)
         heardIndex = (r ushr 44).toInt() - 1
         heardMs = r and ((1L shl 43) - 1)
         // The ear changed song between two readings: the page changes with it now, not at the next one.
@@ -134,7 +129,6 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private var heardMs = 0L
     /** nori-player's reading of the transition engine: see crates/player/src/heard.rs. */
     private val clock = HeardJni.create()
-    private var clockQueue: List<*>? = null
 
     val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
 
@@ -192,20 +186,20 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val old = _state.value
         val item = p.currentMediaItem
         val fresh = queueChanged || !old.connected
-        val queue = if (fresh) dev.nori.music.ffi.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
-        val order = if (fresh || p.shuffleModeEnabled != old.shuffle) playOrder(p) else old.order
-        val queued = if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
+        // The queue is the core's (crates/core/src/playlist.rs), read in one call; the controller's copy
+        // of it trails the service a little, so the core's is taken when both are the same length.
+        val view = if (fresh || p.shuffleModeEnabled != old.shuffle) dev.nori.music.ffi.playlistView().takeIf { it.songs.size == p.mediaItemCount } else null
+        val queue = view?.songs ?: if (fresh) dev.nori.music.ffi.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
+        val order = view?.order?.map { it.toInt() } ?: if (fresh || p.shuffleModeEnabled != old.shuffle) playOrder(p) else old.order
+        val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
         // The song on the page is the one being heard. Into a transition the player has moved on to
         // the next song while the ending of this one still plays alone (see heard); the page stays
         // on this song until the mix is heard, and moves to the next one the moment it is, even while
-        // the player is still on the old one. The heard song is the player's next one, or the nearest
-        // earlier one with that id - the song it just left.
-        val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let { old.queue.getOrNull(this.heardIndex)?.id }?.takeIf { it != item?.mediaId }?.let { id ->
-            val at = p.currentMediaItemIndex
-            p.nextMediaItemIndex.takeIf { it >= 0 && queue.getOrNull(it)?.id == id }
-                ?: (at - 1 downTo 0).firstOrNull { queue.getOrNull(it)?.id == id }
-                ?: queue.indexOfLast { it.id == id }.takeIf { it >= 0 }
-        }
+        // the player is still on the old one. Which copy of a song queued twice that is, the heard
+        // tracker decides (crates/player/src/heard.rs); a queue that has just changed is looked up anew.
+        val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let { this.heardIndex }?.takeIf { it >= 0 }?.let { i ->
+            if (fresh) old.queue.getOrNull(i)?.id?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } else i
+        }?.takeIf { queue.getOrNull(it)?.id != item?.mediaId }
         // Weighted album shuffle plays a pre-spread list with media3 shuffle off so the order sticks;
         // [shuffleLit] keeps the Shuffle control lit until the user turns it off or starts a plain Play.
         if (p.shuffleModeEnabled) shuffleLit = true
@@ -222,8 +216,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             durationMs = if (heardIndex != null) queue[heardIndex].duration.toLong() * 1000
                 else p.duration.takeIf { it != C.TIME_UNSET && it > 0 } ?: (item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
-            bridging = item?.isBridgeItem() == true ||
-                (0 until p.mediaItemCount).any { p.getMediaItemAt(it).isBridgeItem() },
+            bridging = view?.bridging ?: old.bridging,
         )
     }
 

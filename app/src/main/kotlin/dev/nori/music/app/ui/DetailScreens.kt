@@ -105,7 +105,15 @@ private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel) {
     }
 }
 
-private fun List<Song>.matching(q: String) = if (q.isBlank()) this else filter { it.title.contains(q, true) || it.artist.contains(q, true) }
+/**
+ * The songs a filter keeps, by title or artist in either case (nori-core's `TextIndex`). The index takes
+ * the list's text once, and only when a filter is first typed; each keystroke then sends the filter.
+ */
+@Composable
+private fun rememberMatching(songs: List<Song>, q: String): List<Song> {
+    val index = remember(songs) { lazy { dev.nori.music.ffi.TextIndex(songs.map { listOf(it.title, it.artist) }) } }
+    return remember(index, q) { if (q.isBlank()) songs else index.value.view(q).rows.map { songs[it.toInt()] } }
+}
 
 @Composable
 private fun playingId(): String? {
@@ -120,11 +128,13 @@ private fun selectedIds(actions: ActionsViewModel): Set<String> {
     return remember(selection) { selection.mapTo(HashSet()) { it.id } }
 }
 
-private fun quality(songs: List<Song>): String? {
-    val s = songs.firstOrNull() ?: return null
-    val lossless = s.suffix.lowercase() in setOf("flac", "alac", "wav", "aiff", "ape", "wv", "dsf", "dff")
-    return listOfNotNull(s.suffix.uppercase().ifEmpty { null }, if (lossless && s.bitDepth > 0u) "${s.bitDepth}/${s.samplingRate.toInt() / 1000.0}" else s.bitRate.takeIf { it > 0u }?.let { "$it kbps" }).joinToString(" ").ifEmpty { null }
-}
+/** An album's songs by disc, with each disc's heading (nori-core's `pages::album_discs`). Once per album. */
+private fun discsOf(d: AlbumDetail): List<Pair<dev.nori.music.ffi.DiscGroup, List<Song>>> =
+    dev.nori.music.ffi.albumDiscs(d).map { g -> g to g.songs.map { d.songs[it.toInt()] } }
+
+/** An artist's releases by kind, headed and in order (nori-core's `pages::release_groups`). Once per artist. */
+private fun groupsOf(albums: List<Album>): List<Pair<String, List<Album>>> =
+    dev.nori.music.ffi.releaseGroups(albums).map { g -> g.heading to g.albums.map { albums[it.toInt()] } }
 
 
 /**
@@ -163,8 +173,11 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         LoadBox(load) { d -> AlbumBody(d, actions, vm, done, selected, menu, playing, nav) }
         return
     }
-    val discs = remember(detail) {
-        detail?.songs?.groupBy { it.discNumber.toInt().coerceAtLeast(1) }?.toSortedMap().orEmpty()
+    val discs = remember(detail) { detail?.let(::discsOf).orEmpty() }
+    // Worked out once per album, not on every recomposition (nori-core's `fmt`).
+    val caption = remember(detail, album) {
+        if (detail != null) dev.nori.music.ffi.albumCaption(album.year, detail.songs, album.explicitStatus == "explicit")
+        else dev.nori.music.ffi.albumHintCaption(album.year, album.songCount, album.duration)
     }
     // This page's own queue: its songs, plus a song of this record some other queue carried along.
     val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
@@ -172,15 +185,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
         title = album.name,
         subtitle = album.artist,
-        caption = if (detail != null) listOfNotNull(
-            album.year.takeIf { it > 0u }?.toString(), "${detail.songs.size} songs",
-            duration(detail.songs.sumOf { it.duration.toLong() }), quality(detail.songs),
-            "explicit".takeIf { album.explicitStatus == "explicit" },
-        ).joinToString(" · ") else listOfNotNull(
-            album.year.takeIf { it > 0u }?.toString(),
-            album.songCount.takeIf { it > 0u }?.let { "$it songs" },
-            album.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
-        ).joinToString(" · "),
+        caption = caption,
         onSubtitle = album.artistId?.let { a ->
             { nav.artist(a, Artist(a, album.artist, album.coverArt, null, 0u, false, false)) }
         },
@@ -215,10 +220,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                             }
                         }
                         discs.forEach { (disc, tracks) ->
-                            if (discs.size > 1) {
-                                val title = detail.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-                            }
+                            if (discs.size > 1) SectionTitle(disc.heading)
                             val (onRight, onLeft) = actions.swipes
                             tracks.forEachIndexed { i, s ->
                                 SongRow(
@@ -230,7 +232,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                                     swipeRight = rowSwipe(onRight, s, actions),
                                     swipeLeft = rowSwipe(onLeft, s, actions),
                                     divider = i < tracks.lastIndex,
-                                    showArtist = !s.artist.equals(album.artist, ignoreCase = true),
+                                    pageArtist = album.artist,
                                 )
                             }
                         }
@@ -265,17 +267,14 @@ private fun AlbumBody(
 ) {
     // An album is short enough to scroll and its running order is the point of it, so the songs
     // stay exactly as the record has them, grouped by disc and never narrowed.
-    val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
+    val discs = remember(d) { discsOf(d) }
+    val caption = remember(d) { dev.nori.music.ffi.albumCaption(d.album.year, d.songs, d.album.explicitStatus == "explicit") }
     val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
         title = d.album.name,
         subtitle = d.album.artist,
-        caption = listOfNotNull(
-            d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs",
-            duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
-            "explicit".takeIf { d.album.explicitStatus == "explicit" },
-        ).joinToString(" · "),
+        caption = caption,
         onSubtitle = d.album.artistId?.let { a ->
             { nav.artist(a, Artist(a, d.album.artist, d.album.coverArt, null, 0u, false, false)) }
         },
@@ -294,21 +293,12 @@ private fun AlbumBody(
             }
         }
         discs.forEach { (disc, tracks) ->
-            if (discs.size > 1) item(key = "disc$disc") {
-                val title = d.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-            }
-            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs, pageArtist = d.album.artist)
+            if (discs.size > 1) item(key = "disc${disc.disc}") { SectionTitle(disc.heading) }
+            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d${disc.disc}-", context = d.songs, pageArtist = d.album.artist)
         }
     }
 }
 
-private val releaseOrder = listOf("Album", "EP", "Single", "Live", "Compilation", "Soundtrack", "Remix", "Other")
-
-private fun Album.group(): String = when {
-    releaseTypes.isEmpty() -> if (isCompilation) "Compilation" else "Album"
-    else -> releaseTypes.firstOrNull { t -> releaseOrder.any { it.equals(t, true) } && !t.equals("Album", true) }?.replaceFirstChar(Char::uppercase) ?: releaseTypes.first().replaceFirstChar(Char::uppercase)
-}
 
 @Composable
 fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = viewModel()) {
@@ -332,11 +322,7 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         LoadBox(load) { ready -> ArtistBody(ready, actions, vm, done, selected, menu, playing, nav) { leaving = it } }
         return
     }
-    val groups = remember(ui?.detail) {
-        ui?.detail?.albums?.sortedByDescending { it.year }?.groupBy { it.group() }
-            ?.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } })
-            .orEmpty()
-    }
+    val groups = remember(ui?.detail) { ui?.detail?.albums?.let(::groupsOf).orEmpty() }
     // An artist's page has no song list of its own - the queue is every album's songs - so what
     // makes it the page playing is a song of one of its albums sounding.
     val albumIds = remember(ui?.detail) { ui?.detail?.albums?.mapTo(HashSet()) { it.id } ?: emptySet() }
@@ -372,13 +358,13 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             ui != null -> item(key = "body") {
                 Arrive {
                     Column {
-                        ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                        ui.info?.biography?.let { Text(remember(it) { dev.nori.music.ffi.biography(it) }, Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                         Row(Modifier.padding(horizontal = 12.dp)) {
                             ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
-                            ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
+                            ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = dev.nori.music.ffi.musicbrainzArtistUrl(m) }) { Text("MusicBrainz") } }
                         }
                         groups.forEach { (group, albums) ->
-                            SectionTitle(if (group.endsWith("s")) group else "${group}s")
+                            SectionTitle(group)
                             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
                             }
@@ -433,7 +419,7 @@ private fun ArtistBody(
     nav: Nav,
     leave: (String) -> Unit,
 ) {
-    val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
+    val groups = remember(ui.detail) { groupsOf(ui.detail.albums) }
     val albumIds = remember(ui.detail) { ui.detail.albums.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
@@ -454,15 +440,15 @@ private fun ArtistBody(
         },
     ) {
         item(key = "header") {
-            ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            ui.info?.biography?.let { Text(remember(it) { dev.nori.music.ffi.biography(it) }, Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             Row(Modifier.padding(horizontal = 12.dp)) {
                 ui.info?.lastFmUrl?.let { u -> TextButton({ leave(u) }) { Text("last.fm") } }
-                ui.info?.musicBrainzId?.let { m -> TextButton({ leave("https://musicbrainz.org/artist/$m") }) { Text("MusicBrainz") } }
+                ui.info?.musicBrainzId?.let { m -> TextButton({ leave(dev.nori.music.ffi.musicbrainzArtistUrl(m)) }) { Text("MusicBrainz") } }
             }
         }
         groups.forEach { (group, albums) ->
             item(key = "g-$group") {
-                SectionTitle(if (group.endsWith("s")) group else "${group}s")
+                SectionTitle(group)
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
                 }
@@ -506,18 +492,17 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         LoadBox(load) { d -> PlaylistBody(d, id, actions, vm, settings, prefs, done, selected, menu, playing, filter, { filter = it }, { exportM3u.launch("${d.playlist.name}.m3u8") }) }
         return
     }
-    val shown = remember(detail, filter) { detail?.songs?.matching(filter).orEmpty() }
+    val shown = rememberMatching(detail?.songs.orEmpty(), filter)
     // This playlist's own queue: its songs, whatever order they are being played in.
     val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
     HeroPage(
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
         subtitle = playlist.comment?.ifEmpty { null },
-        caption = if (detail != null) "${detail.songs.size} songs · ${duration(detail.songs.sumOf { it.duration.toLong() })}"
-            else listOfNotNull(
-                playlist.songCount.takeIf { it > 0u }?.let { "$it songs" },
-                playlist.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
-            ).joinToString(" · "),
+        caption = remember(detail, playlist) {
+            if (detail != null) dev.nori.music.ffi.listCaption(detail.songs, true)
+            else dev.nori.music.ffi.albumHintCaption(0u, playlist.songCount, playlist.duration)
+        },
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         awaitingPlay = detail == null && load !is Load.Failed,
@@ -596,13 +581,13 @@ private fun PlaylistBody(
     onFilter: (String) -> Unit,
     onExport: () -> Unit,
 ) {
-    val shown = remember(d, filter) { d.songs.matching(filter) }
+    val shown = rememberMatching(d.songs, filter)
     val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
     HeroPage(
         coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
         title = d.playlist.name,
         subtitle = d.playlist.comment?.ifEmpty { null },
-        caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
+        caption = remember(d) { dev.nori.music.ffi.listCaption(d.songs, true) },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
         playingHere = { s -> s.current?.id?.let(songIds::contains) == true },

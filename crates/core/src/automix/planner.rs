@@ -31,14 +31,42 @@ struct Planner {
 static PLANNER: Mutex<Planner> =
     Mutex::new(Planner { prefs: None, transitions_off: false, window: Vec::new(), shuffling: false, generation: 0, none: None });
 
-/// The user's transition settings, and whether the output forbids touching samples at all
-/// (`AudioPolicy::transitions_off`). Handed in whenever the settings change.
+/// Whether the output forbids touching samples at all (`AudioPolicy::transitions_off`). Called whenever
+/// the audio policy changes; the user's transition settings reach the planner by themselves
+/// ([`settings_changed`]).
 #[uniffi::export]
-pub fn transition_setup(prefs: crate::TransitionPrefs, transitions_off: bool) {
+pub fn transition_setup(transitions_off: bool) {
     let mut p = PLANNER.lock();
-    p.prefs = Some(prefs);
     p.transitions_off = transitions_off;
     p.generation += 1;
+}
+
+/// The settings changed: the planner takes the transition settings from them. A plan already made is
+/// asked for again by the platform when it hears of the change.
+pub(crate) fn settings_changed(s: &crate::settings::StoredPrefs) {
+    let prefs = transition_prefs(s);
+    let mut p = PLANNER.lock();
+    if p.prefs != Some(prefs) {
+        p.prefs = Some(prefs);
+        p.generation += 1;
+    }
+}
+
+fn transition_prefs(s: &crate::settings::StoredPrefs) -> crate::TransitionPrefs {
+    crate::TransitionPrefs {
+        auto_mix: s.auto_mix,
+        crossfade_s: s.crossfade_sec,
+        auto_mix_max_s: s.auto_mix_max_s,
+        beat_match: s.auto_mix_beat_match,
+        max_tempo_change_pct: s.auto_mix_max_tempo_pct,
+        bass_swap: s.auto_mix_bass_swap,
+        filter_effects: s.auto_mix_filters,
+        echo_out: s.auto_mix_echo_out,
+        keep_pitch: s.auto_mix_keep_pitch,
+        keep_albums: s.crossfade_keep_albums,
+        // AutoMix's loudness matching stands down under ReplayGain.
+        replay_gain: s.replay_gain != 0,
+    }
 }
 
 /// The songs the player will play: the one before the current one first, then the current one and those

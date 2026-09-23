@@ -87,16 +87,16 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.Load
 import dev.nori.music.ffi.Album
 import dev.nori.music.ffi.Song
+import dev.nori.music.look.CoverLook
+import androidx.compose.ui.draw.drawWithCache
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /** A cover of an octo-fiesta provider item (external song, album, artist or playlist). */
 fun isProviderCover(url: String) = url.contains("&id=ext-") || url.contains("&id=pl-")
 
-/** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from. */
-fun providerOf(id: String): String? = id.takeIf { it.startsWith("ext-") || it.startsWith("pl-") }
-    ?.split('-')?.getOrNull(1)?.replaceFirstChar(Char::uppercase)
-    ?.let { mapOf("Squidwtf" to "SquidWTF").getOrDefault(it, it) }
+/** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from (nori-core's `fmt`). */
+fun providerOf(id: String): String? = if (id.startsWith("ext-") || id.startsWith("pl-")) dev.nori.music.ffi.providerOf(id) else null
 
 /**
  * Two sizes, not four. A Subsonic server renders each requested size on demand and caches it per size,
@@ -134,30 +134,30 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
         }.build()
     }
     val shape = remember(radius) { androidx.compose.foundation.shape.RoundedCornerShape(radius) }
-    val scheme = MaterialTheme.colorScheme
     // A flat grey square is what makes a library of half-loaded covers look broken. Underneath every
     // cover sits a soft two-tone plate with a note on it, which is what shows while the picture loads
-    // and what stays when a track simply has no artwork. It is one gradient, drawn, and costs nothing.
-    val plateBrush = remember(scheme.surfaceVariant) {
-        Brush.linearGradient(listOf(scheme.onSurface.copy(alpha = 0.13f).over(scheme.background), scheme.onSurface.copy(alpha = 0.06f).over(scheme.background)))
-    }
+    // and what stays when a track simply has no artwork. One gradient in the page's look, drawn - and
+    // read while drawing, so the player's page changing colour under a cover only redraws it.
+    val look = LocalLook.current
     var loading by remember(request) { mutableStateOf(url != null) }
     var missing by remember(request) { mutableStateOf(url == null) }
     // The sheen outlives the load by the length of the picture's fade, so it goes away underneath a
     // picture that is already covering it instead of vanishing from on top of the plate.
     var sheen by remember(request) { mutableStateOf(loading) }
     androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
-    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).then(if (plate) Modifier.background(plateBrush) else Modifier)) {
-        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true, scheme.onSurface))
+    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).then(if (plate) Modifier.drawWithCache {
+        val brush = Brush.linearGradient(listOf(look.color(CoverLook.VEIL_13), look.color(CoverLook.VEIL_6)))
+        onDrawBehind { drawRect(brush) }
+    } else Modifier)) {
+        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true))
         androidx.compose.animation.AnimatedVisibility(
             missing && plate, Modifier.align(Alignment.Center),
             enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)), exit = androidx.compose.animation.fadeOut(),
         ) {
-            Icon(
+            LookIcon(
                 Icons.Filled.MusicNote, null,
                 Modifier.size(if (size > 0.dp) size * 0.34f else 40.dp),
-                tint = scheme.onSurface.copy(alpha = 0.22f),
-            )
+            ) { look.color(CoverLook.ON_22) }
         }
         AsyncImage(
             model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
@@ -170,7 +170,30 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     }
 }
 
-fun duration(seconds: Long): String = if (seconds >= 3600) "%d:%02d:%02d".format(seconds / 3600, seconds / 60 % 60, seconds % 60) else "%d:%02d".format(seconds / 60, seconds % 60)
+/**
+ * "3:07", or "1:02:03" from an hour (nori-core's `fmt::duration`). Each second's text is made once for
+ * the life of the process and kept: the seek bar asks for two of these every second a song plays, and
+ * every list row for its song's length, so after the first time through they cost a lookup.
+ */
+fun duration(seconds: Long): String {
+    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.duration(seconds)
+    val i = seconds.toInt()
+    return Durations.made[i] ?: dev.nori.music.ffi.duration(seconds).also { Durations.made[i] = it }
+}
+
+/** The same with a minus in front, for the time left: kept the same way. */
+fun durationLeft(seconds: Long): String {
+    if (seconds < 0 || seconds >= Durations.MAX) return "-" + dev.nori.music.ffi.duration(seconds)
+    val i = seconds.toInt()
+    return Durations.left[i] ?: ("-" + duration(seconds)).also { Durations.left[i] = it }
+}
+
+private object Durations {
+    /** Two hours: a longer mix or audiobook is formatted as it goes. */
+    const val MAX = 7200L
+    val made = arrayOfNulls<String>(MAX.toInt())
+    val left = arrayOfNulls<String>(MAX.toInt())
+}
 
 /** What a sideways drag on a song row does: what it uncovers under the row, and what letting go past [SWIPE_ARM] does. */
 class RowSwipe(val icon: ImageVector, val label: String, val action: () -> Unit)
@@ -178,8 +201,11 @@ class RowSwipe(val icon: ImageVector, val label: String, val action: () -> Unit)
 /** One per row: the Animatable the row slides on, and whether letting go now would act. */
 @Stable
 class SwipeState {
-    val offset = Animatable(0f)
+    /** Where the row is, written straight from the finger; see [swipeable]. */
+    val offset = androidx.compose.runtime.mutableFloatStateOf(0f)
     var armed by mutableStateOf(false)
+    /** The spring back, while it runs: a new drag takes the row from wherever it has got to. */
+    var settling: kotlinx.coroutines.Job? = null
 }
 
 /** How far across the row a drag has to go before letting go acts. */
@@ -200,9 +226,12 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
     val acts by rememberUpdatedState(right to left)
     pointerInput(right != null, left != null) {
         var x = 0f
-        fun settle() { s.armed = false; scope.launch { s.offset.animateTo(0f, back) } }
+        fun settle() {
+            s.armed = false
+            s.settling = scope.launch { androidx.compose.animation.core.animate(s.offset.floatValue, 0f, animationSpec = back) { v, _ -> s.offset.floatValue = v } }
+        }
         sidewaysDrag(
-            onDragStart = { x = s.offset.value; scope.launch { s.offset.stop() } },
+            onDragStart = { s.settling?.cancel(); x = s.offset.floatValue },
             onDragEnd = {
                 if (s.armed) (if (x > 0f) acts.first else acts.second)?.action?.invoke()
                 settle()
@@ -216,11 +245,12 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
             change.consume()
             val armed = kotlin.math.abs(x) > arm
             if (armed != s.armed) { s.armed = armed; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-            scope.launch { s.offset.snapTo(x) }
+            // Written, not snapped to from a coroutine: one launch per pointer event was a job per frame.
+            s.offset.floatValue = x
         }
     }
-        .graphicsLayer { translationX = s.offset.value }
-        .drawBehind { if (s.offset.value != 0f) drawRect(fill) }
+        .graphicsLayer { translationX = s.offset.floatValue }
+        .drawBehind { if (s.offset.floatValue != 0f) drawRect(fill) }
 }
 
 /**
@@ -265,7 +295,7 @@ internal suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sideway
  */
 @Composable
 private fun SwipeBackdrop(s: SwipeState, right: RowSwipe?, left: RowSwipe?, modifier: Modifier) {
-    val side by remember { derivedStateOf { kotlin.math.sign(s.offset.value) } }
+    val side by remember { derivedStateOf { kotlin.math.sign(s.offset.floatValue) } }
     if (side == 0f) return
     val face = (if (side > 0f) right else left) ?: return
     val scheme = MaterialTheme.colorScheme
@@ -275,7 +305,7 @@ private fun SwipeBackdrop(s: SwipeState, right: RowSwipe?, left: RowSwipe?, modi
     Box(modifier.drawBehind { drawRect(fill) }) {
         Row(
             Modifier.align(if (side > 0f) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = Space.gutter)
-                .graphicsLayer { alpha = (kotlin.math.abs(s.offset.value) / 64.dp.toPx()).coerceIn(0f, 1f) },
+                .graphicsLayer { alpha = (kotlin.math.abs(s.offset.floatValue) / 64.dp.toPx()).coerceIn(0f, 1f) },
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(face.icon, null, Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }, ink)
@@ -295,7 +325,7 @@ fun SongRow(
     song: Song, coverUrl: String?, onClick: () -> Unit, onMenu: () -> Unit, modifier: Modifier = Modifier,
     number: Int? = null, playing: Boolean = false, downloaded: Boolean = false,
     selected: Boolean = false, onLongClick: (() -> Unit)? = null, swipeRight: RowSwipe? = null, swipeLeft: RowSwipe? = null,
-    divider: Boolean = true, showArtist: Boolean = true,
+    divider: Boolean = true, pageArtist: String? = null,
 ) {
     val scheme = MaterialTheme.colorScheme
     val swipe = if (swipeRight != null || swipeLeft != null) remember { SwipeState() } else null
@@ -323,7 +353,8 @@ fun SongRow(
                     song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
                     color = if (playing) scheme.primary else scheme.onSurface,
                 )
-                val second = (if (song.explicitStatus == "explicit") "🅴 " else "") + (if (showArtist) song.artist else "")
+                // Once per row, not per recomposition (nori-core's `fmt::song_line`).
+                val second = remember(song.explicitStatus, song.artist, pageArtist) { dev.nori.music.ffi.songLine(song.explicitStatus, song.artist, pageArtist) }
                 if (second.isNotEmpty()) Text(
                     second, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
@@ -332,7 +363,7 @@ fun SongRow(
             val tint = scheme.onSurfaceVariant
             if (song.isExternal) {
                 Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
-                providerOf(song.id)?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
+                remember(song.id) { providerOf(song.id) }?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
             }
             // Every row's marks sit in columns of their own, the same width on every row: the heart, then
             // the download ring or tick, then the time, then the menu. A list of favourites then puts all
@@ -377,9 +408,9 @@ fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
     androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     androidx.compose.runtime.LaunchedEffect(moving, resumed) {
         if (!moving || !resumed) return@LaunchedEffect
-        while (coroutineContext.isActive) {
-            androidx.compose.animation.core.withInfiniteAnimationFrameMillis { phase.floatValue = it / 1000f }
-        }
+        // One callback object for every frame, not a new lambda each time round.
+        val tick: (Long) -> Unit = { phase.floatValue = it / 1000f }
+        while (coroutineContext.isActive) androidx.compose.animation.core.withInfiniteAnimationFrameMillis(tick)
     }
     androidx.compose.foundation.Canvas(modifier) {
         val t = phase.floatValue
@@ -428,7 +459,7 @@ fun LazyListScope.songRows(
             selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, 
             swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
             divider = i < songs.lastIndex,
-            showArtist = pageArtist == null || !s.artist.equals(pageArtist, ignoreCase = true),
+            pageArtist = pageArtist,
         )
     }
 }
@@ -488,7 +519,7 @@ fun ArtistCard(name: String, subtitle: String, coverUrl: String?, size: Dp, onCl
 fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) =
     CoverCard(
         album.name,
-        listOfNotNull(album.artist.ifEmpty { null }, album.year.takeIf { it > 0u }?.toString(), providerOf(album.id)?.let { "☁ $it" }).joinToString(" · "),
+        remember(album.artist, album.year, album.id) { dev.nori.music.ffi.albumSubtitle(album.artist, album.year, album.id) },
         coverUrl, size, onClick, modifier, fill,
     )
 

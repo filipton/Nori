@@ -9,7 +9,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import coil3.SingletonImageLoader
@@ -88,7 +87,8 @@ data class CoverTint(val url: String?, val palette: PagePalette?)
 @Composable
 fun rememberCoverTint(url: String?, dark: Boolean, amoled: Boolean): CoverTint {
     val context = LocalContext.current
-    val key = url?.let { paletteKey(it, dark, amoled) }
+    // Built once per cover and theme, not on every recomposition.
+    val key = remember(url, dark, amoled) { url?.let { paletteKey(it, dark, amoled) } }
     // Straight out of the cache, here in composition. It used to come from `produceState`, whose block
     // is a coroutine that runs *after* the frame the cover changed on: a cover measured long ago still
     // arrived a frame or two late, and until it did, everything drawn from it - the page, the soft
@@ -119,11 +119,8 @@ fun rememberCoverPalette(url: String?, dark: Boolean, amoled: Boolean): PagePale
 private fun derive(bitmap: Bitmap, dark: Boolean, amoled: Boolean): PagePalette? {
     val px = IntArray(bitmap.width * bitmap.height).also { bitmap.getPixels(it, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height) }
     val c = CoverLook.derive(px, bitmap.width, bitmap.height, dark, amoled) ?: return null
-    val on = Color(c.on)
     return PagePalette(
-        edge = Color(c.edge), background = Color(c.background), onBackground = on, onBackgroundVariant = on.copy(alpha = 0.66f),
-        accent = Color(c.accent),
+        c.look,
         wash = c.wash?.let { Bitmap.createBitmap(it, CoverLook.WASH, CoverLook.WASH, Bitmap.Config.ARGB_8888).asImageBitmap() },
-        washEdge = if (c.wash != null) Color(c.washEdge) else Color.Unspecified,
     )
 }

@@ -285,6 +285,8 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             var chromeHeight by remember { mutableStateOf(0.dp) }
             var tabsHeight by remember { mutableStateOf(0.dp) }
             val density = androidx.compose.ui.platform.LocalDensity.current
+            // One look for both halves of the chrome, cross-fading once when the page under it changes.
+            val chromeLook = rememberChromeLook()
             // This replaced a Scaffold when the chrome started floating, and with it went the two things
             // Scaffold quietly provided: something that paints the app's background (every screen was
             // showing the window's default grey, lighter than our own cards) and a content colour for
@@ -338,13 +340,13 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                   // The now playing bar has a heart now, and it reads the stars the user has just
                   // changed from here like every other one. Outside this, it saw only the server's
                   // answer, so a tap on it changed nothing until the song came round again.
-                  CompositionLocalProvider(LocalStarMarks provides marks) { BottomChrome(player, actions, nav::player, tabsHeight) }
+                  CompositionLocalProvider(LocalStarMarks provides marks) { BottomChrome(player, actions, nav::player, tabsHeight, chromeLook) }
               }
               }
               PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
               // The tab bar is over the player, not under it: as the player rises it slides down off the
               // screen instead of vanishing under the sheet in one frame. See BottomChrome.
-              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab) { tabsHeight = it } }
+              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab, chromeLook) { tabsHeight = it } }
               // Top: less in the way of the now-playing bar; swipe or the X dismisses.
               SnackbarHost(
                   snackbar,

@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn index_parses_and_searches() {
-        let mut c = crate::db::open("").unwrap();
+        let mut c = crate::db::open("", "t").unwrap();
         assert_eq!(store(&mut c, MD).unwrap(), 3);
         let hits = search(&c, "hd 600", 10).unwrap();
         assert_eq!(hits.len(), 2);
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn devices_find_their_curve() {
-        let mut c = crate::db::open("").unwrap();
+        let mut c = crate::db::open("", "t").unwrap();
         let md = "- [Sony WH-1000XM5](./Rtings/over-ear/Sony%20WH-1000XM5) by Rtings\n\
 - [Sony WH-1000XM5](./oratory1990/over-ear/Sony%20WH-1000XM5) by oratory1990\n\
 - [Sony WH-1000XM5 (ANC off)](./crinacle/over-ear/Sony%20WH-1000XM5%20(ANC%20off)) by crinacle\n\

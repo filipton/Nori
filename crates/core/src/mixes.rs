@@ -15,6 +15,9 @@ use rusqlite::{types::Value, Connection, OptionalExtension};
 
 use crate::{db, history, model::Song, Core, Result};
 
+/// The "For you" row built on these draws.
+mod board;
+
 const DAY_MS: i64 = 86_400_000;
 
 /// splitmix64: tiny, no state to warm up, good enough to shuffle music.
@@ -56,9 +59,9 @@ pub(crate) fn shuffled_params(seed: u64) -> [Value; 2] {
     [Value::Integer(1 + (r.next() % (LCG_P as u64 - 1)) as i64), Value::Integer((r.next() % LCG_P as u64) as i64)]
 }
 
-/// Most rows of `items` are songs. Saying so keeps the planner from treating `kind=2` as the selective
-/// term and ignoring the expression indexes (there is no ANALYZE data on a phone).
-pub(crate) const SONGS: &str = "likelihood(i.kind=2, 0.9)";
+/// This server's songs. Most rows of `items` are songs: saying so keeps the planner from treating
+/// `kind=2` as the selective term and ignoring the expression indexes (there is no ANALYZE data on a phone).
+pub(crate) const SONGS: &str = "i.server=sid() AND likelihood(i.kind=2, 0.9)";
 
 struct Cand {
     song: Song,
@@ -76,7 +79,7 @@ enum Order {
 /// Up to `n` songs matching `cond` (which numbers its own parameters from ?1), never an excluded one.
 /// `played_only` drives the query from `song_stats`, which is small, instead of from the index.
 fn pool(c: &Connection, played_only: bool, cond: &str, mut args: Vec<Value>, order: Order, n: usize, now_ms: i64) -> rusqlite::Result<Vec<Cand>> {
-    let from = if played_only { "song_stats s JOIN items i ON i.kind=2 AND i.id=s.song_id" } else { "items i LEFT JOIN song_stats s ON s.song_id=i.id" };
+    let from = if played_only { "song_stats s JOIN items i ON s.server=sid() AND i.server=sid() AND i.kind=2 AND i.id=s.song_id" } else { "items i LEFT JOIN song_stats s ON s.server=i.server AND s.song_id=i.id" };
     let order = match order {
         Order::Shuffled(seed) => {
             args.extend(shuffled_params(seed));
@@ -88,7 +91,7 @@ fn pool(c: &Connection, played_only: bool, cond: &str, mut args: Vec<Value>, ord
     args.push(Value::Integer(n as i64));
     let sql = format!(
         "SELECT i.json, coalesce(s.plays,0), coalesce(s.skips,0), coalesce(s.taste,0) FROM {from}
-         WHERE {SONGS} AND {cond} AND NOT EXISTS(SELECT 1 FROM mix_excluded e WHERE e.song_id=i.id) ORDER BY {order} LIMIT ?{}",
+         WHERE {SONGS} AND {cond} AND NOT EXISTS(SELECT 1 FROM mix_excluded e WHERE e.server=i.server AND e.song_id=i.id) ORDER BY {order} LIMIT ?{}",
         args.len()
     );
     let mut st = c.prepare_cached(&sql)?;
@@ -314,7 +317,7 @@ fn decade_cond() -> &'static str {
 
 /// The seed song, then its neighbourhood: same genre first, then same artist and same decade.
 fn instant(c: &Connection, seed_song_id: &str, limit: usize, seed: u64, now_ms: i64) -> rusqlite::Result<Vec<Song>> {
-    let first: Option<Song> = c.prepare_cached("SELECT json FROM items WHERE kind=2 AND id=?1")?.query_row([seed_song_id], |r| r.get::<_, String>(0)).optional()?.and_then(|j| serde_json::from_str(&j).ok());
+    let first: Option<Song> = c.prepare_cached("SELECT json FROM items WHERE server=sid() AND kind=2 AND id=?1")?.query_row([seed_song_id], |r| r.get::<_, String>(0)).optional()?.and_then(|j| serde_json::from_str(&j).ok());
     let Some(first) = first else { return Ok(Vec::new()) };
     if limit == 0 {
         return Ok(Vec::new());
@@ -403,22 +406,22 @@ impl Core {
     pub fn mix_excluded_set(&self, song_id: String, excluded: bool) -> Result<()> {
         let c = self.db.lock();
         if excluded {
-            c.execute("INSERT OR IGNORE INTO mix_excluded(song_id) VALUES(?1)", [song_id])?;
+            c.execute("INSERT OR IGNORE INTO mix_excluded(server, song_id) VALUES(sid(), ?1)", [song_id])?;
         } else {
-            c.execute("DELETE FROM mix_excluded WHERE song_id=?1", [song_id])?;
+            c.execute("DELETE FROM mix_excluded WHERE server=sid() AND song_id=?1", [song_id])?;
         }
         Ok(())
     }
 
     pub fn mix_excluded_clear(&self) -> Result<()> {
-        self.db.lock().execute("DELETE FROM mix_excluded", [])?;
+        self.db.lock().execute("DELETE FROM mix_excluded WHERE server=sid()", [])?;
         Ok(())
     }
 
     /// For the settings screen that lets the user take an exclusion back.
     pub fn mix_excluded_list(&self) -> Result<Vec<Song>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT i.json FROM mix_excluded e JOIN items i ON i.kind=2 AND i.id=e.song_id ORDER BY i.rowid")?;
+        let mut st = c.prepare_cached("SELECT i.json FROM mix_excluded e JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=e.song_id WHERE e.server=sid() ORDER BY i.rowid")?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
     }
@@ -549,7 +552,7 @@ mod tests {
 
     #[test]
     fn every_mix_is_empty_on_an_empty_index() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         assert!(core.mix_quick_picks(20, 1).unwrap().is_empty());
         assert!(core.mix_discover(20, 1).unwrap().is_empty());
         assert!(core.mix_listen_again(20, 1).unwrap().is_empty());
@@ -563,7 +566,7 @@ mod tests {
 
     #[test]
     fn quick_picks_are_liked_and_rested() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let all = library(&core);
         let (loved, today, hated) = (&all[0], &all[1], &all[2]);
         for d in 4..8 {
@@ -590,7 +593,7 @@ mod tests {
 
     #[test]
     fn listen_again_and_top() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let all = library(&core);
         for (i, s) in all.iter().step_by(10).take(5).enumerate() {
             for d in 0..=i as i64 {
@@ -608,7 +611,7 @@ mod tests {
 
     #[test]
     fn discover_prefers_liked_artists_and_genres_and_skips_the_known() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let all = library(&core);
         // a jazz listener, mostly Jazz Artist 0
         for s in all.iter().filter(|s| s.artist == "Jazz Artist 0").take(4) {
@@ -636,7 +639,7 @@ mod tests {
 
     #[test]
     fn discover_without_history_is_a_random_walk() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         library(&core);
         let mix = core.mix_discover(30, 1).unwrap();
         assert_eq!(mix.len(), 30);
@@ -645,7 +648,7 @@ mod tests {
 
     #[test]
     fn genre_artist_and_decade_mixes() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         library(&core);
         let rock = core.mix_genre("rock".into(), 15, 1).unwrap();
         assert_eq!(rock.len(), 15);
@@ -665,7 +668,7 @@ mod tests {
 
     #[test]
     fn instant_mix_starts_with_its_seed_and_stays_close() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let all = library(&core);
         let seed_song = all.iter().find(|s| s.id == "2-1-3").unwrap();
         let mix = core.mix_instant(seed_song.id.clone(), 25, 1).unwrap();
@@ -688,7 +691,7 @@ mod tests {
 
     #[test]
     fn excluded_songs_stay_out_of_every_mix() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let all = library(&core);
         let out: Vec<&Song> = all.iter().filter(|s| s.artist == "Rock Artist 0").collect();
         for s in &out {
@@ -713,10 +716,10 @@ mod tests {
 
     #[test]
     fn pools_use_the_expression_indexes() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let c = core.db.lock();
         let plan = |cond: &str| -> String {
-            let sql = format!("EXPLAIN QUERY PLAN SELECT i.json FROM items i LEFT JOIN song_stats s ON s.song_id=i.id WHERE {SONGS} AND {cond}");
+            let sql = format!("EXPLAIN QUERY PLAN SELECT i.json FROM items i LEFT JOIN song_stats s ON s.server=i.server AND s.song_id=i.id WHERE {SONGS} AND {cond}");
             let mut st = c.prepare(&sql).unwrap();
             let rows = st.query_map([], |r| r.get::<_, String>(3)).unwrap();
             rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")

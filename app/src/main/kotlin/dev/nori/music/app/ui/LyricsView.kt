@@ -46,6 +46,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -68,35 +69,27 @@ import dev.nori.music.app.vm.Load
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.ffi.LyricLine
+import dev.nori.music.look.CoverLook
+import androidx.compose.ui.graphics.ColorProducer
+import dev.nori.music.look.LyricsClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /**
- * How far into [line] the singing is at [ms], as a UTF-16 offset with a fraction: 7.5 means half of
- * the character at index 7. Inside a word the sweep is linear; between words it rests at the word's end.
+ * The part of a laid-out paragraph before [offset], as a clip into [path]: whole visual lines above, a
+ * partial one at the boundary. The path is the line's own and is refilled, not made, on every frame.
  */
-private fun sungOffset(line: LyricLine, ms: Long): Float {
-    if (line.words.isEmpty()) return if (ms >= line.startMs) line.text.length.toFloat() else 0f
-    var at = 0f
-    for (w in line.words) {
-        if (ms >= w.endMs) { at = w.end.toFloat(); continue }
-        if (ms > w.startMs) at = w.start.toFloat() + (w.end.toInt() - w.start.toInt()) * ((ms - w.startMs).toFloat() / (w.endMs - w.startMs).coerceAtLeast(1))
-        break
-    }
-    return at
-}
-
-/** The part of a laid-out paragraph before [offset], as a clip: whole visual lines above, a partial one at the boundary. */
-private fun sungRegion(layout: TextLayoutResult, offset: Float): Path {
-    val path = Path()
+private fun sungRegion(path: Path, layout: TextLayoutResult, offset: Float): Path {
+    path.reset()
+    val p = path.asAndroidPath()
     val index = offset.toInt().coerceIn(0, layout.layoutInput.text.length)
     val row = layout.getLineForOffset(index)
-    for (r in 0 until row) path.addRect(Rect(0f, layout.getLineTop(r), layout.size.width.toFloat(), layout.getLineBottom(r)))
+    for (r in 0 until row) p.addRect(0f, layout.getLineTop(r), layout.size.width.toFloat(), layout.getLineBottom(r), android.graphics.Path.Direction.CCW)
     val from = layout.getHorizontalPosition(index, true)
     val next = (index + 1).coerceAtMost(layout.layoutInput.text.length)
     val to = if (layout.getLineForOffset(next) == row) layout.getHorizontalPosition(next, true) else layout.getLineRight(row)
     val x = from + (to - from) * (offset - index)
-    path.addRect(Rect(layout.getLineLeft(row), layout.getLineTop(row), x, layout.getLineBottom(row)))
+    p.addRect(layout.getLineLeft(row), layout.getLineTop(row), x, layout.getLineBottom(row), android.graphics.Path.Direction.CCW)
     return path
 }
 
@@ -128,7 +121,10 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 is dev.nori.music.data.FoundLyrics -> LyricsBody(vm, p, playing)
                 // In the middle, where "No lyrics" would be: it is waiting, not a line of words yet.
                 LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
-                else -> Box(Modifier.fillMaxSize(), Alignment.Center) { Text("No lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    val look = LocalLook.current
+                    LookText("No lyrics", { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
+                }
             }
         }
     }
@@ -146,53 +142,46 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val shown = LocalPlayerShown.current
-    var nudgeMs by remember(lyrics) { mutableLongStateOf(0L) }
+    // Which line is lit, how long its change takes, how far the singing is and when to look again are all
+    // the core's (crates/look/src/lyrics.rs); this only asks with the playhead and draws the answer.
+    val clock = remember(lyrics) { LyricsClock(lyrics, vm.positionMs) }
+    DisposableEffect(clock) { onDispose { clock.close() } }
+    var nudgeMs by remember(clock) { mutableLongStateOf(0L) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     // Put away with the player is the same as paused: nothing to keep in step.
     val live = resumed && shown
-    // Only sweep when the lyrics actually carry per-word times (enhanced LRC, or a server's structured
-    // cues). Spreading a line's duration across its words by length looks right for a beat and then
-    // drifts badly on a held note or a fast line, which reads as broken sync - a line at a time is
-    // honest and stays in step.
-    val sweep = prefs.lyricsSweep && lyrics.synced && lyrics.wordTimed
-    // The playhead as the lyrics see it. With the sweep on it is read once per frame (a local computation in the
-    // controller, no IPC) and only the draw phase of the active line looks at it; otherwise three times a second.
-    var now by remember(lyrics) { mutableLongStateOf(vm.positionMs) }
-    // Each line's change is as long as the line allows and is centred on the moment it is sung, so the line
-    // is fully lit as the singing starts rather than a third of a second after. A fixed 620 ms glide that
-    // began on the timestamp both lagged every line and, on a verse faster than that, never finished - the
-    // next change always arrived first. `switchAt` is when a line takes over: its timestamp less half its
-    // own change.
-    val timing = remember(lyrics) { LyricTiming.of(lyrics.lines.map { it.startMs.toLong() }) }
-    // Keyed on the lyrics themselves: on the next song this loop must time the new lines, not the old.
-    LaunchedEffect(playing, live, sweep, lyrics) {
-        now = vm.positionMs + nudgeMs
-        if (!lyrics.synced) return@LaunchedEffect
-        var frame = 0
+    // The active line fills in word by word only when the listener wants it and the lyrics carry per-word times.
+    val sweep = prefs.lyricsSweep && clock.sweeps
+    // What is on screen, as the clock packed it: the line lit, its change and how far it is sung. Written
+    // only when that changes; only the draw phase of the active line reads the sung part.
+    var frame by remember(clock) { mutableLongStateOf(clock.shown()) }
+    // Keyed on the clock, so on the next song this loop times the new lines, not the old. One call per
+    // look: the clock says what to draw, whether it changed, and how long to sleep - a number of display
+    // frames while sweeping, otherwise until the next line takes over; never, for words that are not timed.
+    LaunchedEffect(playing, live, sweep, clock) {
+        var step = clock.at(vm.positionMs, sweep, force = true)
+        frame = LyricsClock.frame(step)
         while (playing && live && isActive) {
-            // Every second display frame is plenty for a text fill, and half the redraws.
-            if (sweep) { withFrameMillis { }; if (++frame % 2 == 1) continue } else {
-                // Sleep until the next line takes over and wake once, instead of looking three times a
-                // second and changing up to 300 ms late. Capped, so a seek is picked up within half a second.
-                val t0 = vm.positionMs + nudgeMs
-                val next = timing.nextSwitchAfter(t0)
-                delay(if (next == null) 500L else (next - t0).coerceIn(8L, 500L))
-            }
-            val t = vm.positionMs + nudgeMs
-            // Between words, and while a held note keeps the boundary still, nothing on screen changes: do not invalidate.
-            val line = lyrics.lines.getOrNull(lyrics.lines.indexOfLast { it.startMs <= t })
-            if (!sweep || line == null || lyrics.lines.indexOfLast { it.startMs <= now } != lyrics.lines.indexOfLast { it.startMs <= t } || kotlin.math.abs(sungOffset(line, t) - sungOffset(line, now)) >= 0.04f) now = t
+            val wait = LyricsClock.wait(step)
+            if (wait == 0) break
+            if (sweep) repeat(wait) { withFrameMillis { } } else delay(wait.toLong())
+            step = clock.at(vm.positionMs, sweep, force = false)
+            if (LyricsClock.redraw(step)) frame = LyricsClock.frame(step)
         }
     }
-    val active by remember(lyrics) { derivedStateOf { if (lyrics.synced) timing.lineAt(now) else -1 } }
+    val active by remember(clock) { derivedStateOf { LyricsClock.active(frame) } }
     // How long the change into the current line takes; the scroll and every line's fade use the same.
-    val glideMs = if (active >= 0) timing.glideMs(active) else LYRIC_GLIDE_MS
+    val glideMs by remember(clock) { derivedStateOf { LyricsClock.glideMs(frame) } }
 
     val style = when (prefs.lyricsSize) { 0 -> MaterialTheme.typography.titleMedium; 2 -> MaterialTheme.typography.headlineMedium; else -> MaterialTheme.typography.headlineSmall }
-    val bright = MaterialTheme.colorScheme.onSurface
-    val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f)
-    val page = MaterialTheme.colorScheme.background
+    // The page's colours, read while drawing: the player's page cross-fades under the words, and that
+    // redraws them rather than recomposing the lyrics on every frame of it.
+    val look = LocalLook.current
+    val bright = remember(look) { ColorProducer { look.color(CoverLook.ON) } }
+    val dim = remember(look) { ColorProducer { look.color(CoverLook.ON_35) } }
+    val translated = remember(look) { ColorProducer { look.color(CoverLook.ON_80) } }
+    val accent = remember(look) { ColorProducer { look.color(CoverLook.ACCENT) } }
     val list = rememberLazyListState()
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
@@ -268,7 +257,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                 },
         ) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
-                Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo((line.startMs - nudgeMs).coerceAtLeast(0)); now = line.startMs.toLong() }.padding(vertical = 8.dp)) {
+                Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(clock.tap(i)); frame = clock.shown() }.padding(vertical = 8.dp)) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
                     // Every line owns its brightness and always moves it *from wherever it is now*
                     // towards what it should be. An earlier version drove all lines from one shared
@@ -282,11 +271,11 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                         else strength.animateTo(target, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
                     }
                     when {
-                        !lyrics.synced -> Text(line.text, style = style, color = bright)
-                        i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { now }
+                        !lyrics.synced -> LookText(line.text, bright, style = style)
+                        i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { LyricsClock.sung(frame) }
                         else -> {
-                            Text(
-                                line.text, style = style.copy(fontWeight = weight), color = bright,
+                            LookText(
+                                line.text, bright, style = style.copy(fontWeight = weight),
                                 // Read in the draw phase: a fading line redraws, it does not recompose.
                                 modifier = Modifier.graphicsLayer { alpha = strength.value },
                             )
@@ -295,7 +284,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     // The translation follows its line's fade rather than switching on the moment the line
                     // is reached - otherwise it lit up a frame ahead of the words above it.
                     if (prefs.lyricsTranslation) line.translation?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium, color = bright.copy(alpha = 0.8f), modifier = Modifier.graphicsLayer { alpha = strength.value })
+                        LookText(it, translated, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.graphicsLayer { alpha = strength.value })
                     }
                 }
             }
@@ -311,25 +300,29 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
             onClick = { if (lyrics.synced) tuning = !tuning },
             enabled = lyrics.synced,
             shape = PillShape,
-            color = if (open) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f).over(MaterialTheme.colorScheme.background) else Color.Transparent,
-            contentColor = MaterialTheme.colorScheme.onSurface,
+            // The open pill's plate is drawn rather than composed, so the page changing colour under it
+            // only redraws it.
+            color = Color.Transparent,
             modifier = Modifier.align(if (open) Alignment.BottomCenter else Alignment.BottomStart).padding(start = 12.dp, bottom = 6.dp),
         ) {
-            Row(Modifier.padding(horizontal = 6.dp, vertical = 2.dp), Arrangement.spacedBy(2.dp), Alignment.CenterVertically) {
+            Row(
+                Modifier.then(if (open) Modifier.drawBehind { drawRect(look.color(CoverLook.VEIL_10)) } else Modifier)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                Arrangement.spacedBy(2.dp), Alignment.CenterVertically,
+            ) {
                 // Closed, this is the one thing worth saying: whose words these are - and, when they
                 // came without timings, that they did. Unsung words are all one brightness and a tap on
                 // one goes nowhere, which looks broken unless the corner says why.
-                Text(
+                LookText(
                     listOfNotNull(source?.label ?: "Timing".takeIf { lyrics.synced }, "not timed".takeIf { !lyrics.synced })
                         .joinToString(" · "),
-                    Modifier.padding(horizontal = 8.dp),
-                    style = MaterialTheme.typography.labelSmall, color = dim,
+                    dim, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall,
                 )
                 if (open) {
-                    if (nudgeMs != 0L) Text("%+.1f s".format(nudgeMs / 1000f), style = MaterialTheme.typography.labelSmall)
-                    TextButton({ nudgeMs -= 250 }) { Text("Later", style = MaterialTheme.typography.labelLarge) }
-                    TextButton({ nudgeMs += 250 }) { Text("Sooner", style = MaterialTheme.typography.labelLarge) }
-                    if (nudgeMs != 0L) TextButton({ nudgeMs = 0L }) { Text("Reset", style = MaterialTheme.typography.labelLarge) }
+                    if (nudgeMs != 0L) LookText(remember(nudgeMs) { dev.nori.music.ffi.nudgeSeconds(nudgeMs) }, bright, style = MaterialTheme.typography.labelSmall)
+                    TextButton({ nudgeMs = clock.nudge(-1) }) { LookText("Later", accent, style = MaterialTheme.typography.labelLarge) }
+                    TextButton({ nudgeMs = clock.nudge(1) }) { LookText("Sooner", accent, style = MaterialTheme.typography.labelLarge) }
+                    if (nudgeMs != 0L) TextButton({ nudgeMs = clock.nudge(0) }) { LookText("Reset", accent, style = MaterialTheme.typography.labelLarge) }
                 }
             }
         }
@@ -362,13 +355,13 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
         }
         androidx.compose.runtime.DisposableEffect(sheet) { onDispose { sheet.panelCover = androidx.compose.ui.geometry.Rect.Zero } }
         Column(Modifier.weight(1f)) {
-            Text(
-                song?.title ?: "", Modifier.readable(), style = MaterialTheme.typography.titleMedium,
+            val look = LocalLook.current
+            LookText(
+                song?.title ?: "", { look.color(CoverLook.ON) }, Modifier.readable(), style = MaterialTheme.typography.titleMedium,
                 maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
-            Text(
-                song?.artist ?: "", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            LookText(
+                song?.artist ?: "", { look.color(CoverLook.ON_60) }, style = MaterialTheme.typography.bodySmall,
                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
         }
@@ -382,27 +375,21 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
 
 /**
  * The active line: drawn dim, then drawn again bright through a clip that ends where the singing is.
- * [position] is read in the draw phase only, so a new frame redraws this one text and recomposes nothing.
+ * [sung] is read in the draw phase only, so a new frame redraws this one text and recomposes nothing.
  */
 @Composable
-private fun SweepLine(line: LyricLine, style: TextStyle, dim: Color, bright: Color, position: () -> Long) {
+private fun SweepLine(line: LyricLine, style: TextStyle, dim: ColorProducer, bright: ColorProducer, sung: () -> Float) {
     var layout by remember(line) { mutableStateOf<TextLayoutResult?>(null) }
-    Text(
-        line.text, style = style, color = dim, onTextLayout = { layout = it },
+    val clip = remember { Path() }
+    LookText(
+        line.text, dim, style = style, onTextLayout = { layout = it },
         modifier = Modifier.drawWithContent {
             drawContent()
             val l = layout ?: return@drawWithContent
-            clipPath(sungRegion(l, sungOffset(line, position()))) { drawText(l, color = bright) }
+            clipPath(sungRegion(clip, l, sung())) { drawText(l, color = bright()) }
         },
     )
 }
-
-/**
- * How long a line change takes, scroll and colour together so they arrive at the same moment. Long
- * enough that the eye follows the words up rather than losing its place; short enough that a fast
- * verse, a line every second or so, is never still catching up.
- */
-private const val LYRIC_GLIDE_MS = 620
 
 /** Ease in and out, soft at both ends, the curve iOS uses for its own scrolling transitions. */
 private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
@@ -410,40 +397,3 @@ private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f,
 /** How lit a line is once it has been sung, and before it is reached. */
 private const val PAST_LINE = 0.35f * 0.55f
 private const val NEXT_LINE = 0.35f
-
-/**
- * When each lyric line takes over and how long the change into it lasts. The change is 85 % of the gap
- * to the next line, between [MIN_GLIDE_MS] and [LYRIC_GLIDE_MS], so a fast verse gets quick changes
- * that finish before the next one; and it starts half its length before the line's timestamp, so it is
- * centred on the moment the line is sung.
- */
-private class LyricTiming(private val switchAt: LongArray, private val glide: IntArray) {
-    /** The line that should be lit at playhead [t], or -1 before the first. */
-    fun lineAt(t: Long): Int {
-        var lo = 0; var hi = switchAt.size - 1; var best = -1
-        while (lo <= hi) { val mid = (lo + hi) ushr 1; if (switchAt[mid] <= t) { best = mid; lo = mid + 1 } else hi = mid - 1 }
-        return best
-    }
-    fun nextSwitchAfter(t: Long): Long? { val i = lineAt(t) + 1; return if (i < switchAt.size) switchAt[i] else null }
-    fun glideMs(line: Int): Int = glide.getOrElse(line) { LYRIC_GLIDE_MS }
-
-    companion object {
-        fun of(starts: List<Long>): LyricTiming {
-            val n = starts.size
-            val glide = IntArray(n) { i ->
-                val gap = if (i + 1 < n) starts[i + 1] - starts[i] else Long.MAX_VALUE
-                (gap.coerceAtMost(10_000L) * 0.85).toInt().coerceIn(MIN_GLIDE_MS, LYRIC_GLIDE_MS)
-            }
-            // A line may not take over before the one ahead of it has, however short its own gap.
-            val switchAt = LongArray(n)
-            for (i in 0 until n) {
-                val lead = glide[i] / 2
-                switchAt[i] = if (i == 0) starts[i] - lead else maxOf(starts[i] - lead, switchAt[i - 1] + 1)
-            }
-            return LyricTiming(switchAt, glide)
-        }
-    }
-}
-
-/** The shortest a line change gets, on the fastest verse. Below this it stops reading as movement. */
-private const val MIN_GLIDE_MS = 160

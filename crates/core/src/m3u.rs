@@ -100,7 +100,7 @@ fn words(text: &str) -> Option<String> {
 
 fn candidates(c: &Connection, query: Option<String>) -> rusqlite::Result<Vec<Song>> {
     let Some(q) = query else { return Ok(Vec::new()) };
-    let mut st = c.prepare_cached("SELECT i.json FROM fts JOIN items i ON i.rowid = fts.rowid WHERE fts MATCH ?1 AND i.kind = ?2 ORDER BY rank LIMIT 25")?;
+    let mut st = c.prepare_cached("SELECT i.json FROM fts JOIN items i ON i.rowid = fts.rowid WHERE fts MATCH ?1 AND i.server = sid() AND i.kind = ?2 ORDER BY rank LIMIT 25")?;
     let rows = st.query_map(params![q, db::SONG], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
 }
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn match_prefers_exact_then_falls_back_to_full_text() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let mut live = song("live", "Dogs", "Pink Floyd", "Live", "", 1977);
         live.duration = 900;
         let mut studio = song("studio", "Dogs", "Pink Floyd", "Animals", "", 1977);
@@ -241,6 +241,6 @@ mod tests {
             [some("studio"), some("live"), some("joga"), some("joga"), some("remaster"), some("studio"), some("live"), some("remaster"), None, None, None]
         );
         assert!(core.m3u_match(vec![]).unwrap().is_empty());
-        assert_eq!(Core::new(String::new()).unwrap().m3u_match(vec![entry(1, "a", "b")]).unwrap(), vec![None]);
+        assert_eq!(Core::new(String::new(), "t".into()).unwrap().m3u_match(vec![entry(1, "a", "b")]).unwrap(), vec![None]);
     }
 }

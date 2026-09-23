@@ -31,7 +31,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.draw.drawWithCache
+import dev.nori.music.look.CoverLook
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -80,21 +81,20 @@ import dev.nori.music.app.vm.PlayerViewModel
  * player holds the drag that opens the player, and moving the element a drag started on corrupts it.
  */
 @Composable
-fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp) {
-    val (slab, content, page, edge) = chromeColours()
+fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp, look: Look) {
     // A soft wash under the chrome so the list fades out as it passes behind it. Apple gets this from
     // blurring what is behind the bars; one vertical gradient costs nothing and reads much the same.
+    // Made once per size and page colour, not on every draw.
     Column(
-        Modifier.drawBehind {
-            drawRect(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0f to Color.Transparent, 0.45f to page.copy(alpha = 0.75f), 1f to page,
-                ),
+        Modifier.drawWithCache {
+            val fade = androidx.compose.ui.graphics.Brush.verticalGradient(
+                0f to Color.Transparent, 0.45f to look.color(CoverLook.CHROME_FADE), 1f to look.color(CoverLook.CHROME_PAGE),
             )
+            onDrawBehind { drawRect(fade) }
         },
     ) {
         SelectionBar(actions)
-        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, slab, content, edge) }
+        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, look) }
         Spacer(Modifier.height(tabsHeight))
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -106,9 +106,11 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlaye
  * progress so nothing recomposes while it moves. Slid away, they are out of reach as well as sight.
  */
 @Composable
-fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
+fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, look: Look, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val (slab, content, _, edge) = chromeColours()
+    val slab = look.color(CoverLook.CHROME_SLAB)
+    val content = look.color(CoverLook.CHROME_CONTENT)
+    val edge = look.color(CoverLook.CHROME_EDGE)
     val search = tabs.firstOrNull { it.route == "search" }
     val rest = tabs.filter { it.route != "search" }
     val sheet = LocalPlayerSheet.current
@@ -149,41 +151,33 @@ fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (
 }
 
 /**
- * The chrome's colours: the slab, what is written on it, and the page it fades into. Neutral, like
- * Apple's. Only a page that is *about* one cover - an album, an artist, the player - wears that cover's
- * colour; a bar tinted by whatever happens to be playing turns the whole app red on screens that have
- * nothing to do with the record.
+ * The chrome's look: the slab, what is written on it, and the page it fades into. Neutral, like Apple's.
+ * Only a page that is *about* one cover - an album, an artist - wears that cover's colour; a bar tinted
+ * by whatever happens to be playing turns the whole app red on screens that have nothing to do with the
+ * record. The colours themselves are the page's look (nori_look::dress): how far the slab is lifted off
+ * the page - more on a dark page, where AMOLED black left it nothing to lift off - and the cover's edge
+ * lent to it first, so it still belongs to the record.
+ *
+ * The bar changes with the page rather than switching over in the frame the page does: one cross-fade
+ * over the span the player's own colours travel in, shared by the bar and the tabs.
  */
 @Composable
-private fun chromeColours(): ChromeColours {
-    val scheme = MaterialTheme.colorScheme
-    val tint = currentPageTint()
-    val page = tint?.background ?: scheme.background
-    val content = tint?.onBackground ?: scheme.onSurface
-    // How far the slab is lifted off the page. One figure could not do both ends: a ninth of the text
-    // colour is plenty over white, and over a dark page - the AMOLED black most of all - it leaves the
-    // slab with nothing under it to lift, which is the bar that could not be told from the page at all.
-    // The theme is read off the page's own luminance rather than off prefs.theme, so a light cover on a
-    // dark page gets the treatment its own colour asks for.
-    val dark = page.luminance() < 0.5f
-    val lift = if (dark) 0.20f else 0.11f
-    // A tinted page lends the slab its cover's edge first, so it still belongs to the record, and the
-    // lift goes on top of that rather than instead of it.
-    val slab = content.copy(alpha = lift).over(tint?.let { blend(page, it.edge, 0.30f) } ?: page)
-    // The faint line Apple's floating bars carry along their top edge. It does most of the work in the
-    // light theme, where a shadow on a white page is barely there.
-    // The bar wears the record's colours too, so it has to change when the page does rather than
-    // switching over in the frame the song changes. The same span the player's own colours travel in.
-    val ease = androidx.compose.animation.core.tween<Color>(420)
-    val slabNow by androidx.compose.animation.animateColorAsState(slab, ease, label = "slab")
-    val contentNow by androidx.compose.animation.animateColorAsState(content, ease, label = "content")
-    val pageNow by androidx.compose.animation.animateColorAsState(page, ease, label = "page")
-    val edgeNow by androidx.compose.animation.animateColorAsState(content.copy(alpha = if (dark) 0.14f else 0.07f), ease, label = "edge")
-    return ChromeColours(slabNow, contentNow, pageNow, edgeNow)
+fun rememberChromeLook(): Look {
+    val base = LocalLook.current
+    val target = pagePalette.value?.look ?: (base as? FixedLook)?.table ?: IntArray(CoverLook.LEN) { base.argb(it) }
+    val t = remember { androidx.compose.animation.core.Animatable(1f) }
+    val live = remember { LiveLook { t.value }.also { it.set(null, target, 0) } }
+    var first by remember { mutableStateOf(true) }
+    LaunchedEffect(target) {
+        if (first) { first = false; return@LaunchedEffect }
+        // From wherever it has got to, so a page change mid-fade turns round instead of jumping.
+        val now = IntArray(CoverLook.LEN) { live.argb(it) }
+        t.snapTo(0f)
+        live.set(now, target, 0)
+        t.animateTo(1f, androidx.compose.animation.core.tween(420))
+    }
+    return live
 }
-
-/** The slab's colour, what is written on it, the page it fades into, and the hairline round its edge. */
-private data class ChromeColours(val slab: Color, val content: Color, val page: Color, val edge: Color)
 
 data class Tab(val route: String, val label: String, val icon: ImageVector)
 
@@ -221,7 +215,10 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
  * No progress bar on purpose: it would tick for as long as the app is open.
  */
 @Composable
-fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, slab: Color, content: Color, edge: Color) {
+fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, look: Look) {
+    val slab = look.color(CoverLook.CHROME_SLAB)
+    val content = look.color(CoverLook.CHROME_CONTENT)
+    val edge = look.color(CoverLook.CHROME_EDGE)
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     val settings: dev.nori.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
@@ -231,20 +228,15 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
         dev.nori.music.settings.ThemeMode.DARK -> true
         dev.nori.music.settings.ThemeMode.LIGHT -> false
     }
-    // The bar wears the colour of what is playing, not of the page it happens to be sitting on: that is
-    // what ties it to the music while you browse somewhere else entirely. The palette is the same cached
-    // one the player and the album page use, so this costs a map lookup.
-    val palette = if (prefs.coverColors) {
-        rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled)
-    } else null
-    // The colours of the songs either side, worked out before they are reached. Their covers are
+    // The colours of what is playing and of the songs either side, worked out before they are reached. Their covers are
     // already fetched ahead (PlayerViewModel); this is the other half of that, and it is what stops the
     // page wearing the last song's colour for a moment after a skip. It happens here rather than in the
     // player because the bar is on screen whenever something is playing, so a skip from the
     // notification or the lock screen is covered too.
     val context = androidx.compose.ui.platform.LocalContext.current
-    val around = remember(state.nextIndex, state.previousIndex, state.queue) {
+    val around = remember(state.current?.coverArt, state.nextIndex, state.previousIndex, state.queue) {
         listOfNotNull(
+            vm.cover(state.current?.coverArt, CoverSize.ROW),
             vm.cover(state.queue.getOrNull(state.nextIndex)?.coverArt, CoverSize.ROW),
             vm.cover(state.queue.getOrNull(state.previousIndex)?.coverArt, CoverSize.ROW),
         ).filterNot(::isProviderCover)
@@ -260,7 +252,6 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     }
     val scheme = MaterialTheme.colorScheme
     val sheet = LocalPlayerSheet.current
-    NowPlayingPalette(palette)
     Surface(
         shape = CardShape, color = slab, contentColor = content,
         shadowElevation = 10.dp,
@@ -303,7 +294,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                         Text(
                             (if (real) state.error else null) ?: s?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (real && state.error != null) scheme.error else content.copy(alpha = 0.65f),
+                            color = if (real && state.error != null) scheme.error else look.color(CoverLook.CHROME_CONTENT_65),
                         )
                     }
                 }
@@ -322,7 +313,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
             // for it because the title beside it is already allowed to run out of space gracefully.
             song?.let { s ->
                 val starred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, s.id, s.starred)
-                FavoriteHeart(starred, tint = content, muted = content.copy(alpha = 0.75f)) { actions.star(s, !starred) }
+                FavoriteHeart(starred, tint = content, muted = look.color(CoverLook.CHROME_CONTENT_75)) { actions.star(s, !starred) }
             }
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
             IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
@@ -330,16 +321,6 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
         }
     }
 }
-
-/**
- * The colours of the track that is playing, published once by the mini player so the tab bar under it
- * can wear the same tint. A plain holder rather than a CompositionLocal provider, because the two
- * composables are siblings: the bar is drawn after the player has worked its palette out.
- */
-private val nowPlaying = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
-
-@Composable
-fun nowPlayingPalette(): PagePalette? = nowPlaying.value
 
 private val pagePalette = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
 
@@ -357,14 +338,6 @@ fun PageTint(palette: PagePalette?) {
         pagePalette.value = palette
         onDispose { if (pagePalette.value === palette) pagePalette.value = null }
     }
-}
-
-@Composable
-private fun currentPageTint(): PagePalette? = pagePalette.value
-
-@Composable
-private fun NowPlayingPalette(palette: PagePalette?) {
-    androidx.compose.runtime.LaunchedEffect(palette) { nowPlaying.value = palette }
 }
 
 /**

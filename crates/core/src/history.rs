@@ -77,7 +77,7 @@ pub(crate) fn record(c: &mut Connection, song: &Song, started_ms: i64, heard_ms:
     }
     // A clock that was wrong at the time must not mint a score that outlives everything else.
     let started_ms = started_ms.clamp(TASTE_EPOCH_MS, now_ms.max(TASTE_EPOCH_MS) + DAY_MS);
-    let known: Option<i64> = c.prepare_cached("SELECT 1 FROM items WHERE kind=?1 AND id=?2")?.query_row(params![db::SONG, song.id], |r| r.get(0)).optional()?;
+    let known: Option<i64> = c.prepare_cached("SELECT 1 FROM items WHERE server=sid() AND kind=?1 AND id=?2")?.query_row(params![db::SONG, song.id], |r| r.get(0)).optional()?;
     if known.is_none() {
         db::index(c, &[], &[], std::slice::from_ref(song))?;
     }
@@ -85,7 +85,7 @@ pub(crate) fn record(c: &mut Connection, song: &Song, started_ms: i64, heard_ms:
     let (completed, skipped, weight) = classify(heard_ms, duration_ms);
     let local = started_ms + tz_offset_ms as i64;
     let tx = c.transaction()?;
-    tx.prepare_cached("INSERT INTO plays(song_id, started_ms, heard_ms, duration_ms, completed, skipped, hour, day) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?.execute(params![
+    tx.prepare_cached("INSERT INTO plays(server, song_id, started_ms, heard_ms, duration_ms, completed, skipped, hour, day) VALUES(sid(), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")?.execute(params![
         song.id,
         started_ms,
         heard_ms,
@@ -96,8 +96,8 @@ pub(crate) fn record(c: &mut Connection, song: &Song, started_ms: i64, heard_ms:
         local.div_euclid(DAY_MS)
     ])?;
     tx.prepare_cached(
-        "INSERT INTO song_stats(song_id, plays, skips, last_played_ms, heard_ms_total, taste) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(song_id) DO UPDATE SET plays=plays+excluded.plays, skips=skips+excluded.skips,
+        "INSERT INTO song_stats(server, song_id, plays, skips, last_played_ms, heard_ms_total, taste) VALUES(sid(), ?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(server, song_id) DO UPDATE SET plays=plays+excluded.plays, skips=skips+excluded.skips,
            last_played_ms=max(last_played_ms, excluded.last_played_ms), heard_ms_total=heard_ms_total+excluded.heard_ms_total, taste=taste+excluded.taste",
     )?
     .execute(params![song.id, !skipped, skipped, if skipped { 0 } else { started_ms }, heard_ms, weight * scale(started_ms)])?;
@@ -137,8 +137,8 @@ pub(crate) fn summary(c: &Connection, from_ms: i64, to_ms: i64, top: u32) -> rus
     {
         let mut st = c.prepare_cached(
             "SELECT i.json, p.plays, p.skips, p.ms FROM
-               (SELECT song_id, sum(skipped=0) plays, sum(skipped) skips, sum(heard_ms) ms FROM plays WHERE started_ms>=?1 AND started_ms<?2 GROUP BY song_id) p
-             LEFT JOIN items i ON i.kind=2 AND i.id=p.song_id ORDER BY p.plays DESC, p.ms DESC, p.song_id",
+               (SELECT song_id, sum(skipped=0) plays, sum(skipped) skips, sum(heard_ms) ms FROM plays WHERE server=sid() AND started_ms>=?1 AND started_ms<?2 GROUP BY song_id) p
+             LEFT JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=p.song_id ORDER BY p.plays DESC, p.ms DESC, p.song_id",
         )?;
         let mut rows = st.query(params![from_ms, to_ms])?;
         while let Some(r) = rows.next()? {
@@ -177,14 +177,14 @@ pub(crate) fn summary(c: &Connection, from_ms: i64, to_ms: i64, top: u32) -> rus
     songs.truncate(top);
     out.top_songs = songs;
 
-    let mut st = c.prepare_cached("SELECT hour, count(*) FROM plays WHERE started_ms>=?1 AND started_ms<?2 AND skipped=0 GROUP BY hour")?;
+    let mut st = c.prepare_cached("SELECT hour, count(*) FROM plays WHERE server=sid() AND started_ms>=?1 AND started_ms<?2 AND skipped=0 GROUP BY hour")?;
     let mut rows = st.query(params![from_ms, to_ms])?;
     while let Some(r) = rows.next()? {
         let (hour, n): (i64, u32) = (r.get(0)?, r.get(1)?);
         out.plays_per_hour[hour.clamp(0, 23) as usize] += n;
     }
 
-    let mut st = c.prepare_cached("SELECT day, count(*) FROM plays WHERE started_ms>=?1 AND started_ms<?2 AND skipped=0 GROUP BY day ORDER BY day")?;
+    let mut st = c.prepare_cached("SELECT day, count(*) FROM plays WHERE server=sid() AND started_ms>=?1 AND started_ms<?2 AND skipped=0 GROUP BY day ORDER BY day")?;
     let mut rows = st.query(params![from_ms, to_ms])?;
     let (mut prev, mut run) = (i64::MIN, 0u32);
     while let Some(r) = rows.next()? {
@@ -199,8 +199,8 @@ pub(crate) fn summary(c: &Connection, from_ms: i64, to_ms: i64, top: u32) -> rus
 
     out.first_play = c
         .prepare_cached(
-            "SELECT i.json, p.started_ms, p.heard_ms, p.completed, p.skipped FROM plays p JOIN items i ON i.kind=2 AND i.id=p.song_id
-             WHERE p.started_ms>=?1 AND p.started_ms<?2 AND p.skipped=0 ORDER BY p.started_ms, p.rowid LIMIT 1",
+            "SELECT i.json, p.started_ms, p.heard_ms, p.completed, p.skipped FROM plays p JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=p.song_id
+             WHERE p.server=sid() AND p.started_ms>=?1 AND p.started_ms<?2 AND p.skipped=0 ORDER BY p.started_ms, p.rowid LIMIT 1",
         )?
         .query_row(params![from_ms, to_ms], |r| Ok(entry(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
         .optional()?
@@ -221,8 +221,8 @@ impl Core {
     pub fn history_recent(&self, limit: u32, offset: u32, include_skipped: bool) -> Result<Vec<HistoryEntry>> {
         let c = self.db.lock();
         let mut st = c.prepare_cached(
-            "SELECT i.json, p.started_ms, p.heard_ms, p.completed, p.skipped FROM plays p JOIN items i ON i.kind=2 AND i.id=p.song_id
-             WHERE p.skipped<=?1 ORDER BY p.started_ms DESC, p.rowid DESC LIMIT ?2 OFFSET ?3",
+            "SELECT i.json, p.started_ms, p.heard_ms, p.completed, p.skipped FROM plays p JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=p.song_id
+             WHERE p.server=sid() AND p.skipped<=?1 ORDER BY p.started_ms DESC, p.rowid DESC LIMIT ?2 OFFSET ?3",
         )?;
         let rows = st.query_map(params![include_skipped, limit, offset], |r| Ok(entry(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().flatten().collect())
@@ -230,7 +230,7 @@ impl Core {
 
     /// Forgets every listen and with it the taste model. Mix exclusions and smart playlists stay.
     pub fn history_clear(&self) -> Result<()> {
-        self.db.lock().execute_batch("DELETE FROM plays; DELETE FROM song_stats;")?;
+        self.db.lock().execute_batch("DELETE FROM plays WHERE server=sid(); DELETE FROM song_stats WHERE server=sid();")?;
         Ok(())
     }
 
@@ -245,7 +245,7 @@ impl Core {
         let c = self.db.lock();
         let mut st = c.prepare_cached(
             "SELECT s.song_id, s.plays, s.skips, s.last_played_ms, s.heard_ms_total, s.taste, i.json FROM song_stats s
-             LEFT JOIN items i ON i.kind=2 AND i.id=s.song_id WHERE s.song_id IN (SELECT value FROM json_each(?1))",
+             LEFT JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=s.song_id WHERE s.server=sid() AND s.song_id IN (SELECT value FROM json_each(?1))",
         )?;
         let rows = st.query_map([serde_json::to_string(&ids).unwrap_or_default()], |r| {
             let song: Song = r.get::<_, Option<String>>(6)?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
@@ -305,7 +305,7 @@ pub(crate) mod tests {
 
     #[test]
     fn record_stores_the_song_and_rolls_up() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let s = song("s1", "Dogs", "Pink Floyd", "Animals", "Rock", 1977);
         assert!(core.history_record(s.clone(), NOW - DAY, 200_000, 0).unwrap());
         assert!(core.history_record(s.clone(), NOW - DAY + 1, 5_000, 0).unwrap());
@@ -334,7 +334,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_newer_index_entry_is_not_overwritten() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let mut s = song("s1", "Dogs", "Pink Floyd", "Animals", "Rock", 1977);
         s.starred = true;
         db::index(&mut core.db.lock(), &[], &[], std::slice::from_ref(&s)).unwrap();
@@ -345,7 +345,7 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_tracks_are_never_recorded() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         for id in ["ext-deezer-song-7", "pl-deezer-9", ""] {
             assert!(!core.history_record(Song { id: id.into(), duration: 100, ..Default::default() }, NOW, 100_000, 0).unwrap());
         }
@@ -356,12 +356,12 @@ pub(crate) mod tests {
 
     #[test]
     fn taste_decays_and_listens_to_the_user() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let (fresh, old, skipped) = (song("a", "A", "X", "", "", 0), song("b", "B", "X", "", "", 0), song("c", "C", "X", "", "", 0));
         listen(&core, &fresh, NOW);
         listen(&core, &old, NOW - 30 * DAY);
         skip(&core, &skipped, NOW);
-        let stored = |id: &str| -> f64 { core.db.lock().query_row("SELECT taste FROM song_stats WHERE song_id=?1", [id], |r| r.get(0)).unwrap() };
+        let stored = |id: &str| -> f64 { core.db.lock().query_row("SELECT taste FROM song_stats WHERE server=sid() AND song_id=?1", [id], |r| r.get(0)).unwrap() };
         assert!((decayed(stored("a"), NOW) - 1.0).abs() < 1e-9);
         assert!((decayed(stored("b"), NOW) - 0.5).abs() < 1e-9);
         assert!((decayed(stored("c"), NOW) + 0.6).abs() < 1e-9);
@@ -379,7 +379,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_broken_clock_cannot_poison_the_model() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let s = song("a", "A", "X", "", "", 0);
         assert!(record(&mut core.db.lock(), &s, i64::MAX / 2, 200_000, 0, NOW).unwrap());
         assert!(record(&mut core.db.lock(), &s, -5, 200_000, 0, NOW).unwrap());
@@ -389,7 +389,7 @@ pub(crate) mod tests {
 
     #[test]
     fn summary_of_an_empty_history() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let s = core.stats_summary(0, i64::MAX, 10).unwrap();
         assert_eq!((s.plays, s.listened_ms, s.longest_streak_days), (0, 0, 0));
         assert_eq!((s.plays_per_hour.len(), s.plays_per_weekday.len()), (24, 7));
@@ -398,7 +398,7 @@ pub(crate) mod tests {
 
     #[test]
     fn summary_is_what_a_year_in_review_needs() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let dogs = song("s1", "Dogs", "Pink Floyd", "Animals", "Rock", 1977);
         let pigs = song("s2", "Pigs", "Pink Floyd", "Animals", "Rock", 1977);
         let bjork = song("s3", "Jóga", "Björk", "Homogenic", "Electronic", 1997);
@@ -431,7 +431,7 @@ pub(crate) mod tests {
 
     #[test]
     fn hour_and_day_are_local_time() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let s = song("s1", "A", "X", "", "", 0);
         // Sunday 23:30 UTC is Monday 01:30 at UTC+2
         let sunday_late = 1_780_272_000_000 - 30 * 60_000;
@@ -442,7 +442,7 @@ pub(crate) mod tests {
 
     #[test]
     fn listens_survive_a_dropped_index_without_breaking_anything() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         listen(&core, &song("s1", "A", "X", "", "", 0), NOW);
         db::clear_library(&core.db.lock()).unwrap();
         assert!(core.history_recent(10, 0, true).unwrap().is_empty());

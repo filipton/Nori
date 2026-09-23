@@ -20,7 +20,7 @@ const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confiden
 
 pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
     c.prepare_cached(&format!(
-        "INSERT OR REPLACE INTO track_analysis({COLUMNS}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)"
+        "INSERT OR REPLACE INTO track_analysis(server, {COLUMNS}) VALUES(sid(), ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)"
     ))?
     .execute(params![
         a.song_id,
@@ -61,7 +61,7 @@ pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
 }
 
 pub fn get(c: &Connection, song_id: &str) -> rusqlite::Result<Option<TrackAnalysis>> {
-    c.prepare_cached(&format!("SELECT {COLUMNS} FROM track_analysis WHERE song_id=?1"))?
+    c.prepare_cached(&format!("SELECT {COLUMNS} FROM track_analysis WHERE server=sid() AND song_id=?1"))?
         .query_row([song_id], |r| {
             Ok(TrackAnalysis {
                 song_id: r.get(0)?,
@@ -104,7 +104,7 @@ pub fn get(c: &Connection, song_id: &str) -> rusqlite::Result<Option<TrackAnalys
 
 /// The ids with no row, or a row from an older analysis version, in the order given.
 pub fn missing(c: &Connection, ids: &[String]) -> rusqlite::Result<Vec<String>> {
-    let mut st = c.prepare_cached("SELECT analysis_version FROM track_analysis WHERE song_id=?1")?;
+    let mut st = c.prepare_cached("SELECT analysis_version FROM track_analysis WHERE server=sid() AND song_id=?1")?;
     let mut out = Vec::new();
     for id in ids {
         let v: Option<i32> = st.query_row([id], |r| r.get(0)).optional()?;
@@ -181,13 +181,13 @@ impl Core {
     /// Forgets every analysis, so tracks are measured again as they play. For when the measurements look wrong.
     pub fn analysis_clear(&self) -> Result<u32> {
         let c = self.db.lock();
-        let n = c.execute("DELETE FROM track_analysis", [])? as u32;
+        let n = c.execute("DELETE FROM track_analysis WHERE server=sid()", [])? as u32;
         Ok(n)
     }
 
     /// How many tracks have an analysis, for the settings screen.
     pub fn analysis_count(&self) -> Result<u32> {
-        Ok(self.db.lock().query_row("SELECT count(*) FROM track_analysis", [], |r| r.get(0))?)
+        Ok(self.db.lock().query_row("SELECT count(*) FROM track_analysis WHERE server=sid()", [], |r| r.get(0))?)
     }
 
     pub fn analysis_store(&self, analysis: TrackAnalysis) -> Result<()> {

@@ -116,9 +116,7 @@ fun SongMenu(
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                     Text(song.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                     Text("${song.artist} · ${song.album}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    if (song.suffix.isNotEmpty()) Caption(
-                        listOfNotNull(song.suffix.uppercase(), song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }).joinToString(" · "),
-                    )
+                    if (song.suffix.isNotEmpty()) Caption(remember(song) { dev.nori.music.ffi.songFormat(song) })
                 }
             }
             Hairline(startIndent = Space.gutter)
@@ -222,20 +220,11 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
 /** Everything the server said about one file. */
 @Composable
 fun TrackInfo(song: Song, onDone: () -> Unit) {
-    val rows = listOfNotNull(
-        "Title" to song.title, "Artist" to song.artists.joinToString(", ") { it.name }.ifEmpty { song.artist }, "Album" to song.album,
-        "Track" to listOfNotNull(song.discNumber.takeIf { it > 0u }?.let { "disc $it" }, song.track.takeIf { it > 0u }?.let { "track $it" }).joinToString(", "),
-        "Year" to song.year.takeIf { it > 0u }?.toString(), "Genre" to song.genre, "Duration" to duration(song.duration.toLong()),
-        "Format" to listOfNotNull(song.suffix.uppercase().ifEmpty { null }, song.contentType.ifEmpty { null }).joinToString(" · "),
-        "Quality" to listOfNotNull(song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }, song.channelCount.takeIf { it > 0u }?.let { "$it ch" }).joinToString(" · "),
-        "Size" to song.size.takeIf { it > 0u }?.let { "%.1f MB".format(it.toDouble() / 1_048_576) },
-        "ReplayGain" to song.replayGain?.let { g -> listOfNotNull(g.trackGain?.let { "track %+.2f dB".format(it) }, g.albumGain?.let { "album %+.2f dB".format(it) }, g.trackPeak?.let { "peak %.3f".format(it) }).joinToString(" · ") },
-        "BPM" to song.bpm.takeIf { it > 0u }?.toString(), "Plays (server)" to song.playCount.takeIf { it > 0u }?.toString(), "Last played" to song.played?.take(16)?.replace('T', ' '),
-        "Added" to song.created?.take(10), "Path" to song.path, "MusicBrainz" to song.musicBrainzId, "Comment" to song.comment, "Id" to song.id,
-    ).filter { !it.second.isNullOrBlank() }
+    // Which rows there are, in what order and how each reads is nori-core's (`fmt::track_info`).
+    val rows = remember(song) { dev.nori.music.ffi.trackInfo(song) }
     AlertDialog(
         onDismissRequest = onDone, title = { Text("Details") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { (k, v) -> Text(k, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(v!!, Modifier.padding(bottom = 8.dp)) } } },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { r -> Text(r.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(r.value, Modifier.padding(bottom = 8.dp)) } } },
         confirmButton = { TextButton(onDone) { Text("Close") } },
     )
 }

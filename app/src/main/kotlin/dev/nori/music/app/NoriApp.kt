@@ -18,7 +18,23 @@ class NoriApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
         val nori = Nori.get(this)
-        Thread { nori.warmUp() }.start()
+        Thread { numberStyle(); nori.warmUp() }.start()
+    }
+
+    /** A new locale changes how the core writes fractions ("12,4 MB"), so it is told again. */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        numberStyle()
+    }
+
+    /**
+     * The core writes numbers the way `String.format` does in the default locale; this tells it which
+     * separators that locale uses. On the warm-up thread at start, so loading the core stays off the
+     * main thread.
+     */
+    private fun numberStyle() {
+        val symbols = java.text.DecimalFormatSymbols.getInstance()
+        dev.nori.music.ffi.fmtSetLocale(symbols.decimalSeparator.toString(), symbols.groupingSeparator.toString())
     }
 
     /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. */

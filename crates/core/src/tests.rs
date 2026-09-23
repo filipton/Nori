@@ -9,7 +9,7 @@ const SEARCH: &str = r#"{"subsonic-response":{"status":"ok","version":"1.16.1","
 
 #[test]
 fn search_parses_indexes_and_skips_external() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     let r = core.parse_search(SEARCH.into()).unwrap();
     assert_eq!(r.songs.len(), 3);
     assert!(r.artists[0].starred);
@@ -33,14 +33,14 @@ fn search_parses_indexes_and_skips_external() {
 
 #[test]
 fn api_error_is_surfaced() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     let e = core.parse_status(r#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}"#.into());
     assert!(matches!(e, Err(CoreError::Api { code: 40, .. })));
 }
 
 #[test]
 fn queue_and_cache_round_trip() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     let songs = core.parse_search(SEARCH.into()).unwrap().songs;
     core.save_queue(PlayQueue { songs: songs.clone(), index: 1, position_ms: 5000 }).unwrap();
     let q = core.load_queue().unwrap();
@@ -58,7 +58,7 @@ fn queue_and_cache_round_trip() {
 
 #[test]
 fn synced_lyrics_preferred() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     let l = core
         .parse_lyrics(r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[
           {"synced":false,"line":[{"value":"plain"}]},{"synced":true,"line":[{"start":1500,"value":"timed"}]}]}}}"#.into())
@@ -69,7 +69,7 @@ fn synced_lyrics_preferred() {
 
 #[test]
 fn a_device_is_bound_to_one_profile() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     let p = |name: &str, outputs: &[&str]| SoundProfile { name: name.into(), json: "{}".into(), outputs: outputs.iter().map(|s| s.to_string()).collect() };
     core.profile_save(p("IEM", &["USB: DAC", "Wired headphones"])).unwrap();
     core.profile_save(p("Flat", &[])).unwrap();
@@ -99,7 +99,7 @@ fn autoeq_preset_is_read() {
 
 #[test]
 fn pending_calls_replay_in_order() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     core.pending_add("star".into(), vec![Param { key: "id".into(), value: "a b".into() }]).unwrap();
     core.pending_add("scrobble".into(), vec![]).unwrap();
     let l = core.pending_list().unwrap();
@@ -110,7 +110,7 @@ fn pending_calls_replay_in_order() {
 
 #[test]
 fn browse_sorts_filters_and_groups_by_decade() {
-    let core = Core::new(String::new()).unwrap();
+    let core = Core::new(String::new(), "t".into()).unwrap();
     core.parse_search(r#"{"subsonic-response":{"status":"ok","searchResult3":{"song":[
       {"id":"a","title":"beta","year":1994,"starred":"2020-01-01"},{"id":"b","title":"Alpha","year":2003},{"id":"c","title":"gamma","year":1999}]}}}"#.into()).unwrap();
     let by_title: Vec<String> = core.browse_songs("title".into(), false, false, 0, 0, 0, 10).unwrap().into_iter().map(|s| s.title).collect();

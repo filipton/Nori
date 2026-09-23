@@ -77,6 +77,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.92"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "audio-codec-algorithms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -740,6 +751,7 @@ version = "0.3.3"
 name = "nori-player"
 version = "0.3.3"
 dependencies = [
+ "nori-text",
  "parking_lot",
  "rubato",
  "rustfft",
@@ -747,13 +759,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nori-text"
+version = "0.3.3"
+
+[[package]]
 name = "norimusic"
 version = "0.3.3"
 dependencies = [
+ "async-trait",
  "jni",
+ "libc",
  "md-5",
  "nori-look",
  "nori-player",
+ "nori-text",
  "parking_lot",
  "rusqlite",
  "serde",

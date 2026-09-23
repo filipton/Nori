@@ -11,6 +11,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import dev.nori.music.ffi.SearchSplit
+import dev.nori.music.ffi.searchSplit
 
 enum class SearchScope { EVERYTHING, LIBRARY, PROVIDERS }
 
@@ -23,16 +27,26 @@ data class SearchUi(
     val error: String? = null,
     val history: List<String> = emptyList(),
     val scope: SearchScope = SearchScope.EVERYTHING,
+    /** [result] split by the core (search.rs): only the library's items, null when that is all of it. */
+    val library: SearchResult? = null,
+    /** Only the providers' items (octo-fiesta marks them; Navidrome's are the rest), null when there are none. */
+    val providers: SearchResult? = null,
+    val hasProviders: Boolean = false,
 ) {
-    /** [result] narrowed to what [scope] asks for; octo-fiesta marks provider items, Navidrome's are the rest. */
+    /** [result] narrowed to what [scope] asks for. */
     val shown: SearchResult? get() = result?.let { r ->
         when (scope) {
             SearchScope.EVERYTHING -> r
-            SearchScope.LIBRARY -> SearchResult(r.artists.filterNot { it.isExternal }, r.albums.filterNot { it.isExternal }, r.songs.filterNot { it.isExternal })
-            SearchScope.PROVIDERS -> SearchResult(r.artists.filter { it.isExternal }, r.albums.filter { it.isExternal }, r.songs.filter { it.isExternal })
+            SearchScope.LIBRARY -> library ?: r
+            SearchScope.PROVIDERS -> providers ?: NOTHING
         }
     }
-    val hasProviders: Boolean get() = result?.let { r -> r.songs.any { it.isExternal } || r.albums.any { it.isExternal } || r.artists.any { it.isExternal } } == true
+
+    internal fun with(split: SearchSplit) = copy(result = split.everything, library = split.library, providers = split.providers, hasProviders = split.hasProviders)
+
+    private companion object {
+        val NOTHING = SearchResult(emptyList(), emptyList(), emptyList())
+    }
 }
 
 /**
@@ -52,17 +66,17 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
         viewModelScope.launch {
             query.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
-                val local = runCatching { nori.library.localSearch(q) }.getOrNull() ?: return@collectLatest
-                _ui.update { if (it.query.trim() == q && !it.fromServer) it.copy(result = local) else it }
+                val local = runCatching { withContext(Dispatchers.IO) { nori.core.localSearchSplit(q, 30u) } }.getOrNull() ?: return@collectLatest
+                _ui.update { if (it.query.trim() == q && !it.fromServer) it.with(local) else it }
             }
         }
         viewModelScope.launch {
             query.debounce { if (it.isBlank()) 0L else nori.settings.value.liveSearchDelayMs.toLong() }.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
                 try {
-                    // A merged provider result may repeat an id, and lists are keyed by id.
-                    val remote = nori.library.search(q).let { r -> r.copy(artists = r.artists.distinctBy { it.id }, albums = r.albums.distinctBy { it.id }, songs = r.songs.distinctBy { it.id }) }
-                    _ui.update { if (it.query.trim() == q) it.copy(result = remote, fromServer = true, searching = false, error = null) else it }
+                    val found = nori.library.search(q)
+                    val remote = withContext(Dispatchers.Default) { searchSplit(found) }
+                    _ui.update { if (it.query.trim() == q) it.with(remote).copy(fromServer = true, searching = false, error = null) else it }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -75,7 +89,7 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
     fun setQuery(text: String) {
         val q = text.trim()
         _ui.update {
-            if (q.isEmpty()) it.copy(query = text, result = null, fromServer = false, searching = false, error = null)
+            if (q.isEmpty()) it.copy(query = text, result = null, library = null, providers = null, hasProviders = false, fromServer = false, searching = false, error = null)
             else it.copy(query = text, fromServer = false, searching = true, error = null)
         }
         query.value = q
@@ -84,9 +98,9 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
     /** Called when the user acts on a result: that is a query worth remembering. */
     fun remember() = viewModelScope.launch {
         val q = query.value
-        if (q.length < 2) return@launch
-        nori.library.rememberSearch(q)
-        _ui.update { it.copy(history = nori.library.searchHistory()) }
+        // Too short to be a query (the core says): nothing remembered, nothing to show.
+        val history = withContext(Dispatchers.IO) { nori.core.searchRememberRecent(q) } ?: return@launch
+        _ui.update { it.copy(history = history) }
     }
 
     fun setScope(s: SearchScope) = _ui.update { it.copy(scope = s) }

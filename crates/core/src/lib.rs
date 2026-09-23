@@ -19,12 +19,32 @@ pub mod queue;
 mod background;
 mod scrobble;
 mod rules;
+mod bridge;
 mod heard;
 mod history;
 mod m3u;
 mod mixes;
 mod model;
+mod outputs;
+mod profiles;
+mod settings;
+mod settings_store;
+mod fmt;
+mod pages;
 mod smart;
+mod stars;
+mod actions;
+mod browse;
+mod covers;
+mod search;
+mod words;
+mod transport;
+mod client;
+mod cache_policy;
+mod lrclib;
+mod stream;
+mod autofill;
+mod playlist;
 
 use std::sync::Arc;
 
@@ -283,10 +303,10 @@ pub struct Core {
 
 #[uniffi::export]
 impl Core {
-    /// `db_path` empty opens an in-memory index.
+    /// The app's database at `db_path` (empty: in memory), for `server`'s rows (a server profile's id).
     #[uniffi::constructor]
-    pub fn new(db_path: String) -> Result<Arc<Self>> {
-        let db = db::open(&db_path)?;
+    pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
+        let db = db::open(&db_path, &server)?;
         automix::store::migrate(&db)?;
         let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) });
         // The newest core is the one the app is using: the audio path finds the database through it.
@@ -294,8 +314,8 @@ impl Core {
         Ok(core)
     }
 
-    /// Returns the normalised base url. Each server profile has its own database file, so the
-    /// index is only dropped when the same file is pointed at a different server or user.
+    /// Returns the normalised base url. Each server profile has its own rows, so the index is only
+    /// dropped when the same profile is pointed at a different server or user.
     pub fn configure(&self, config: ServerConfig) -> Result<String> {
         let auth = match (&config.api_key, config.legacy_auth) {
             (Some(k), _) if !k.is_empty() => api::Auth::ApiKey(k),
@@ -516,27 +536,27 @@ impl Core {
 
     pub fn cache_get(&self, key: String) -> Result<Option<Vec<u8>>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT body FROM cache WHERE key=?1")?;
+        let mut st = c.prepare_cached("SELECT body FROM cache WHERE server=sid() AND key=?1")?;
         Ok(st.query_row([key], |r| r.get(0)).optional()?)
     }
 
     /// True when `key` was stored less than `max_age_ms` ago: the caller can skip asking the server again.
     pub fn cache_fresh(&self, key: String, max_age_ms: i64) -> Result<bool> {
         let c = self.db.lock();
-        let ts: Option<i64> = c.prepare_cached("SELECT ts FROM cache WHERE key=?1")?.query_row([key], |r| r.get(0)).optional()?;
+        let ts: Option<i64> = c.prepare_cached("SELECT ts FROM cache WHERE server=sid() AND key=?1")?.query_row([key], |r| r.get(0)).optional()?;
         Ok(ts.is_some_and(|t| db::now_ms() - t < max_age_ms))
     }
 
     pub fn cache_put(&self, key: String, body: Vec<u8>) -> Result<()> {
         let c = self.db.lock();
-        c.prepare_cached("INSERT OR REPLACE INTO cache(key, body, ts) VALUES(?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;
+        c.prepare_cached("INSERT OR REPLACE INTO cache(server, key, body, ts) VALUES(sid(), ?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;
         Ok(())
     }
 
     /// Drops cached responses whose key starts with `prefix` (after a write to the server).
     pub fn cache_evict(&self, prefix: String) -> Result<()> {
         let c = self.db.lock();
-        c.execute("DELETE FROM cache WHERE key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
+        c.execute("DELETE FROM cache WHERE server=sid() AND key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
         Ok(())
     }
 
@@ -563,13 +583,13 @@ impl Core {
 
     pub fn pending_add(&self, endpoint: String, params: Vec<Param>) -> Result<()> {
         let json = serde_json::to_string(&params.iter().map(|p| (&p.key, &p.value)).collect::<Vec<_>>()).unwrap_or_default();
-        self.db.lock().execute("INSERT INTO pending(endpoint, params) VALUES(?1, ?2)", params![endpoint, json])?;
+        self.db.lock().execute("INSERT INTO pending(server, endpoint, params) VALUES(sid(), ?1, ?2)", params![endpoint, json])?;
         Ok(())
     }
 
     pub fn pending_list(&self) -> Result<Vec<PendingCall>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT rowid, endpoint, params FROM pending ORDER BY rowid LIMIT 200")?;
+        let mut st = c.prepare_cached("SELECT rowid, endpoint, params FROM pending WHERE server=sid() ORDER BY rowid LIMIT 200")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         Ok(rows
             .filter_map(|r| r.ok())
@@ -581,7 +601,7 @@ impl Core {
     }
 
     pub fn pending_done(&self, row_id: i64) -> Result<()> {
-        self.db.lock().execute("DELETE FROM pending WHERE rowid=?1", [row_id])?;
+        self.db.lock().execute("DELETE FROM pending WHERE server=sid() AND rowid=?1", [row_id])?;
         Ok(())
     }
 
@@ -593,7 +613,7 @@ impl Core {
             "year" | "duration" | "created" | "playCount" | "userRating" => format!("json_extract(json, '$.{sort}')"),
             _ => "rowid".to_string(),
         };
-        let mut sql = String::from("SELECT json FROM items WHERE kind=?1");
+        let mut sql = String::from("SELECT json FROM items WHERE server=sid() AND kind=?1");
         if starred_only {
             sql.push_str(" AND json_extract(json, '$.starred') = 1");
         }
@@ -615,41 +635,27 @@ impl Core {
     /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
     pub fn browse_decades(&self) -> Result<Vec<Genre>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
+        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE server=sid() AND kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
         let rows = st.query_map([db::SONG], |r| Ok(Genre { name: r.get::<_, i64>(0)?.to_string(), song_count: r.get(1)?, album_count: 0 }))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// A page of every indexed song, for "download the whole library".
-    pub fn indexed_songs(&self, offset: u32, limit: u32) -> Result<Vec<Song>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT json FROM items WHERE kind=?1 ORDER BY rowid LIMIT ?3 OFFSET ?2")?;
-        let rows = st.query_map(params![db::SONG, offset, limit], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
-    }
+    // ---- downloads: the metadata side; media3 owns the bytes. Songs are queued by transfers.rs ----
 
-    // ---- downloads: the metadata side; media3 owns the bytes ----
-
-    /// Queued, not yet complete; [download_done] makes it show up in [downloads].
-    pub fn download_add(&self, song: Song) -> Result<()> {
-        let json = serde_json::to_string(&song).unwrap_or_default();
-        self.db.lock().execute("INSERT OR IGNORE INTO downloads(id, json, ts) VALUES(?1, ?2, ?3)", params![song.id, json, db::now_ms()])?;
-        Ok(())
-    }
-
+    /// A queued song finished; [downloads] with `done` lists it from now on.
     pub fn download_done(&self, id: String) -> Result<()> {
-        self.db.lock().execute("UPDATE downloads SET done=1 WHERE id=?1", [id])?;
+        self.db.lock().execute("UPDATE downloads SET done=1 WHERE server=sid() AND id=?1", [id])?;
         Ok(())
     }
 
     pub fn download_remove(&self, id: String) -> Result<()> {
-        self.db.lock().execute("DELETE FROM downloads WHERE id=?1", [id])?;
+        self.db.lock().execute("DELETE FROM downloads WHERE server=sid() AND id=?1", [id])?;
         Ok(())
     }
 
     pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT json FROM downloads WHERE done=?1 ORDER BY ts DESC")?;
+        let mut st = c.prepare_cached("SELECT json FROM downloads WHERE server=sid() AND done=?1 ORDER BY ts DESC")?;
         let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
     }
@@ -744,20 +750,20 @@ impl Core {
 
     pub fn search_remember(&self, query: String) -> Result<()> {
         let c = self.db.lock();
-        c.execute("INSERT OR REPLACE INTO searches(query, ts) VALUES(?1, ?2)", params![query.trim(), db::now_ms()])?;
-        c.execute("DELETE FROM searches WHERE query NOT IN (SELECT query FROM searches ORDER BY ts DESC LIMIT 20)", [])?;
+        c.execute("INSERT OR REPLACE INTO searches(server, query, ts) VALUES(sid(), ?1, ?2)", params![query.trim(), db::now_ms()])?;
+        c.execute("DELETE FROM searches WHERE server=sid() AND query NOT IN (SELECT query FROM searches WHERE server=sid() ORDER BY ts DESC LIMIT 20)", [])?;
         Ok(())
     }
 
     pub fn search_history(&self) -> Result<Vec<String>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT query FROM searches ORDER BY ts DESC")?;
+        let mut st = c.prepare_cached("SELECT query FROM searches WHERE server=sid() ORDER BY ts DESC")?;
         let rows = st.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn search_forget(&self) -> Result<()> {
-        self.db.lock().execute("DELETE FROM searches", [])?;
+        self.db.lock().execute("DELETE FROM searches WHERE server=sid()", [])?;
         Ok(())
     }
 }

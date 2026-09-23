@@ -1,30 +1,7 @@
-//! How the queue moves (`nori_player::queue`), as the platform asks: placement of songs added by hand,
-//! shuffle around the playing song, what is fetched ahead, what to do when a song will not play, and
-//! the previous and repeat buttons. One call per user action or player event.
+//! How the queue moves (`nori_player::queue`), as the platform asks: what is fetched ahead, what to do
+//! when a song will not play, and the previous and repeat buttons (the queue itself is playlist.rs). One call per user action or player event.
 
 use nori_player::queue::{self as q, OnError, PlaybackError};
-
-/// Where songs added by hand go: the list index, and the new play order when shuffling.
-#[derive(Debug, Clone, uniffi::Record)]
-pub struct QueuePlacement {
-    pub at: u32,
-    pub order: Option<Vec<u32>>,
-}
-
-/// `n` songs, `cur` playing, `hand[i]`: song i was added by hand, `order`: the play order when shuffling,
-/// `last`: Add to queue (after the other hand-added songs) rather than Play next, `count` songs added.
-#[uniffi::export]
-pub fn queue_place(n: u32, cur: u32, hand: Vec<bool>, order: Option<Vec<u32>>, last: bool, count: u32) -> QueuePlacement {
-    let order: Option<Vec<usize>> = order.map(|o| o.into_iter().map(|i| i as usize).collect());
-    let p = q::place(n as usize, cur as usize, &hand, order.as_deref(), last, count as usize);
-    QueuePlacement { at: p.at as u32, order: p.order.map(|o| o.into_iter().map(|i| i as u32).collect()) }
-}
-
-/// The play order when shuffle is turned on: the playing song, the hand-added songs after it, then the rest.
-#[uniffi::export]
-pub fn queue_shuffle_around(n: u32, cur: u32, hand: Vec<bool>, seed: u64) -> Vec<u32> {
-    q::shuffle_around(n as usize, cur as usize, &hand, seed).into_iter().map(|i| i as u32).collect()
-}
 
 /// The songs coming up that are fetched ahead, as [first, last] positions after the playing one (0);
 /// empty when none.

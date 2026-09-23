@@ -58,7 +58,12 @@ private fun limiterMeter(): Float {
     return value
 }
 
-private fun hz(f: Float) = if (f >= 1000) "%.4gk".format(f / 1000).replace(".000k", "k").replace(".00k", "k") else "%.0f".format(f)
+/** A band's label, its frequency and a mark for its kind (nori-core's `fmt::eq_band_label`). */
+private fun bandLabel(b: Band): String = dev.nori.music.ffi.eqBandLabel(
+    b.freq, b.channel == BandChannel.LEFT, b.channel == BandChannel.RIGHT,
+    b.kind == BandKind.LOW_SHELF || b.kind == BandKind.LOW_SHELF_SLOPE,
+    b.kind == BandKind.HIGH_SHELF || b.kind == BandKind.HIGH_SHELF_SLOPE, b.kind.usesGain,
+)
 
 @Composable
 fun EqualizerScreen(vm: SettingsViewModel) {
@@ -109,15 +114,9 @@ fun EqualizerScreen(vm: SettingsViewModel) {
 
         p.eqBands.forEachIndexed { i, b ->
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                val mark = when {
-                    b.channel == BandChannel.LEFT -> " L"
-                    b.channel == BandChannel.RIGHT -> " R"
-                    b.kind == BandKind.LOW_SHELF || b.kind == BandKind.LOW_SHELF_SLOPE -> " ↙"
-                    b.kind == BandKind.HIGH_SHELF || b.kind == BandKind.HIGH_SHELF_SLOPE -> " ↗"
-                    !b.kind.usesGain -> " ∿"
-                    else -> ""
-                }
-                Text(hz(b.freq) + mark, Modifier.width(56.dp).clickable { editing = i }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                // Once per band shape, not on every frame of a gain drag.
+                val label = remember(b.freq, b.channel, b.kind) { bandLabel(b) }
+                Text(label, Modifier.width(56.dp).clickable { editing = i }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (b.kind.usesGain) {
                     NoriSlider(b.gainDb, -12f..12f, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
                     Text(
@@ -143,7 +142,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
 
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Pre-amp ${signedDb(p.effectivePreampDb)} dB${if (p.eqPreampDb == null) " (automatic)" else ""}")
+                Text(dev.nori.music.ffi.eqPreamp(p.effectivePreampDb, p.eqPreampDb == null))
                 Text("Automatic pulls the level down by the largest boost so the curve cannot clip", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             NoriSwitch(p.eqPreampDb == null, { auto -> vm.update { it.copy(eqPreampDb = if (auto) null else it.effectivePreampDb) } })
@@ -153,19 +152,19 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         SectionTitle("Output")
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Text("Balance", Modifier.width(80.dp))
-            NoriSlider(p.balance, -1f..1f, { v -> vm.update { it.copy(balance = if (kotlin.math.abs(v) < 0.04f) 0f else v) } }, Modifier.weight(1f), centred = true)
-            Text(if (p.balance == 0f) "centre" else "%s %.0f%%".format(if (p.balance < 0) "L" else "R", kotlin.math.abs(p.balance) * 100), Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
+            NoriSlider(p.balance, -1f..1f, { v -> vm.update { it.copy(balance = dev.nori.music.ffi.eqBalanceSnap(v)) } }, Modifier.weight(1f), centred = true)
+            Text(dev.nori.music.ffi.eqBalance(p.balance), Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
         }
         Toggle("Mono", "Both channels summed, for one-earbud listening", p.mono) { on -> vm.update { it.copy(mono = on) } }
         Toggle("Limiter", "Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.", p.limiter) { on -> vm.update { it.copy(limiter = on) } }
         if (p.limiter) {
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                Text(dev.nori.music.ffi.eqCeiling(p.limiterThresholdDb), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 // Proof that it is working: what it is pulling back, right now. Polled only while this
                 // screen is on top, so it costs nothing the rest of the time.
                 val reduction = limiterMeter()
                 Text(
-                    if (reduction > 0.05f) "−%.1f dB".format(reduction) else "not clipping",
+                    dev.nori.music.ffi.eqReduction(reduction),
                     style = MaterialTheme.typography.labelMedium,
                     color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -197,8 +196,8 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         ActionRow("Save current settings as a profile", Icons.Filled.Add, { naming = true }, divider = false)
 
         SectionTitle("Crossfeed")
-        Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        NoriSlider(p.crossfeedDb, 0f..9f, { v -> vm.update { it.copy(crossfeedDb = if (v < 1f) 0f else v) } }, Modifier.padding(horizontal = Space.gutter))
+        Text(dev.nori.music.ffi.eqCrossfeed(p.crossfeedDb), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        NoriSlider(p.crossfeedDb, 0f..9f, { v -> vm.update { it.copy(crossfeedDb = dev.nori.music.ffi.eqCrossfeedSnap(v)) } }, Modifier.padding(horizontal = Space.gutter))
     }
 }
 
@@ -223,7 +222,7 @@ private fun ImportDialog(vm: SettingsViewModel, onDone: () -> Unit) {
 @Composable
 private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
     AlertDialog(
-        onDismissRequest = onDone, title = { Text("${hz(band.freq)} Hz") },
+        onDismissRequest = onDone, title = { Text("${dev.nori.music.ffi.eqHz(band.freq)} Hz") },
         text = {
             Column {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -238,8 +237,8 @@ private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Uni
                 }
                 Text("Frequency", style = MaterialTheme.typography.labelMedium)
                 // Logarithmic: the slider position is the exponent, 20 Hz to 20 kHz.
-                NoriSlider(kotlin.math.log10(band.freq / 20f) / 3f, 0f..1f, { x -> onChange(band.copy(freq = (20f * Math.pow(10.0, x * 3.0).toFloat()))) })
-                Text(if (band.kind == BandKind.LOW_SHELF_SLOPE || band.kind == BandKind.HIGH_SHELF_SLOPE) "Slope %.2f".format(band.q) else "Q %.2f".format(band.q), style = MaterialTheme.typography.labelMedium)
+                NoriSlider(dev.nori.music.ffi.eqFreqToSlider(band.freq), 0f..1f, { x -> onChange(band.copy(freq = dev.nori.music.ffi.eqSliderToFreq(x))) })
+                Text(dev.nori.music.ffi.eqShape(band.kind == BandKind.LOW_SHELF_SLOPE || band.kind == BandKind.HIGH_SHELF_SLOPE, band.q), style = MaterialTheme.typography.labelMedium)
                 NoriSlider(band.q, 0.2f..8f, { q -> onChange(band.copy(q = q)) })
             }
         },

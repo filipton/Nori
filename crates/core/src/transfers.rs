@@ -199,7 +199,7 @@ impl Tracker {
         if !self.info.contains_key(id) {
             let found = crate::active().and_then(|core| {
                 let c = core.db.lock();
-                let json: String = c.query_row("SELECT json FROM downloads WHERE id=?1", [id], |r| r.get(0)).ok()?;
+                let json: String = c.query_row("SELECT json FROM downloads WHERE server=sid() AND id=?1", [id], |r| r.get(0)).ok()?;
                 serde_json::from_str::<crate::Song>(&json).ok()
             });
             let info = found.map_or_else(Info::default, |s| Info {
@@ -259,12 +259,14 @@ fn id_of(env: &mut JNIEnv, s: &JString) -> Option<String> {
     env.get_string(s).ok().map(Into::into)
 }
 
-/// The quality downloads are made at (0: the original file), for what songs should weigh.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_setup(_: JNIEnv, _: JClass, download_kbps: jint) {
+/// Takes the download quality from the settings (0: the original file), for what songs should weigh;
+/// songs weighed at another quality are weighed again. Asked whenever songs are queued, and when an
+/// earlier process's queue is picked up.
+fn follow_quality() {
+    let kbps = crate::settings_store::with_prefs(|p| p.download.bit_rate).unwrap_or(0);
     with(|t| {
-        if t.download_kbps != download_kbps {
-            t.download_kbps = download_kbps;
+        if t.download_kbps != kbps {
+            t.download_kbps = kbps;
             t.info.clear();
         }
     });
@@ -340,17 +342,6 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_unmark(mut env
         } else {
             0
         }
-    })
-}
-
-/// A download an earlier process left failed: marked so, unless already marked. Returns its progress.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_restoreFailed(mut env: JNIEnv, _: JClass, id: JString, length: jlong, bytes: jlong) -> jfloat {
-    let Some(id) = id_of(&mut env, &id) else { return -1.0 };
-    with(|t| {
-        let estimate = t.info(&id).estimate;
-        t.marks.entry(id).or_insert((Phase::Failed, 0));
-        fraction(length, bytes, estimate)
     })
 }
 
@@ -634,6 +625,150 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_summaryFailed(
     with(|t| t.batch.failed)
 }
 
+// ---- uniffi: which songs are queued, and picking up an earlier process's queue -----------------------------
+
+/// What queuing songs did. `fresh` went into the queue now, in the order asked; `again` were in it
+/// already but unfinished - failed, or lost to a process that died before the platform heard of them -
+/// and are asked for again, so the download button always does something. Finished songs are left as
+/// they are.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct DownloadQueued {
+    pub fresh: Vec<String>,
+    pub again: Vec<String>,
+}
+
+/// One download as the platform's own queue remembers it: media3's `Download.STATE_*`, the length (-1
+/// unknown) and the bytes it has.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DownloadKnown {
+    pub id: String,
+    pub state: i32,
+    pub length: i64,
+    pub bytes: i64,
+}
+
+/// A download an earlier process left failed, and how far it got.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DownloadFailed {
+    pub id: String,
+    pub progress: f32,
+}
+
+/// What an earlier process left unfinished, sorted out (see [`Core::download_recover`]).
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct DownloadRecovery {
+    /// Never reached the platform's queue (the add was still in flight): to be asked for again.
+    pub lost: Vec<String>,
+    /// Failed: marked failed here, so each reads as failed rather than waiting.
+    pub failed: Vec<DownloadFailed>,
+    /// Finished there but not recorded here (the process went between the two): recorded now. Each
+    /// song's streamed copy is the same bytes twice and can go.
+    pub finished: Vec<String>,
+    /// Queued or interrupted mid-download: the platform's queue has to be started to resume them.
+    pub unfinished: bool,
+}
+
+const REMOVING: jint = 5;
+
+/// Adds the `rows` (id, song json) that are not in the queue yet, behind everything queued before, and
+/// sorts the rest into asked again (unfinished) and left out (finished).
+fn queue_rows(c: &mut rusqlite::Connection, rows: impl IntoIterator<Item = (String, String)>) -> crate::Result<DownloadQueued> {
+    use rusqlite::OptionalExtension;
+    let tx = c.transaction()?;
+    let mut out = DownloadQueued::default();
+    {
+        // The queue is listed by this stamp. Counting on from the newest keeps a new batch behind the
+        // last one, and its own songs in the order asked, whatever the clock does.
+        let newest: i64 = tx.query_row("SELECT coalesce(max(ts), 0) FROM downloads WHERE server=sid()", [], |r| r.get(0))?;
+        let mut ts = newest.max(crate::db::now_ms());
+        let mut done = tx.prepare_cached("SELECT done FROM downloads WHERE server=sid() AND id=?1")?;
+        let mut add = tx.prepare_cached("INSERT INTO downloads(server, id, json, ts) VALUES(sid(), ?1, ?2, ?3)")?;
+        let mut seen = HashSet::new();
+        for (id, json) in rows {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            match done.query_row([&id], |r| r.get::<_, bool>(0)).optional()? {
+                None => {
+                    ts += 1;
+                    add.execute(rusqlite::params![id, json, ts])?;
+                    out.fresh.push(id);
+                }
+                Some(false) => out.again.push(id),
+                Some(true) => {}
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(out)
+}
+
+/// What the platform's queue says about the songs still `pending` here; the failed ones come back
+/// separately with their length and bytes.
+fn recovery(pending: &[String], known: &[DownloadKnown]) -> (DownloadRecovery, Vec<(String, i64, i64)>) {
+    let by_id: HashMap<&str, &DownloadKnown> = known.iter().map(|k| (k.id.as_str(), k)).collect();
+    let mut r = DownloadRecovery::default();
+    let mut failed = Vec::new();
+    for id in pending {
+        match by_id.get(id.as_str()).map(|k| (k.state, k)) {
+            None | Some((REMOVING, _)) => r.lost.push(id.clone()),
+            Some((COMPLETED, _)) => r.finished.push(id.clone()),
+            Some((FAILED, k)) => failed.push((id.clone(), k.length, k.bytes)),
+            Some(_) => r.unfinished = true,
+        }
+    }
+    (r, failed)
+}
+
+#[uniffi::export]
+impl Core {
+    /// Queues `songs` for download; see [`DownloadQueued`].
+    pub fn download_queue(&self, songs: Vec<crate::Song>) -> crate::Result<DownloadQueued> {
+        follow_quality();
+        let rows = songs.into_iter().map(|s| {
+            let json = serde_json::to_string(&s).unwrap_or_default();
+            (s.id, json)
+        });
+        queue_rows(&mut self.db.lock(), rows)
+    }
+
+    /// Queues every song of the offline index, in index order, as [`Core::download_queue`] does. One
+    /// call however big the library: the songs go from the index into the queue without leaving the core.
+    pub fn download_queue_library(&self) -> crate::Result<DownloadQueued> {
+        follow_quality();
+        let mut c = self.db.lock();
+        let rows: Vec<(String, String)> = {
+            let mut st = c.prepare("SELECT id, json FROM items WHERE server=sid() AND kind=?1 ORDER BY rowid")?;
+            let rows = st.query_map([crate::db::SONG], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        queue_rows(&mut c, rows)
+    }
+
+    /// Brings the downloads table and the platform's queue (`known`: what it holds of the songs pending
+    /// here) back into agreement after the process died: finished songs are recorded, failed ones marked,
+    /// and what is left to do is said.
+    pub fn download_recover(&self, known: Vec<DownloadKnown>) -> crate::Result<DownloadRecovery> {
+        follow_quality();
+        let pending: Vec<String> = self.downloads(false)?.into_iter().map(|s| s.id).collect();
+        let (mut r, failed) = recovery(&pending, &known);
+        for id in &r.finished {
+            self.download_done(id.clone())?;
+        }
+        r.failed = with(|t| {
+            failed
+                .into_iter()
+                .map(|(id, length, bytes)| {
+                    let estimate = t.info(&id).estimate;
+                    t.marks.entry(id.clone()).or_insert((Phase::Failed, 0));
+                    DownloadFailed { progress: fraction(length, bytes, estimate), id }
+                })
+                .collect()
+        });
+        Ok(r)
+    }
+}
+
 // ---- uniffi: what the downloads screen shows ----------------------------------------------------------------
 
 /// The downloads screen's lists, in the order the queue will run them.
@@ -778,16 +913,21 @@ pub fn format_speed(bps: i64) -> String {
     s
 }
 
-/// [`format_speed`] onto the end of `out`.
+/// [`format_speed`] onto the end of `out`, in the phone's number style (`nori_text`).
 pub fn push_speed(out: &mut String, bps: i64) {
     use std::fmt::Write;
-    let _ = match bps {
-        b if b <= 0 => Ok(()),
-        b if b < 1_000 => write!(out, "{b} B/s"),
-        b if b < 1_000_000 => write!(out, "{:.0} KB/s", b as f64 / 1_000.0),
-        b if b < 10_000_000 => write!(out, "{:.1} MB/s", b as f64 / 1_000_000.0),
-        b => write!(out, "{:.0} MB/s", b as f64 / 1_000_000.0),
+    let (v, places, unit) = match bps {
+        b if b <= 0 => return,
+        b if b < 1_000 => {
+            let _ = write!(out, "{b} B/s");
+            return;
+        }
+        b if b < 1_000_000 => (b as f64 / 1_000.0, 0, " KB/s"),
+        b if b < 10_000_000 => (b as f64 / 1_000_000.0, 1, " MB/s"),
+        b => (b as f64 / 1_000_000.0, 0, " MB/s"),
     };
+    nori_text::push_fixed(out, v, places, false);
+    out.push_str(unit);
 }
 
 /// "45 s left", "12:34 left", "2:05:00 left"; empty when it cannot be said (negative).
@@ -810,16 +950,19 @@ pub fn push_eta(out: &mut String, sec: i64) {
     };
 }
 
-/// "850 B", "38 MB", "2.1 GB".
+/// "850 B", "38 MB", "2.1 GB", in the phone's number style (`nori_text`).
 #[uniffi::export]
 pub fn format_bytes(bytes: i64) -> String {
-    match bytes {
-        b if b < 1024 => format!("{b} B"),
-        b if b < 1_048_576 => format!("{:.0} KB", b as f64 / 1024.0),
-        b if b < 10_485_760 => format!("{:.1} MB", b as f64 / 1_048_576.0),
-        b if b < 1_073_741_824 => format!("{:.0} MB", b as f64 / 1_048_576.0),
-        b => format!("{:.1} GB", b as f64 / 1_073_741_824.0),
-    }
+    let (v, places, unit) = match bytes {
+        b if b < 1024 => return format!("{b} B"),
+        b if b < 1_048_576 => (b as f64 / 1024.0, 0, " KB"),
+        b if b < 10_485_760 => (b as f64 / 1_048_576.0, 1, " MB"),
+        b if b < 1_073_741_824 => (b as f64 / 1_048_576.0, 0, " MB"),
+        b => (b as f64 / 1_073_741_824.0, 1, " GB"),
+    };
+    let mut out = nori_text::fixed(v, places, false);
+    out.push_str(unit);
+    out
 }
 
 #[cfg(test)]
@@ -974,6 +1117,57 @@ mod tests {
         let [_, queued, _, finished] = sections(&pending, &[], &marks(&[("a", Phase::Done, 0)]), |s: &String| s.as_str());
         assert_eq!((queued, finished), (vec!["b".to_string()], vec!["a".to_string()]));
     }
+
+    fn song(id: &str) -> crate::Song {
+        crate::Song { id: id.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn queuing_adds_what_is_new_and_asks_again_for_what_is_stuck() {
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        let q = core.download_queue(vec![song("a"), song("b"), song("a")]).unwrap();
+        assert_eq!((q.fresh, q.again), (vec!["a".to_string(), "b".into()], vec![]));
+        core.download_done("a".into()).unwrap();
+        let q = core.download_queue(vec![song("a"), song("b"), song("c")]).unwrap();
+        assert_eq!(q.fresh, ["c"], "a finished song is left alone");
+        assert_eq!(q.again, ["b"], "an unfinished one is asked for again");
+        // Listed newest first; the queue runs, and the screen shows it, the other way round.
+        let pending: Vec<String> = core.downloads(false).unwrap().into_iter().rev().map(|s| s.id).collect();
+        assert_eq!(pending, ["b", "c"]);
+    }
+
+    #[test]
+    fn the_whole_library_is_queued_in_index_order() {
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        let songs: Vec<crate::Song> = ["x", "y", "z"].map(song).to_vec();
+        crate::db::index(&mut core.db.lock(), &[], &[], &songs).unwrap();
+        core.download_queue(vec![songs[1].clone()]).unwrap();
+        let q = core.download_queue_library().unwrap();
+        assert_eq!((q.fresh, q.again), (vec!["x".to_string(), "z".into()], vec!["y".to_string()]));
+        assert_eq!(core.downloads(false).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn an_earlier_process_queue_is_sorted_out() {
+        let known = |id: &str, state| DownloadKnown { id: id.into(), state, length: 100, bytes: 50 };
+        let pending = ["lost", "removing", "done", "failed", "queued"].map(String::from);
+        let all = [known("removing", REMOVING), known("done", COMPLETED), known("failed", FAILED), known("queued", QUEUED), known("other", COMPLETED)];
+        let (r, failed) = recovery(&pending, &all);
+        assert_eq!(r.lost, ["lost", "removing"]);
+        assert_eq!(r.finished, ["done"]);
+        assert_eq!(failed, [("failed".to_string(), 100, 50)]);
+        assert!(r.unfinished);
+        assert!(!recovery(&pending[..1], &[]).0.unfinished);
+
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        core.download_queue(vec![song("rc-a"), song("rc-b")]).unwrap();
+        let r = core.download_recover(vec![known("rc-a", COMPLETED), known("rc-b", FAILED)]).unwrap();
+        assert_eq!(r.finished, ["rc-a"]);
+        assert_eq!(r.failed, [DownloadFailed { id: "rc-b".into(), progress: 0.5 }]);
+        assert_eq!(core.downloads(true).unwrap().len(), 1, "recorded as finished");
+        assert_eq!(download_phase("rc-b".into()), Phase::Failed as i32);
+    }
+
 
     #[test]
     fn words() {

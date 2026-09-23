@@ -166,9 +166,12 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
     LoadBox(load) { all ->
-        val artists = remember(all, filter) { if (filter.isBlank()) all else all.filter { it.name.contains(filter, true) } }
-        // First row of each initial, for the index on the right edge.
-        val letters = remember(artists) { artists.withIndex().groupBy { it.value.name.firstOrNull()?.uppercaseChar()?.takeIf(Char::isLetter) ?: '#' }.mapValues { it.value.first().index }.toSortedMap() }
+        // What the filter keeps and the first row of each initial, for the index on the right edge
+        // (nori-core's `TextIndex`): the names go over once per list, each keystroke sends the filter.
+        val index = remember(all) { dev.nori.music.ffi.TextIndex(all.map { listOf(it.name) }) }
+        val view = remember(index, filter) { index.view(filter) }
+        val artists = remember(view) { view.rows.map { all[it.toInt()] } }
+        val letters = view.letters
         Column {
             SearchField(filter, { filter = it }, "Filter artists", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
             Row {
@@ -187,7 +190,7 @@ private fun Artists(vm: ArtistsViewModel = viewModel()) {
                     }
                 }
                 if (letters.size > 3) Column(Modifier.padding(end = 2.dp).verticalScroll(rememberScrollState())) {
-                    letters.forEach { (c, index) -> Text("$c", Modifier.clickable { scope.launch { list.scrollToItem(index) } }.padding(horizontal = 8.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+                    letters.forEach { l -> Text(l.letter, Modifier.clickable { scope.launch { list.scrollToItem(l.row.toInt()) } }.padding(horizontal = 8.dp, vertical = 1.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
                 }
             }
         }
@@ -296,7 +299,7 @@ private fun Favourites(actions: ActionsViewModel, vm: StarredViewModel = viewMod
             item(key = "all") {
                 NavRow(
                     "Favourite songs", { nav.mix(dev.nori.music.app.vm.FAVOURITES_MIX) }, chevron = true,
-                    subtitle = s.songs.count { !it.isExternal }.let { n -> "$n song${if (n == 1) "" else "s"}" },
+                    subtitle = remember(s.songs) { dev.nori.music.ffi.wordsSongs(s.songs.count { !it.isExternal }.toUInt()) },
                     leading = { Icon(Icons.Filled.Favorite, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
                 )
             }
@@ -369,10 +372,7 @@ private fun Downloads(actions: ActionsViewModel) {
             val waiting = (d.pending.size - failed).coerceAtLeast(0)
             NavRow(
                 "Download queue", nav::downloads, chevron = true,
-                subtitle = listOfNotNull(
-                    "$waiting to go".takeIf { waiting > 0 },
-                    "$failed failed".takeIf { failed > 0 },
-                ).joinToString(" · ").ifEmpty { "Nothing downloading" },
+                subtitle = dev.nori.music.ffi.wordsDownloadQueue(waiting.toUInt(), failed.toUInt()),
                 leading = { Icon(Icons.Filled.Downloading, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary) },
             )
         }

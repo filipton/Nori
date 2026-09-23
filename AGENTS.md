@@ -10,15 +10,23 @@ and move like Apple Music (the cover melting into the page, no blocky Material d
 ```
 crates/player/  Rust, platform-free: how music is played and heard. The sound chain (dsp.rs), speed
                 and pitch (speed.rs over sonic.rs), silence skipping (silence.rs), AutoMix analysis,
-                planning and mixing (automix/), the transition engine (engine.rs), which song the ear
-                is on during a mix (heard.rs), the audio policy, ReplayGain and fades (policy.rs), and
-                which sound an output device gets (device.rs). No I/O, no uniffi, no JNI.
+                planning and mixing (automix/), the transition engine (engine.rs), feeding the output in
+                bursts (burst.rs), which song the ear is on during a mix (heard.rs), seeks that land
+                (seek.rs), the queue itself (playlist.rs: list, play order, shuffle, repeat, songs added
+                by hand) and how it moves (queue.rs), how the controls sound and when the chain is
+                rebuilt (transport.rs), what mixes where (transitions.rs), the audio policy, ReplayGain
+                and fades (policy.rs), USB DACs (dac.rs), outputs (outputs.rs) and which sound an output
+                device gets (device.rs, sound.rs). No I/O, no uniffi, no JNI.
 crates/look/    Rust, platform-free: how a page looks. The colours a page takes from its cover (cover.rs,
                 with a line-for-line port of AndroidX Palette in palette.rs) and a theme's tones from
                 one colour (theme.rs). Pixels in, colours out; no I/O, no uniffi, no JNI.
-crates/core/    Rust for Android: request signing, response parsing, SQLite/FTS5 index + caches
-                (uniffi), and the doors into nori-player (JNI in dsp.rs, stages.rs,
-                automix/engine_jni.rs, heard.rs, look.rs; uniffi in dsp.rs)
+crates/core/    Rust for Android, and the app's state: the Subsonic client and network policy (client.rs,
+                transport.rs, cache_policy.rs, stream.rs), the SQLite/FTS5 index and caches, settings
+                (settings.rs, profiles.rs), the queue the app plays (playlist.rs; the songs in it by id,
+                queue.rs), refilling it (autofill.rs), downloads (transfers.rs), scrobbling, the
+                transition planner (automix/planner.rs), and the doors into nori-player and nori-look
+                (JNI in dsp.rs, stages.rs, automix/engine_jni.rs, heard.rs, seek.rs, look.rs,
+                transfers.rs; uniffi everywhere else). Kotlin asks and draws; the core decides.
 core/           Android library, no UI: net/, data/ (Library = the repository), playback/
                 (media3 service, DAC, scrobbling; TransitionSink only forwards to the engine,
                 Stages.kt only forwards speed/pitch and silence skipping),

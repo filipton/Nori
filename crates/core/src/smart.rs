@@ -50,6 +50,9 @@ use serde_json::{json, Map, Value};
 
 use crate::{db, mixes, model::*, Core, CoreError, Result};
 
+/// The editor's flat form of a definition.
+mod draft;
+
 const DAY_MS: i64 = 86_400_000;
 const MAX_DEPTH: usize = 8;
 
@@ -236,6 +239,14 @@ enum Node {
 }
 
 impl Node {
+    /// Whether a rule anywhere in here asks about `field`.
+    fn asks(&self, field: Field) -> bool {
+        match self {
+            Node::Rule(r) => r.field == field,
+            Node::Group { rules, .. } => rules.iter().any(|n| n.asks(field)),
+        }
+    }
+
     fn needs_stats(&self) -> bool {
         match self {
             Node::Rule(r) => r.needs_stats(),
@@ -550,7 +561,7 @@ impl Compiler<'_> {
                         };
                         format!("i.id {}IN (SELECT value FROM json_each(?{n}))", if yes { "" } else { "NOT " })
                     }
-                    ExcludedFromMixes => format!("i.id {}IN (SELECT song_id FROM mix_excluded)", if yes { "" } else { "NOT " }),
+                    ExcludedFromMixes => format!("i.id {}IN (SELECT song_id FROM mix_excluded WHERE server=sid())", if yes { "" } else { "NOT " }),
                     // Written exactly like the partial index on starred songs.
                     _ if yes => format!("{x}=1"),
                     _ => format!("coalesce({x},0)<>1"),
@@ -677,8 +688,8 @@ fn matches(n: &Node, row: &Row, env: &Env) -> bool {
 
 fn load(c: &Connection, rowid: i64) -> rusqlite::Result<Option<Row>> {
     let mut st = c.prepare_cached(
-        "SELECT i.json, coalesce(s.plays,0), coalesce(s.skips,0), coalesce(s.last_played_ms,0), EXISTS(SELECT 1 FROM mix_excluded e WHERE e.song_id=i.id)
-         FROM items i LEFT JOIN song_stats s ON s.song_id=i.id WHERE i.rowid=?1",
+        "SELECT i.json, coalesce(s.plays,0), coalesce(s.skips,0), coalesce(s.last_played_ms,0), EXISTS(SELECT 1 FROM mix_excluded e WHERE e.server=i.server AND e.song_id=i.id)
+         FROM items i LEFT JOIN song_stats s ON s.server=i.server AND s.song_id=i.id WHERE i.rowid=?1",
     )?;
     let row = st.query_row([rowid], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).optional()?;
     Ok(row.and_then(|(json, plays, skips, last_played_ms, excluded)| {
@@ -689,9 +700,9 @@ fn load(c: &Connection, rowid: i64) -> rusqlite::Result<Option<Row>> {
 /// CROSS JOIN pins the join order: without ANALYZE data the planner would still start from the index.
 fn tables(root: &Node) -> &'static str {
     if root.needs_stats() {
-        "FROM song_stats s CROSS JOIN items i ON i.kind=2 AND i.id=s.song_id"
+        "FROM song_stats s CROSS JOIN items i ON s.server=sid() AND i.server=sid() AND i.kind=2 AND i.id=s.song_id"
     } else {
-        "FROM items i LEFT JOIN song_stats s ON s.song_id=i.id"
+        "FROM items i LEFT JOIN song_stats s ON s.server=i.server AND s.song_id=i.id"
     }
 }
 
@@ -804,7 +815,7 @@ impl Core {
     /// Newest first.
     pub fn smart_list(&self) -> Result<Vec<SmartPlaylist>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT id, name, json FROM smart_playlists ORDER BY updated_ms DESC, id")?;
+        let mut st = c.prepare_cached("SELECT id, name, json FROM smart_playlists WHERE server=sid() ORDER BY updated_ms DESC, id")?;
         let rows = st.query_map([], |r| Ok(SmartPlaylist { id: r.get(0)?, name: r.get(1)?, json: r.get(2)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -815,31 +826,42 @@ impl Core {
         let c = self.db.lock();
         let now = db::now_ms();
         let id = if id.is_empty() {
-            let stored: i64 = c.query_row("SELECT count(*) FROM smart_playlists", [], |r| r.get(0))?;
+            let stored: i64 = c.query_row("SELECT count(*) FROM smart_playlists WHERE server=sid()", [], |r| r.get(0))?;
             format!("sp-{:x}", mixes::Rng::new(now as u64 ^ (stored as u64) << 48).next())
         } else {
             id
         };
-        c.execute("INSERT OR REPLACE INTO smart_playlists(id, name, json, updated_ms) VALUES(?1, ?2, ?3, ?4)", params![id, name, json, now])?;
+        c.execute("INSERT OR REPLACE INTO smart_playlists(server, id, name, json, updated_ms) VALUES(sid(), ?1, ?2, ?3, ?4)", params![id, name, json, now])?;
         Ok(id)
     }
 
     pub fn smart_delete(&self, id: String) -> Result<()> {
-        self.db.lock().execute("DELETE FROM smart_playlists WHERE id=?1", [id])?;
+        self.db.lock().execute("DELETE FROM smart_playlists WHERE server=sid() AND id=?1", [id])?;
         Ok(())
     }
 
-    /// One page of the playlist. `downloaded_ids` is only read when a rule uses `isDownloaded`; pass an
-    /// empty list otherwise. `offset` and `limit` page inside the playlist's own `limit` / `limitMs`.
-    pub fn smart_evaluate(&self, json: String, downloaded_ids: Vec<String>, offset: u32, limit: u32) -> Result<Vec<Song>> {
+    /// One page of the playlist. `offset` and `limit` page inside the playlist's own `limit` / `limitMs`.
+    pub fn smart_evaluate(&self, json: String, offset: u32, limit: u32) -> Result<Vec<Song>> {
         let def = parse(&json)?;
-        Ok(run(&self.db.lock(), &def, &downloaded_ids, offset as usize, limit as usize, false, db::now_ms())?.0)
+        let downloaded = self.downloaded_for(&def)?;
+        Ok(run(&self.db.lock(), &def, &downloaded, offset as usize, limit as usize, false, db::now_ms())?.0)
     }
 
     /// How many songs the playlist has, its own caps applied.
-    pub fn smart_count(&self, json: String, downloaded_ids: Vec<String>) -> Result<u32> {
+    pub fn smart_count(&self, json: String) -> Result<u32> {
         let def = parse(&json)?;
-        Ok(run(&self.db.lock(), &def, &downloaded_ids, 0, 0, true, db::now_ms())?.1 as u32)
+        let downloaded = self.downloaded_for(&def)?;
+        Ok(run(&self.db.lock(), &def, &downloaded, 0, 0, true, db::now_ms())?.1 as u32)
+    }
+}
+
+impl Core {
+    /// The finished downloads, read only when a rule asks whether a song is downloaded.
+    fn downloaded_for(&self, def: &Def) -> Result<Vec<String>> {
+        if !def.root.asks(IsDownloaded) {
+            return Ok(Vec::new());
+        }
+        Ok(self.downloads(true)?.into_iter().map(|s| s.id).collect())
     }
 }
 
@@ -887,7 +909,7 @@ mod tests {
     }
 
     fn library() -> std::sync::Arc<Core> {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let mut songs = vec![
             song("dogs", "Dogs", "Pink Floyd", "Animals", "Progressive Rock", 1977),
             song("pigs", "Pigs (Three Different Ones)", "Pink Floyd", "Animals", "Progressive Rock", 1977),
@@ -957,8 +979,8 @@ mod tests {
             "sort": { "field": "title", "descending": true } })
         .to_string();
         assert_eq!(eval(&core, &def, &[]), ["bare", "so", "joga", "bach"], "no year is year 0");
-        assert_eq!(ids(&core.smart_evaluate(def.clone(), vec![], 2, 1).unwrap()), ["joga"]);
-        assert_eq!(core.smart_count(def, vec![]).unwrap(), 4);
+        assert_eq!(ids(&core.smart_evaluate(def.clone(), 2, 1).unwrap()), ["joga"]);
+        assert_eq!(core.smart_count(def).unwrap(), 4);
     }
 
     #[test]
@@ -1027,6 +1049,12 @@ mod tests {
             { "field": "isDownloaded", "op": "isFalse" }, { "field": "year", "op": "is", "value": 1959 }] }] } })
         .to_string();
         assert_eq!(eval(&core, &both, &["joga", "it's"]), ["joga", "so"]);
+        // Asked through the core, the downloads are its own: only finished ones count.
+        let songs: Vec<Song> = ["joga", "so"].map(|id| Song { id: id.into(), ..Default::default() }).to_vec();
+        core.download_queue(songs).unwrap();
+        core.download_done("joga".into()).unwrap();
+        assert_eq!(ids(&core.smart_evaluate(flag("isDownloaded", "isTrue"), 0, 50).unwrap()), ["joga"]);
+        assert_eq!(core.smart_count(flag("isDownloaded", "isFalse")).unwrap(), 6);
     }
 
     #[test]
@@ -1060,12 +1088,12 @@ mod tests {
 
         let capped = json!({ "sort": { "field": "year" }, "limit": 3 }).to_string();
         assert_eq!(eval(&core, &capped, &[]), ["bare", "so", "dogs"]);
-        assert_eq!(core.smart_count(capped.clone(), vec![]).unwrap(), 3);
-        assert_eq!(ids(&core.smart_evaluate(capped.clone(), vec![], 2, 50).unwrap()), ["dogs"], "paging stops at the playlist's own limit");
-        assert!(core.smart_evaluate(capped.clone(), vec![], 3, 50).unwrap().is_empty());
-        assert!(core.smart_evaluate(capped, vec![], 0, 0).unwrap().is_empty());
+        assert_eq!(core.smart_count(capped.clone()).unwrap(), 3);
+        assert_eq!(ids(&core.smart_evaluate(capped.clone(), 2, 50).unwrap()), ["dogs"], "paging stops at the playlist's own limit");
+        assert!(core.smart_evaluate(capped.clone(), 3, 50).unwrap().is_empty());
+        assert!(core.smart_evaluate(capped, 0, 0).unwrap().is_empty());
 
-        let pages: Vec<String> = (0..4).flat_map(|p| core.smart_evaluate(by("title", false), vec![], p * 2, 2).unwrap()).map(|s| s.id).collect();
+        let pages: Vec<String> = (0..4).flat_map(|p| core.smart_evaluate(by("title", false), p * 2, 2).unwrap()).map(|s| s.id).collect();
         assert_eq!(pages, eval(&core, &by("title", false), &[]));
     }
 
@@ -1076,7 +1104,7 @@ mod tests {
         assert_eq!(shuffled(1), shuffled(1));
         assert_eq!(shuffled(1).len(), 7);
         assert!((2..12).any(|s| shuffled(s) != shuffled(1)));
-        let paged: Vec<String> = (0..7).flat_map(|p| core.smart_evaluate(json!({ "sort": { "field": "random", "seed": 1 } }).to_string(), vec![], p, 1).unwrap()).map(|s| s.id).collect();
+        let paged: Vec<String> = (0..7).flat_map(|p| core.smart_evaluate(json!({ "sort": { "field": "random", "seed": 1 } }).to_string(), p, 1).unwrap()).map(|s| s.id).collect();
         assert_eq!(paged, shuffled(1), "pages of a random order still tile");
     }
 
@@ -1086,8 +1114,8 @@ mod tests {
         // durations: dogs 1024 s, five of 200 s, bare 0 s
         let def = |ms: i64| json!({ "sort": { "field": "duration", "descending": true }, "limitMs": ms }).to_string();
         assert_eq!(eval(&core, &def(1_500_000), &[]), ["dogs", "pigs", "joga"]);
-        assert_eq!(core.smart_count(def(1_500_000), vec![]).unwrap(), 3);
-        assert_eq!(ids(&core.smart_evaluate(def(1_500_000), vec![], 1, 5).unwrap()), ["pigs", "joga"]);
+        assert_eq!(core.smart_count(def(1_500_000)).unwrap(), 3);
+        assert_eq!(ids(&core.smart_evaluate(def(1_500_000), 1, 5).unwrap()), ["pigs", "joga"]);
         assert!(eval(&core, &def(1000), &[]).is_empty(), "the first song is already over");
         assert_eq!(eval(&core, &def(100_000_000), &[]).len(), 7);
         let both = json!({ "sort": { "field": "duration", "descending": true }, "limitMs": 1_500_000, "limit": 2 }).to_string();
@@ -1099,10 +1127,10 @@ mod tests {
 
     #[test]
     fn empty_index() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         for d in smart_defaults() {
-            assert!(core.smart_evaluate(d.json.clone(), vec![], 0, 50).unwrap().is_empty());
-            assert_eq!(core.smart_count(d.json, vec![]).unwrap(), 0);
+            assert!(core.smart_evaluate(d.json.clone(), 0, 50).unwrap().is_empty());
+            assert_eq!(core.smart_count(d.json).unwrap(), 0);
         }
         assert!(core.smart_list().unwrap().is_empty());
     }
@@ -1161,9 +1189,9 @@ mod tests {
         }
         assert!(error(&format!(r#"{{"match":{deep}}}"#)).contains("nested more than 8"));
         // a broken definition is refused everywhere, not only by validate
-        let core = Core::new(String::new()).unwrap();
-        assert!(matches!(core.smart_evaluate("{".into(), vec![], 0, 1), Err(CoreError::Parse { .. })));
-        assert!(matches!(core.smart_count("{".into(), vec![]), Err(CoreError::Parse { .. })));
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        assert!(matches!(core.smart_evaluate("{".into(), 0, 1), Err(CoreError::Parse { .. })));
+        assert!(matches!(core.smart_count("{".into()), Err(CoreError::Parse { .. })));
         assert!(matches!(core.smart_save(String::new(), "x".into(), "{".into()), Err(CoreError::Parse { .. })));
         assert!(core.smart_list().unwrap().is_empty());
     }
@@ -1183,7 +1211,7 @@ mod tests {
 
     #[test]
     fn storage_round_trip() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let def = one("genre", "is", json!("Jazz"));
         let a = core.smart_save(String::new(), "Jazz".into(), def.clone()).unwrap();
         let b = core.smart_save(String::new(), "Ünïcödé ✓".into(), "{}".into()).unwrap();
@@ -1200,7 +1228,7 @@ mod tests {
 
     #[test]
     fn played_rules_are_driven_from_the_stats_table() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         let c = core.db.lock();
         let plan = |json: &str| -> String {
             let def = parse(json).unwrap();
@@ -1215,7 +1243,8 @@ mod tests {
         let of = |id: &str| defaults.iter().find(|d| d.id == id).unwrap().json.clone();
         for id in ["default-most-played", "default-recently-played"] {
             let p = plan(&of(id));
-            assert!(p.contains("SCAN s"), "{id}: {p}");
+            // Stats first: scanned, or searched by the server's part of its key.
+            assert!(p.starts_with("SCAN s") || p.starts_with("SEARCH s "), "{id}: {p}");
         }
         assert!(plan(&one("genre", "is", json!("rock"))).contains("items_genre"));
         assert!(plan(&of("default-forgotten-favourites")).contains("items_starred"));
@@ -1225,12 +1254,12 @@ mod tests {
     /// milliseconds per call in a release build; here it only has to work and to page correctly.
     #[test]
     fn a_hundred_thousand_songs() {
-        let core = Core::new(String::new()).unwrap();
+        let core = Core::new(String::new(), "t".into()).unwrap();
         {
             let mut c = core.db.lock();
             let tx = c.transaction().unwrap();
             {
-                let mut st = tx.prepare("INSERT INTO items(kind, id, json) VALUES(2, ?1, ?2)").unwrap();
+                let mut st = tx.prepare("INSERT INTO items(server, kind, id, json) VALUES(sid(), 2, ?1, ?2)").unwrap();
                 for i in 0..100_000u32 {
                     let s = Song {
                         id: format!("s{i}"),
@@ -1252,25 +1281,25 @@ mod tests {
             { "field": "title", "op": "contains", "value": "7" } ] },
             "sort": { "field": "duration", "descending": true }, "limit": 500 })
         .to_string();
-        let first = core.smart_evaluate(def.clone(), vec![], 0, 50).unwrap();
+        let first = core.smart_evaluate(def.clone(), 0, 50).unwrap();
         assert_eq!(first.len(), 50);
         assert!(first.windows(2).all(|w| w[0].duration >= w[1].duration));
         assert!(first.iter().all(|s| s.genre.as_deref() == Some("Jazz") && (1990..2000).contains(&s.year) && s.title.contains('7')));
-        let last = core.smart_evaluate(def.clone(), vec![], 480, 50).unwrap();
+        let last = core.smart_evaluate(def.clone(), 480, 50).unwrap();
         assert_eq!(last.len(), 20);
-        assert_eq!(core.smart_count(def, vec![]).unwrap(), 500);
+        assert_eq!(core.smart_count(def).unwrap(), 500);
 
         let starred = json!({ "match": { "rules": [{ "field": "starred", "op": "isTrue" }] }, "sort": { "field": "random", "seed": 7 } }).to_string();
-        assert_eq!(core.smart_count(starred.clone(), vec![]).unwrap(), 100);
-        assert_eq!(core.smart_evaluate(starred, vec![], 90, 50).unwrap().len(), 10);
+        assert_eq!(core.smart_count(starred.clone()).unwrap(), 100);
+        assert_eq!(core.smart_evaluate(starred, 90, 50).unwrap().len(), 10);
 
         let budget = json!({ "sort": { "field": "random", "seed": 3 }, "limitMs": 3_600_000 }).to_string();
-        let hour = core.smart_evaluate(budget.clone(), vec![], 0, 1000).unwrap();
+        let hour = core.smart_evaluate(budget.clone(), 0, 1000).unwrap();
         let total: u32 = hour.iter().map(|s| s.duration).sum();
         assert!(total <= 3600 && total > 3600 - 520, "{total}");
-        assert_eq!(core.smart_count(budget, vec![]).unwrap() as usize, hour.len());
+        assert_eq!(core.smart_count(budget).unwrap() as usize, hour.len());
 
         let unicode = json!({ "match": { "rules": [{ "field": "artist", "op": "is", "value": "ärtist 5" }] }, "limit": 10 }).to_string();
-        assert!(core.smart_evaluate(unicode, vec![], 0, 10).unwrap().is_empty());
+        assert!(core.smart_evaluate(unicode, 0, 10).unwrap().is_empty());
     }
 }

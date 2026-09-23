@@ -28,6 +28,17 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.withContext
+import dev.nori.music.ffi.HomeShelf
+import dev.nori.music.ffi.browsePaging
+import dev.nori.music.ffi.homePinned
+import dev.nori.music.ffi.homeRefreshDrops
+import dev.nori.music.ffi.homeShelves
+import dev.nori.music.ffi.songSorts
+import dev.nori.music.ffi.starOverlay
+import dev.nori.music.ffi.starOverlayAlbums
 
 /**
  * One row of the home page. Not every shelf is a shelf of albums: the playlists are playlists and the
@@ -68,43 +79,35 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
     /** True while a manual refresh is running, so the page can show that it is and then stop. */
     val refreshing: StateFlow<Boolean> = _refreshing
 
-    private fun row(sort: AlbumSort) = refreshes.flatMapLatest { nori.library.albums(sort, size = 20) }
-        .catch { emit(emptyList()) }.onStart { emit(emptyList()) }
-
-    private fun albumShelf(r: HomeRow, sort: AlbumSort) = row(sort).map { Shelf.Albums(r, it) }
-
-    private fun source(r: HomeRow): kotlinx.coroutines.flow.Flow<Shelf> = when (r) {
-        HomeRow.RECENT -> albumShelf(r, AlbumSort.RECENT)
-        HomeRow.NEWEST -> albumShelf(r, AlbumSort.NEWEST)
-        HomeRow.FREQUENT -> albumShelf(r, AlbumSort.FREQUENT)
-        HomeRow.RANDOM -> albumShelf(r, AlbumSort.RANDOM)
-        // The one shelf that answers a star, the way the favourites screen does: the list is asked for
-        // again whenever something is starred, and this session's marks are applied on top so an album
-        // that has just lost its heart leaves the shelf at once rather than when the server replies. No
-        // other shelf re-queries on a star, because a star changes nothing in any of them.
-        HomeRow.STARRED -> combine(
-            combine(refreshes, nori.library.starsVersion) { _, v -> v }.flatMapLatest { nori.library.albums(AlbumSort.STARRED, size = 20) },
-            nori.library.starMarks,
-        ) { albums, marks -> Shelf.Albums(r, albums.filter { marks["albumId:${it.id}"] != false }) }
-            .catch { emit(Shelf.Albums(r, emptyList())) }.onStart { emit(Shelf.Albums(r, emptyList())) }
-        // Every playlist there is, newest first, as against the handful the user pinned. Somebody who
-        // keeps six playlists does not want to choose which of them is worth pinning.
-        HomeRow.PLAYLISTS -> refreshes.flatMapLatest { nori.library.playlists() }.map { Shelf.Playlists(r, it.take(20)) }
+    /** What each shelf is and where it comes from is the core's (browse.rs); this only makes the requests. */
+    private fun source(r: HomeRow, shelf: HomeShelf): kotlinx.coroutines.flow.Flow<Shelf> = when (shelf) {
+        is HomeShelf.Albums -> {
+            val sort = AlbumSort.entries.first { it.api == shelf.sort }
+            val size = shelf.size.toInt()
+            if (shelf.followsStars) combine(
+                combine(refreshes, nori.library.starsVersion) { _, v -> v }.flatMapLatest { nori.library.albums(sort, size = size) },
+                nori.library.starMarks,
+            ) { albums, _ -> Shelf.Albums(r, withContext(Dispatchers.Default) { starOverlayAlbums(albums) }) }
+                .catch { emit(Shelf.Albums(r, emptyList())) }.onStart { emit(Shelf.Albums(r, emptyList())) }
+            else refreshes.flatMapLatest { nori.library.albums(sort, size = size) }
+                .catch { emit(emptyList()) }.onStart { emit(emptyList()) }.map { Shelf.Albums(r, it) }
+        }
+        is HomeShelf.Playlists -> refreshes.flatMapLatest { nori.library.playlists() }.map { Shelf.Playlists(r, it.take(shelf.take.toInt())) }
             .catch { emit(Shelf.Playlists(r, emptyList())) }.onStart { emit(Shelf.Playlists(r, emptyList())) }
-        // Straight out of the offline index, so it costs no request at all - and worth reading again
-        // after a refresh, which is the one thing that changes what the index holds.
-        HomeRow.TOP_SONGS -> refreshes.flatMapLatest {
-            flow { emit(Shelf.Songs(r, runCatching { nori.library.browseSongs("playCount", true, false, null, 0, 20) }.getOrDefault(emptyList()))) }
+        // Worth reading again after a refresh, which is the one thing that changes what the index holds.
+        is HomeShelf.Songs -> refreshes.flatMapLatest {
+            flow { emit(Shelf.Songs(r, runCatching { nori.library.browseSongs(shelf.sort, shelf.descending, false, null, 0, shelf.limit.toInt()) }.getOrDefault(emptyList()))) }
         }.onStart { emit(Shelf.Songs(r, emptyList())) }
-        // The pinned playlists are fetched once for the whole page, below, because the row is a
-        // selection of something the page already has to hold.
-        HomeRow.PINNED -> flowOf(Shelf.Playlists(r, emptyList()))
+        HomeShelf.Pinned -> flowOf(Shelf.Playlists(r, emptyList()))
+        HomeShelf.Hidden -> flowOf(Shelf.Albums(r, emptyList()))
     }
 
     /** Only the rows the user kept are requested at all; a hidden shelf costs no request. */
     val ui: StateFlow<Load<HomeUi>> = nori.settings.prefs.map { it.homeRows to it.pinnedPlaylists }.distinctUntilChanged().flatMapLatest { (rows, pins) ->
-        val pinned = if (HomeRow.PINNED in rows && pins.isNotEmpty()) refreshes.flatMapLatest { nori.library.playlists() }.map { all -> all.filter { it.id in pins } }.catch { emit(emptyList()) }.onStart { emit(emptyList()) } else flowOf(emptyList())
-        combine(combine(rows.map(::source)) { it.toList() }.onStart { emit(emptyList()) }, pinned) { shelves, p -> HomeUi(shelves, p) }
+        val shelves = homeShelves(rows.map { it.name })
+        val pinned = if (HomeShelf.Pinned in shelves && pins.isNotEmpty()) refreshes.flatMapLatest { nori.library.playlists() }
+            .map { all -> withContext(Dispatchers.Default) { homePinned(all, pins) } }.catch { emit(emptyList()) }.onStart { emit(emptyList()) } else flowOf(emptyList())
+        combine(combine(rows.zip(shelves, ::source)) { it.toList() }.onStart { emit(emptyList()) }, pinned) { s, p -> HomeUi(s, p) }
     }.asLoad()
 
     /**
@@ -118,7 +121,7 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
         _refreshing.value = true
         viewModelScope.launch {
             try {
-                runCatching { nori.library.dropCached("getAlbumList2", "getPlaylists", "getStarred2") }
+                runCatching { nori.library.dropCached(*homeRefreshDrops().toTypedArray()) }
                 refreshes.update { it + 1 }
                 runCatching { nori.library.sync().collect { } }
             } finally {
@@ -131,10 +134,10 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
 /** The album grid: one sort order at a time, pages appended as the list nears its end. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class AlbumsViewModel(app: Application) : NoriViewModel(app) {
-    private val pageSize = 60
+    private val pageSize by lazy { browsePaging().albums.toInt() }
     private val _sort = MutableStateFlow(nori.settings.value.listPrefs["albums.sort"]?.let { n -> AlbumSort.entries.firstOrNull { it.name == n } } ?: AlbumSort.BY_NAME)
     val sort: StateFlow<AlbumSort> = _sort
-    private val _albums = MutableStateFlow<List<Album>>(emptyList())
+    private val _albums = MutableStateFlow(Grown.empty<Album>())
     val albums: StateFlow<List<Album>> = _albums
     private var loading = false
     private var exhausted = false
@@ -145,7 +148,7 @@ class AlbumsViewModel(app: Application) : NoriViewModel(app) {
         if (s == _sort.value) return
         _sort.value = s
         nori.settings.update { it.copy(listPrefs = it.listPrefs + ("albums.sort" to s.name)) }
-        _albums.value = emptyList()
+        _albums.value = Grown.empty()
         exhausted = false
         loading = false
         loadMore()
@@ -159,7 +162,7 @@ class AlbumsViewModel(app: Application) : NoriViewModel(app) {
         viewModelScope.launch {
             nori.library.albums(sort, pageSize, offset).catch { }.collect { page ->
                 if (sort != _sort.value) return@collect
-                _albums.update { it.take(offset) + page }
+                _albums.value = _albums.value.from(offset, page)
                 exhausted = page.size < pageSize
             }
             loading = false
@@ -184,15 +187,11 @@ class StarredViewModel(app: Application) : NoriViewModel(app) {
     // Re-queried on every star change: the one-shot read would otherwise keep a removed favourite
     // until the screen is reopened. The stored answer paints first, so there is no loading flash.
     @OptIn(ExperimentalCoroutinesApi::class)
-    // This session's marks are applied on top, so an unstarred item leaves the list at once rather than
-    // when the server's new answer arrives.
-    val starred: StateFlow<Load<Starred>> = combine(nori.library.starsVersion.flatMapLatest { nori.library.starred() }, nori.library.starMarks) { s, marks ->
-        s.copy(
-            artists = s.artists.filter { marks["artistId:${it.id}"] != false },
-            albums = s.albums.filter { marks["albumId:${it.id}"] != false },
-            songs = s.songs.filter { marks["id:${it.id}"] != false },
-        )
-    }.asLoad()
+    // This session's marks are applied on top (by the core, which keeps them), so an unstarred item
+    // leaves the list at once rather than when the server's new answer arrives.
+    val starred: StateFlow<Load<Starred>> = combine(nori.library.starsVersion.flatMapLatest { nori.library.starred() }, nori.library.starMarks) { s, _ ->
+        starOverlay(s)
+    }.flowOn(Dispatchers.Default).asLoad()
 }
 
 class GenresViewModel(app: Application) : NoriViewModel(app) {
@@ -250,19 +249,24 @@ class GenreViewModel(app: Application) : DetailViewModel<List<Song>>(app) {
     override fun load(id: String) = flow { emit(nori.library.songsByGenre(id)) }
 }
 
-enum class SongSort(val key: String, val label: String, val descending: Boolean = false) {
-    TITLE("title", "Title"), ARTIST("artist", "Artist"), ALBUM("album", "Album"), YEAR("year", "Year", true),
-    ADDED("created", "Added", true), PLAYS("playCount", "Most played", true), LONGEST("duration", "Longest", true),
+/** The orders of the "all songs" list; what each sorts on, and its label, are the core's (`song_sorts`). */
+enum class SongSort {
+    TITLE, ARTIST, ALBUM, YEAR, ADDED, PLAYS, LONGEST;
+
+    val label: String get() = labels[name] ?: name
+
+    private companion object {
+        val labels: Map<String, String> by lazy { songSorts().associate { it.name to it.label } }
+    }
 }
 
 /** Every song of the offline index, a page at a time. Nothing here touches the network. */
 class SongsViewModel(app: Application) : NoriViewModel(app) {
-    private val page = 200
     private val _sort = MutableStateFlow(nori.settings.value.listPrefs["songs.sort"]?.let { n -> SongSort.entries.firstOrNull { it.name == n } } ?: SongSort.TITLE)
     val sort: StateFlow<SongSort> = _sort
     private val _starred = MutableStateFlow(false)
     val starredOnly: StateFlow<Boolean> = _starred
-    private val _songs = MutableStateFlow<List<Song>>(emptyList())
+    private val _songs = MutableStateFlow(Grown.empty<Song>())
     val songs: StateFlow<List<Song>> = _songs
     private var years: IntRange? = null
     private var loading = false
@@ -273,15 +277,21 @@ class SongsViewModel(app: Application) : NoriViewModel(app) {
     fun setYears(range: IntRange?) { if (range != years) { years = range; reset() } }
     fun setSort(s: SongSort) { _sort.value = s; nori.settings.update { it.copy(listPrefs = it.listPrefs + ("songs.sort" to s.name)) }; reset() }
     fun setStarredOnly(on: Boolean) { _starred.value = on; reset() }
-    private fun reset() { _songs.value = emptyList(); exhausted = false; loading = false; loadMore() }
+    private fun reset() { _songs.value = Grown.empty(); exhausted = false; loading = false; loadMore() }
 
     fun loadMore() {
         if (loading || exhausted) return
         loading = true
-        val (s, st, y, offset) = listOf(_sort.value, _starred.value, years, _songs.value.size)
+        val s = _sort.value
+        val st = _starred.value
+        val y = years
+        val offset = _songs.value.size
         viewModelScope.launch {
-            val next = runCatching { nori.library.browseSongs(_sort.value.key, _sort.value.descending, _starred.value, years, offset as Int, page) }.getOrDefault(emptyList())
-            if (s == _sort.value && st == _starred.value && y == years) { _songs.update { it + next }; exhausted = next.size < page }
+            // A page that could not be read ends the list, as an empty one would.
+            val next = runCatching {
+                withContext(Dispatchers.IO) { nori.core.songsPage(s.name, st, (y?.first ?: 0).toUInt(), (y?.last ?: 0).toUInt(), offset.toUInt()) }
+            }.getOrNull()
+            if (s == _sort.value && st == _starred.value && y == years) { _songs.value = _songs.value.plus(next?.songs.orEmpty()); exhausted = next?.exhausted ?: true }
             loading = false
         }
     }

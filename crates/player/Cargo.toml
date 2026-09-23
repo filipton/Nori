@@ -14,6 +14,7 @@ synth = []
 
 [dependencies]
 parking_lot = "0.12"
+nori-text = { path = "../text" }
 # AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
 rustfft = "6"
 signalsmith-stretch = "0.1"

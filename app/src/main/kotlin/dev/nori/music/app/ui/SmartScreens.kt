@@ -75,14 +75,6 @@ private fun <T> Pick(value: T, options: List<T>, modifier: Modifier = Modifier, 
     DropdownMenu(open, { open = false }) { options.forEach { o -> DropdownMenuItem({ Text(label(o)) }, { onPick(o); open = false }) } }
 }
 
-/** Each tile's own colour: what it wears before its covers arrive, and the band its name sits on. */
-private fun mixColour(id: String) = androidx.compose.ui.graphics.Color(
-    when (id) {
-        FAVOURITES_MIX -> 0xFFE0335A; "quick-picks" -> 0xFF8E3BD6; "discover" -> 0xFF1E88E5
-        "discover-weekly" -> 0xFF1565C0; "listen-again" -> 0xFF00897B; "top" -> 0xFFE0662B; else -> 0xFF5C6BC0
-    },
-)
-
 /**
  * A mix's artwork: four covers of what is in it, the mix's colour rising from the bottom under its
  * name. Before there is anything in it, the colour alone. The covers cross-fade in and out, so a tile
@@ -91,8 +83,11 @@ private fun mixColour(id: String) = androidx.compose.ui.graphics.Color(
  */
 @Composable
 private fun MixArt(card: MixCard, size: androidx.compose.ui.unit.Dp, onClick: (() -> Unit)? = null, large: Boolean = false) {
-    val seed = mixColour(card.id)
-    val deep = blend(seed, androidx.compose.ui.graphics.Color.Black, 0.45f)
+    // The tile's colour, the deeper one it runs to and the band under its name (nori-core's
+    // `mix_tile_colours`), once per mix.
+    val c = remember(card.id) { dev.nori.music.ffi.mixTileColours(card.id).map { androidx.compose.ui.graphics.Color(it.toInt()) } }
+    val seed = c[0]
+    val deep = c[1]
     val white = androidx.compose.ui.graphics.Color.White
     Box(
         Modifier.size(size).clip(if (large) TileShape else CardShape)
@@ -118,7 +113,7 @@ private fun MixArt(card: MixCard, size: androidx.compose.ui.unit.Dp, onClick: ((
         Box(
             Modifier.matchParentSize().background(
                 androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0.38f to deep.copy(alpha = 0f), 0.72f to deep.copy(alpha = 0.72f), 1f to deep.copy(alpha = 0.94f),
+                    0.38f to c[2], 0.72f to c[3], 1f to c[4],
                 ),
             ),
         )
@@ -268,7 +263,7 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
         draft.rules.forEachIndexed { i, r ->
             fun set(n: SmartRule) { draft = draft.copy(rules = draft.rules.toMutableList().also { it[i] = n }) }
             Surface(
-                shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+                shape = CardShape, color = LocalLook.current.color(dev.nori.music.look.CoverLook.VEIL_6),
                 contentColor = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 5.dp),
             ) {
@@ -337,11 +332,12 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
             items(listOf(7 to "Week", 30 to "Month", 365 to "Year", 0 to "All time")) { (d, l) -> Chip(l, days == d) { days = d } }
         }
         val st = s ?: return@Column
+        val words = remember(st) { dev.nori.music.ffi.statsWords(st) }
 
         // The headline: two numbers worth reading from across the room, the rest as a grid of tiles.
         Column(Modifier.padding(horizontal = Space.gutter, vertical = 14.dp)) {
             Text("${st.plays}", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
-            Text("plays · ${duration(st.listenedMs / 1000)} listened", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(words.headline, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Row(Modifier.padding(horizontal = 14.dp), Arrangement.spacedBy(8.dp)) {
             StatTile("${st.distinctSongs}", "songs", Modifier.weight(1f))
@@ -354,13 +350,11 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
             StatTile("${st.longestStreakDays}", "day streak", Modifier.weight(1f))
         }
 
-        val peak = st.playsPerHour.withIndex().maxByOrNull { it.value }
-        if (peak != null && peak.value > 0u) {
+        words.habit?.let { said ->
             SectionTitle("When you listen")
-            HourChart(st.playsPerHour.map { it.toInt() })
+            HourChart(words.hours)
             Text(
-                "Most around ${peak.index}:00" + st.playsPerWeekday.withIndex().maxByOrNull { it.value }
-                    ?.let { ", mostly on ${listOf("Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays")[it.index]}" }.orEmpty(),
+                said,
                 Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
                 style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -369,7 +363,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
         if (st.topSongs.isNotEmpty()) SectionTitle("Top songs")
         st.topSongs.forEachIndexed { i, t -> RankRow(i + 1, t.song.title, t.song.artist, "${t.plays}") }
         if (st.topArtists.isNotEmpty()) SectionTitle("Top artists")
-        st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, duration(t.listenedMs / 1000), "${t.plays}") }
+        st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, words.artistTimes[i], "${t.plays}") }
         if (st.topAlbums.isNotEmpty()) SectionTitle("Top albums")
         st.topAlbums.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
         if (st.topGenres.isNotEmpty()) SectionTitle("Top genres")
@@ -381,7 +375,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
 @Composable
 private fun StatTile(value: String, label: String, modifier: Modifier = Modifier) {
     Surface(
-        shape = CardShape, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f).over(MaterialTheme.colorScheme.background),
+        shape = CardShape, color = LocalLook.current.color(dev.nori.music.look.CoverLook.VEIL_6),
         contentColor = MaterialTheme.colorScheme.onSurface, modifier = modifier,
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
@@ -393,19 +387,18 @@ private fun StatTile(value: String, label: String, modifier: Modifier = Modifier
 
 /** Twenty-four bars, drawn: the shape of a listening day says more than "most around 20:00" alone. */
 @Composable
-private fun HourChart(perHour: List<Int>) {
-    val peak = (perHour.maxOrNull() ?: 0).coerceAtLeast(1)
+private fun HourChart(perHour: List<Float>) {
     val bar = MaterialTheme.colorScheme.primary
     val dim = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
     Column(Modifier.padding(horizontal = Space.gutter)) {
         androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(96.dp)) {
             val gap = size.width / 24f * 0.28f
             val w = size.width / 24f - gap
-            perHour.forEachIndexed { h, plays ->
+            perHour.forEachIndexed { h, share ->
                 val x = h * (w + gap)
-                val tall = size.height * (plays / peak.toFloat())
+                val tall = size.height * share
                 drawRoundRect(dim, androidx.compose.ui.geometry.Offset(x, 0f), androidx.compose.ui.geometry.Size(w, size.height), androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f))
-                if (plays > 0) drawRoundRect(
+                if (share > 0f) drawRoundRect(
                     bar, androidx.compose.ui.geometry.Offset(x, size.height - tall),
                     androidx.compose.ui.geometry.Size(w, tall), androidx.compose.ui.geometry.CornerRadius(w / 2f, w / 2f),
                 )

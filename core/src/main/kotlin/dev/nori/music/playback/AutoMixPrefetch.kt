@@ -69,7 +69,7 @@ class AutoMixPrefetch(
     /** Whether the whole file is already on the device, as a download or as a complete cache entry. */
     private fun onDevice(id: String): Boolean {
         if (id in sources.downloaded) return true
-        val key = runCatching { sources.resolve(DataSpec(songUri(id))).key }.getOrNull() ?: return false
+        val key = runCatching { sources.streamKey(id) }.getOrNull() ?: return false
         val length = ContentMetadata.getContentLength(sources.streamCache.getContentMetadata(key))
         return length > 0 && sources.streamCache.getCachedBytes(key, 0, length) >= length
     }
