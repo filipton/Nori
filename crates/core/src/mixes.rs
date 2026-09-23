@@ -16,7 +16,7 @@ use rusqlite::{types::Value, Connection, OptionalExtension};
 use crate::{db, history, model::Song, Core, Result};
 
 /// The "For you" row built on these draws.
-pub(crate) mod board;
+pub mod board;
 
 const DAY_MS: i64 = 86_400_000;
 
@@ -363,7 +363,7 @@ fn instant(c: &Connection, seed_song_id: &str, limit: usize, seed: u64, now_ms: 
 
 /// All mixes are read-only and take a few milliseconds; call them off the main thread like every other
 /// core call. `seed` picks the draw: keep it to get the same mix again, change it to refresh.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     pub fn mix_quick_picks(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
         Ok(quick_picks(&self.db.lock(), limit as usize, seed, db::now_ms())?)
@@ -428,7 +428,7 @@ impl Core {
 }
 
 /// Shuffle for a play queue: seeded, and songs of one artist (and, when possible, of one album) are kept apart.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn weighted_shuffle(songs: Vec<Song>, seed: u64) -> Vec<Song> {
     spread(songs, &mut Rng::new(seed), None)
 }

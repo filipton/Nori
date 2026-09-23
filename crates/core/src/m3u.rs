@@ -21,7 +21,7 @@ fn line(s: &str) -> String {
 
 /// The name an imported file's playlist gets: the file's own name without its folders or extension,
 /// "Imported" when the picker said nothing about it.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn m3u_playlist_name(file: Option<String>) -> String {
     let Some(f) = file else { return "Imported".into() };
     let base = f.rsplit('/').next().unwrap_or(&f);
@@ -29,12 +29,12 @@ pub fn m3u_playlist_name(file: Option<String>) -> String {
 }
 
 /// The file an exported playlist is offered as.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn m3u_file_name(playlist: String) -> String {
     format!("{playlist}.m3u8")
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn m3u_export(name: String, songs: Vec<Song>) -> String {
     let mut out = String::from("#EXTM3U\n");
     if !line(&name).is_empty() {
@@ -80,7 +80,7 @@ fn from_path(path: &str) -> (String, String) {
     (artist, title)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn m3u_parse(text: String) -> Vec<M3uEntry> {
     let mut out = Vec::new();
     let mut info: Option<(i32, String)> = None;
@@ -147,7 +147,7 @@ fn resolve(c: &Connection, e: &M3uEntry) -> rusqlite::Result<Option<Song>> {
     Ok(closest(by_title, e.duration_s))
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// One result per entry, in order; None where the index has nothing that fits. One call for the whole
     /// playlist: exact artist and title first, then the full-text index.

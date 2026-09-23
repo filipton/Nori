@@ -114,7 +114,6 @@ private val CREDITS by lazy {
             Credit("OkHttp", "Every network request", "Copyright Square, Inc.", "Apache-2.0", "Apache-2.0"),
             Credit("Coil", "Loading and caching covers", "Copyright Coil Contributors", "Apache-2.0", "Apache-2.0"),
             Credit("kotlinx.coroutines", "The concurrency the app is written in", "Copyright JetBrains s.r.o. and Kotlin Programming Language contributors", "Apache-2.0", "Apache-2.0"),
-            Credit("JNA", "How Kotlin reaches the Rust core, taken under the Apache half of its dual licence", "Copyright (c) 2007 Timothy Wall and the JNA contributors", "Apache-2.0", "Apache-2.0"),
         ),
         "Fonts and data" to listOf(
             Credit("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", "OFL-1.1"),

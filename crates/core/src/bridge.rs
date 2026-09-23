@@ -50,7 +50,7 @@ pub fn pick(seed: Option<&Song>, pool: &[Song], exclude: &[String], n: usize, rn
     scored.into_iter().take(n).map(|(_, s)| s.clone()).collect()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The server cannot be reached for the song playing: downloads to play instead, the closest to it
     /// first, none already queued. The first time the song and what follows are parked behind them;

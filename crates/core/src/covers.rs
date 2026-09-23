@@ -19,7 +19,8 @@ const PROVIDER_PREFIXES: [&str; 2] = ["ext-", "pl-"];
 
 /// How the app sizes, names and keeps artwork. Read once; a list asks for thousands of covers and builds
 /// their addresses itself from the signed prefix (`Core::url_prefix`) rather than crossing for each.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CoverRules {
     pub row: u32,
     pub card: u32,
@@ -35,7 +36,7 @@ pub struct CoverRules {
     pub disk_bytes: u64,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn cover_rules() -> CoverRules {
     CoverRules {
         row: ROW,
@@ -50,7 +51,8 @@ pub fn cover_rules() -> CoverRules {
 }
 
 /// One cover to fetch: the cover id at one size.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct CoverWant {
     pub id: String,
     pub size: u32,
@@ -64,7 +66,7 @@ fn warmable(art: &str) -> bool {
 
 /// The covers of `arts` (cover ids, in order) to fetch, each at both sizes: provider artwork left out,
 /// each cover once, at most `cap` covers.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn cover_wants(arts: Vec<String>, cap: u32) -> Vec<CoverWant> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
@@ -87,7 +89,7 @@ pub fn cover_wants(arts: Vec<String>, cap: u32) -> Vec<CoverWant> {
 /// as forwards: going back through a queue is as ordinary as going on, and with only the one song behind
 /// warmed, the second swipe back always waited on the server. `ahead` 0 still warms the song behind.
 /// Only positions inside a queue of `len` songs, never the one playing.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn cover_neighbours(index: i32, previous: i32, next: i32, ahead: i32, len: u32) -> Vec<u32> {
     let ahead = ahead.max(0);
     let mut around = vec![previous, next];

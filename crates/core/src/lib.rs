@@ -2,56 +2,52 @@
 //! SQLite index. No sockets and no threads of its own; every call is coarse
 //! (one response, one page) so the FFI crossing stays off the hot path.
 
-uniffi::setup_scaffolding!();
-
-mod api;
-mod autoeq;
+pub mod api;
+pub mod autoeq;
 pub mod automix;
-mod db;
-mod lyrics;
+pub mod db;
+pub mod lyrics;
 pub mod dsp;
-mod stages;
-mod alog;
+pub mod alog;
 pub mod transfers;
-mod look;
-mod seek;
+pub mod look;
 pub mod queue;
-mod background;
-mod scrobble;
-mod rules;
-mod bridge;
-mod heard;
-mod history;
-mod m3u;
-mod mixes;
-mod model;
-mod outputs;
-mod profiles;
-mod settings;
-mod settings_store;
-mod settings_schema;
-mod fmt;
-mod pages;
-mod smart;
-mod stars;
-mod actions;
-mod browse;
-mod covers;
-mod search;
-mod words;
-mod transport;
-mod client;
-mod cache_policy;
-mod lrclib;
-mod stream;
-mod autofill;
-mod car;
-mod decoder;
-mod stream_cache;
-mod playlist;
-mod library;
-mod menus;
-mod stage;
+pub mod background;
+pub mod scrobble;
+pub mod rules;
+pub mod bridge;
+pub mod heard;
+pub mod history;
+pub mod m3u;
+pub mod mixes;
+pub mod model;
+pub mod outputs;
+pub mod profiles;
+pub mod settings;
+pub mod settings_store;
+pub mod settings_schema;
+pub mod fmt;
+pub mod pages;
+pub mod smart;
+pub mod stars;
+pub mod actions;
+pub mod browse;
+pub mod covers;
+pub mod search;
+pub mod words;
+pub mod transport;
+pub mod client;
+pub mod cache_policy;
+pub mod lrclib;
+pub mod stream;
+pub mod autofill;
+pub mod car;
+pub mod decoder;
+pub mod stream_cache;
+pub mod playlist;
+pub mod library;
+pub mod menus;
+pub mod stage;
 
 use std::sync::Arc;
 
@@ -61,7 +57,9 @@ use serde::Deserialize;
 
 pub use model::*;
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+// Kotlin's exception carries no message (uniffi's JNI bindings give none), so its `toString` is this Display.
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Error), uniffi::export(Display))]
 pub enum CoreError {
     #[error("{reason}")]
     Api { code: i32, reason: String },
@@ -79,7 +77,8 @@ impl From<rusqlite::Error> for CoreError {
 
 type Result<T> = std::result::Result<T, CoreError>;
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ServerConfig {
     pub url: String,
     pub user: String,
@@ -89,14 +88,16 @@ pub struct ServerConfig {
     pub legacy_auth: bool,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PendingCall {
     pub row_id: i64,
     pub endpoint: String,
     pub params: Vec<Param>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Param {
     pub key: String,
     pub value: String,
@@ -302,20 +303,23 @@ pub(crate) fn active() -> Option<Arc<Core>> {
     ACTIVE.lock().upgrade()
 }
 
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Core {
     db: Mutex<Connection>,
     server: RwLock<api::Server>,
+    /// The downloads table's ids, for asking about one song without the database (transfers.rs).
+    held: Mutex<transfers::Held>,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The app's database at `db_path` (empty: in memory), for `server`'s rows (a server profile's id).
-    #[uniffi::constructor]
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
         let db = db::open(&db_path, &server)?;
         automix::store::migrate(&db)?;
-        let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) });
+        let held = transfers::Held::load(&db)?;
+        let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()), held: Mutex::new(held) });
         // The newest core is the one the app is using: the audio path finds the database through it.
         *ACTIVE.lock() = Arc::downgrade(&core);
         Ok(core)
@@ -439,19 +443,19 @@ impl Core {
     pub fn parse_starred(&self, body: Vec<u8>) -> Result<Starred> {
         let f = parse(&body)?.starred2.unwrap_or_default();
         db::index(&mut self.db.lock(), &f.artist, &f.album, &f.song)?;
-        Ok(Starred { artists: f.artist, albums: f.album, songs: f.song })
+        Ok(Starred::new(f.artist, f.album, f.song))
     }
 
     pub fn parse_album(&self, body: Vec<u8>) -> Result<AlbumDetail> {
         let a = parse(&body)?.album.unwrap_or_default();
         db::index(&mut self.db.lock(), &[], std::slice::from_ref(&a.album), &a.song)?;
-        Ok(AlbumDetail { album: a.album, songs: a.song, disc_titles: a.disc_titles })
+        Ok(AlbumDetail::new(a.album, a.song, a.disc_titles))
     }
 
     pub fn parse_artist(&self, body: Vec<u8>) -> Result<ArtistDetail> {
         let a = parse(&body)?.artist.unwrap_or_default();
         db::index(&mut self.db.lock(), std::slice::from_ref(&a.artist), &a.album, &[])?;
-        Ok(ArtistDetail { artist: a.artist, albums: a.album })
+        Ok(ArtistDetail::new(a.artist, a.album))
     }
 
     pub fn parse_artist_info(&self, body: Vec<u8>) -> Result<ArtistInfo> {
@@ -499,7 +503,7 @@ impl Core {
     pub fn parse_playlist(&self, body: Vec<u8>) -> Result<PlaylistDetail> {
         let p = parse(&body)?.playlist.unwrap_or_default();
         db::index(&mut self.db.lock(), &[], &[], &p.entry)?;
-        Ok(PlaylistDetail { playlist: p.playlist, songs: p.entry })
+        Ok(PlaylistDetail::new(p.playlist, p.entry))
     }
 
     pub fn parse_genres(&self, body: Vec<u8>) -> Result<Vec<Genre>> {
@@ -585,6 +589,8 @@ impl Core {
         let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
         // A queue saved by an older build (or edited since) may point past its end: the last song then.
         let index = q.index.min(q.songs.len().saturating_sub(1) as u32);
+        // Kept for the queue it is about to become, so the platform does not hand the songs straight back.
+        crate::queue::queue_register(q.songs.clone());
         Ok(PlayQueue { songs: q.songs, index, position_ms: q.position })
     }
 
@@ -641,25 +647,15 @@ impl Core {
         Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
     }
 
-    /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
-    pub fn browse_decades(&self) -> Result<Vec<Genre>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE server=sid() AND kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
-        let rows = st.query_map([db::SONG], |r| Ok(Genre { name: r.get::<_, i64>(0)?.to_string(), song_count: r.get(1)?, album_count: 0 }))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
     // ---- downloads: the metadata side; media3 owns the bytes. Songs are queued by transfers.rs ----
 
     /// A queued song finished; [downloads] with `done` lists it from now on.
     pub fn download_done(&self, id: String) -> Result<()> {
-        self.db.lock().execute("UPDATE downloads SET done=1 WHERE server=sid() AND id=?1", [id])?;
-        Ok(())
+        self.download_settle(vec![id], vec![true])
     }
 
     pub fn download_remove(&self, id: String) -> Result<()> {
-        self.db.lock().execute("DELETE FROM downloads WHERE server=sid() AND id=?1", [id])?;
-        Ok(())
+        self.download_settle(vec![id], vec![false])
     }
 
     pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
@@ -778,14 +774,14 @@ impl Core {
 }
 
 /// LRC or plain lyrics text, from a third-party provider, into the app's lyrics shape.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_from_lrc(text: String) -> Lyrics {
     lyrics::from_lrc(&text)
 }
 
 /// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
 /// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn parse_eq_preset(text: String) -> EqPreset {
     let mut preset = EqPreset::default();
     for line in text.lines() {
@@ -822,4 +818,4 @@ pub fn parse_eq_preset(text: String) -> EqPreset {
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;

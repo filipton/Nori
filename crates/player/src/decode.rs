@@ -139,6 +139,13 @@ fn opus_setup(extra: Option<&[u8]>) -> Option<(usize, usize, usize, f32)> {
     Some((channels, pre_skip, pre_roll, gain))
 }
 
+/// One packet's samples as [`Decoder::decode_lent`] lends them, and the shape they came out in.
+pub struct Lent<'a> {
+    pub samples: &'a [f32],
+    pub channels: usize,
+    pub rate: u32,
+}
+
 pub struct Decoder {
     inner: Engine,
     codec: Codec,
@@ -225,6 +232,16 @@ impl Decoder {
     pub fn decode_f32(&mut self, packet: &[u8], out: &mut [f32]) -> Result<usize, Fault> {
         self.decode(packet)?;
         self.take_f32(out)
+    }
+
+    /// Decodes `packet` and lends its samples where they lie, interleaved: for a reader in the same
+    /// process (the analyser measuring a track ahead) that would only copy them on. Nothing is kept
+    /// for `take_*`.
+    pub fn decode_lent(&mut self, packet: &[u8]) -> Result<Lent<'_>, Fault> {
+        self.decode(packet)?;
+        let n = std::mem::take(&mut self.held) * self.channels;
+        let from = self.from * self.channels;
+        Ok(Lent { samples: &self.scratch[from..from + n], channels: self.channels, rate: self.rate })
     }
 
     fn decode(&mut self, packet: &[u8]) -> Result<(), Fault> {
@@ -338,8 +355,9 @@ fn mp3_main_data_begin(frame: &[u8]) -> u16 {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use crate::sim::{mp3_frames, ogg_opus};
 
     #[test]
     fn codecs_cross_by_number_and_are_named_by_mime() {
@@ -354,37 +372,6 @@ pub(crate) mod tests {
     #[test]
     fn every_codec_opens_without_setup_data_where_it_needs_none() {
         assert!(Decoder::new(Codec::Mp3, 44_100, 2, None, true).is_ok());
-    }
-
-    /// MPEG audio frames out of a file, the way the platform's extractor hands them in: tags skipped,
-    /// and the LAME/Xing info frame (which carries the gapless numbers, not audio) left out.
-    pub(crate) fn mp3_frames(file: &[u8]) -> Vec<&[u8]> {
-        let mut i = 0;
-        if file.starts_with(b"ID3") {
-            let size = file[6..10].iter().fold(0usize, |a, &b| (a << 7) | (b & 0x7F) as usize);
-            i = 10 + size;
-        }
-        let mut frames = Vec::new();
-        while i + 4 <= file.len() {
-            let h = u32::from_be_bytes([file[i], file[i + 1], file[i + 2], file[i + 3]]);
-            if h >> 21 != 0x7FF {
-                i += 1;
-                continue;
-            }
-            let bitrate = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320][((h >> 12) & 0xF) as usize] * 1000;
-            let rate = [44_100, 48_000, 32_000][((h >> 10) & 3) as usize];
-            let len = 144 * bitrate / rate + ((h >> 9) & 1) as usize;
-            if len == 0 || i + len > file.len() {
-                break;
-            }
-            let frame = &file[i..i + len];
-            let info = frame.windows(4).take(64).any(|w| w == b"Xing" || w == b"Info");
-            if !info {
-                frames.push(frame);
-            }
-            i += len;
-        }
-        frames
     }
 
     #[test]
@@ -448,6 +435,21 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn lent_samples_are_the_ones_taken_otherwise() {
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.mp3")).unwrap();
+        let frames = mp3_frames(&file);
+        let mut taken = Decoder::new(Codec::Mp3, 44_100, 2, None, false).unwrap();
+        let mut lent = Decoder::new(Codec::Mp3, 44_100, 2, None, false).unwrap();
+        let mut out = vec![0f32; 1152 * 2];
+        for f in &frames[..4] {
+            let n = taken.decode_f32(f, &mut out).unwrap();
+            let l = lent.decode_lent(f).unwrap();
+            assert_eq!((l.samples, l.channels, l.rate), (&out[..n * 2], 2, 44_100), "the decoder delay dropped the same way");
+        }
+        assert_eq!(lent.take_f32(&mut out), Ok(0), "nothing kept after a loan");
+    }
+
+    #[test]
     fn a_frame_whose_audio_began_before_the_seek_is_silence() {
         let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.mp3")).unwrap();
         let frames = mp3_frames(&file);
@@ -477,34 +479,6 @@ pub(crate) mod tests {
         e.extend_from_slice(&[0x10, 0x00, 0x10, 0x00, 0, 0, 0, 0, 0, 0, 0x0A, 0xC4, 0x42, 0xF0, 0, 0, 0, 0]);
         e.extend_from_slice(&[0u8; 16]);
         assert!(Decoder::new(Codec::Flac, 44_100, 2, Some(&e), false).is_ok());
-    }
-
-    /// Opus packets out of an Ogg file, and the setup media3 would hand over with them: the OpusHead,
-    /// then the pre-skip and an 80 ms seek pre-roll in nanoseconds.
-    pub(crate) fn ogg_opus(file: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
-        let mut packets = Vec::new();
-        let mut cur = Vec::new();
-        let mut i = 0;
-        while i + 27 <= file.len() && &file[i..i + 4] == b"OggS" {
-            let segs = file[i + 26] as usize;
-            let table = &file[i + 27..i + 27 + segs];
-            let mut at = i + 27 + segs;
-            for &l in table {
-                cur.extend_from_slice(&file[at..at + l as usize]);
-                at += l as usize;
-                if l < 255 {
-                    packets.push(std::mem::take(&mut cur));
-                }
-            }
-            i = at;
-        }
-        let head = packets.remove(0);
-        packets.remove(0); // OpusTags
-        let pre_skip = u16::from_le_bytes([head[10], head[11]]) as i64;
-        let mut setup = head.clone();
-        setup.extend_from_slice(&(pre_skip * 1_000_000_000 / 48_000).to_ne_bytes());
-        setup.extend_from_slice(&80_000_000i64.to_ne_bytes());
-        (setup, packets)
     }
 
     #[test]

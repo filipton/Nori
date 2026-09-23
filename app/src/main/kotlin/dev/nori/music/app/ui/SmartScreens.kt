@@ -161,7 +161,7 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
         HeroPage(
             coverUrl = null,
             title = m.title,
-            caption = remember(m.songs) { if (m.songs.isEmpty()) "" else dev.nori.music.ffi.listCaption(m.songs, false) },
+            caption = m.caption,
             onPlay = { if (m.songs.isNotEmpty()) actions.play(m.songs) },
             onShuffle = { if (m.songs.isNotEmpty()) actions.shuffle(m.songs) },
             queue = queue,
@@ -222,7 +222,8 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
             Text(playlist?.name ?: "Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             TextButton({ nav.smartEdit(id) }) { Text("Edit") }
         }
-        LoadBox(load) { songs ->
+        LoadBox(load) { page ->
+            val songs = page.songs
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
@@ -230,7 +231,7 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
                         OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text("Shuffle") }
                         TextButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Text("Get") }
                     }
-                    Text(remember(songs) { dev.nori.music.ffi.listCaption(songs, true) }, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
+                    Text(page.caption, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
                 }
                 songRows(songs, actions, playing, done, selection.mapTo(HashSet()) { it.id }, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
             }
@@ -333,9 +334,10 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(periods) { p -> Chip(p.label, days == p.days) { days = p.days } }
         }
-        val st = s ?: return@Column
-        val words = remember(st) { dev.nori.music.ffi.statsWords(st) }
-        val tiles = remember(st) { dev.nori.music.ffi.statsTiles(st) }
+        val page = s ?: return@Column
+        val st = page.stats
+        val words = page.words
+        val tiles = page.tiles
 
         // The headline: two numbers worth reading from across the room, the rest as a grid of tiles.
         Column(Modifier.padding(horizontal = Space.gutter, vertical = 14.dp)) {

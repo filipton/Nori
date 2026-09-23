@@ -129,13 +129,13 @@ private fun selectedIds(actions: ActionsViewModel): Set<String> {
     return remember(selection) { selection.mapTo(HashSet()) { it.id } }
 }
 
-/** An album's songs by disc, with each disc's heading (nori-core's `pages::album_discs`). Once per album. */
+/** An album's songs by disc, as the core laid them out when the album was read (`pages::album_discs`). */
 private fun discsOf(d: AlbumDetail): List<Pair<dev.nori.music.ffi.DiscGroup, List<Song>>> =
-    dev.nori.music.ffi.albumDiscs(d).map { g -> g to g.songs.map { d.songs[it.toInt()] } }
+    d.discs.map { g -> g to g.songs.map { d.songs[it.toInt()] } }
 
-/** An artist's releases by kind, headed and in order (nori-core's `pages::release_groups`). Once per artist. */
-private fun groupsOf(albums: List<Album>): List<Pair<String, List<Album>>> =
-    dev.nori.music.ffi.releaseGroups(albums).map { g -> g.heading to g.albums.map { albums[it.toInt()] } }
+/** An artist's releases by kind, as the core grouped them when the artist was read (`pages::release_groups`). */
+private fun groupsOf(d: dev.nori.music.ffi.ArtistDetail): List<Pair<String, List<Album>>> =
+    d.groups.map { g -> g.heading to g.albums.map { d.albums[it.toInt()] } }
 
 
 /**
@@ -162,15 +162,14 @@ private fun LibraryOffer(id: String, external: Boolean, actions: ActionsViewMode
     TextButton({ actions.addToLibrary(id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) { Text(offer) }
 }
 
-/** An album's own queue: its songs, and any song of the record some other queue carried along. */
-private fun albumQueue(album: Album, songs: List<Song>?) =
-    dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Songs(songs?.map { it.id }.orEmpty(), album.id))
+/**
+ * An album's own queue before its songs are read: any song of the record some other queue carried along.
+ * Once they are, the album comes with its queue (`AlbumDetail.queue`), and so do playlists and artists.
+ */
+private fun albumHintQueue(album: Album) = dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Songs(emptyList(), album.id))
 
 /** A list's own queue: its songs, whatever order they are being played in. */
 internal fun songsQueue(songs: List<Song>?) = dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Songs(songs?.map { it.id }.orEmpty(), null))
-
-/** An artist's page has no song list of its own: what makes it the page playing is a song of one of its albums. */
-private fun artistQueue(albums: List<Album>?) = dev.nori.music.ffi.PageQueue(dev.nori.music.ffi.PageOwn.Albums(albums?.map { it.id }.orEmpty()))
 
 /** Makes a playlist a favourite on this phone, or not (the core's `pins_toggled`). */
 private fun SettingsViewModel.pin(id: String, on: Boolean) =
@@ -197,9 +196,9 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         return
     }
     val discs = remember(detail) { detail?.let(::discsOf).orEmpty() }
-    // Worked out once per album, not on every recomposition (nori-core's `fmt`).
-    val caption = remember(detail, album) { dev.nori.music.ffi.albumPageCaption(album, detail?.songs) }
-    val queue = remember(detail, album.id) { albumQueue(album, detail?.songs) }
+    // The album's own caption once it is read; until then what the row that opened it knew (nori-core's `fmt`).
+    val caption = detail?.caption ?: remember(album) { dev.nori.music.ffi.albumHintCaption(album.year, album.songCount, album.duration) }
+    val queue = detail?.queue ?: remember(album.id) { albumHintQueue(album) }
     HeroPage(
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
         title = album.name,
@@ -248,7 +247,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                                     swipeRight = rowSwipe(onRight, s, actions),
                                     swipeLeft = rowSwipe(onLeft, s, actions),
                                     divider = i < tracks.lastIndex,
-                                    pageArtist = album.artist,
+                                    line = disc.lines[i],
                                 )
                             }
                         }
@@ -284,19 +283,17 @@ private fun AlbumBody(
     // An album is short enough to scroll and its running order is the point of it, so the songs
     // stay exactly as the record has them, grouped by disc and never narrowed.
     val discs = remember(d) { discsOf(d) }
-    val caption = remember(d) { dev.nori.music.ffi.albumPageCaption(d.album, d.songs) }
-    val queue = remember(d) { albumQueue(d.album, d.songs) }
     HeroPage(
         coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
         title = d.album.name,
         subtitle = d.album.artist,
-        caption = caption,
+        caption = d.caption,
         onSubtitle = d.album.artistId?.let { a ->
             { nav.artist(a, Artist(a, d.album.artist, d.album.coverArt, null, 0u, false, false)) }
         },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
-        queue = queue,
+        queue = d.queue,
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(d.album.id, !albumStarred); Unit }
@@ -306,7 +303,7 @@ private fun AlbumBody(
         item(key = "header") { LibraryOffer(d.album.id, d.album.isExternal, actions) }
         discs.forEach { (disc, tracks) ->
             if (disc.heading.isNotEmpty()) item(key = "disc${disc.disc}") { SectionTitle(disc.heading) }
-            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d${disc.disc}-", context = d.songs, pageArtist = d.album.artist)
+            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d${disc.disc}-", context = d.songs, lines = disc.lines)
         }
     }
 }
@@ -334,8 +331,8 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         LoadBox(load) { ready -> ArtistBody(ready, actions, vm, done, selected, menu, playing, nav) { leaving = it } }
         return
     }
-    val groups = remember(ui?.detail) { ui?.detail?.albums?.let(::groupsOf).orEmpty() }
-    val queue = remember(ui?.detail) { artistQueue(ui?.detail?.albums) }
+    val groups = remember(ui?.detail) { ui?.detail?.let(::groupsOf).orEmpty() }
+    val queue = ui?.detail?.queue
     val similar = remember(ui?.info) { ui?.info?.similar?.let { dev.nori.music.ffi.similarArtists(it) }.orEmpty() }
     HeroPage(
         coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
@@ -344,8 +341,8 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
             if (ui != null) dev.nori.music.ffi.wordsReleases(ui.detail.albums.size.toUInt())
             else artist.albumCount.takeIf { it > 0u }?.let { dev.nori.music.ffi.wordsReleases(it) }.orEmpty()
         },
-        onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
-        onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
+        onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id) } },
+        onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id, shuffle = true) } },
         awaitingPlay = ui == null && load !is Load.Failed,
         queue = queue,
         actions = {
@@ -359,8 +356,8 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
                 ) {
                     MoreCircle(
                         listOf(
-                            "Add to queue" to { actions.queueArtist(ui!!.detail.albums) },
-                            "Download everything" to { actions.downloadArtist(ui!!.detail.albums) },
+                            "Add to queue" to { actions.queueArtist(ui!!.detail.artist.id) },
+                            "Download everything" to { actions.downloadArtist(ui!!.detail.artist.id) },
                         ),
                     )
                 }
@@ -432,23 +429,22 @@ private fun ArtistBody(
     nav: Nav,
     leave: (String) -> Unit,
 ) {
-    val groups = remember(ui.detail) { groupsOf(ui.detail.albums) }
-    val queue = remember(ui.detail) { artistQueue(ui.detail.albums) }
+    val groups = remember(ui.detail) { groupsOf(ui.detail) }
     val similar = remember(ui.info) { ui.info?.similar?.let { dev.nori.music.ffi.similarArtists(it) }.orEmpty() }
     HeroPage(
         coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
         title = ui.detail.artist.name,
         caption = remember(ui.detail) { dev.nori.music.ffi.wordsReleases(ui.detail.albums.size.toUInt()) },
-        onPlay = { actions.playArtist(ui.detail.albums) },
-        onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
-        queue = queue,
+        onPlay = { actions.playArtist(ui.detail.artist.id) },
+        onShuffle = { actions.playArtist(ui.detail.artist.id, shuffle = true) },
+        queue = ui.detail.queue,
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(ui.detail.artist.id, !artistStarred); Unit }
             MoreCircle(
                 listOf(
-                    "Add to queue" to { actions.queueArtist(ui.detail.albums) },
-                    "Download everything" to { actions.downloadArtist(ui.detail.albums) },
+                    "Add to queue" to { actions.queueArtist(ui.detail.artist.id) },
+                    "Download everything" to { actions.downloadArtist(ui.detail.artist.id) },
                 ),
             )
         },
@@ -507,19 +503,15 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         return
     }
     val shown = rememberMatching(detail?.songs.orEmpty(), filter)
-    val queue = remember(detail) { songsQueue(detail?.songs) }
     HeroPage(
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
         subtitle = playlist.comment?.ifEmpty { null },
-        caption = remember(detail, playlist) {
-            if (detail != null) dev.nori.music.ffi.listCaption(detail.songs, true)
-            else dev.nori.music.ffi.albumHintCaption(0u, playlist.songCount, playlist.duration)
-        },
+        caption = detail?.caption ?: remember(playlist) { dev.nori.music.ffi.albumHintCaption(0u, playlist.songCount, playlist.duration) },
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         awaitingPlay = detail == null && load !is Load.Failed,
-        queue = queue,
+        queue = detail?.queue,
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             // A favourite, drawn and named as every other favourite in the app is: a heart, filled
@@ -595,15 +587,14 @@ private fun PlaylistBody(
     onExport: () -> Unit,
 ) {
     val shown = rememberMatching(d.songs, filter)
-    val queue = remember(d) { songsQueue(d.songs) }
     HeroPage(
         coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
         title = d.playlist.name,
         subtitle = d.playlist.comment?.ifEmpty { null },
-        caption = remember(d) { dev.nori.music.ffi.listCaption(d.songs, true) },
+        caption = d.caption,
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
-        queue = queue,
+        queue = d.queue,
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             FavoriteCircle(pinned) { settings.pin(id, !pinned); Unit }

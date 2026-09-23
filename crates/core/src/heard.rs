@@ -1,98 +1,117 @@
 //! Which song the ear is on and where, for the app's seek bar and now-playing page:
 //! `nori_player::heard` fed with the transition engine's latest reading. Asked every frame the bar is
-//! drawn, so the question is one JNI call with primitives in and one packed `long` out - no strings,
-//! records or buffers cross, and nothing is allocated on either side.
+//! drawn, so the answer is a few numbers, packed into one `i64` for a platform that asks across a
+//! language boundary, and nothing is allocated.
 
-use jni::objects::JClass;
-use jni::sys::{jboolean, jint, jlong};
-use jni::JNIEnv;
+use nori_player::engine::Heard;
 use nori_player::heard::{HeardTracker, Playhead, Seen};
 use parking_lot::Mutex;
 
-use crate::automix::engine_jni::HEARD;
+/// The engine's latest word on what the ear has, for [`HeardClock`].
+static HEARD: Mutex<Heard> = Mutex::new(Heard {
+    id: None,
+    us: 0,
+    at_ms: 0,
+    until_us: i64::MAX,
+    mixing: false,
+    next_id: None,
+    next_from_us: 0,
+    next_rate: 1.0,
+    from_id: None,
+    audible_us: i64::MAX,
+});
+
+/// What the engine says the ear has now, after each call made on it. Asked about on every position
+/// query while a hold or mix runs, so it is copied in place, reusing the strings it already has.
+pub fn publish(heard: &Heard) {
+    let mut shared = HEARD.lock();
+    if *shared != *heard {
+        shared.assign(heard);
+    }
+}
+
+/// Whether a mix is being heard right now (for the test bridge and logs).
+pub fn mixing() -> bool {
+    HEARD.lock().mixing
+}
+
+/// Whether the ear is behind the player on a held ending (for logs).
+pub fn holding() -> bool {
+    HEARD.lock().id.is_some()
+}
 
 const MS_BITS: u32 = 43;
 
+/// Where the ear is: the queue index it is on (none: the player's own word stands), whether that
+/// changed since the last question, and the place in ms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeardAt {
+    pub index: Option<usize>,
+    pub changed: bool,
+    pub ms: i64,
+}
+
+impl HeardAt {
+    /// `(index + 1) << 44 | changed << 43 | ms`, index none being 0.
+    pub fn pack(self) -> i64 {
+        let index = self.index.map_or(0, |i| i as i64 + 1);
+        (index << (MS_BITS + 1)) | ((self.changed as i64) << MS_BITS) | self.ms.clamp(0, (1 << MS_BITS) - 1)
+    }
+}
+
 /// The tracker, and the revision of the core's queue it was last given (crates/core/src/playlist.rs).
-struct Clock {
+pub struct HeardClock {
     t: HeardTracker,
     rev: u64,
     /// The place the seek bar last showed.
     head: Playhead,
 }
 
-fn tracker<'a>(h: jlong) -> Option<&'a Mutex<Clock>> {
-    (h != 0).then(|| unsafe { &*(h as *const Mutex<Clock>) })
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_HeardJni_create(_: JNIEnv, _: JClass) -> jlong {
-    Box::into_raw(Box::new(Mutex::new(Clock { t: HeardTracker::new(), rev: u64::MAX, head: Playhead::new() }))) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_HeardJni_destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Mutex<Clock>) });
+impl Default for HeardClock {
+    fn default() -> Self {
+        HeardClock { t: HeardTracker::new(), rev: u64::MAX, head: Playhead::new() }
     }
 }
 
-/// Asked with what the player says now: `on` is its current index in the queue and `next` the one it
-/// goes to next (-1 for none). The queue is the core's own; it is read again only when it has changed.
-/// Returns `(index + 1) << 44 | changed << 43 | ms`, index -1 meaning the player's own word stands
-/// (and ms is then `position_ms`).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_HeardJni_at(
-    _: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong,
-) -> jlong {
-    let Some(t) = tracker(h) else { return position_ms.max(0) };
-    let mut c = t.lock();
-    let s = seen(&mut c, now_ms, playing, on, next, position_ms);
-    pack(s, s.ms)
-}
-
-/// [`Java_dev_nori_music_playback_HeardJni_at`] for the seek bar itself, whose page shows queue index
-/// `shown` (-1: nothing): the same answer, but the place is the one the bar shows - held while the ear
-/// has moved to a song the page has not followed to yet (`nori_player::heard::Playhead`). Asked every
-/// frame the bar is drawn; primitives only, nothing allocated.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_PlayheadJni_position(
-    _: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong, shown: jint,
-) -> jlong {
-    let Some(t) = tracker(h) else { return position_ms.max(0) };
-    let mut c = t.lock();
-    let s = seen(&mut c, now_ms, playing, on, next, position_ms);
-    let Clock { t, head, .. } = &mut *c;
-    let ms = head.show(t, s, usize::try_from(shown).ok(), now_ms);
-    pack(s, ms)
-}
-
-/// Where the seek bar is while nothing can be asked (the app reconnecting to the player): the last place
-/// shown, run on from then if the music was `playing`.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_PlayheadJni_runOn(_: JNIEnv, _: JClass, h: jlong, now_ms: jlong, playing: jboolean) -> jlong {
-    tracker(h).map_or(0, |t| t.lock().head.run_on(now_ms, playing != 0))
-}
-
-fn seen(c: &mut Clock, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong) -> Seen {
-    let heard = HEARD.lock();
-    let rev = crate::playlist::playlist_rev();
-    if c.rev != rev {
-        c.rev = rev;
-        c.t.set_queue(crate::playlist::with(|p| crate::queue::durations(p.ids())));
+impl HeardClock {
+    pub fn new() -> Self {
+        Self::default()
     }
-    c.t.at_index(&heard, now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms)
+
+    /// Asked with what the player says now: `on` is its current index in the queue and `next` the one it
+    /// goes to next. The queue is the core's own; it is read again only when it has changed. With no
+    /// index the player's own word stands, and the place is `position_ms`.
+    pub fn at(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64) -> HeardAt {
+        let s = self.seen(now_ms, playing, on, next, position_ms);
+        at(s, s.ms)
+    }
+
+    /// [`HeardClock::at`] for the seek bar itself, whose page shows queue index `shown`: the same answer,
+    /// but the place is the one the bar shows - held while the ear has moved to a song the page has not
+    /// followed to yet (`nori_player::heard::Playhead`).
+    pub fn position(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64, shown: Option<usize>) -> HeardAt {
+        let s = self.seen(now_ms, playing, on, next, position_ms);
+        let ms = self.head.show(&self.t, s, shown, now_ms);
+        at(s, ms)
+    }
+
+    /// Where the seek bar is while nothing can be asked (the app reconnecting to the player): the last place
+    /// shown, run on from then if the music was `playing`.
+    pub fn run_on(&self, now_ms: i64, playing: bool) -> i64 {
+        self.head.run_on(now_ms, playing)
+    }
+
+    fn seen(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64) -> Seen {
+        let heard = HEARD.lock();
+        let rev = crate::playlist::playlist_rev();
+        if self.rev != rev {
+            self.rev = rev;
+            self.t.set_queue(crate::playlist::with(|p| crate::queue::durations(p.ids())));
+        }
+        self.t.at_index(&heard, now_ms, playing, on, next, position_ms)
+    }
 }
 
-fn pack(s: Seen, ms: i64) -> jlong {
-    let index = s.index.map_or(0, |i| i as i64 + 1);
-    (index << (MS_BITS + 1)) | ((s.changed as i64) << MS_BITS) | ms.clamp(0, (1 << MS_BITS) - 1)
-}
-
-/// The length the player page shows for its song: the heard song's own (`heard_s` seconds, -1 when the
-/// ear is where the player is), else the player's measure, else the song's tags. See
-/// `nori_player::heard::shown_duration_ms`.
-#[uniffi::export]
-pub fn shown_duration_ms(heard_s: i64, player_ms: i64, tagged_ms: i64) -> i64 {
-    nori_player::heard::shown_duration_ms((heard_s >= 0).then_some(heard_s), player_ms, tagged_ms)
+fn at(s: Seen, ms: i64) -> HeardAt {
+    HeardAt { index: s.index, changed: s.changed, ms }
 }

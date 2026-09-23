@@ -8,6 +8,7 @@ import dev.nori.music.ffi.CurveStep
 import dev.nori.music.ffi.DeviceEffect
 import dev.nori.music.ffi.SoundProfile
 import dev.nori.music.net.Http
+import dev.nori.music.net.said
 import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Sound
 import dev.nori.music.settings.sound
@@ -97,7 +98,7 @@ class DeviceSound(private val context: Context, private val settings: Settings, 
         val before = settings.value.sound()
         val created = runCatching { adopt(output, entry, live = true) }.getOrElse {
             // No network, or GitHub not answering: asking later is better than silently doing nothing.
-            android.util.Log.w("nori", "autoeq for $output: ${it.message}")
+            android.util.Log.w("nori", "autoeq for $output: ${it.said}")
             post(Offer(output, entry))
             return
         }

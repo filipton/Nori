@@ -1,16 +1,13 @@
-//! The `track_analysis` table, the `Core` methods around it, and the JNI streaming analyser that feeds it from the
+//! The `track_analysis` table, the `Core` methods around it, and the streaming analyser that feeds it from the
 //! playback path.
 
-use jni::objects::{JByteBuffer, JClass};
-use jni::sys::{jint, jlong};
-use jni::JNIEnv;
+use nori_player::decode::{Decoder, Fault};
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::analysis::Analyzer;
 use super::ANALYSIS_VERSION;
 use crate::{Core, Result, TrackAnalysis};
-
 
 const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confidence, beat_offset_ms, stability, downbeat_phase, \
      downbeat_confidence, lufs, key, key_confidence, silence_start_ms, silence_end_ms, mixramp_start_ms, mixramp_end_ms, \
@@ -145,29 +142,98 @@ pub fn migrate(c: &Connection) -> rusqlite::Result<()> {
     }
     Ok(())
 }
-struct Stream {
+/// A song measured as it plays: fed from the playback path buffer by buffer, then finished into the store
+/// ([`Core::analysis_finish_stream`]). It crosses to the platform as a handle, since the platform both feeds
+/// it and hands it to the store.
+pub struct AnalysisStream {
     a: Mutex<Analyzer>,
     channels: usize,
+}
+
+impl AnalysisStream {
+    /// `expected_ms` (0 if unknown) sizes the buffers so feeding never reallocates.
+    pub fn new(rate: u32, channels: usize, expected_ms: u64) -> Self {
+        AnalysisStream { a: Mutex::new(Analyzer::new(rate.max(1), expected_ms)), channels: channels.clamp(1, 8) }
+    }
+
+    /// The stream as a handle, for [`AnalysisStream::from_handle`] and the store; freed with
+    /// [`AnalysisStream::free_handle`].
+    pub fn into_handle(self) -> i64 {
+        Box::into_raw(Box::new(self)) as i64
+    }
+
+    /// The stream behind a handle; none for 0.
+    ///
+    /// # Safety
+    /// `h` is 0 or a handle [`AnalysisStream::into_handle`] made that has not been freed.
+    pub unsafe fn from_handle<'a>(h: i64) -> Option<&'a AnalysisStream> {
+        // SAFETY: the caller's promise: a live handle is a boxed stream.
+        (h != 0).then(|| unsafe { &*(h as *const AnalysisStream) })
+    }
+
+    /// Lets a handle go.
+    ///
+    /// # Safety
+    /// `h` is 0 or a live handle [`AnalysisStream::into_handle`] made, and is not used again.
+    pub unsafe fn free_handle(h: i64) {
+        if h != 0 {
+            // SAFETY: the caller's promise: `h` is a boxed stream nobody else will free.
+            drop(unsafe { Box::from_raw(h as *mut AnalysisStream) });
+        }
+    }
+
+    /// Forget everything fed so far (a seek, a new track).
+    pub fn reset(&self) {
+        self.a.lock().reset();
+    }
+
+    /// Frames fed since it was made or reset.
+    pub fn frames(&self) -> u64 {
+        self.a.lock().samples()
+    }
+
+    /// Interleaved 16-bit samples.
+    pub fn feed_i16(&self, x: &[i16]) {
+        self.a.lock().feed_interleaved(x, self.channels, |v| v as f32 / 32768.0);
+    }
+
+    /// Interleaved float samples.
+    pub fn feed_f32(&self, x: &[f32]) {
+        self.a.lock().feed_interleaved(x, self.channels, |v| v);
+    }
+
+    /// Decodes one packet of a track being measured ahead with `d` and folds the samples in, without their
+    /// leaving the decoder's own memory. Returns the frames heard; a stream that comes out at another rate
+    /// than the analyser was made for is [`Fault::Broken`], to be measured another way from the start.
+    pub fn feed_packet(&self, d: &mut Decoder, packet: &[u8]) -> std::result::Result<usize, Fault> {
+        let pcm = d.decode_lent(packet)?;
+        let mut a = self.a.lock();
+        if a.rate() as u32 != pcm.rate {
+            return Err(Fault::Broken);
+        }
+        a.feed_interleaved(pcm.samples, pcm.channels, |v| v);
+        Ok(pcm.samples.len() / pcm.channels.max(1))
+    }
 }
 
 /// A streaming-analyser handle (the kind `AutoMixAnalyzer.create` returns) around an analyser that was
 /// fed elsewhere - by the transition engine's tap - so the store can finish it the same way.
 pub fn stream_handle(a: Analyzer, channels: usize) -> i64 {
-    Box::into_raw(Box::new(Stream { a: Mutex::new(a), channels: channels.clamp(1, 8) })) as i64
+    AnalysisStream { a: Mutex::new(a), channels: channels.clamp(1, 8) }.into_handle()
 }
 
 /// Frees a handle from [`stream_handle`] that never reached anyone.
 pub fn free_stream_handle(h: i64) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Stream) });
-    }
+    // SAFETY: the handle came from `stream_handle` and reached nobody else.
+    unsafe { AnalysisStream::free_handle(h) }
 }
 
-fn stream<'a>(h: i64) -> Option<&'a Stream> {
-    (h != 0).then(|| unsafe { &*(h as *const Stream) })
+fn stream<'a>(h: i64) -> Option<&'a AnalysisStream> {
+    // SAFETY: the platform hands the store 0 or a live handle it was given.
+    unsafe { AnalysisStream::from_handle(h) }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     pub fn analysis_get(&self, song_id: String) -> Result<Option<TrackAnalysis>> {
         Ok(get(&self.db.lock(), &song_id)?)
@@ -241,7 +307,7 @@ impl Core {
 
 #[cfg(test)]
 pub fn test_handle(a: Analyzer) -> i64 {
-    Box::into_raw(Box::new(Stream { a: Mutex::new(a), channels: 1 })) as i64
+    stream_handle(a, 1)
 }
 
 #[cfg(test)]
@@ -250,63 +316,6 @@ pub fn test_with(h: i64, f: impl FnOnce(&mut Analyzer)) {
 }
 
 #[cfg(test)]
-pub fn test_destroy(h: jlong) {
-    drop(unsafe { Box::from_raw(h as *mut Stream) });
-}
-
-// ---- JNI: dev.nori.music.playback.AutoMixAnalyzer --------------------------------------------------------------
-
-const PCM_16: jint = 2;
-const PCM_FLOAT: jint = 4;
-
-/// `expected_ms` (0 if unknown) sizes the buffers so feeding never reallocates.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_create(_: JNIEnv, _: JClass, rate: jint, channels: jint, expected_ms: jlong) -> jlong {
-    let a = Analyzer::new(rate.max(1) as u32, expected_ms.max(0) as u64);
-    Box::into_raw(Box::new(Stream { a: Mutex::new(a), channels: channels.clamp(1, 8) as usize })) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        drop(unsafe { Box::from_raw(h as *mut Stream) });
-    }
-}
-
-/// Forget everything fed so far (a seek, a new track).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_reset(_: JNIEnv, _: JClass, h: jlong) {
-    if let Some(s) = stream(h) {
-        s.a.lock().reset();
-    }
-}
-
-/// Frames fed since create/reset.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_frames(_: JNIEnv, _: JClass, h: jlong) -> jlong {
-    stream(h).map_or(0, |s| s.a.lock().samples() as jlong)
-}
-
-/// Feeds `bytes` bytes of interleaved PCM from `buffer[pos..]` (a direct buffer; read only). False when it cannot.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_AutoMixAnalyzer_feed(env: JNIEnv, _: JClass, h: jlong, buffer: JByteBuffer, pos: jint, bytes: jint, encoding: jint) -> bool {
-    let Ok(src) = env.get_direct_buffer_address(&buffer) else { return false };
-    let Some(s) = stream(h) else { return false };
-    if src.is_null() || pos < 0 || bytes <= 0 {
-        return false;
-    }
-    let src = unsafe { src.add(pos as usize) };
-    let mut a = s.a.lock();
-    match encoding {
-        PCM_16 if src as usize % 2 == 0 => {
-            let x = unsafe { std::slice::from_raw_parts(src as *const i16, bytes as usize / 2) };
-            a.feed_interleaved(x, s.channels, |v| v as f32 / 32768.0);
-        }
-        PCM_FLOAT if src as usize % 4 == 0 => {
-            let x = unsafe { std::slice::from_raw_parts(src as *const f32, bytes as usize / 4) };
-            a.feed_interleaved(x, s.channels, |v| v);
-        }
-        _ => return false,
-    }
-    true
+pub fn test_destroy(h: i64) {
+    free_stream_handle(h);
 }

@@ -2,7 +2,7 @@
 //! analysis, planning and per-sample work itself lives in the player crate (`nori_player::automix`),
 //! shared with every platform.
 
-pub mod engine_jni;
+pub mod host;
 pub mod store;
 pub mod planner;
 
@@ -17,13 +17,13 @@ use crate::{AutoMixSettings, TrackAnalysis, TransitionPlan};
 /// 4 = float) at any rate and channel count, exactly as MediaCodec hands it out. A `ByteArray` on the Kotlin side,
 /// so a track crosses as one copy rather than millions of boxed floats. One call per track, off the main thread;
 /// about 0.14 CPU-seconds for 4 minutes on a desktop.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_analyse(song_id: String, pcm: Vec<u8>, sample_rate: i32, channels: i32, encoding: i32) -> TrackAnalysis {
     analyse_bytes(&song_id, &pcm, sample_rate, channels, encoding).track
 }
 
 /// How to get from `outgoing` to `incoming`; either may be unknown. Durations in ms.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn plan_transition(
     outgoing: Option<TrackAnalysis>, incoming: Option<TrackAnalysis>, out_duration_ms: i64, in_duration_ms: i64, settings: AutoMixSettings,
 ) -> TransitionPlan {
@@ -31,44 +31,44 @@ pub fn plan_transition(
 }
 
 /// The plan as the flat array `AutoMixMixer.configure` takes.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_mixer_params(plan: TransitionPlan) -> Vec<f32> {
     mixer::params(&plan)
 }
 
 /// `bpm` folded by ×2/×½ to the octave nearest `reference`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_fold_tempo(reference: f64, bpm: f64) -> f64 {
     tempo::fold(reference, bpm)
 }
 
 /// Playback speed that locks `in_bpm` to `out_bpm` after octave folding (1.0 when either is unknown).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_tempo_ratio(out_bpm: f64, in_bpm: f64) -> f64 {
     tempo::match_ratio(out_bpm, in_bpm)
 }
 
 /// "8B", "11A", or empty for an unknown key.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_key_name(key: i32) -> String {
     structure::camelot_name(key)
 }
 
 /// Steps between two keys on the Camelot wheel (0 same, 1 compatible); -1 when either is unknown.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_key_distance(a: i32, b: i32) -> i32 {
     structure::key_distance(a, b)
 }
 
 /// The defaults the settings screen starts from.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn automix_default_settings() -> AutoMixSettings {
     AutoMixSettings::default()
 }
 
 /// `current` sits inside an album played in order (for ReplayGain's album mode); see
 /// `nori_player::transitions::in_album_run`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn in_album_run(before: Option<crate::WindowSong>, current: crate::WindowSong, after: Option<crate::WindowSong>, shuffling: bool) -> bool {
     nori_player::transitions::in_album_run(before.as_ref(), &current, after.as_ref(), shuffling)
 }

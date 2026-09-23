@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::settings::{load, save, PrefValue, StoredPrefs};
+use crate::settings::{load, save, set_band, set_level, EqLevel, PrefValue, SoundBand, StoredPrefs};
 use crate::{alog, background, db};
 
 struct Kept {
@@ -71,7 +71,7 @@ fn write(c: &mut Connection, prefs: &StoredPrefs) -> rusqlite::Result<()> {
 
 /// The settings kept in the app's database at `db_path`. The first time there are none, `legacy` (what
 /// the platform kept until now) becomes them.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_open(db_path: String, legacy: HashMap<String, PrefValue>) -> crate::Result<StoredPrefs> {
     let mut c = db::open_app(&db_path)?;
     let raw = read(&c)?;
@@ -129,17 +129,24 @@ fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
 /// The settings changed; kept now and written on the core's background thread. Returns what the
 /// platform's player has to apply again ([`APPLY_AUDIO`], [`APPLY_GAIN`], [`REPLAN`]); 0 for a change
 /// only screens care about.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_put(prefs: StoredPrefs) -> u32 {
-    let (db, effect) = {
+    edit(|_| prefs).unwrap_or(0)
+}
+
+/// The kept settings replaced by what `make` makes of them, and written as [`settings_put`] writes
+/// them. Returns what the player has to apply again, or none when nothing changed.
+fn edit(make: impl FnOnce(&StoredPrefs) -> StoredPrefs) -> Option<u32> {
+    let (db, effect, prefs) = {
         let mut k = KEPT.write();
-        let Some(k) = k.as_mut() else { return 0 };
+        let k = k.as_mut()?;
+        let prefs = make(&k.prefs);
         if k.prefs == prefs {
-            return 0;
+            return None;
         }
         let effect = effects(&k.prefs, &prefs);
         k.prefs = prefs.clone();
-        (k.db.clone(), effect)
+        (k.db.clone(), effect, prefs)
     };
     changed(&prefs);
     let change = CHANGES.fetch_add(1, Ordering::SeqCst) + 1;
@@ -154,7 +161,39 @@ pub fn settings_put(prefs: StoredPrefs) -> u32 {
             }
         }
     });
-    effect
+    Some(effect)
+}
+
+/// One band of the equalizer moved (`settings::set_band`), edited where the settings are kept: what the
+/// player has to apply again and the band as it was kept, held in its ranges; none when nothing changed.
+pub fn edit_band(index: u32, asked: SoundBand) -> Option<(u32, SoundBand)> {
+    let mut kept = asked;
+    let effect = edit(|p| {
+        let s = set_band(p.sound(), index, asked);
+        if let Some(k) = s.eq_bands.get(index as usize) {
+            kept = *k;
+        }
+        p.clone().with_sound(s)
+    })?;
+    Some((effect, kept))
+}
+
+/// Pre-amp, balance, limiter ceiling or crossfeed moved (`settings::set_level`), edited where the
+/// settings are kept: what the player has to apply again and the value as it was kept, held in range
+/// and snapped; none when nothing changed.
+pub fn edit_level(level: EqLevel, value: f32) -> Option<(u32, f32)> {
+    let mut kept = value;
+    let effect = edit(|p| {
+        let s = set_level(p.sound(), level, value);
+        kept = match level {
+            EqLevel::Preamp => s.eq_preamp_db.unwrap_or(value),
+            EqLevel::Balance => s.balance,
+            EqLevel::Limiter => s.limiter_threshold_db,
+            EqLevel::Crossfeed => s.crossfeed_db,
+        };
+        p.clone().with_sound(s)
+    })?;
+    Some((effect, kept))
 }
 
 /// What in the core follows the settings by itself, told at once.
@@ -204,8 +243,32 @@ mod tests {
         assert_eq!(effects(&a, &StoredPrefs { auto_mix_bass_swap: !a.auto_mix_bass_swap, ..a.clone() }), REPLAN);
     }
 
+    /// The tests that open the store take turns: it is one for the whole process.
+    static OPEN: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    #[test]
+    fn a_slider_edits_the_kept_settings_in_place() {
+        let _turn = OPEN.lock();
+        let dir = std::env::temp_dir().join(format!("nori-settings-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        settings_open(dir.join("nori.db").display().to_string(), HashMap::new()).unwrap();
+        let band = current().unwrap().eq_bands[2];
+        let (effect, kept) = edit_band(2, SoundBand { gain_db: 99.0, ..band }).unwrap();
+        assert_eq!(effect, 0, "the sound chain follows its bands by itself");
+        assert_eq!(kept.gain_db, crate::settings::EQ_RANGES.gain.max, "held in range");
+        assert_eq!(current().unwrap().eq_bands[2], kept);
+        assert_eq!(edit_band(2, kept), None, "the same band again changes nothing");
+        assert_eq!(edit_band(99, band), None, "a band that is not there");
+        assert_eq!(edit_level(EqLevel::Balance, 0.02), None, "near the middle is the middle, as it was");
+        assert_eq!(edit_level(EqLevel::Balance, -0.5), Some((APPLY_AUDIO, -0.5)));
+        assert_eq!(current().unwrap().balance, -0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_old_store_is_taken_once_then_the_database_is_the_settings() {
+        let _turn = OPEN.lock();
         let dir = std::env::temp_dir().join(format!("nori-settings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

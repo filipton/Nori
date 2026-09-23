@@ -589,7 +589,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     IconButton(
                         {
                             // The player's own rule (`queue_previous_restarts`), so the sleeve and the sound agree.
-                            val rewinds = dev.nori.music.ffi.queuePreviousRestarts(vm.positionMs, state.previousIndex >= 0, prefs.previousAlwaysSkips)
+                            val rewinds = dev.nori.music.ffi.queuePreviousRestarts(vm.positionMs, state.previousIndex >= 0)
                             if (rewinds || !slide.ask(1)) vm.previous()
                         },
                         Modifier.size(72.dp),
@@ -1329,7 +1329,7 @@ private fun SleeveCarousel(
                 val o = offset
                 val w = size.width.toFloat()
                 // Past a third of the way or flicked (the core's `swipe_turn`, shared with the bar).
-                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter)
+                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter, bar = false)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
@@ -1969,20 +1969,25 @@ private fun SeekTimes(
     val look = LocalLook.current
     val quiet = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON_VARIANT) }
     // Which place the times count from - the finger, a held seek, the music - is the core's (`seek_times`).
-    // Asked over JNI with primitives: a scrub asks on every frame the finger moves.
-    val times = CoverLook.seekTimes(dragging.value, drag.floatValue, held.value ?: -1L, pos.longValue, durationMs)
+    // Asked over JNI with primitives, in the draw phase: a second's tick, or a scrub on every frame the
+    // finger moves, redraws the two times and recomposes nothing.
+    val times = { CoverLook.seekTimes(dragging.value, drag.floatValue, held.value ?: -1L, pos.longValue, durationMs) }
+    val style = MaterialTheme.typography.labelSmall
+    val longest = (durationMs / 1000).coerceAtLeast(0)
     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-        LookText(duration(times ushr 32), quiet, style = MaterialTheme.typography.labelSmall)
+        LookTime({ duration(times() ushr 32) }, duration(longest), quiet, style, end = false)
         // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty the
         // rest of the time, holding its space so the two times either side never move. It said
         // "Mixing" through every crossfade as well, which is a word about the plumbing rather than
         // about the music, and it flickered up between songs for no reason anyone could see.
-        // The position's tick recomposes this once a second, which keeps the minutes current; how the
-        // timer reads is nori-core's (`words_sleep`), asked only while one is set.
+        // While a timer is set the position's tick is read here, so it recomposes this once a second and
+        // keeps the minutes current; otherwise nothing here reads it. How the timer reads is
+        // nori-core's (`words_sleep`), asked only while one is set.
         //
         // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
         // and subtracting one from the other gives a number about fifty years wide, which the
         // rounding then turned into a cheerful "1 min" for every timer ever set.
+        if (sleepAt > 0) pos.longValue
         val centre = if (error == null && !sleepAtEndOfTrack && sleepAt <= 0) "" else dev.nori.music.ffi.seekMiddle(
             error, sleepAtEndOfTrack, if (sleepAt > 0) sleepAt - android.os.SystemClock.elapsedRealtime() else null,
         )
@@ -1994,7 +1999,7 @@ private fun SeekTimes(
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
-        LookText(durationLeft(times and 0xFFFF_FFFFL), quiet, style = MaterialTheme.typography.labelSmall)
+        LookTime({ durationLeft(times() and 0xFFFF_FFFFL) }, durationLeft(longest), quiet, style, end = true)
     }
 }
 

@@ -6,10 +6,8 @@
 //! or its bar actually change.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use jni::objects::{JClass, JString};
-use jni::sys::{jfloat, jint, jlong, jstring};
-use jni::JNIEnv;
 use parking_lot::Mutex;
 
 use crate::{alog, Core};
@@ -25,18 +23,18 @@ const ESTIMATE_CEILING: f32 = 0.97;
 /// What an unlisted song is guessed to weigh when nothing in the batch says otherwise.
 const UNKNOWN_SONG_BYTES: i64 = 8_000_000;
 
-// media3's `Download.STATE_*`.
-const QUEUED: jint = 0;
-const STOPPED: jint = 1;
-const DOWNLOADING: jint = 2;
-const COMPLETED: jint = 3;
-const FAILED: jint = 4;
-const RESTARTING: jint = 7;
+// media3's `Download.STATE_*`, which the platform reports downloads in.
+pub const QUEUED: i32 = 0;
+pub const STOPPED: i32 = 1;
+pub const DOWNLOADING: i32 = 2;
+pub const COMPLETED: i32 = 3;
+pub const FAILED: i32 = 4;
+pub const RESTARTING: i32 = 7;
 
 /// What [`followed`] and [`removed`] tell the platform to do.
-const NEW_BATCH: jint = 1;
-const DRAINED: jint = 2;
-const MARKS: jint = 4;
+pub const NEW_BATCH: i32 = 1;
+pub const DRAINED: i32 = 2;
+pub const MARKS: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -156,6 +154,8 @@ struct Tracker {
     slots: Vec<Slot>,
     batch: Batch,
     marks: HashMap<String, (Phase, i64)>,
+    /// The songs whose mark changed since the platform last asked (see [`download_marks_changed`]).
+    changed: HashSet<String>,
     info: HashMap<String, Info>,
     download_kbps: i32,
     speed_bps: i64,
@@ -164,6 +164,8 @@ struct Tracker {
     notice: Notice,
     scratch_title: String,
     scratch_text: String,
+    /// The downloads screen's lines are written here and handed over; see [`line`].
+    scratch_line: String,
 }
 
 static TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
@@ -227,13 +229,23 @@ impl Tracker {
             Some(p) if self.marks.get(id).map(|m| m.0) == Some(p) && p == Phase::Downloading => false,
             Some(p) => {
                 self.marks.insert(id.to_string(), (p, now));
+                self.changed.insert(id.to_string());
                 if p == Phase::Done {
                     self.recent_only();
                 }
                 true
             }
-            None => self.marks.remove(id).is_some(),
+            None => self.unmark(id),
         }
+    }
+
+    /// Takes `id`'s mark away; true when it had one.
+    fn unmark(&mut self, id: &str) -> bool {
+        let had = self.marks.remove(id).is_some();
+        if had {
+            self.changed.insert(id.to_string());
+        }
+        had
     }
 
     /// Finished marks beyond the latest [`RECENT`] go; the song's own "downloaded" state carries on.
@@ -244,7 +256,7 @@ impl Tracker {
         }
         done.sort();
         for (_, id) in done.iter().take(done.len() - RECENT) {
-            self.marks.remove(id);
+            self.unmark(id);
         }
     }
 
@@ -253,11 +265,7 @@ impl Tracker {
     }
 }
 
-// ---- JNI: dev.nori.music.downloads.DownloadsJni ----------------------------------------------------------
-
-fn id_of(env: &mut JNIEnv, s: &JString) -> Option<String> {
-    env.get_string(s).ok().map(Into::into)
-}
+// ---- what the platform reports as downloads run ------------------------------------------------------------
 
 /// Takes the download quality from the settings (0: the original file), for what songs should weigh;
 /// songs weighed at another quality are weighed again. Asked whenever songs are queued, and when an
@@ -274,9 +282,8 @@ fn follow_quality() {
 
 /// media3 reported `id` in `state`. Returns [`NEW_BATCH`] (a batch starts: the last one's result goes),
 /// [`DRAINED`] (the last song settled: say how it went) and [`MARKS`] (the phases changed).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_followed(mut env: JNIEnv, _: JClass, id: JString, state: jint, now: jlong) -> jint {
-    let Some(id) = id_of(&mut env, &id) else { return 0 };
+pub fn followed(id: &str, state: i32, now: i64) -> i32 {
+    let id = id.to_string();
     with(|t| {
         let was_open = t.batch.open.contains(&id);
         let mut flags = 0;
@@ -316,14 +323,12 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_followed(mut e
 }
 
 /// `id` left the queue for good. Returns flags as [`followed`] does.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_removed(mut env: JNIEnv, _: JClass, id: JString) -> jint {
-    let Some(id) = id_of(&mut env, &id) else { return 0 };
+pub fn removed(id: &str) -> i32 {
     with(|t| {
-        let was_open = t.batch.open.contains(&id);
-        t.batch.removed(&id);
-        t.close(&id);
-        let mut flags = if t.marks.remove(&id).is_some() { MARKS } else { 0 };
+        let was_open = t.batch.open.contains(id);
+        t.batch.removed(id);
+        t.close(id);
+        let mut flags = if t.unmark(id) { MARKS } else { 0 };
         if was_open && t.batch.open.is_empty() {
             flags |= DRAINED;
         }
@@ -332,12 +337,10 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_removed(mut en
 }
 
 /// Forgets `id`'s mark and figures (it is being asked for again, or cancelled).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_unmark(mut env: JNIEnv, _: JClass, id: JString) -> jint {
-    let Some(id) = id_of(&mut env, &id) else { return 0 };
+pub fn unmark(id: &str) -> i32 {
     with(|t| {
-        t.close(&id);
-        if t.marks.remove(&id).is_some() {
+        t.close(id);
+        if t.unmark(id) {
             MARKS
         } else {
             0
@@ -346,20 +349,16 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_unmark(mut env
 }
 
 /// Where a ring starts before any bytes arrive: 0, or negative when the size cannot be told.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_startFraction(mut env: JNIEnv, _: JClass, id: JString) -> jfloat {
-    let Some(id) = id_of(&mut env, &id) else { return -1.0 };
-    with(|t| if t.info(&id).estimate > 0 { 0.0 } else { -1.0 })
+pub fn start_fraction(id: &str) -> f32 {
+    with(|t| if t.info(id).estimate > 0 { 0.0 } else { -1.0 })
 }
 
 /// A download's bytes start moving: the slot its chunks are reported against.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_open(mut env: JNIEnv, _: JClass, id: JString, now: jlong) -> jint {
-    let Some(id) = id_of(&mut env, &id) else { return -1 };
+pub fn open(id: &str, now: i64) -> i32 {
     with(|t| {
-        let estimate = t.info(&id).estimate;
+        let estimate = t.info(id).estimate;
         let slot = Slot {
-            id,
+            id: id.to_string(),
             estimate,
             length: 0,
             bytes: 0,
@@ -374,11 +373,11 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_open(mut env: 
         match t.slots.iter().position(|s| !s.live) {
             Some(i) => {
                 t.slots[i] = slot;
-                i as jint
+                i as i32
             }
             None => {
                 t.slots.push(slot);
-                t.slots.len() as jint - 1
+                t.slots.len() as i32 - 1
             }
         }
     })
@@ -386,8 +385,7 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_open(mut env: 
 
 /// A chunk arrived on `slot`: `bytes` so far of `length` (0 unknown). Returns the progress to show, or
 /// NaN when it has not moved enough to be worth drawing. Called per chunk; allocates nothing.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_note(_: JNIEnv, _: JClass, slot: jint, length: jlong, bytes: jlong, now: jlong) -> jfloat {
+pub fn note(slot: i32, length: i64, bytes: i64, now: i64) -> f32 {
     let mut guard = TRACKER.lock();
     let Some(s) = guard.as_mut().and_then(|t| t.slots.get_mut(slot.max(0) as usize)).filter(|s| s.live) else { return f32::NAN };
     s.bytes = bytes;
@@ -477,8 +475,7 @@ fn sections<'a, T: Clone>(pending: &'a [T], done: &'a [T], marks: &HashMap<Strin
 /// Returns 0 when nothing changed since the last call (keep the last notification), 1 when it did (read
 /// [`notice_title`] and friends), 2 when the batch is over (the "complete" notification). Asked once a
 /// second: it works in buffers kept from call to call and allocates nothing unless the words change.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_notice(_: JNIEnv, _: JClass, listed: jint, waiting: jint, now: jlong) -> jint {
+pub fn notice(listed: i32, waiting: bool, now: i64) -> i32 {
     use std::fmt::Write;
     let mut guard = TRACKER.lock();
     let t = guard.get_or_insert_with(Tracker::default);
@@ -520,7 +517,7 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_notice(_: JNIE
     let (title, text) = (&mut t.scratch_title, &mut t.scratch_text);
     title.clear();
     text.clear();
-    if waiting != 0 {
+    if waiting {
         title.push_str("Waiting for a network");
     } else if total == 1 {
         match current_title {
@@ -565,32 +562,25 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_notice(_: JNIE
     1
 }
 
-fn jstr(env: &mut JNIEnv, s: &str) -> jstring {
-    env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+/// The notification's title as [`notice`] last worded it, lent to `f` without a copy.
+pub fn notice_title<R>(f: impl FnOnce(&str) -> R) -> R {
+    with(|t| f(&t.notice.title))
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_noticeTitle(mut env: JNIEnv, _: JClass) -> jstring {
-    let t = with(|t| t.notice.title.clone());
-    jstr(&mut env, &t)
+/// The notification's text as [`notice`] last worded it, lent to `f` without a copy.
+pub fn notice_text<R>(f: impl FnOnce(&str) -> R) -> R {
+    with(|t| f(&t.notice.text))
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_noticeText(mut env: JNIEnv, _: JClass) -> jstring {
-    let t = with(|t| t.notice.text.clone());
-    jstr(&mut env, &t)
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_noticePermille(_: JNIEnv, _: JClass) -> jint {
+/// The notification's bar, in thousandths.
+pub fn notice_permille() -> i32 {
     with(|t| t.notice.permille)
 }
 
 /// How the batch went, once it has: "title\ntext" (text may be empty), or empty when there is nothing to
 /// say. The caller keeps the notification when [`summary_failed`] says something failed.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_summary(mut env: JNIEnv, _: JClass) -> jstring {
-    let s = with(|t| {
+pub fn summary() -> String {
+    with(|t| {
         let (done, failed) = (t.batch.done, t.batch.failed);
         if done == 0 && failed == 0 {
             return String::new();
@@ -616,12 +606,11 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_summary(mut en
             String::new()
         };
         format!("{title}\n{text}")
-    });
-    jstr(&mut env, &s)
+    })
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_summaryFailed(_: JNIEnv, _: JClass) -> jint {
+/// How many songs of the batch failed.
+pub fn summary_failed() -> i32 {
     with(|t| t.batch.failed)
 }
 
@@ -631,7 +620,8 @@ pub extern "system" fn Java_dev_nori_music_downloads_DownloadsJni_summaryFailed(
 /// already but unfinished - failed, or lost to a process that died before the platform heard of them -
 /// and are asked for again, so the download button always does something. Finished songs are left as
 /// they are.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadQueued {
     pub fresh: Vec<String>,
     pub again: Vec<String>,
@@ -639,7 +629,8 @@ pub struct DownloadQueued {
 
 /// One download as the platform's own queue remembers it: media3's `Download.STATE_*`, the length (-1
 /// unknown) and the bytes it has.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadKnown {
     pub id: String,
     pub state: i32,
@@ -648,14 +639,16 @@ pub struct DownloadKnown {
 }
 
 /// A download an earlier process left failed, and how far it got.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadFailed {
     pub id: String,
     pub progress: f32,
 }
 
 /// What an earlier process left unfinished, sorted out (see [`Core::download_recover`]).
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadRecovery {
     /// Never reached the platform's queue (the add was still in flight): to be asked for again.
     pub lost: Vec<String>,
@@ -668,7 +661,68 @@ pub struct DownloadRecovery {
     pub unfinished: bool,
 }
 
-const REMOVING: jint = 5;
+const REMOVING: i32 = 5;
+
+/// Which songs the downloads table holds and whether each has finished, kept beside the table so one
+/// song can be asked about - by every row a list draws, every track opened - without the database, and
+/// the table counted without reading it. Read from the table once, when the core opens; every write to
+/// the table updates it while the database is still locked, so the two never disagree.
+#[derive(Debug, Default)]
+pub struct Held {
+    ids: HashMap<String, bool>,
+    done: u32,
+}
+
+/// Moves on whenever any core's downloads table changes, so a platform's copy of the counts can tell a
+/// change from the same answer asked twice. One counter for every core: a new server's numbers never
+/// read as the old one's.
+static HELD_VERSION: AtomicU64 = AtomicU64::new(1);
+
+impl Held {
+    pub(crate) fn load(c: &rusqlite::Connection) -> crate::Result<Held> {
+        let mut st = c.prepare("SELECT id, done FROM downloads WHERE server=sid()")?;
+        let ids: HashMap<String, bool> = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.filter_map(|r| r.ok()).collect();
+        let done = ids.values().filter(|d| **d).count() as u32;
+        HELD_VERSION.fetch_add(1, Ordering::Relaxed);
+        Ok(Held { ids, done })
+    }
+
+    /// 0 not in the table, 1 queued or failed, 2 finished.
+    fn state(&self, id: &str) -> i32 {
+        self.ids.get(id).map_or(0, |d| if *d { 2 } else { 1 })
+    }
+
+    fn queued(&mut self, id: &str) {
+        if !self.ids.contains_key(id) {
+            self.ids.insert(id.to_string(), false);
+            HELD_VERSION.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn finished(&mut self, id: &str) {
+        if let Some(d) = self.ids.get_mut(id).filter(|d| !**d) {
+            *d = true;
+            self.done += 1;
+            HELD_VERSION.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn removed(&mut self, id: &str) {
+        if let Some(d) = self.ids.remove(id) {
+            self.done -= d as u32;
+            HELD_VERSION.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// How many songs are downloaded and how many are still to come, and which version of the table that is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct DownloadCounts {
+    pub done: u32,
+    pub pending: u32,
+    pub version: u64,
+}
 
 /// Adds the `rows` (id, song json) that are not in the queue yet, behind everything queued before, and
 /// sorts the rest into asked again (unfinished) and left out (finished).
@@ -720,7 +774,7 @@ fn recovery(pending: &[String], known: &[DownloadKnown]) -> (DownloadRecovery, V
     (r, failed)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Queues `songs` for download; see [`DownloadQueued`].
     pub fn download_queue(&self, songs: Vec<crate::Song>) -> crate::Result<DownloadQueued> {
@@ -729,7 +783,10 @@ impl Core {
             let json = serde_json::to_string(&s).unwrap_or_default();
             (s.id, json)
         });
-        queue_rows(&mut self.db.lock(), rows)
+        let mut c = self.db.lock();
+        let q = queue_rows(&mut c, rows)?;
+        self.held_queued(&q);
+        Ok(q)
     }
 
     /// Queues every song of the offline index, in index order, as [`Core::download_queue`] does. One
@@ -742,7 +799,81 @@ impl Core {
             let rows = st.query_map([crate::db::SONG], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.filter_map(|r| r.ok()).collect()
         };
-        queue_rows(&mut c, rows)
+        let q = queue_rows(&mut c, rows)?;
+        self.held_queued(&q);
+        Ok(q)
+    }
+
+    /// Downloads that settled, in the order they did: each id finished (`finished` true) or left the
+    /// queue for good. One transaction however many there are; ids the table no longer holds cost nothing.
+    pub fn download_settle(&self, ids: Vec<String>, finished: Vec<bool>) -> crate::Result<()> {
+        let mut c = self.db.lock();
+        let tx = c.transaction()?;
+        {
+            let held = self.held.lock();
+            let mut done = tx.prepare_cached("UPDATE downloads SET done=1 WHERE server=sid() AND id=?1")?;
+            let mut gone = tx.prepare_cached("DELETE FROM downloads WHERE server=sid() AND id=?1")?;
+            let mut state: HashMap<&str, i32> = HashMap::new();
+            for (id, f) in ids.iter().zip(&finished) {
+                let now = state.entry(id.as_str()).or_insert_with(|| held.state(id));
+                match (*now, *f) {
+                    (0, _) | (2, true) => {}
+                    (_, true) => {
+                        done.execute([id])?;
+                        *now = 2;
+                    }
+                    (_, false) => {
+                        gone.execute([id])?;
+                        *now = 0;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        let mut held = self.held.lock();
+        for (id, f) in ids.iter().zip(finished) {
+            if f {
+                held.finished(id);
+            } else {
+                held.removed(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes every unfinished song out of the queue at once, forgets their marks and figures, and says
+    /// which they were, for the platform to stop.
+    pub fn download_cancel_all(&self) -> crate::Result<Vec<String>> {
+        let ids: Vec<String> = {
+            let c = self.db.lock();
+            let ids: Vec<String> = {
+                let mut st = c.prepare_cached("SELECT id FROM downloads WHERE server=sid() AND done=0")?;
+                let rows = st.query_map([], |r| r.get(0))?;
+                rows.filter_map(|r| r.ok()).collect()
+            };
+            c.execute("DELETE FROM downloads WHERE server=sid() AND done=0", [])?;
+            let mut held = self.held.lock();
+            for id in &ids {
+                held.removed(id);
+            }
+            ids
+        };
+        // The tracker looks songs up in the database while it is locked, so it is only taken once the
+        // database is let go.
+        with(|t| {
+            for id in &ids {
+                t.close(id);
+                t.unmark(id);
+            }
+        });
+        Ok(ids)
+    }
+
+    /// The table counted, from memory.
+    pub fn download_counts(&self) -> DownloadCounts {
+        let held = self.held.lock();
+        let done = held.done;
+        DownloadCounts { done, pending: held.ids.len() as u32 - done, version: HELD_VERSION.load(Ordering::Relaxed) }
     }
 
     /// Brings the downloads table and the platform's queue (`known`: what it holds of the songs pending
@@ -752,15 +883,16 @@ impl Core {
         follow_quality();
         let pending: Vec<String> = self.downloads(false)?.into_iter().map(|s| s.id).collect();
         let (mut r, failed) = recovery(&pending, &known);
-        for id in &r.finished {
-            self.download_done(id.clone())?;
-        }
+        self.download_settle(r.finished.clone(), vec![true; r.finished.len()])?;
         r.failed = with(|t| {
             failed
                 .into_iter()
                 .map(|(id, length, bytes)| {
                     let estimate = t.info(&id).estimate;
-                    t.marks.entry(id.clone()).or_insert((Phase::Failed, 0));
+                    if !t.marks.contains_key(&id) {
+                        t.marks.insert(id.clone(), (Phase::Failed, 0));
+                        t.changed.insert(id.clone());
+                    }
                     DownloadFailed { progress: fraction(length, bytes, estimate), id }
                 })
                 .collect()
@@ -769,10 +901,20 @@ impl Core {
     }
 }
 
+impl Core {
+    fn held_queued(&self, q: &DownloadQueued) {
+        let mut held = self.held.lock();
+        for id in &q.fresh {
+            held.queued(id);
+        }
+    }
+}
+
 // ---- uniffi: what the downloads screen shows ----------------------------------------------------------------
 
 /// The downloads screen's lists, in the order the queue will run them.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadSections {
     pub active: Vec<crate::Song>,
     pub queued: Vec<crate::Song>,
@@ -782,45 +924,48 @@ pub struct DownloadSections {
 }
 
 /// A download's phase for the screen: 0 waiting (or nothing), 1 downloading, 2 failed, 3 done.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_phase(id: String) -> i32 {
     with(|t| t.marks.get(&id).map_or(0, |m| m.0 as i32))
 }
 
 /// The ids with a phase, and each one's phase (as [`download_phase`]) and when it began.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadMarks {
     pub ids: Vec<String>,
     pub phases: Vec<i32>,
     pub at: Vec<i64>,
 }
 
-#[uniffi::export]
-pub fn download_marks() -> DownloadMarks {
+/// The marks that changed since the last call, each with its phase now (0: it has none any more). The
+/// platform keeps its own copy of the marks and only hears what moved.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn download_marks_changed() -> DownloadMarks {
     with(|t| {
         let mut m = DownloadMarks { ids: Vec::new(), phases: Vec::new(), at: Vec::new() };
-        for (id, (p, at)) in &t.marks {
-            m.ids.push(id.clone());
-            m.phases.push(*p as i32);
-            m.at.push(*at);
+        for id in t.changed.drain() {
+            let (p, at) = t.marks.get(&id).map_or((0, 0), |(p, at)| (*p as i32, *at));
+            m.ids.push(id);
+            m.phases.push(p);
+            m.at.push(at);
         }
         m
     })
 }
 
-/// "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading".
-#[uniffi::export]
-pub fn download_summary(active: i32, queued: i32, failed: i32) -> String {
+/// "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading", onto the
+/// end of `out`.
+fn push_summary(out: &mut String, active: i32, queued: i32, failed: i32, speed: i64, eta: i64) {
     use std::fmt::Write;
-    let (speed, eta) = with(|t| (t.speed_bps, t.eta_s));
-    let mut out = String::new();
+    let base = out.len();
     let mut add = |f: &dyn Fn(&mut String)| {
         let start = out.len();
-        if start > 0 {
+        if start > base {
             out.push_str(" · ");
         }
         let mark = out.len();
-        f(&mut out);
+        f(out);
         if out.len() == mark {
             out.truncate(start);
         }
@@ -844,20 +989,16 @@ pub fn download_summary(active: i32, queued: i32, failed: i32) -> String {
         add(&|o| push_speed(o, speed));
         add(&|o| push_eta(o, eta));
     }
-    if out.is_empty() {
+    if out.len() == base {
         out.push_str("Nothing downloading");
     }
-    out
 }
 
-/// A running song's second line: its artist, then where it stands ("45% · 2.1 MB/s · 1:20 left").
-#[uniffi::export]
-pub fn download_row(id: String, artist: String) -> String {
+/// Where a running song stands, onto the end of `out` (its artist): " · 45% · 2.1 MB/s · 1:20 left".
+fn push_row(out: &mut String, slots: &[Slot], id: &str) {
     use std::fmt::Write;
-    with(|t| {
-        let mut out = artist;
-        let Some(i) = t.slot_of(&id) else { return out };
-        let s = &t.slots[i];
+    {
+        let Some(s) = slots.iter().find(|s| s.live && s.id == id) else { return };
         let f = fraction(s.length, s.bytes, s.estimate);
         let total = if s.length > 0 { s.length } else { s.estimate };
         let speed = s.rate as i64;
@@ -873,29 +1014,76 @@ pub fn download_row(id: String, artist: String) -> String {
             }
         };
         if f >= 0.0 {
-            add(&mut out, &|o| {
+            add(out, &|o| {
                 let _ = write!(o, "{}%", (f * 100.0).round() as i32);
             });
         }
-        add(&mut out, &|o| push_speed(o, speed));
-        add(&mut out, &|o| push_eta(o, eta));
-        out
-    })
+        add(out, &|o| push_speed(o, speed));
+        add(out, &|o| push_eta(o, eta));
+    }
+}
+
+/// Writes one of the downloads screen's lines into the tracker's own buffer and lends it to `f`: the only
+/// allocation is whatever the screen keeps of it.
+fn line<R>(write: impl FnOnce(&mut Tracker, &mut String), f: impl FnOnce(&str) -> R) -> R {
+    let mut guard = TRACKER.lock();
+    let t = guard.get_or_insert_with(Tracker::default);
+    let mut out = std::mem::take(&mut t.scratch_line);
+    out.clear();
+    write(t, &mut out);
+    let r = f(&out);
+    t.scratch_line = out;
+    r
+}
+
+// ---- the downloads screen's words -----------------------------------------------------------------------------
+
+/// A running song's second line: its artist, then where it stands ("45% · 2.1 MB/s · 1:20 left"). Asked
+/// whenever its ring moves; lent to `f`.
+pub fn row<R>(id: &str, artist: &str, f: impl FnOnce(&str) -> R) -> R {
+    line(
+        |t, out| {
+            out.push_str(artist);
+            push_row(out, &t.slots, id);
+        },
+        f,
+    )
+}
+
+/// The screen's summary line for its sections' sizes, with the batch's speed and time left; asked once a
+/// second while it is open; lent to `f`.
+pub fn summary_line<R>(active: i32, queued: i32, failed: i32, f: impl FnOnce(&str) -> R) -> R {
+    line(|t, out| push_summary(out, active, queued, failed, t.speed_bps, t.eta_s), f)
+}
+
+// ---- whether a song is downloaded -----------------------------------------------------------------------------
+
+/// Whether `id` is in the active core's downloads table: 0 no, 1 queued or failed, 2 finished. Asked by
+/// every row a list draws and every track opened; answered from memory.
+pub fn held(id: &str) -> i32 {
+    crate::active().map_or(0, |core| core.held.lock().state(id))
 }
 
 /// The download statistics for checks: bytes a second right now, and seconds left (-1 unknown).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_speed_eta() -> Vec<i64> {
     with(|t| vec![t.speed_bps, t.eta_s])
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The downloads screen's lists: pending songs split by what they are doing, oldest first (the order
     /// they run), and this session's finished songs newest first.
     pub fn download_sections(&self) -> crate::Result<DownloadSections> {
         let pending = self.downloads(false)?;
-        let done = self.downloads(true)?;
+        // Of the finished songs only this session's are listed, and there are at most [`RECENT`] of those:
+        // they are looked up one by one rather than the whole table read for them.
+        let recent: Vec<String> = with(|t| t.marks.iter().filter(|(_, m)| m.0 == Phase::Done).map(|(id, _)| id.clone()).collect());
+        let done: Vec<crate::Song> = {
+            let c = self.db.lock();
+            let mut st = c.prepare_cached("SELECT json FROM downloads WHERE server=sid() AND id=?1 AND done=1")?;
+            recent.iter().filter_map(|id| st.query_row([id], |r| r.get::<_, String>(0)).ok()).filter_map(|j| serde_json::from_str(&j).ok()).collect()
+        };
         with(|t| {
             let [active, queued, failed, finished] = sections(&pending, &done, &t.marks, |s: &crate::Song| s.id.as_str());
             Ok(DownloadSections { active, queued, failed, finished })
@@ -906,7 +1094,7 @@ impl Core {
 // ---- words ----------------------------------------------------------------------------------------------------
 
 /// "850 KB/s", "3.2 MB/s"; empty when nothing is measurable.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn format_speed(bps: i64) -> String {
     let mut s = String::new();
     push_speed(&mut s, bps);
@@ -931,7 +1119,7 @@ pub fn push_speed(out: &mut String, bps: i64) {
 }
 
 /// "45 s left", "12:34 left", "2:05:00 left"; empty when it cannot be said (negative).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn format_eta(sec: i64) -> String {
     let mut s = String::new();
     push_eta(&mut s, sec);
@@ -951,7 +1139,7 @@ pub fn push_eta(out: &mut String, sec: i64) {
 }
 
 /// "850 B", "38 MB", "2.1 GB", in the phone's number style (`nori_text`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn format_bytes(bytes: i64) -> String {
     let (v, places, unit) = match bytes {
         b if b < 1024 => return format!("{b} B"),
@@ -1168,6 +1356,68 @@ mod tests {
         assert_eq!(download_phase("rc-b".into()), Phase::Failed as i32);
     }
 
+
+    #[test]
+    fn the_table_is_known_from_memory_and_settles_in_one_go() {
+        let core = Core::new(String::new(), "t".into()).unwrap();
+        let state = |id: &str| core.held.lock().state(id);
+        core.download_queue(vec![song("h-a"), song("h-b"), song("h-c"), song("h-d")]).unwrap();
+        let v0 = core.download_counts();
+        assert_eq!((v0.done, v0.pending, state("h-a"), state("h-x")), (0, 4, 1, 0));
+        // In order: "h-b" finishes and then goes, "h-x" was never there.
+        let ids = ["h-a", "h-b", "h-b", "h-x"].map(String::from).to_vec();
+        core.download_settle(ids, vec![true, true, false, false]).unwrap();
+        let v1 = core.download_counts();
+        assert_eq!((v1.done, v1.pending, state("h-a"), state("h-b")), (1, 2, 2, 0));
+        assert!(v1.version > v0.version);
+        assert_eq!(core.download_counts(), v1, "asked again, the same answer");
+        assert_eq!(core.downloads(true).unwrap().len(), 1);
+
+        let mut gone = core.download_cancel_all().unwrap();
+        gone.sort();
+        assert_eq!(gone, ["h-c", "h-d"]);
+        assert_eq!((core.download_counts().pending, core.downloads(false).unwrap().len(), state("h-a")), (0, 0, 2), "finished songs stay");
+        // What an opened core reads is what was written.
+        let c = core.db.lock();
+        let again = Held::load(&c).unwrap();
+        assert_eq!((again.done, again.ids.len()), (1, 1));
+    }
+
+    #[test]
+    fn only_the_marks_that_moved_come_over() {
+        with(|t| {
+            t.mark("mk-a", Some(Phase::Downloading), 1);
+            t.mark("mk-b", Some(Phase::Failed), 2);
+        });
+        let m = download_marks_changed();
+        let mine = |m: &DownloadMarks, id: &str| m.ids.iter().position(|i| i == id).map(|i| m.phases[i]);
+        assert_eq!((mine(&m, "mk-a"), mine(&m, "mk-b")), (Some(1), Some(2)));
+        with(|t| {
+            t.unmark("mk-a");
+        });
+        let m = download_marks_changed();
+        assert_eq!((mine(&m, "mk-a"), mine(&m, "mk-b")), (Some(0), None), "gone, and the other one did not move");
+        with(|t| {
+            t.unmark("mk-b");
+        });
+    }
+
+    #[test]
+    fn the_screen_lines() {
+        let mut s = String::new();
+        push_summary(&mut s, 2, 14, 1, 3_200_000, 754);
+        assert_eq!(s, "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left");
+        s.clear();
+        push_summary(&mut s, 0, 0, 0, 3_200_000, 754);
+        assert_eq!(s, "Nothing downloading");
+        let slot = Slot { id: "r".into(), estimate: 0, length: 1000, bytes: 450, started_at: 0, gate_value: 0.0, gate_at: 0, speed_bytes: 0, speed_at: 0, rate: 0.0, live: true };
+        let mut s = String::from("Artist");
+        push_row(&mut s, std::slice::from_ref(&slot), "r");
+        assert_eq!(s, "Artist · 45%");
+        let mut s = String::from("Artist");
+        push_row(&mut s, std::slice::from_ref(&slot), "other");
+        assert_eq!(s, "Artist");
+    }
 
     #[test]
     fn words() {

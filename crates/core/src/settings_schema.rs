@@ -13,7 +13,8 @@ use crate::MusicFolder;
 
 /// A settings group: its own page, so the root of Settings is a few rows instead of eighty. The icon
 /// is the platform's, by `id`.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingsGroup {
     pub id: String,
     pub title: String,
@@ -133,7 +134,8 @@ pub fn setting_key(title: &str) -> String {
 
 /// One search result: the page it opens, the row it points at, and the line under its title (the
 /// page's name, then the row's words).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingsHit {
     pub group: String,
     pub key: String,
@@ -163,7 +165,8 @@ fn search(query: &str) -> Vec<SettingsHit> {
 // ---- a page ----
 
 /// One choice in a list of options: what it says, and the value [`setting_set`] takes for it.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingOption {
     pub label: String,
     pub value: String,
@@ -172,7 +175,8 @@ pub struct SettingOption {
 /// One row of a settings page. `key` is what search lands on; `name` is the setting it changes, for
 /// [`setting_set`]; `enabled: false` is a setting the app is going to ignore right now - still there,
 /// plainly not live.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SettingRow {
     Toggle { key: String, name: String, title: String, detail: String, on: bool, enabled: bool },
     /// `shown` is the chosen option's label (or the value itself when no option is it).
@@ -194,13 +198,15 @@ pub enum SettingRow {
     Button { title: String, action: String },
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingsSection {
     pub title: String,
     pub rows: Vec<SettingRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingsPage {
     pub title: String,
     /// Empty for a page the platform draws itself (About, Licences).
@@ -208,7 +214,8 @@ pub struct SettingsPage {
 }
 
 /// The USB DAC as the platform sees it.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DacFacts {
     pub device: Option<String>,
     pub bit_perfect: bool,
@@ -222,7 +229,8 @@ pub struct DacFacts {
 }
 
 /// The offline index: what is on the phone, whether it is being filled, and why that failed.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SyncFacts {
     pub running: bool,
     pub songs: u32,
@@ -232,7 +240,8 @@ pub struct SyncFacts {
 }
 
 /// What lives on the phone, in bytes; `busy` while something is being cleared.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StorageFacts {
     pub stream_bytes: i64,
     pub cover_bytes: i64,
@@ -243,7 +252,8 @@ pub struct StorageFacts {
 }
 
 /// What a page depends on besides the settings.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingsFacts {
     pub dac: DacFacts,
     /// The platform can take its accent from the wallpaper.
@@ -634,7 +644,8 @@ pub fn page(id: &str, p: &StoredPrefs, f: &SettingsFacts) -> Option<SettingsPage
 /// One thing the core is built from that is not ours: what it is, whose it is, under what terms, and
 /// which bundled licence text those terms are (`licences/<file>.txt`; none for something with no
 /// licence to reproduce).
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Credit {
     pub name: String,
     pub what: String,
@@ -645,8 +656,8 @@ pub struct Credit {
 
 /// The core's own credits, for the licences page of any app built on it. A line here is added in the
 /// same commit that adds the dependency. Where a crate offers MIT or Apache-2.0, the MIT text is shown.
-const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 12] = [
-    ("uniffi", "Generates the Kotlin bindings to the core", "Mozilla Foundation", "MPL-2.0", Some("MPL-2.0")),
+const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 13] = [
+    ("uniffi", "Generates the Kotlin bindings to the core and the JNI calls under them", "Mozilla Foundation", "MPL-2.0", Some("MPL-2.0")),
     ("rusqlite", "The library index, full-text search and caches", "Copyright (c) 2014 The rusqlite developers", "MIT", Some("MIT")),
     ("SQLite", "The database itself, bundled into the core", "D. Richard Hipp and the SQLite developers, dedicated to the public domain", "Public domain", None),
     ("RustFFT", "The spectrum analysis behind tempo, beats and key", "Copyright (c) 2015 The RustFFT Developers", "MIT or Apache-2.0", Some("MIT")),
@@ -659,6 +670,7 @@ const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 12] = [
     ),
     ("serde and serde_json", "Reading the server's answers", "Copyright (c) David Tolnay and the Serde developers", "MIT or Apache-2.0", Some("MIT")),
     ("jni", "The core's direct calls from the audio path", "Copyright (c) 2016 Prevoty, Inc. and jni-rs contributors", "MIT or Apache-2.0", Some("MIT")),
+    ("simd_cesu8", "Java's strings turned into the core's and back", "Copyright (c) Sean C. Roach", "MIT or Apache-2.0", Some("MIT")),
     ("md-5", "Signing requests the way the Subsonic API asks", "Copyright (c) RustCrypto Developers", "MIT or Apache-2.0", Some("MIT")),
     ("parking_lot", "Locks inside the core", "Copyright (c) 2016 The Rust Project Developers (Amanieu d'Antras)", "MIT or Apache-2.0", Some("MIT")),
     ("thiserror", "Errors inside the core", "Copyright (c) David Tolnay", "MIT or Apache-2.0", Some("MIT")),
@@ -681,7 +693,7 @@ const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 12] = [
 // ---- the doors ----
 
 /// What the core is built from, in the order the licences page lists it.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn core_credits() -> Vec<Credit> {
     CORE_CREDITS
         .iter()
@@ -690,19 +702,19 @@ pub fn core_credits() -> Vec<Credit> {
 }
 
 /// The groups the root of Settings lists, in order.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_groups() -> Vec<SettingsGroup> {
     GROUPS.iter().map(|(id, title, summary)| SettingsGroup { id: id.to_string(), title: title.to_string(), summary: summary.to_string() }).collect()
 }
 
 /// The rows whose title (first) or words (after) contain `query`; nothing for a blank one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_search(query: String) -> Vec<SettingsHit> {
     search(&query)
 }
 
 /// One group's page for the settings as they are now; `None` for a group there is not.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_page(id: String, facts: SettingsFacts) -> Option<SettingsPage> {
     let p = crate::settings_store::current().unwrap_or_default();
     page(&id, &p, &facts)
@@ -710,20 +722,20 @@ pub fn settings_page(id: String, facts: SettingsFacts) -> Option<SettingsPage> {
 
 /// The settings as they are now with one row's value changed (see `settings::set_by_name`); `None` for
 /// a name that is not a setting. Nothing is kept until the platform puts the result.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn setting_set(name: String, value: String) -> Option<SettingChange> {
     let p = crate::settings_store::current().unwrap_or_default();
     set_by_name(&p, &name, &value)
 }
 
 /// Whether the interface is dark for the theme setting (0 system, 1 light, 2 dark) and the system's own.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn theme_is_dark(theme: i32, system_dark: bool) -> bool {
     nori_look::theme::is_dark(theme, system_dark)
 }
 
 /// How big the interface is drawn for the size setting on a screen this wide; see `nori_look::theme::ui_scale`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn ui_scale(setting: f32, width_dp: i32) -> f32 {
     nori_look::theme::ui_scale(setting, width_dp)
 }
@@ -774,10 +786,10 @@ mod tests {
     #[test]
     fn the_core_credits_what_it_is_built_from() {
         let c = core_credits();
-        assert_eq!(c.len(), 12);
+        assert_eq!(c.len(), 13);
         assert_eq!((c[0].name.as_str(), c[0].licence.as_str(), c[0].file.as_deref()), ("uniffi", "MPL-2.0", Some("MPL-2.0")));
         assert_eq!((c[2].name.as_str(), c[2].file.as_deref()), ("SQLite", None));
-        assert_eq!(c[11].name, "AndroidX Palette, ported");
+        assert_eq!(c[12].name, "AndroidX Palette, ported");
     }
 
     #[test]

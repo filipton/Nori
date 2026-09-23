@@ -3,6 +3,7 @@ package dev.nori.music.app.vm
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.nori.music.ffi.IngestStats
+import dev.nori.music.net.said
 import dev.nori.music.playback.DacState
 import dev.nori.music.playback.DeviceSound
 import dev.nori.music.playback.Outputs
@@ -36,8 +37,6 @@ import dev.nori.music.ffi.SyncFacts
 import dev.nori.music.ffi.autoeqCountWords
 import dev.nori.music.ffi.autoeqHits
 import dev.nori.music.ffi.eqSetAutoPreamp
-import dev.nori.music.ffi.eqSetBand
-import dev.nori.music.ffi.eqSetLevel
 import dev.nori.music.ffi.serverNewId
 import dev.nori.music.ffi.settingSet
 import dev.nori.music.ffi.soundFromJson
@@ -312,11 +311,11 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     // graphic bands coming back when the last one goes) are the core's (settings.rs).
     fun applyPreset(p: NamedPreset) = update { it.withSound(eqApplyPreset(it.sound(), p)) }
 
-    /** One band changed, held in the equalizer's ranges by the core. */
-    fun setBand(index: Int, band: Band) = update { it.withSound(eqSetBand(it.sound(), index.toUInt(), band.stored())) }
+    /** One band changed, held in the equalizer's ranges by the core; on every step of a drag, so edited in place there. */
+    fun setBand(index: Int, band: Band) = nori.settings.setBand(index, band)
 
-    /** Pre-amp, balance, limiter ceiling or crossfeed moved; the core holds it in range and snaps it. */
-    fun setLevel(level: EqLevel, value: Float) = update { it.withSound(eqSetLevel(it.sound(), level, value)) }
+    /** Pre-amp, balance, limiter ceiling or crossfeed moved; the core holds it in range and snaps it, in place like a band. */
+    fun setLevel(level: EqLevel, value: Float) = nori.settings.setLevel(level, value)
 
     /** The automatic pre-amp on or off; off starts from the level it was at. */
     fun setAutoPreamp(automatic: Boolean) = update { it.withSound(eqSetAutoPreamp(it.sound(), automatic)) }
@@ -493,7 +492,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 nori.library.sync().collect { }
                 _sync.value = SyncUi(indexed = nori.library.indexSize())
             } catch (e: Exception) {
-                _sync.update { it.copy(running = false, error = e.message) }
+                _sync.update { it.copy(running = false, error = e.said) }
             }
         }
     }

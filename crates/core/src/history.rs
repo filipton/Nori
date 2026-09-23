@@ -208,7 +208,7 @@ pub(crate) fn summary(c: &Connection, from_ms: i64, to_ms: i64, top: u32) -> rus
     Ok(out)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Call once per listen, when the track ends or is left. `tz_offset_ms` is the local UTC offset at
     /// `started_ms`; the core has no time zone of its own and the hour and weekday charts are local time.
@@ -277,6 +277,7 @@ pub(crate) mod tests {
             suffix: "flac".into(),
             ..Default::default()
         }
+        .dressed()
     }
 
     /// A full listen at `at`.

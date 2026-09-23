@@ -18,7 +18,8 @@ const MISS_KEPT_MS: i64 = 7 * 24 * 3_600_000;
 const DURATION_SLACK_S: f64 = 4.0;
 
 /// Lyrics to show after the server's own, and where they came from.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct LyricsPick {
     pub lyrics: Lyrics,
     /// From LRCLIB; otherwise this is the server's empty answer, shown once nothing better came.
@@ -279,7 +280,7 @@ fn lrclib_allowed(p: &crate::settings::StoredPrefs) -> bool {
     p.third_party_lookups && p.lyrics_lrclib
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// What to show once the server's own lyrics are in (`server_has_lines`, `server_synced` describe
     /// them; the platform shows them itself). The server's synced lyrics win; otherwise, when the
@@ -289,7 +290,11 @@ impl Client {
     /// comes back from here when nothing better was found.
     pub async fn lyrics_after_server(&self, song: Song, server_has_lines: bool, server_synced: bool) -> NetResult<Option<LyricsPick>> {
         let allow = crate::settings_store::with_prefs(lrclib_allowed).unwrap_or(false);
-        self.after_server(song, allow, server_has_lines, server_synced).await
+        let mut pick = self.after_server(song, allow, server_has_lines, server_synced).await?;
+        if let Some(p) = &mut pick {
+            crate::look::keep(&mut p.lyrics);
+        }
+        Ok(pick)
     }
 }
 
@@ -365,7 +370,7 @@ mod tests {
     #[test]
     fn lrc_is_written_with_centiseconds_rounded_half_up() {
         let line = |start_ms, text: &str| LyricLine { start_ms, text: text.into(), ..Default::default() };
-        let l = Lyrics { synced: true, word_timed: false, lines: vec![line(5_200, "a"), line(65_125, "b"), line(3_599_995, "c"), line(-1, "plain")] };
+        let l = Lyrics { synced: true, word_timed: false, lines: vec![line(5_200, "a"), line(65_125, "b"), line(3_599_995, "c"), line(-1, "plain")], key: 0 };
         assert_eq!(to_lrc(&l), "[00:05.20]a\n[01:05.13]b\n[59:60.00]c\nplain");
     }
 

@@ -536,7 +536,7 @@ impl<C: Clone> TransitionEngine<C> {
                     self.feed_analysis(host, buffer, native);
                 }
                 if self.stretch.is_some() {
-                    self.stretch_out(host, buffer);
+                    self.stretch_out(host, buffer, pts_us);
                     self.drain(down);
                     return (true, buffer.len());
                 }
@@ -652,7 +652,9 @@ impl<C: Clone> TransitionEngine<C> {
     /// caller's buffer, reported as taken when this goes through the queue.
     fn pass<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, buffer: &[u8], whole: usize, pts_us: i64, copy: bool) -> (bool, usize) {
         let out = self.out.expect("pass runs on PCM");
-        if !self.queue.is_empty() || copy {
+        // A resync waiting (the track back on its own timestamps after a stretch) goes down with the
+        // buffer it belongs to, which only the queue knows how to do.
+        if !self.queue.is_empty() || copy || self.resync_next {
             if !copy {
                 self.feed_analysis(host, buffer, out);
             }
@@ -1008,8 +1010,13 @@ impl<C: Clone> TransitionEngine<C> {
     }
 
     /// After a mix the incoming track keeps going through the stretcher until its tempo is back to normal.
-    fn stretch_out<H: Host>(&mut self, host: &mut H, buffer: &[u8]) {
+    fn stretch_out<H: Host>(&mut self, host: &mut H, buffer: &[u8], pts_us: i64) {
         let Some(out) = self.out else { return };
+        // Everything the stretcher hands out continues the running clock, its last audio too, which comes
+        // out as it finishes and hands the track back to its own timestamps. Stamped after that it went
+        // down at 0: the output's clock fell back to the start of the queue, the next ending was held
+        // against a clock that could never reach it, and it was never let go - silence to the end.
+        let at = if self.synthetic_pts_us == TIME_UNSET { pts_us } else { self.synthetic_pts_us };
         let Some(s) = self.stretched(host, buffer) else { return };
         let o = if self.converting() {
             let c = self.converted(host, &s);
@@ -1021,9 +1028,12 @@ impl<C: Clone> TransitionEngine<C> {
         } else {
             s
         };
-        let at = if self.synthetic_pts_us == TIME_UNSET { 0 } else { self.synthetic_pts_us };
         let frames = o.len() / out.frame_bytes();
+        // Finished: the track's own timestamps begin with the buffer after this audio, and that is where
+        // the output takes its new reference.
+        let resync = self.stretch.is_none() && std::mem::take(&mut self.resync_next);
         self.enqueue(o, at);
+        self.resync_next |= resync;
         // Only a running clock moves on: the stretcher may have just finished and handed the track
         // back to its own timestamps. (The Kotlin sink added to the unset marker here, leaving a garbage
         // clock for the next mix to stamp its audio with.)
@@ -1662,6 +1672,11 @@ mod tests {
         // Nothing runs on a garbage clock afterwards: timestamps stay non-negative and ordered from the resync on.
         let last = d.taken.iter().rev().take(20).map(|(_, p)| *p).collect::<Vec<_>>();
         assert!(last.windows(2).all(|w| w[0] >= w[1]), "{last:?}");
+        // From the mix on the clock only moves forward. The stretcher's last audio was once stamped 0,
+        // pulling the output's clock back to the start of the queue: the next ending was then held against
+        // a clock that could never reach it, and never let go.
+        let from_mix: Vec<i64> = d.taken.iter().map(|(_, p)| *p).skip_while(|&p| p < 1_000_000).collect();
+        assert!(from_mix.windows(2).all(|w| w[1] >= w[0]), "{from_mix:?}");
     }
 
     #[test]

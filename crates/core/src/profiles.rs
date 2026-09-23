@@ -6,8 +6,11 @@
 //! load, whether to read the profiles again, whether to run the device's arrival again. The platform
 //! fetches an AutoEQ preset when asked (that is transport) and applies the effect.
 
-use nori_player::device::{self, keep_loose, ChoiceKind, DeviceRow, NoticeText, FLAT};
+use nori_player::device::{self, keep_loose, FLAT};
 use nori_player::outputs::SPEAKER;
+
+// Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
+pub use nori_player::device::{ChoiceKind, DeviceRow, NoticeText};
 use rusqlite::OptionalExtension;
 
 use crate::settings::{self, sound_from, sound_json, SoundError, SoundSettings, StoredPrefs};
@@ -18,6 +21,7 @@ const LOOSE: &str = "looseSound";
 /// The devices the user said should never be offered a curve, as a JSON list (`app_kv`).
 const QUIET: &str = "quietOutputs";
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum ChoiceKind {
     Automatic,
@@ -26,6 +30,7 @@ pub enum ChoiceKind {
     Profile,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct DeviceRow {
     pub output: String,
@@ -37,6 +42,7 @@ pub struct DeviceRow {
     pub profile: Option<String>,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct NoticeText {
     pub message: String,
@@ -69,7 +75,8 @@ impl Step {
 
 /// What the platform does after a step, in this order: read the profiles (and the quiet devices) again,
 /// load the sound, and run the device's arrival again.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DeviceEffect {
     pub refresh: bool,
     pub apply: Option<SoundSettings>,
@@ -103,7 +110,8 @@ impl Now {
 
 /// A device arriving: the effect of its bound profile or of the sound from before, and whether a curve
 /// is offered or applied (`entry`, with the url of its preset, when one matches).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DeviceArrival {
     pub effect: DeviceEffect,
     pub curve: CurveStep,
@@ -123,7 +131,7 @@ fn device_name(output: &str) -> &str {
     output.split_once(": ").map_or("", |(_, n)| n)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The output that music now goes to.
     pub fn device_arrive(&self, output: String) -> DeviceArrival {
@@ -347,20 +355,21 @@ impl Core {
 }
 
 /// Every output seen, the one playing now included, each with the sound it gets.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_rows(known: Vec<String>, current: String, profiles: Vec<SoundProfile>, quiet: Vec<String>) -> Vec<DeviceRow> {
     let bound: Vec<(&str, &[String])> = profiles.iter().map(|p| (p.name.as_str(), p.outputs.as_slice())).collect();
     device::rows(&known, &current, &bound, &quiet)
 }
 
 /// The snackbar line about the device that just connected; see `nori_player::device::notice`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_notice(offer: bool, name: String, output: String, current: String) -> Option<NoticeText> {
     device::notice(offer, &name, &output, &current)
 }
 
 /// What the test bridge asks a device to get.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SpecKind {
     Automatic,
     Quiet,
@@ -370,7 +379,8 @@ pub enum SpecKind {
     Curve,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DeviceSpec {
     pub output: String,
     pub kind: SpecKind,
@@ -379,7 +389,7 @@ pub struct DeviceSpec {
 
 /// The test bridge's `set deviceSound "<output>=flat|auto|quiet|profile:<name>|curve:<search>"`; anything
 /// else after the last '=' is automatic.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_spec(value: String) -> DeviceSpec {
     let (output, spec) = value.rsplit_once('=').unwrap_or((&value, &value));
     let (kind, arg) = if spec == "flat" {
@@ -405,14 +415,16 @@ pub fn autoeq_too_short(query: &str) -> bool {
 
 /// One AutoEQ curve with the lines under it: `caption` in the browser (who measured it, the form and
 /// the target, whichever are known), `short` in a device's sheet (who measured it and the form).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AutoEqHit {
     pub entry: AutoEqEntry,
     pub caption: String,
     pub short: String,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AutoEqFound {
     pub too_short: bool,
     pub hits: Vec<AutoEqHit>,
@@ -425,25 +437,27 @@ fn hit(entry: AutoEqEntry) -> AutoEqHit {
 }
 
 /// The curves with their lines.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autoeq_hits(entries: Vec<AutoEqEntry>) -> Vec<AutoEqHit> {
     entries.into_iter().map(hit).collect()
 }
 
 /// The size of the downloaded AutoEQ list: "8123 headphones", and the search field's "Search 8123 headphones".
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AutoEqCount {
     pub count: String,
     pub search: String,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autoeq_count_words(count: u32) -> AutoEqCount {
     AutoEqCount { count: format!("{count} headphones"), search: format!("Search {count} headphones") }
 }
 
 /// What a device's sheet says and offers.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DeviceSheet {
     /// The words under its name.
     pub intro: String,
@@ -470,13 +484,13 @@ pub fn sheet(output: &str, kind: Option<&str>, current: bool, auto_eq_auto: bool
 
 /// The sheet of the device `output` (plugged in as `kind`, the one playing now or not), given the
 /// saved profiles' names.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_sheet(output: String, kind: Option<String>, current: bool, auto_eq_auto: bool, profiles: Vec<String>) -> DeviceSheet {
     sheet(&output, kind.as_deref(), current, auto_eq_auto, &profiles)
 }
 
 /// The mark on the device playing now, after its kind when it has one: " · Playing now", "Playing now".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_playing_now(after_kind: bool) -> String {
     (if after_kind { " · Playing now" } else { "Playing now" }).into()
 }

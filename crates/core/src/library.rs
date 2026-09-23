@@ -27,13 +27,14 @@ pub fn local_epoch_day() -> i64 {
 }
 
 /// The lyrics of nothing playing: no lines, untimed, as if the server had said so.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_none() -> crate::Lyrics {
-    crate::Lyrics { synced: false, word_timed: false, lines: Vec::new() }
+    crate::Lyrics { synced: false, word_timed: false, lines: Vec::new(), key: 0 }
 }
 
 /// What a press on "Resume from server" does with the queue the server kept.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ResumePlan {
     /// Nothing was saved: say so.
     Nothing { message: String },
@@ -49,6 +50,17 @@ fn resume_plan(q: PlayQueue) -> ResumePlan {
     }
 }
 
+/// The favourites handed to the mixes from the stored answer: whether there was one, and what
+/// [`Client::mix_favourites_refresh`] needs to ask the server after it.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct FavouritesHanded {
+    pub handed: bool,
+    pub digest: Option<u64>,
+    /// Young enough that the server is not asked.
+    pub fresh: bool,
+}
+
 /// What a failed refresh means: nothing when a stored answer is already on screen (offline with something
 /// to show is not an error), the failure itself when there is nothing to fall back on.
 fn refreshed(got: NetResult<Option<Page>>, had_stored: bool) -> NetResult<Option<Page>> {
@@ -58,7 +70,7 @@ fn refreshed(got: NetResult<Option<Page>>, had_stored: bool) -> NetResult<Option
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// The second half of a screen's read, after `read_stored` painted what was kept: asks the server
     /// unless that was fresh, and returns its answer only when it differs. A failure is only an error
@@ -76,6 +88,45 @@ impl Client {
             crate::stars::star_restore(kind, id, previous);
         }
         sent
+    }
+
+    /// The starred songs, as stored for this server and with this session's marks, handed to the mixes
+    /// (`mix_favourites`) without crossing to the platform and back. The first half of the favourites
+    /// read, as `read_stored` is of a screen's.
+    pub fn mix_favourites_stored(&self) -> NetResult<FavouritesHanded> {
+        let stored = self.read_stored(Read::StarredItems)?;
+        let handed = match stored.page {
+            Some(Page::StarredPage { v }) => {
+                self.core.mix_favourites(v.songs);
+                true
+            }
+            _ => false,
+        };
+        Ok(FavouritesHanded { handed, digest: stored.digest, fresh: stored.fresh })
+    }
+
+    /// The second half: the server's starred songs handed to the mixes when they differ from the stored
+    /// ones (`stored_digest`). True when they were.
+    pub async fn mix_favourites_refresh(&self, stored_digest: Option<u64>) -> NetResult<bool> {
+        Ok(match self.read_refresh(Read::StarredItems, stored_digest).await? {
+            Some(Page::StarredPage { v }) => {
+                self.core.mix_favourites(v.songs);
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Every album of the artist `artist_id` (a provider's left out), in order, as one list of songs: the
+    /// artist as stored, or asked for when it is not, then [`Client::artist_songs`].
+    pub async fn artist_songs_of(&self, artist_id: String) -> NetResult<Vec<Song>> {
+        let read = || Read::ArtistById { id: artist_id.clone() };
+        let page = match self.read_stored(read())?.page {
+            Some(p) => p,
+            None => self.read_fetch(read(), None).await?.unwrap_or(Page::Albums { v: Vec::new() }),
+        };
+        let Page::ArtistPage { v } = page else { return Ok(Vec::new()) };
+        Ok(self.artist_songs(v.albums).await)
     }
 
     /// Draws mix `id` unless today's (or this week's) draw is there already; `again` asks for a different

@@ -14,38 +14,51 @@ use crate::model::{ListeningStats, Song};
 /// grouping separators its default locale formats with (`DecimalFormatSymbols` on Android). Every
 /// fraction the app writes, here and in the player, then reads as the phone's own did - "12,4 MB" on a
 /// Polish phone. Never called, it is a point (see `nori_text`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn fmt_set_locale(decimal_separator: String, grouping_separator: String) {
     nori_text::set_style(&decimal_separator, &grouping_separator);
 }
 
 /// "3:07", or "1:02:03" from an hour.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn duration(seconds: i64) -> String {
-    let s = seconds;
-    if s >= 3600 {
-        format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
-    } else {
-        format!("{}:{:02}", s / 60, s % 60)
-    }
+    let mut buf = [0u8; 32];
+    let n = write_duration(seconds, false, &mut buf);
+    String::from_utf8_lossy(&buf[..n]).into_owned()
 }
 
 /// The time left in a song, under the seek bar: "-3:07".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn duration_left(seconds: i64) -> String {
-    format!("-{}", duration(seconds))
+    let mut buf = [0u8; 32];
+    let n = write_duration(seconds, true, &mut buf);
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// [duration] (or, `left`, [duration_left]) written into `buf` without allocating; the length written.
+/// The player's times ask for it over JNI once a second, straight into a Java string.
+pub fn write_duration(seconds: i64, left: bool, buf: &mut [u8; 32]) -> usize {
+    use std::io::Write;
+    let s = seconds;
+    let mut w = &mut buf[..];
+    let _ = if s >= 3600 {
+        write!(w, "{}{}:{:02}:{:02}", if left { "-" } else { "" }, s / 3600, s / 60 % 60, s % 60)
+    } else {
+        write!(w, "{}{}:{:02}", if left { "-" } else { "" }, s / 60, s % 60)
+    };
+    32 - w.len()
 }
 
 /// A decibel figure with its sign, one decimal: "+3.5", "-1.0", and "+0.0" for nothing at all. `-0.0`
 /// is a real float - the automatic pre-amp is minus the largest boost, and minus nothing is negative
 /// zero - and printed as it is it read "-0.0 dB".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn signed_db(db: f32) -> String {
     fixed(if db == 0.0 { 0.0 } else { db as f64 }, 1, true)
 }
 
 /// How far the lyrics are nudged: "+0.5 s", "-1.3 s".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn nudge_seconds(ms: i64) -> String {
     format!("{} s", fixed((ms as f32 / 1000.0) as f64, 1, true))
 }
@@ -67,7 +80,7 @@ fn hz_text(f: f32) -> String {
 
 /// A band's label: its frequency and a mark for what kind of band it is - one channel only (L, R), a
 /// shelf (↙ low, ↗ high) or a band with no gain (∿), in that order of precedence.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_band_label(freq: f32, left: bool, right: bool, low_shelf: bool, high_shelf: bool, uses_gain: bool) -> String {
     let mark = if left {
         " L"
@@ -86,36 +99,36 @@ pub fn eq_band_label(freq: f32, left: bool, right: bool, low_shelf: bool, high_s
 }
 
 /// A band's frequency alone: the band dialog's title says "{this} Hz".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_hz(freq: f32) -> String {
     hz_text(freq)
 }
 
 /// The frequency slider is logarithmic: its position is the exponent, 20 Hz at 0 to 20 kHz at 1.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_freq_to_slider(freq: f32) -> f32 {
     (((freq / 20.0) as f64).log10() as f32) / 3.0
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_slider_to_freq(x: f32) -> f32 {
     20.0 * (10f64.powf(x as f64 * 3.0) as f32)
 }
 
 /// "Slope 0.71" for a shelf given by its slope, "Q 1.41" for the rest.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_shape(slope: bool, q: f32) -> String {
     format!("{} {}", if slope { "Slope" } else { "Q" }, fixed(q as f64, 2, false))
 }
 
 /// A balance near the middle is the middle: within 4 % of it the slider snaps to 0.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_balance_snap(v: f32) -> f32 {
     if v.abs() < 0.04 { 0.0 } else { v }
 }
 
 /// "centre", "L 30%", "R 5%".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_balance(balance: f32) -> String {
     if balance == 0.0 {
         return "centre".into();
@@ -124,12 +137,12 @@ pub fn eq_balance(balance: f32) -> String {
 }
 
 /// Crossfeed under a decibel is none at all.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_crossfeed_snap(db: f32) -> f32 {
     if db < 1.0 { 0.0 } else { db }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_crossfeed(db: f32) -> String {
     if db > 0.0 {
         format!("{} dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.", fixed(db as f64, 1, false))
@@ -139,13 +152,13 @@ pub fn eq_crossfeed(db: f32) -> String {
 }
 
 /// "Ceiling -1.0 dB".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_ceiling(db: f32) -> String {
     format!("Ceiling {} dB", fixed(db as f64, 1, false))
 }
 
 /// What the limiter is pulling back right now, or that it is not: "−2.3 dB", "not clipping".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_reduction(db: f32) -> String {
     if db > 0.05 {
         format!("−{} dB", fixed(db as f64, 1, false))
@@ -155,13 +168,13 @@ pub fn eq_reduction(db: f32) -> String {
 }
 
 /// "Pre-amp -3.5 dB (automatic)".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_preamp(db: f32, automatic: bool) -> String {
     format!("Pre-amp {} dB{}", signed_db(db), if automatic { " (automatic)" } else { "" })
 }
 
 /// "12.4 MB".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn megabytes(bytes: u64) -> String {
     format!("{} MB", fixed(bytes as f64 / 1_048_576.0, 1, false))
 }
@@ -173,7 +186,7 @@ fn songs(n: u32, always_plural: bool) -> String {
 }
 
 /// A list's caption: "12 songs · 48:10".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn songs_caption(count: u32, seconds: u64, always_plural: bool) -> String {
     format!("{} · {}", songs(count, always_plural), duration(seconds as i64))
 }
@@ -198,14 +211,13 @@ pub fn quality_of(s: &Song) -> Option<String> {
 }
 
 /// An album page's caption once its songs are in: "2019 · 12 songs · 48:10 · FLAC 16/44.1 · explicit".
-#[uniffi::export]
-pub fn album_caption(year: u32, songs: Vec<Song>, explicit: bool) -> String {
+pub fn album_caption(year: u32, songs: &[Song], explicit: bool) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(5);
     if year > 0 {
         parts.push(year.to_string());
     }
     parts.push(format!("{} songs", songs.len()));
-    parts.push(duration(total_seconds(&songs) as i64));
+    parts.push(duration(total_seconds(songs) as i64));
     if let Some(q) = songs.first().and_then(quality_of) {
         parts.push(q);
     }
@@ -216,7 +228,7 @@ pub fn album_caption(year: u32, songs: Vec<Song>, explicit: bool) -> String {
 }
 
 /// What is known of an album before its songs are: "2019 · 12 songs · 48:10", each part only if known.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_hint_caption(year: u32, song_count: u32, seconds: u32) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(3);
     if year > 0 {
@@ -231,25 +243,13 @@ pub fn album_hint_caption(year: u32, song_count: u32, seconds: u32) -> String {
     parts.join(" · ")
 }
 
-/// An album page's caption from whatever is known of it: [`album_caption`] once its songs are in, the
-/// [`album_hint_caption`] of the row that opened it before then. Explicit is the server's own flag.
-#[uniffi::export]
-pub fn album_page_caption(album: crate::model::Album, songs: Option<Vec<Song>>) -> String {
-    match songs {
-        Some(songs) => album_caption(album.year, songs, album.explicit_status == "explicit"),
-        None => album_hint_caption(album.year, album.song_count, album.duration),
-    }
-}
-
 /// A caption for `songs` as a whole: "12 songs · 48:10". See [`songs_caption`].
-#[uniffi::export]
-pub fn list_caption(songs: Vec<Song>, always_plural: bool) -> String {
-    songs_caption(songs.len() as u32, total_seconds(&songs), always_plural)
+pub fn list_caption(songs: &[Song], always_plural: bool) -> String {
+    songs_caption(songs.len() as u32, total_seconds(songs), always_plural)
 }
 
 /// "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from.
-#[uniffi::export]
-pub fn provider_of(id: String) -> Option<String> {
+pub fn provider_of(id: &str) -> Option<String> {
     if !id.starts_with("ext-") && !id.starts_with("pl-") {
         return None;
     }
@@ -260,9 +260,9 @@ pub fn provider_of(id: String) -> Option<String> {
     Some(if cap == "Squidwtf" { "SquidWTF".into() } else { cap })
 }
 
-/// An album card's second line: "Artist · 2019 · ☁ Deezer", each part only if there is one.
-#[uniffi::export]
-pub fn album_subtitle(artist: String, year: u32, id: String) -> String {
+/// An album card's second line: "Artist · 2019 · ☁ Deezer", each part only if there is one. The album
+/// carries it as its `subtitle`.
+pub fn album_subtitle(artist: &str, year: u32, id: &str) -> String {
     let mut out = String::new();
     let mut add = |s: &str| {
         if !out.is_empty() {
@@ -271,7 +271,7 @@ pub fn album_subtitle(artist: String, year: u32, id: String) -> String {
         out.push_str(s);
     };
     if !artist.is_empty() {
-        add(&artist);
+        add(artist);
     }
     if year > 0 {
         add(&year.to_string());
@@ -283,15 +283,15 @@ pub fn album_subtitle(artist: String, year: u32, id: String) -> String {
 }
 
 /// A song row's second line: an explicit mark, then the artist unless the page is already about them.
-#[uniffi::export]
-pub fn song_line(explicit_status: String, artist: String, page_artist: Option<String>) -> String {
+/// The song carries it for no page as its `line`; an album's discs carry it for the album's artist.
+pub fn song_line(explicit_status: &str, artist: &str, page_artist: Option<&str>) -> String {
     let show = page_artist.is_none_or(|p| !artist.to_lowercase().eq(&p.to_lowercase()));
     let mut out = String::new();
     if explicit_status == "explicit" {
         out.push_str("🅴 ");
     }
     if show {
-        out.push_str(&artist);
+        out.push_str(artist);
     }
     out
 }
@@ -315,7 +315,7 @@ fn quality_parts(s: &Song, channels: bool) -> Vec<String> {
 }
 
 /// The line under a song at the top of its menu: "FLAC · 1411 kbps · 44.1 kHz · 16 bit".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_format(song: Song) -> String {
     let mut parts = vec![song.suffix.to_uppercase()];
     parts.extend(quality_parts(&song, false));
@@ -323,14 +323,15 @@ pub fn song_format(song: Song) -> String {
 }
 
 /// One line of a song's details: what it is, and what the server said.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct InfoRow {
     pub label: String,
     pub value: String,
 }
 
 /// Everything the server said about one file, in the order the details sheet shows it, blanks left out.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn track_info(song: Song) -> Vec<InfoRow> {
     let join = |parts: Vec<Option<String>>, sep: &str| parts.into_iter().flatten().collect::<Vec<_>>().join(sep);
     let artists = song.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
@@ -371,7 +372,8 @@ pub fn track_info(song: Song) -> Vec<InfoRow> {
 }
 
 /// What the listening page says about its numbers, worked out once per period.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StatsWords {
     /// Under the play count: "plays · 12:34:56 listened".
     pub headline: String,
@@ -392,33 +394,34 @@ fn busiest(v: &[u32]) -> Option<usize> {
 }
 
 /// One period the listening stats can cover: `days` back from now, 0 for all time.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StatsPeriod {
     pub days: u32,
     pub label: String,
 }
 
 /// The periods, in the order the chips run, and which one opens (a year).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn stats_periods() -> Vec<StatsPeriod> {
     [(7, "Week"), (30, "Month"), (365, "Year"), (0, "All time")].map(|(days, l)| StatsPeriod { days, label: l.into() }).to_vec()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn stats_default_days() -> u32 {
     365
 }
 
 /// One tile of the stats: a number and what it counts.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StatTileWords {
     pub value: String,
     pub label: String,
 }
 
 /// The six tiles under the headline, in two rows of three.
-#[uniffi::export]
-pub fn stats_tiles(stats: ListeningStats) -> Vec<StatTileWords> {
+pub fn stats_tiles(stats: &ListeningStats) -> Vec<StatTileWords> {
     [
         (stats.distinct_songs, "songs"),
         (stats.distinct_artists, "artists"),
@@ -432,13 +435,12 @@ pub fn stats_tiles(stats: ListeningStats) -> Vec<StatTileWords> {
 }
 
 /// The hours marked under the listening-day chart.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn stats_hour_ticks() -> Vec<String> {
     ["00", "06", "12", "18", "23"].map(String::from).to_vec()
 }
 
-#[uniffi::export]
-pub fn stats_words(stats: ListeningStats) -> StatsWords {
+pub fn stats_words(stats: &ListeningStats) -> StatsWords {
     const DAYS: [&str; 7] = ["Mondays", "Tuesdays", "Wednesdays", "Thursdays", "Fridays", "Saturdays", "Sundays"];
     let when = busiest(&stats.plays_per_hour).filter(|&h| stats.plays_per_hour[h] > 0).map(|h| {
         let mut out = format!("Most around {h}:00");
@@ -458,6 +460,18 @@ pub fn stats_words(stats: ListeningStats) -> StatsWords {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn durations_are_written_without_allocating() {
+        use super::*;
+        assert_eq!(duration(187), "3:07");
+        assert_eq!(duration(3723), "1:02:03");
+        assert_eq!(duration_left(187), "-3:07");
+        assert_eq!(duration_left(3723), "-1:02:03");
+        let mut buf = [0u8; 32];
+        let n = write_duration(i64::MAX, true, &mut buf);
+        assert!(n <= 31, "room left for the NUL the JNI door appends");
+    }
+
     use super::*;
 
     /// Printed by Kotlin's hz(): the float's bits and the label.
@@ -467,7 +481,7 @@ mod tests {
     fn stats_periods_and_tiles() {
         assert_eq!(stats_periods().iter().map(|p| (p.days, p.label.as_str())).collect::<Vec<_>>(), [(7, "Week"), (30, "Month"), (365, "Year"), (0, "All time")]);
         assert_eq!(stats_default_days(), 365);
-        let t = stats_tiles(ListeningStats { distinct_songs: 4, longest_streak_days: 2, ..Default::default() });
+        let t = stats_tiles(&ListeningStats { distinct_songs: 4, longest_streak_days: 2, ..Default::default() });
         assert_eq!((t[0].value.as_str(), t[0].label.as_str()), ("4", "songs"));
         assert_eq!((t[5].value.as_str(), t[5].label.as_str()), ("2", "day streak"));
         assert_eq!(stats_hour_ticks(), ["00", "06", "12", "18", "23"]);
@@ -498,21 +512,33 @@ mod tests {
         assert_eq!(megabytes(10 * 1_048_576 + 104_858), "10.1 MB");
         assert_eq!(songs_caption(1, 200, false), "1 song · 3:20");
         assert_eq!(songs_caption(1, 200, true), "1 songs · 3:20");
-        assert_eq!(provider_of("ext-squidwtf-song-1".into()).as_deref(), Some("SquidWTF"));
-        assert_eq!(provider_of("ext-deezer-song-1".into()).as_deref(), Some("Deezer"));
-        assert_eq!(provider_of("al-1".into()), None);
-        assert_eq!(album_subtitle("Radiohead".into(), 1997, "pl-deezer-1".into()), "Radiohead · 1997 · ☁ Deezer");
-        assert_eq!(album_subtitle("".into(), 0, "1".into()), "");
-        assert_eq!(song_line("explicit".into(), "Radiohead".into(), Some("radiohead".into())), "🅴 ");
-        assert_eq!(song_line("".into(), "Radiohead".into(), None), "Radiohead");
+        assert_eq!(provider_of("ext-squidwtf-song-1").as_deref(), Some("SquidWTF"));
+        assert_eq!(provider_of("ext-deezer-song-1").as_deref(), Some("Deezer"));
+        assert_eq!(provider_of("al-1"), None);
+        assert_eq!(album_subtitle("Radiohead", 1997, "pl-deezer-1"), "Radiohead · 1997 · ☁ Deezer");
+        assert_eq!(album_subtitle("", 0, "1"), "");
+        assert_eq!(song_line("explicit", "Radiohead", Some("radiohead")), "🅴 ");
+        assert_eq!(song_line("", "Radiohead", None), "Radiohead");
         let s = Song { suffix: "flac".into(), bit_depth: 24, sampling_rate: 96000, duration: 100, ..Default::default() };
         assert_eq!(quality_of(&s).as_deref(), Some("FLAC 24/96.0"));
-        assert_eq!(album_caption(2019, vec![s.clone(), s], true), "2019 · 2 songs · 3:20 · FLAC 24/96.0 · explicit");
+        assert_eq!(album_caption(2019, &[s.clone(), s], true), "2019 · 2 songs · 3:20 · FLAC 24/96.0 · explicit");
         assert_eq!(album_hint_caption(0, 12, 0), "12 songs");
-        let album = crate::model::Album { year: 2019, song_count: 2, duration: 200, explicit_status: "explicit".into(), ..Default::default() };
-        assert_eq!(album_page_caption(album.clone(), None), "2019 · 2 songs · 3:20");
-        let t = Song { suffix: "flac".into(), bit_depth: 24, sampling_rate: 96000, duration: 100, ..Default::default() };
-        assert_eq!(album_page_caption(album, Some(vec![t.clone(), t])), "2019 · 2 songs · 3:20 · FLAC 24/96.0 · explicit");
+        assert_eq!(album_hint_caption(2019, 2, 200), "2019 · 2 songs · 3:20");
+    }
+
+    #[test]
+    fn records_come_out_of_a_read_with_their_words() {
+        let song: Song = serde_json::from_str(r#"{"id":"ext-deezer-song-1","artist":"Björk","explicitStatus":"explicit"}"#).unwrap();
+        assert_eq!((song.line.as_str(), song.provider.as_deref()), ("🅴 Björk", Some("Deezer")));
+        // Made again when read, never stored.
+        let stored = serde_json::to_string(&song).unwrap();
+        assert!(!stored.contains("line") && !stored.contains("Deezer"), "{stored}");
+        let album: crate::Album = serde_json::from_str(r#"{"id":"1","name":"Homogenic","artist":"Björk","year":1997}"#).unwrap();
+        assert_eq!(album.subtitle, "Björk · 1997");
+        let artist: crate::Artist = serde_json::from_str(r#"{"id":"1","name":"Björk","albumCount":1}"#).unwrap();
+        assert_eq!(artist.albums_line, "1 album");
+        let list: crate::Playlist = serde_json::from_str(r#"{"id":"1","name":"Mix","songCount":12,"duration":2890}"#).unwrap();
+        assert_eq!((list.line.as_str(), list.songs_line.as_str()), ("12 songs · 48:10", "12 songs"));
     }
 
     #[test]
@@ -541,14 +567,14 @@ mod tests {
             top_artists: vec![TopEntry { listened_ms: 187_900, ..Default::default() }],
             ..Default::default()
         };
-        let w = stats_words(stats);
+        let w = stats_words(&stats);
         assert_eq!(w.headline, "plays · 1:02:03 listened");
         // The first of equal peaks, as `maxByOrNull` picks.
         assert_eq!(w.habit.as_deref(), Some("Most around 21:00, mostly on Fridays"));
         assert_eq!((w.hours[9], w.hours[21], w.hours[0]), (0.5, 1.0, 0.0));
         assert_eq!(w.artist_times, ["3:07"]);
         // Nothing played: no chart and nothing to say about it, and no dividing by nothing.
-        let none = stats_words(ListeningStats { plays_per_hour: vec![0; 24], plays_per_weekday: vec![0; 7], ..Default::default() });
+        let none = stats_words(&ListeningStats { plays_per_hour: vec![0; 24], plays_per_weekday: vec![0; 7], ..Default::default() });
         assert_eq!((none.habit, none.hours[3]), (None, 0.0));
     }
 }

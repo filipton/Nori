@@ -41,12 +41,14 @@ data class MixPage(
     val id: String, val title: String, val songs: List<Song>, val covers: List<String>,
     /** False for favourites (they follow the hearts) and for top songs (there is only one draw of those). */
     val refreshable: Boolean, val favourites: Boolean,
+    /** "12 songs · 48:10", the core's; empty with no songs. */
+    val caption: String,
 )
 
 /** The core names the covers; the list rendition of each, so they are cache hits. */
 private val tileSize: Int get() = dev.nori.music.data.Covers.rules.row.toInt()
 private fun NoriViewModel.card(t: MixTile) = MixCard(t.id, t.title, t.covers.mapNotNull { cover(it, tileSize) }, t.favourites)
-private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, s.title, s.songs, s.covers.mapNotNull { cover(it, tileSize) }, s.refreshable, s.favourites)
+private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, s.title, s.songs, s.covers.mapNotNull { cover(it, tileSize) }, s.refreshable, s.favourites, s.caption)
 
 /**
  * Today's (or this week's) draw of each mix lives in the core (see mixes/board.rs), shared by the Home
@@ -73,16 +75,12 @@ internal object MixStore {
 }
 
 /**
- * The starred songs handed to the core, re-asked on every star change, with this session's marks: an
- * unstarred song leaves the list under the finger instead of after the server's answer. Emits once the
- * core has them.
+ * The starred songs handed to the mixes, re-asked on every star change, with this session's marks: an
+ * unstarred song leaves the list under the finger instead of after the server's answer. The core reads
+ * and hands them itself, so they never come out here to be sent back. Emits once the core has them.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-private fun Nori.favouritesHanded(): Flow<Unit> =
-    combine(library.starsVersion.flatMapLatest { library.starred() }.map { it.songs }, library.starMarks) { songs, _ ->
-        withContext(Dispatchers.IO) { core.mixFavourites(songs) }
-        Unit
-    }
+private fun Nori.favouritesHanded(): Flow<Unit> = library.starsVersion.flatMapLatest { library.handFavourites() }
 
 /** The "For you" row: favourites first, then the mixes the core draws from the index and the listening history. */
 class MixesViewModel(app: Application) : NoriViewModel(app) {

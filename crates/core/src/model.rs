@@ -44,7 +44,29 @@ fn id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(opt_id(d)?.unwrap_or_default())
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+/// A record that carries words made from its own fields (a row's second line, a card's subtitle) has its
+/// serde derived as `remote = "Self"` and is read through here: every copy of it that is read - off the
+/// wire, out of the index, out of a stored answer - comes out with its words, and none of them are stored.
+macro_rules! dressed {
+    ($t:ty) => {
+        impl Serialize for $t {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                <$t>::serialize(self, s)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let mut v = <$t>::deserialize(d)?;
+                v.dress();
+                Ok(v)
+            }
+        }
+    };
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default, rename_all = "camelCase")]
 pub struct ReplayGain {
     pub track_gain: Option<f32>,
@@ -53,7 +75,8 @@ pub struct ReplayGain {
     pub album_peak: Option<f32>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default)]
 pub struct ArtistRef {
     #[serde(deserialize_with = "id")]
@@ -61,8 +84,9 @@ pub struct ArtistRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(remote = "Self", default, rename_all = "camelCase")]
 pub struct Song {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -106,10 +130,43 @@ pub struct Song {
     pub music_brainz_id: Option<String>,
     pub bpm: u32,
     pub comment: Option<String>,
+    /// A row's second line: the explicit mark, then the artist ([`crate::fmt::song_line`] on no artist's
+    /// page). Worked out once when the song is read, so a list does not ask for it row by row.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub line: String,
+    /// Which service a provider's song comes from, "Deezer" ([`crate::fmt::provider_of`]).
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub provider: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
-#[serde(default, rename_all = "camelCase")]
+impl Song {
+    fn dress(&mut self) {
+        self.line = crate::fmt::song_line(&self.explicit_status, &self.artist, None);
+        self.provider = crate::fmt::provider_of(&self.id);
+    }
+
+    /// A song known only by its id, with the words a read would have given it.
+    pub(crate) fn only_id(id: String) -> Self {
+        let mut s = Song { id, ..Default::default() };
+        s.dress();
+        s
+    }
+
+    /// The song as a read gives it back, for a test that builds one and compares it with what was read.
+    #[cfg(test)]
+    pub(crate) fn dressed(mut self) -> Self {
+        self.dress();
+        self
+    }
+}
+
+dressed!(Song);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(remote = "Self", default, rename_all = "camelCase")]
 pub struct Album {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -136,10 +193,23 @@ pub struct Album {
     pub created: Option<String>,
     pub explicit_status: String,
     pub music_brainz_id: Option<String>,
+    /// A card's second line, "Artist · 2019 · ☁ Deezer" ([`crate::fmt::album_subtitle`]), made when read.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub subtitle: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
-#[serde(default, rename_all = "camelCase")]
+impl Album {
+    fn dress(&mut self) {
+        self.subtitle = crate::fmt::album_subtitle(&self.artist, self.year, &self.id);
+    }
+}
+
+dressed!(Album);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(remote = "Self", default, rename_all = "camelCase")]
 pub struct Artist {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -152,10 +222,23 @@ pub struct Artist {
     pub starred: bool,
     /// Set by octo-fiesta for provider items that are not in the library yet.
     pub is_external: bool,
+    /// Under the name in the artists list, "12 albums" ([`crate::words::words_albums`]), made when read.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub albums_line: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
-#[serde(default, rename_all = "camelCase")]
+impl Artist {
+    fn dress(&mut self) {
+        self.albums_line = crate::words::words_albums(self.album_count);
+    }
+}
+
+dressed!(Artist);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+#[serde(remote = "Self", default, rename_all = "camelCase")]
 pub struct Playlist {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -167,9 +250,27 @@ pub struct Playlist {
     pub duration: u32,
     #[serde(deserialize_with = "opt_id")]
     pub cover_art: Option<String>,
+    /// Its line in the library, "12 songs · 48:10" ([`crate::words::words_playlist_line`]), made when read.
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub line: String,
+    /// Under its card on the home page: "12 songs".
+    #[serde(skip)]
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub songs_line: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+impl Playlist {
+    fn dress(&mut self) {
+        self.line = crate::words::words_playlist_line(self.song_count, self.duration);
+        self.songs_line = crate::words::words_songs(self.song_count);
+    }
+}
+
+dressed!(Playlist);
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default, rename_all = "camelCase")]
 pub struct RadioStation {
     #[serde(deserialize_with = "id")]
@@ -179,7 +280,8 @@ pub struct RadioStation {
     pub home_page_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default)]
 pub struct Genre {
     #[serde(rename = "value")]
@@ -190,22 +292,41 @@ pub struct Genre {
     pub album_count: u32,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SearchResult {
     pub artists: Vec<Artist>,
     pub albums: Vec<Album>,
     pub songs: Vec<Song>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AlbumDetail {
     pub album: Album,
     pub songs: Vec<Song>,
     /// Names of discs that have one (OpenSubsonic `discTitles`).
     pub disc_titles: Vec<DiscTitle>,
+    /// The songs by disc, each with its heading and its rows' second lines ([`crate::pages::album_discs`]).
+    pub discs: Vec<crate::pages::DiscGroup>,
+    /// The line under the title, "2019 · 12 songs · 48:10 · FLAC 16/44.1" ([`crate::fmt::album_caption`]).
+    pub caption: String,
+    /// The page's own queue: these songs, and any song of this album another queue carried along.
+    pub queue: std::sync::Arc<crate::pages::PageQueue>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+impl AlbumDetail {
+    /// The album page as it is shown, worked out once when the album is read.
+    pub fn new(album: Album, songs: Vec<Song>, disc_titles: Vec<DiscTitle>) -> Self {
+        let discs = crate::pages::album_discs(&album, &songs, &disc_titles);
+        let caption = crate::fmt::album_caption(album.year, &songs, album.explicit_status == "explicit");
+        let queue = crate::pages::PageQueue::of_songs(&songs, Some(&album.id));
+        AlbumDetail { album, songs, disc_titles, discs, caption, queue }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default)]
 pub struct DiscTitle {
     pub disc: u32,
@@ -213,7 +334,8 @@ pub struct DiscTitle {
 }
 
 /// One level of the server's folder tree.
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Directory {
     pub id: String,
     pub name: String,
@@ -221,13 +343,27 @@ pub struct Directory {
     pub songs: Vec<Song>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ArtistDetail {
     pub artist: Artist,
     pub albums: Vec<Album>,
+    /// The releases by kind, headed and in order ([`crate::pages::release_groups`]).
+    pub groups: Vec<crate::pages::ReleaseGroup>,
+    /// The page's own queue: a song of one of these albums.
+    pub queue: std::sync::Arc<crate::pages::PageQueue>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+impl ArtistDetail {
+    pub fn new(artist: Artist, albums: Vec<Album>) -> Self {
+        let groups = crate::pages::release_groups(&albums);
+        let queue = crate::pages::PageQueue::of_albums(&albums);
+        ArtistDetail { artist, albums, groups, queue }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ArtistInfo {
     pub last_fm_url: Option<String>,
     pub music_brainz_id: Option<String>,
@@ -236,21 +372,45 @@ pub struct ArtistInfo {
     pub similar: Vec<Artist>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PlaylistDetail {
     pub playlist: Playlist,
     pub songs: Vec<Song>,
+    /// The line under the title, "12 songs · 48:10" ([`crate::fmt::list_caption`]).
+    pub caption: String,
+    /// The page's own queue: these songs.
+    pub queue: std::sync::Arc<crate::pages::PageQueue>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+impl PlaylistDetail {
+    pub fn new(playlist: Playlist, songs: Vec<Song>) -> Self {
+        let caption = crate::fmt::list_caption(&songs, true);
+        let queue = crate::pages::PageQueue::of_songs(&songs, None);
+        PlaylistDetail { playlist, songs, caption, queue }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Starred {
     pub artists: Vec<Artist>,
     pub albums: Vec<Album>,
     pub songs: Vec<Song>,
+    /// The favourite songs row, "12 songs" ([`crate::words::words_favourite_songs`]).
+    pub songs_line: String,
+}
+
+impl Starred {
+    pub fn new(artists: Vec<Artist>, albums: Vec<Album>, songs: Vec<Song>) -> Self {
+        let songs_line = crate::words::words_favourite_songs(&songs);
+        Starred { artists, albums, songs, songs_line }
+    }
 }
 
 /// One word (or syllable) of a lyric line and when it is sung. `start`/`end` index the line's text in UTF-16 units.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct LyricWord {
     pub start_ms: i64,
     pub end_ms: i64,
@@ -258,7 +418,8 @@ pub struct LyricWord {
     pub end: u32,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct LyricLine {
     /// Milliseconds from track start; -1 when the lyrics are unsynced.
     pub start_ms: i64,
@@ -271,15 +432,21 @@ pub struct LyricLine {
     pub background: bool,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Lyrics {
     pub synced: bool,
     /// True when the word timing came from the server; false when it was spread over each line by the core.
     pub word_timed: bool,
     pub lines: Vec<LyricLine>,
+    /// What the core kept of these lyrics' timing when they were read, so a clock is started on them by
+    /// this key (`LyricsJni.kept`) rather than with every line handed back. 0: nothing kept.
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub key: u64,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PlayQueue {
     pub songs: Vec<Song>,
     pub index: u32,
@@ -287,6 +454,7 @@ pub struct PlayQueue {
 }
 
 /// The order is the wire format: `dsp.rs` reads the ordinal out of the flat band array, so only append.
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum EqKind {
     Peaking,
@@ -302,6 +470,7 @@ pub enum EqKind {
     HighShelfSlope,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct EqBand {
     pub kind: EqKind,
@@ -310,13 +479,15 @@ pub struct EqBand {
     pub q: f32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct EqPreset {
     pub preamp_db: f32,
     pub bands: Vec<EqBand>,
 }
 
 /// One of the built-in curves from `dsp::eq_presets`.
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct NamedPreset {
     pub name: String,
@@ -324,7 +495,8 @@ pub struct NamedPreset {
     pub bands: Vec<EqBand>,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ServerInfo {
     pub version: String,
     pub server_type: String,
@@ -332,14 +504,16 @@ pub struct ServerInfo {
     pub open_subsonic: bool,
 }
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct IngestStats {
     pub artists: u32,
     pub albums: u32,
     pub songs: u32,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 #[serde(default)]
 pub struct MusicFolder {
     #[serde(deserialize_with = "id")]
@@ -349,7 +523,8 @@ pub struct MusicFolder {
 
 // ---- play history, listening stats, smart playlists, m3u ----
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HistoryEntry {
     pub song: Song,
     pub started_ms: i64,
@@ -358,7 +533,8 @@ pub struct HistoryEntry {
     pub skipped: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongStat {
     pub song_id: String,
     /// Listens that were not skips.
@@ -371,7 +547,8 @@ pub struct SongStat {
     pub taste: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct TopSong {
     pub song: Song,
     pub plays: u32,
@@ -379,7 +556,8 @@ pub struct TopSong {
 }
 
 /// An artist, album or genre in a top list. `id` is empty for genres and for artists the server gave no id.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct TopEntry {
     pub id: String,
     pub name: String,
@@ -389,7 +567,8 @@ pub struct TopEntry {
     pub listened_ms: i64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ListeningStats {
     pub plays: u32,
     pub skips: u32,
@@ -411,7 +590,8 @@ pub struct ListeningStats {
     pub first_play: Option<HistoryEntry>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartPlaylist {
     pub id: String,
     pub name: String,
@@ -419,7 +599,8 @@ pub struct SmartPlaylist {
     pub json: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct M3uEntry {
     /// -1 when the playlist does not say.
     pub duration_s: i32,
@@ -429,7 +610,8 @@ pub struct M3uEntry {
 }
 
 /// One headphone measurement in the AutoEQ database.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AutoEqEntry {
     pub name: String,
     /// Who measured it: oratory1990, crinacle, ...
@@ -443,7 +625,8 @@ pub struct AutoEqEntry {
 }
 
 /// A saved sound setting: the whole chain under a name, optionally bound to output devices.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SoundProfile {
     pub name: String,
     /// The settings as JSON, written and read by the Kotlin side.
@@ -455,6 +638,7 @@ pub struct SoundProfile {
 /// What AutoMix knows about one track, from `automix::analysis`. One row in `track_analysis`.
 /// Times are milliseconds from the start of the file. The beat grid is not stored beat by beat: beat `n` sits at
 /// `beat_offset_ms + n * 60000 / bpm`, and beats with `n % 4 == downbeat_phase` start a bar.
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct TrackAnalysis {
     pub song_id: String,
@@ -517,6 +701,7 @@ pub struct TrackAnalysis {
 }
 
 /// The user's AutoMix switches, as the planner sees them.
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct AutoMixSettings {
     /// Longest transition, seconds.
@@ -541,6 +726,7 @@ pub struct AutoMixSettings {
 }
 
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum TransitionKind {
     /// No overlap: the next track follows sample for sample.
@@ -556,6 +742,7 @@ pub enum TransitionKind {
 }
 
 /// The order is the wire format of `automix_mixer_params`; only append.
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum FadeCurve {
     /// cos/sin: constant power, for material that does not add coherently.
@@ -567,6 +754,7 @@ pub enum FadeCurve {
 
 /// How to get from one track to the next. Fields marked "relative" count from the moment the transition starts;
 /// -1 means "not used".
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct TransitionPlan {
     pub kind: TransitionKind,
@@ -628,6 +816,7 @@ pub struct TransitionPlan {
 
 pub use nori_player::policy::{AudioPolicy, AudioPrefs, GainMode, GainTags, OutputState};
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct AudioPrefs {
     pub dsp: bool,
@@ -639,6 +828,7 @@ pub struct AudioPrefs {
     pub pitch: f32,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct OutputState {
     pub hi_res: bool,
@@ -647,6 +837,7 @@ pub struct OutputState {
     pub offload_refused: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct AudioPolicy {
     pub untouched: bool,
@@ -658,6 +849,7 @@ pub struct AudioPolicy {
     pub processor_in_chain: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum GainMode {
     Off,
@@ -666,6 +858,7 @@ pub enum GainMode {
     Auto,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct GainTags {
     pub track_gain: Option<f32>,
@@ -676,6 +869,7 @@ pub struct GainTags {
 
 pub use nori_player::device::{Arrival, ArrivalPlan, CurveStep};
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct Arrival {
     pub bound: bool,
@@ -685,6 +879,7 @@ pub struct Arrival {
     pub auto_apply: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum CurveStep {
     None,
@@ -692,6 +887,7 @@ pub enum CurveStep {
     Apply,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct ArrivalPlan {
     pub load_bound: bool,
@@ -701,6 +897,7 @@ pub struct ArrivalPlan {
 
 pub use nori_player::transitions::{TransitionPrefs, WindowSong};
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct WindowSong {
     pub id: String,
@@ -713,6 +910,7 @@ pub struct WindowSong {
     pub radio: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct TransitionPrefs {
     pub auto_mix: bool,
@@ -730,6 +928,7 @@ pub struct TransitionPrefs {
 
 pub use nori_player::transport::{ChainChange, Dip, Rebuild, Switch};
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum Switch {
     Seek,
@@ -737,12 +936,14 @@ pub enum Switch {
     Skip,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct Dip {
     pub down_ms: i32,
     pub up_ms: i32,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct ChainChange {
     pub offloaded: bool,
@@ -754,6 +955,7 @@ pub struct ChainChange {
     pub processor_changed: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum Rebuild {
     None,
@@ -763,6 +965,7 @@ pub enum Rebuild {
 
 pub use nori_player::dac::{DacChoice, DacMode};
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct DacMode {
     pub rate: u32,
@@ -770,6 +973,7 @@ pub struct DacMode {
     pub float: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct DacChoice {
     pub use_index: i32,

@@ -2,6 +2,7 @@ package dev.nori.music.settings
 
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
+import dev.nori.music.ffi.EqLevel
 import dev.nori.music.ffi.PrefValue
 import dev.nori.music.ffi.SavedQuality
 import dev.nori.music.ffi.SavedServer
@@ -16,6 +17,7 @@ import dev.nori.music.ffi.settingsOpen
 import dev.nori.music.ffi.settingsPut
 import dev.nori.music.ffi.settingLabels
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 
 /** AUTO: album gain while the neighbours in the queue are from the same album, track gain otherwise. */
 enum class ReplayGainMode { OFF, TRACK, ALBUM, AUTO }
@@ -273,7 +275,13 @@ data class Prefs(
     val dsp: Boolean by lazy { dev.nori.music.playback.Dsp.soundOn(eqEnabled, crossfeedDb, balance, mono, limiter) }
 
     /** The pre-amp in effect: the one set, or the automatic one (the core's `SoundSettings::effective_preamp_db`), worked out once per settings. */
-    val effectivePreampDb: Float by lazy { dev.nori.music.ffi.eqEffectivePreampDb(sound()) }
+    val effectivePreampDb: Float by lazy {
+        // Over plain JNI: a band's drag makes new settings on every step, and the screen shows this for each.
+        dev.nori.music.playback.Dsp.effectivePreampDb(
+            eqEnabled, eqPreampDb ?: 0f, eqPreampDb == null,
+            IntArray(eqBands.size) { eqBands[it].kind.ordinal }, FloatArray(eqBands.size) { eqBands[it].gainDb },
+        )
+    }
 }
 
 /** The part of [Prefs] a sound profile remembers; its JSON is read and written by the core (`settings.rs`). */
@@ -378,6 +386,44 @@ class Settings(private val context: Context) {
         val next = change(state.value)
         if (next == state.value) return
         put(next.stored(), next)
+    }
+
+    /** Where a band crosses to the core and back; one for the settings, taken in turn. */
+    private val band = FloatArray(5)
+
+    /**
+     * One equalizer band changed, on every step of a slider: edited in the core where the settings are
+     * kept, which holds it in range, and only that band replaced here. Building and comparing the whole
+     * settings record for each step was most of what a drag cost.
+     */
+    fun setBand(index: Int, b: Band) {
+        val effect: Int
+        val kept: Band
+        synchronized(band) {
+            band[0] = b.kind.ordinal.toFloat(); band[1] = b.freq; band[2] = b.gainDb; band[3] = b.q; band[4] = b.channel.ordinal.toFloat()
+            effect = SoundEdit.setBand(index, band)
+            if (effect < 0) return
+            kept = Band(BandKind.entries[band[0].toInt()], band[1], band[2], band[3], BandChannel.entries[band[4].toInt()])
+        }
+        state.update { p -> if (index in p.eqBands.indices) p.copy(eqBands = p.eqBands.toMutableList().also { it[index] = kept }) else p }
+        if (effect != 0) _effects.tryEmit(effect)
+    }
+
+    /** Pre-amp, balance, limiter ceiling or crossfeed moved; edited in the core like a band, which holds and snaps it. */
+    fun setLevel(level: EqLevel, value: Float) {
+        val r = SoundEdit.setLevel(level.ordinal, value)
+        if (r == -1L) return
+        val kept = java.lang.Float.intBitsToFloat((r ushr 32).toInt())
+        state.update { p ->
+            when (level) {
+                EqLevel.PREAMP -> p.copy(eqPreampDb = kept)
+                EqLevel.BALANCE -> p.copy(balance = kept)
+                EqLevel.LIMITER -> p.copy(limiterThresholdDb = kept)
+                EqLevel.CROSSFEED -> p.copy(crossfeedDb = kept)
+            }
+        }
+        val effect = r.toInt()
+        if (effect != 0) _effects.tryEmit(effect)
     }
 
     /** Settings the core already worked out (a change by name, `settings::set_by_name`), kept as they are. */

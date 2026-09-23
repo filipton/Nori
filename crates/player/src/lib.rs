@@ -14,10 +14,13 @@ pub mod outputs;
 pub mod heard;
 pub mod pcm;
 pub mod seek;
+pub mod pipeline;
 pub mod playlist;
 pub mod policy;
 pub mod queue;
 pub mod silence;
+#[cfg(any(test, feature = "synth"))]
+pub mod sim;
 pub mod sound;
 pub mod sonic;
 pub mod speed;

@@ -84,11 +84,14 @@ pub struct Fed<'a, D> {
     pub now_ms: i64,
     /// The output's clock, read once per call: it does not move in the microseconds a call takes.
     position: Option<i64>,
+    /// A discontinuity was passed down: the next buffer taken may move the clock (a resync), so it is
+    /// read again after it. The transition engine measures that jump to keep the ear's place.
+    resynced: bool,
 }
 
 impl<'a, D: Downstream> Fed<'a, D> {
     pub fn new(down: &'a mut D, burst: &'a mut Burst, now_ms: i64) -> Self {
-        Fed { down, burst, now_ms, position: None }
+        Fed { down, burst, now_ms, position: None, resynced: false }
     }
 
     fn clock(&mut self) -> i64 {
@@ -122,6 +125,9 @@ impl<D: Downstream> Downstream for Fed<'_, D> {
             self.burst.filling = true;
         }
         let (taken, used) = self.down.handle_buffer(data, from, pts_us);
+        if used > 0 && std::mem::take(&mut self.resynced) {
+            self.position = None;
+        }
         self.burst.bytes_written += used as u64;
         if let Some(f) = self.burst.format.filter(|f| f.frame_bytes() > 0 && f.rate > 0) {
             self.burst.written_us += (used / f.frame_bytes()) as i64 * 1_000_000 / f.rate as i64;
@@ -137,6 +143,7 @@ impl<D: Downstream> Downstream for Fed<'_, D> {
         // The audio already written stays in the output, so the count stands; the clock's jump when it
         // is reached is left out by `queued_us`.
         self.burst.filling = true;
+        self.resynced = true;
         self.down.handle_discontinuity();
     }
 

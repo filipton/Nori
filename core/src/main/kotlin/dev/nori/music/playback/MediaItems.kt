@@ -44,22 +44,14 @@ fun Song.toMediaItem(coverUrl: String?): MediaItem = MediaItem.Builder()
 /** Songs about to be queued: handed to the core in one call, and made into the player's items. */
 fun List<Song>.toMediaItems(coverUrl: (Song) -> String?): List<MediaItem> {
     if (isNotEmpty()) dev.nori.music.ffi.queueRegister(this)
-    return map { it.toMediaItem(coverUrl(it)) }
+    return heldMediaItems(coverUrl)
 }
 
 /**
- * The song behind a queued item, from the core. An item a system controller added from outside that the
- * core never saw comes back with what the player itself knows.
+ * Songs the core handed out for the queue itself and already keeps (the saved queue, autofill, the
+ * offline bridge): made into the player's items without crossing back.
  */
-fun MediaItem.toSong(): Song = dev.nori.music.ffi.queueSong(mediaId) ?: Song(
-    id = mediaId, title = mediaMetadata.title?.toString().orEmpty(), album = mediaMetadata.albumTitle?.toString().orEmpty(),
-    artist = mediaMetadata.artist?.toString().orEmpty(), albumId = null, artistId = null, coverArt = null,
-    duration = ((mediaMetadata.durationMs ?: 0L) / 1000).toUInt(), track = (mediaMetadata.trackNumber ?: 0).toUInt(),
-    discNumber = 0u, year = 0u, genre = mediaMetadata.genre?.toString(), suffix = "", contentType = "", bitRate = 0u, size = 0u,
-    samplingRate = 0u, bitDepth = 0u, userRating = 0u, starred = false, isExternal = false, replayGain = null,
-    artists = emptyList(), created = null, playCount = 0u, played = null, path = null, explicitStatus = "",
-    channelCount = 0u, musicBrainzId = null, bpm = 0u, comment = null,
-)
+fun List<Song>.heldMediaItems(coverUrl: (Song) -> String?): List<MediaItem> = map { it.toMediaItem(coverUrl(it)) }
 
 const val RADIO_PREFIX = "radio:"
 

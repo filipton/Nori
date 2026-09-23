@@ -8,37 +8,82 @@ and move like Apple Music (the cover melting into the page, no blocky Material d
 ## Where things are
 
 ```
-crates/player/  Rust, platform-free: how music is played and heard. The sound chain (dsp.rs), speed
-                and pitch (speed.rs over sonic.rs), silence skipping (silence.rs), AutoMix analysis,
-                planning and mixing (automix/), the transition engine (engine.rs), feeding the output in
-                bursts (burst.rs), which song the ear is on during a mix (heard.rs), seeks that land
-                (seek.rs), the queue itself (playlist.rs: list, play order, shuffle, repeat, songs added
-                by hand) and how it moves (queue.rs), how the controls sound and when the chain is
-                rebuilt (transport.rs), what mixes where (transitions.rs), the audio policy, ReplayGain
-                and fades (policy.rs), USB DACs (dac.rs), outputs (outputs.rs) and which sound an output
-                device gets (device.rs, sound.rs). No I/O, no uniffi, no JNI.
+crates/player/  Rust, platform-free: how music is played and heard. Decoding compressed audio packet by
+                packet (decode.rs: MP3, FLAC, AAC-LC, Vorbis, ALAC over symphonia, Opus over opus-rs,
+                nothing allocated per packet), the sound chain (dsp.rs), speed and pitch (speed.rs over
+                sonic.rs), silence skipping (silence.rs), AutoMix analysis, planning and mixing
+                (automix/), the transition engine (engine.rs), feeding the output in bursts (burst.rs),
+                which song the ear is on and the playhead (heard.rs), seeks that land (seek.rs), the queue
+                itself (playlist.rs: list, play order, shuffle, repeat, songs added by hand, the offline
+                bridge's marks) and how it moves (queue.rs: placement, refilling, the error run), how the
+                controls sound and when the chain is rebuilt (transport.rs: fades, switches, timings),
+                what mixes where (transitions.rs), the audio policy, ReplayGain and fades (policy.rs), USB
+                DACs (dac.rs), outputs (outputs.rs) and which sound an output device gets (device.rs,
+                sound.rs). No I/O, no uniffi, no JNI. pipeline.rs is the player around the transition
+                engine with the platform left out (the queue walked song by song, one reading at a time,
+                media3's AudioSink with the processors in it over a device buffer); sim.rs (behind
+                `synth`) runs it on a simulated AudioTrack and a virtual clock, and tests/pipeline asserts
+                on what the ear would get.
 crates/look/    Rust, platform-free: how a page looks and moves. The colours a page takes from its cover
                 (cover.rs, with a line-for-line port of AndroidX Palette in palette.rs), a theme's tones
-                from one colour (theme.rs), a page's whole dressed look and its cross-fade (dress.rs,
-                over Compose's own colour maths in compose.rs), and lyric timing, sweep and redraw pacing
-                (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
+                from one colour and the accents (theme.rs), a page's whole dressed look and its cross-fade
+                (dress.rs, over Compose's own colour maths in compose.rs), the player's sleeve geometry and
+                gradients (sleeve.rs), the seek bar's pacing (motion.rs) and lyric timing, sweep and redraw
+                pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
 crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
                 decimal separator is handed in once), with Java's rounding.
-crates/core/    Rust for Android, and the app's state: the Subsonic client and network policy (client.rs,
-                transport.rs, cache_policy.rs, stream.rs), one SQLite/FTS5 database for the whole app with
-                every server's rows keyed by its id (db.rs), settings (settings.rs codec, settings_store.rs
-                the live copy, profiles.rs), the queue the app plays (playlist.rs; the songs in it by id,
-                queue.rs), refilling it (autofill.rs), the offline bridge (bridge.rs), downloads
-                (transfers.rs), the stream cache's order (stream_cache.rs), stars, actions and every word
-                the app says (actions.rs, stars.rs, words.rs, fmt.rs, pages.rs), the car's browse tree
-                (car.rs), scrobbling, the transition planner (automix/planner.rs), and the doors into
-                nori-player and nori-look (JNI in dsp.rs, stages.rs, automix/engine_jni.rs, heard.rs,
-                seek.rs, look.rs, transfers.rs, stream_cache.rs; uniffi everywhere else). Kotlin asks and
-                draws; the core decides. The core reacts to its own state (a settings change reaches the
-                planner and the sound chain by itself) rather than waiting for Kotlin to pass it on.
+crates/core/    Rust, platform-free: the app's state, an rlib a desktop or terminal client links as it is
+                (package norimusic-core, lib `norimusic`). The Subsonic client and network policy (client.rs,
+                transport.rs, cache_policy.rs, stream.rs, library.rs), one SQLite/FTS5 database for the
+                whole app with every server's rows keyed by its id (db.rs), settings (settings.rs codec and
+                rules, settings_store.rs the live copy, settings_schema.rs every settings page, profiles.rs),
+                the queue the app plays (playlist.rs; the songs in it by id, queue.rs; the rules, rules.rs),
+                refilling it (autofill.rs), the offline bridge (bridge.rs), downloads (transfers.rs), the
+                stream cache's order (stream_cache.rs), stars, actions, menus, pages and every word the app
+                says (stars.rs, actions.rs, menus.rs, pages.rs, words.rs, fmt.rs), browsing and search
+                (browse.rs, search.rs), the player's stage constants (stage.rs), the car's browse tree
+                (car.rs), scrobbling, the transition planner (automix/planner.rs) and the engine's host
+                (automix/host.rs), the sound chain that follows the settings (dsp.rs), the ear's clock
+                (heard.rs), the streaming analyser (automix/store.rs). Plain Rust types in and out, no
+                JNI. Its uniffi exports sit behind the default `ffi` feature; `cargo build -p
+                norimusic-core --no-default-features` builds it without uniffi. Kotlin asks and draws;
+                the core decides, and reacts to its own state (a settings change reaches the planner
+                and the sound chain by itself).
+crates/engine/  Rust, platform-free: the whole player for a platform without one (package nori-engine):
+                songs loaded in bursts per `load_control` through a client's ByteSource (source.rs),
+                demuxed with symphonia's format readers and decoded by decode.rs (demux.rs), the shared
+                pipeline on one engine thread that sleeps between bursts (engine.rs), and a lock-free
+                ring a sound card pulls from (output.rs: the AudioOutput trait a client implements).
+                library.rs says where songs are, wav.rs renders to a file, and the `core` feature
+                (core.rs) plays the core's queue with its planner, settings and stream addresses.
+                tests/engine.rs checks it against sim.rs sample for sample. No JNI, no uniffi.
+crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
+crates/http/    Rust, desktop: the core's Transport and the engine's ByteSource over one ureq agent.
+crates/cli/     Rust, desktop: nori-cli, the terminal client that proves the split - log in, search,
+                queue and play through the core, the engine and output-cpal, or `--wav` to a file.
+crates/android/ Rust, Android only: the library the app loads (package nori-android, cdylib `norimusic`, so
+                libnorimusic.so): the core with its uniffi scaffolding, and the JNI doors with primitives
+                and direct buffers on every hot path. The scaffolding is JNI too: build.rs generates it
+                with uniffi-bindgen-kotlin-jni from the core's exports (the Kotlin in package
+                dev.nori.music.ffi and uniffi comes from crates/uniffi-bindgen), and JNI_OnLoad hands it
+                the JavaVM and the app's class loader. The doors are one module per group (decoder.rs, dsp.rs,
+                stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps read and written in
+                place - playlist.rs, settings.rs, transfers.rs, stream_cache.rs). Doors only convert;
+                anything they decide belongs in the core. JNI_OnLoad registers every door with
+                RegisterNatives (lib.rs): no door is exported by a `Java_` name (only the generated uniffi
+                functions are, as their Kotlin expects), doors whose Kotlin signature is primitives only
+                are `@CriticalNative` (no JNIEnv, no class), and short ones
+                over arrays or direct buffers `@FastNative`. A new door goes into its module's `Class`
+                table with the JVM signature javap shows; the Kotlin `external fun` and the Rust
+                function must agree on the annotation (critical: no `env`/class parameters).
+crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.toml pins, with two
+                changes marked NORI: a class looked up from a thread the core started is found through the
+                app's class loader, and a thread the runtime attached to the JVM is detached when it ends
+                (Android aborts otherwise). Take upstream's again when the revision moves, and keep both.
 core/           Android library, no UI: net/, data/ (Library = the repository), playback/
-                (media3 service, DAC, scrobbling; TransitionSink only forwards to the engine,
-                Stages.kt only forwards speed/pitch and silence skipping),
+                (media3 service, DAC, scrobbling; RustAudio.kt puts the core's decoder ahead of
+                MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
+                speed/pitch and silence skipping),
                 downloads/, settings/, Nori.kt (object graph)
 app/            the UI only: vm/ (ViewModels, all logic and state) and ui/ (Compose, draws state)
 tools/          dev-server.sh: a local Navidrome with generated music for testing
@@ -60,6 +105,10 @@ word, colour and piece of state - lives in the crates; the Kotlin is a front end
 ```sh
 ./gradlew :app:assembleDebug -PrustTargets=x86_64   # fast build for an emulator
 cargo test                                          # the Rust tests
+cargo test -p nori-player --test pipeline           # the player end to end on a virtual clock (sim.rs)
+cargo test -p nori-engine                           # the desktop player on real threads, against sim.rs
+cargo run --release -p nori-cli -- --url http://localhost:4533 --user admin --password admin \
+    --search Noise --songs 2 --start 570 --crossfade 6 --wav out.wav   # a render through the whole client
 tools/dev-server.sh                                 # Navidrome at http://10.0.2.2:4533 from the emulator, admin/admin
 ```
 
@@ -113,7 +162,7 @@ there: a screenshot proves a screen renders, not that the feature works.
 - The UI thread never waits for the core: `Nori` builds `core`, `http` and `sources` lazily and the
   application warms them on a background thread. Keep FFI and OkHttp out of constructors and composition.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct
-  buffers, never uniffi.
+  buffers (crates/android), never uniffi.
 - octo-fiesta: a stream request for an `ext-` id makes the server download the track. Never
   queue or prefetch provider tracks the user did not ask to play. Provider items are never indexed.
 
@@ -141,6 +190,12 @@ Everything visual stays static: gradients are values, scroll effects are read in
 (`graphicsLayer`, `drawBehind`), and nothing animates unless the user touched it. The rounded covers
 were measured against square ones on the grid and cost nothing (identical 50th/90th percentile frame
 times), but measure again before adding blur, shadows on lists or anything per-frame.
+
+## Other clients
+
+`docs/clients.md` lists what the core does and what a new client (desktop, terminal) builds itself. Speed,
+CPU, memory, wakeups and battery decide where work goes: something that measures faster in Kotlin (per-frame
+animation maths) stays in Kotlin. Keep the list current when a job moves across the boundary.
 
 ## Optional features
 

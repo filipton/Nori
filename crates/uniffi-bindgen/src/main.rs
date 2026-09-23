@@ -1,3 +1,4 @@
+// Writes the Kotlin bindings from the crates' sources: `bindings src:nori-android <out dir>`.
 fn main() {
-    uniffi::uniffi_bindgen_main()
+    uniffi_bindgen_kotlin_jni::main().unwrap()
 }

@@ -1,25 +1,61 @@
-//! The sound chain as Kotlin reaches it: raw JNI on direct ByteBuffers, called once per audio buffer
-//! from the media3 AudioProcessor. The chain itself is `nori_player::dsp`; this only moves bytes and
-//! handles across. It must not allocate, copy or serialise anything on the process path.
+//! The sound chain the settings ask for (`nori_player::dsp`), run once per audio buffer by the platform's
+//! output: a [`SoundChain`] follows the settings by itself, so nothing crosses from the platform but the
+//! samples. It must not allocate, copy or serialise anything on the process path.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use jni::objects::{JByteBuffer, JClass, JFloatArray, JIntArray};
-use jni::sys::{jfloat, jint, jlong};
-use jni::JNIEnv;
 use parking_lot::{Mutex, RwLock};
 
 pub use nori_player::dsp::*;
 
-const PCM_16: jint = 2; // C.ENCODING_PCM_16BIT
-const PCM_FLOAT: jint = 4; // C.ENCODING_PCM_FLOAT
-
-/// The meter lives outside the lock so the UI can poll it without ever waiting on the playback thread.
-struct Handle {
+/// One output's equalizer, set up again from the settings on its next buffer whenever they change. Shared
+/// between the audio thread, which processes, and the UI, which reads the limiter's meter: the meter lives
+/// outside the lock so the UI can poll it without ever waiting on the playback thread.
+pub struct SoundChain {
     eq: Mutex<Equalizer>,
     reduction_db: AtomicU32,
-    /// The [`CHAIN_GEN`] this handle's equalizer was last set up for.
+    /// The [`CHAIN_GEN`] this equalizer was last set up for.
     applied: AtomicU64,
+}
+
+impl SoundChain {
+    pub fn new(rate: u32, channels: usize) -> Self {
+        let eq = Mutex::new(Equalizer::new(rate.max(1), channels.max(1)));
+        SoundChain { eq, reduction_db: AtomicU32::new(0), applied: AtomicU64::new(0) }
+    }
+
+    /// The limiter meter: peak gain reduction in dB in the last buffer, 0 when it is off or idle.
+    /// Lock-free, poll freely.
+    pub fn gain_reduction_db(&self) -> f32 {
+        f32::from_bits(self.reduction_db.load(Ordering::Relaxed))
+    }
+
+    /// How many frames the chain holds back (the limiter's look-ahead), as set up for its latest buffer.
+    pub fn delay_frames(&self) -> usize {
+        self.eq.lock().delay_frames()
+    }
+
+    /// A new stream: the filters' memory goes, and the settings are read again.
+    pub fn reset(&self) {
+        self.eq.lock().reset();
+        self.applied.store(0, Ordering::Relaxed);
+    }
+
+    /// Filters interleaved 16-bit samples from `input` into `output` (the same length).
+    pub fn process_i16(&self, input: &[i16], output: &mut [i16]) {
+        let mut eq = self.eq.lock();
+        follow_chain(&mut eq, &self.applied);
+        eq.process_i16(input, output);
+        self.reduction_db.store(eq.gain_reduction_db().to_bits(), Ordering::Relaxed);
+    }
+
+    /// Filters interleaved float samples from `input` into `output` (the same length).
+    pub fn process_f32(&self, input: &[f32], output: &mut [f32]) {
+        let mut eq = self.eq.lock();
+        follow_chain(&mut eq, &self.applied);
+        eq.process_f32(input, output);
+        self.reduction_db.store(eq.gain_reduction_db().to_bits(), Ordering::Relaxed);
+    }
 }
 
 /// The most bands a chain carries: the parametric editor's own limit, with room to spare.
@@ -107,68 +143,8 @@ fn follow_chain(eq: &mut Equalizer, applied: &AtomicU64) {
     applied.store(g, Ordering::Relaxed);
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_create(_: JNIEnv, _: JClass, rate: jint, channels: jint) -> jlong {
-    let eq = Mutex::new(Equalizer::new(rate.max(1) as u32, channels.max(1) as usize));
-    Box::into_raw(Box::new(Handle { eq, reduction_db: AtomicU32::new(0), applied: AtomicU64::new(0) })) as jlong
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_destroy(_: JNIEnv, _: JClass, handle: jlong) {
-    if handle != 0 {
-        drop(unsafe { Box::from_raw(handle as *mut Handle) });
-    }
-}
-
-/// The limiter meter: peak gain reduction in dB in the last buffer, 0 when it is off or idle. Lock-free, poll freely.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_gainReductionDb(_: JNIEnv, _: JClass, handle: jlong) -> jfloat {
-    if handle == 0 {
-        return 0.0;
-    }
-    f32::from_bits(unsafe { &*(handle as *const Handle) }.reduction_db.load(Ordering::Relaxed))
-}
-
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_reset(_: JNIEnv, _: JClass, handle: jlong) {
-    if handle != 0 {
-        let h = unsafe { &*(handle as *const Handle) };
-        h.eq.lock().reset();
-        h.applied.store(0, Ordering::Relaxed);
-    }
-}
-
-/// Filters `bytes` bytes from `input[in_pos..]` into `output[out_pos..]`; both are direct buffers.
-/// Returns false when the buffers cannot be reached, so the caller copies instead.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_process(
-    env: JNIEnv, _: JClass, handle: jlong, input: JByteBuffer, in_pos: jint, output: JByteBuffer, out_pos: jint, bytes: jint, encoding: jint,
-) -> bool {
-    let (Ok(src), Ok(dst)) = (env.get_direct_buffer_address(&input), env.get_direct_buffer_address(&output)) else { return false };
-    if handle == 0 || src.is_null() || dst.is_null() || bytes <= 0 {
-        return false;
-    }
-    let h = unsafe { &*(handle as *const Handle) };
-    let mut eq = h.eq.lock();
-    follow_chain(&mut eq, &h.applied);
-    let (src, dst, bytes) = unsafe { (src.add(in_pos as usize), dst.add(out_pos as usize), bytes as usize) };
-    // Android direct buffers are 8-byte aligned and positions are whole frames; stay safe anyway.
-    match encoding {
-        PCM_16 if src as usize % 2 == 0 && dst as usize % 2 == 0 => unsafe {
-            eq.process_i16(std::slice::from_raw_parts(src as *const i16, bytes / 2), std::slice::from_raw_parts_mut(dst as *mut i16, bytes / 2));
-        },
-        PCM_FLOAT if src as usize % 4 == 0 && dst as usize % 4 == 0 => unsafe {
-            eq.process_f32(std::slice::from_raw_parts(src as *const f32, bytes / 4), std::slice::from_raw_parts_mut(dst as *mut f32, bytes / 4));
-        },
-        _ => return false,
-    }
-    h.reduction_db.store(eq.gain_reduction_db().to_bits(), Ordering::Relaxed);
-    true
-}
-
-
 /// The built-in curves, as data, so the UI (and the settings store) never holds a frequency of its own.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_presets() -> Vec<crate::NamedPreset> {
     nori_player::dsp::eq_presets()
 }
@@ -190,7 +166,8 @@ pub(crate) fn offload_wanted() -> bool {
 }
 
 /// Everything the platform applies to its player when the settings or the output change, in one call.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AudioApply {
     pub policy: crate::AudioPolicy,
     pub speed: f32,
@@ -203,7 +180,7 @@ pub struct AudioApply {
 /// song playing): which parts of the chain may run (`nori_player::policy`) and whether the output must be
 /// rebuilt for it (`nori_player::transport::rebuild`). The sound chain itself follows the settings by
 /// itself ([`settings_changed`]).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn audio_apply(output: crate::OutputState, offloaded: bool) -> AudioApply {
     let s = crate::settings_store::current().unwrap_or_default();
     let prefs = crate::AudioPrefs {
@@ -230,78 +207,59 @@ pub fn audio_apply(output: crate::OutputState, offloaded: bool) -> AudioApply {
     AudioApply { policy, speed: s.speed, pitch: s.pitch, rebuild: nori_player::transport::rebuild(change) }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn audio_policy(prefs: crate::AudioPrefs, output: crate::OutputState) -> crate::AudioPolicy {
     nori_player::policy::audio_policy(&prefs, &output)
 }
 
 /// The volume a track plays at under ReplayGain, 0..1; see `nori_player::policy::replay_gain`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn replay_gain_volume(
     mode: crate::GainMode, tags: Option<crate::GainTags>, in_album_run: bool, preamp_db: f32, untagged_db: f32, radio: bool, bit_perfect: bool,
 ) -> f32 {
     nori_player::policy::replay_gain(mode, tags.as_ref(), in_album_run, preamp_db, untagged_db, radio, bit_perfect)
 }
 
-/// Where a volume fade from `from` to `to` stands at `t` (0..1) of its length. Asked on every tick of
-/// a fade, so it is plain JNI: primitives in and out, nothing boxed.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_fadeVolume(_: JNIEnv, _: JClass, from: jfloat, to: jfloat, t: jfloat) -> jfloat {
-    nori_player::policy::fade(from, to, t)
-}
-
 /// The dip around a switch made while music plays; `None`: switch at once. See `nori_player::transport`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn switch_dip(fade_ms: i32, switch: crate::Switch, playing: bool) -> Option<crate::Dip> {
     nori_player::transport::switch_dip(fade_ms, switch, playing)
 }
 
 /// Pressing play: fade in over this long; `None` to start at full volume.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn play_fade(fade_ms: i32, playing: bool) -> Option<i32> {
     nori_player::transport::play_fade(fade_ms, playing)
 }
 
 /// Pressing pause: fade out over this long first; `None` to pause at once.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn pause_fade(fade_ms: i32, playing: bool) -> Option<i32> {
     nori_player::transport::pause_fade(fade_ms, playing)
 }
 
 /// Whether a settings change must rebuild the output, and when.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sink_rebuild(change: crate::ChainChange) -> crate::Rebuild {
     nori_player::transport::rebuild(change)
 }
 
 /// What an output device gets as music moves to it; see `nori_player::device`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_arrival(arrival: crate::Arrival) -> crate::ArrivalPlan {
     nori_player::device::on_arrival(arrival)
 }
 
 /// How deep the output buffer is made so it can be fed in bursts; see `nori_player::burst`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn burst_buffer_us() -> i64 {
     nori_player::burst::BUFFER_US
 }
 
 /// Which of a DAC's modes plays a song untouched, or why none can; see `nori_player::dac`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn dac_choice(enabled: bool, modes: Vec<crate::DacMode>, playing: crate::DacMode) -> crate::DacChoice {
     nori_player::dac::choose(enabled, &modes, playing)
-}
-
-/// The automatic pre-amp for bands given as parallel arrays of kinds and gains; see
-/// `nori_player::dsp::auto_preamp_db`.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_autoPreampDb(env: JNIEnv, _: JClass, kinds: JIntArray, gains: JFloatArray) -> jfloat {
-    let n = env.get_array_length(&kinds).unwrap_or(0).clamp(0, 64) as usize;
-    let (mut k, mut g) = ([0i32; 64], [0f32; 64]);
-    if env.get_int_array_region(&kinds, 0, &mut k[..n]).is_err() || env.get_float_array_region(&gains, 0, &mut g[..n]).is_err() {
-        return 0.0;
-    }
-    nori_player::dsp::auto_preamp_db(k[..n].iter().copied().zip(g[..n].iter().copied()))
 }
 
 #[cfg(test)]

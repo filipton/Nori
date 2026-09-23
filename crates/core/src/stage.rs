@@ -7,7 +7,8 @@
 use nori_look::sleeve;
 
 /// One stop of a gradient: where along it (0..1) and how opaque.
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct GradientStop {
     pub at: f32,
     pub alpha: f32,
@@ -18,7 +19,8 @@ fn stops(s: &[sleeve::Stop]) -> Vec<GradientStop> {
 }
 
 /// Everything the platform lays out and times by, read once.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Stage {
     /// How much of the sleeve's height goes soft at its bottom; the same share its colour is averaged
     /// from (`nori_look::cover`).
@@ -65,7 +67,7 @@ pub struct Stage {
     pub quick_load_ms: i64,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn stage() -> Stage {
     Stage {
         melt: nori_look::cover::MELT,
@@ -98,9 +100,11 @@ pub fn stage() -> Stage {
 // ---- gestures ----------------------------------------------------------------------------------------------
 
 const TURN: f32 = 0.3;
-/// A release faster than this, in pixels a second, changes the record whatever the distance. The sleeve
-/// and the now playing bar used to disagree (1000 and 900); a swipe is the same gesture in both.
+/// A release faster than this, in pixels a second, changes the record whatever the distance: on the
+/// player's sleeve...
 const FLICK_PX_S: f32 = 1_000.0;
+/// ...and on the now playing bar, a small strip under the thumb, where a flick is shorter and slower.
+const BAR_FLICK_PX_S: f32 = 900.0;
 const GIVE: f32 = 0.2;
 const GIVE_LIMIT: f32 = 0.06;
 /// The player sheet: a release faster than this goes the way it was flicked...
@@ -112,12 +116,13 @@ const BACK_TRAVEL: f32 = 0.2;
 /// Where a sideways drag on a row of records goes when the finger lifts at `offset` pixels (negative:
 /// towards the next) with `velocity` pixels a second, on a row `width` wide: -1 to the next record, 1 to
 /// the one before, 0 back where it was. Past [`TURN`] of the width, or flicked; never towards a record
-/// that is not there.
-#[uniffi::export]
-pub fn swipe_turn(offset: f32, velocity: f32, width: f32, has_before: bool, has_after: bool) -> i32 {
-    if offset < 0.0 && has_after && (velocity < -FLICK_PX_S || offset < -width * TURN) {
+/// that is not there. `bar` is the now playing bar, which takes a slower flick than the sleeve.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn swipe_turn(offset: f32, velocity: f32, width: f32, has_before: bool, has_after: bool, bar: bool) -> i32 {
+    let flick = if bar { BAR_FLICK_PX_S } else { FLICK_PX_S };
+    if offset < 0.0 && has_after && (velocity < -flick || offset < -width * TURN) {
         -1
-    } else if offset > 0.0 && has_before && (velocity > FLICK_PX_S || offset > width * TURN) {
+    } else if offset > 0.0 && has_before && (velocity > flick || offset > width * TURN) {
         1
     } else {
         0
@@ -129,7 +134,7 @@ pub fn swipe_turn(offset: f32, velocity: f32, width: f32, has_before: bool, has_
 /// A flick goes the way it was flicked; a drag that has come a little way finishes the move it started,
 /// and a smaller one goes back. Deciding by the halfway point instead meant a pull down from the player
 /// had to cover half the screen before it would close.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sheet_target(from: f32, progress: f32, velocity: f32) -> f32 {
     let moved = progress - from;
     if velocity < -SHEET_FLICK_PX_S {
@@ -148,7 +153,8 @@ pub fn sheet_target(from: f32, progress: f32, velocity: f32) -> f32 {
 // ---- the transport -----------------------------------------------------------------------------------------
 
 /// What the play button shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TransportGlyph {
     Play,
     Pause,
@@ -159,7 +165,7 @@ pub enum TransportGlyph {
 /// The play button: a spinner once buffering has lasted `spinner_after_ms` (`waited`); before that the
 /// wait is "playing" - the player is going to play, that is what buffering means - and showing Play
 /// meanwhile said "paused" for a fraction of a second after every skip.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn transport_glyph(playing: bool, buffering: bool, waited: bool) -> TransportGlyph {
     if waited {
         TransportGlyph::Spinner
@@ -173,32 +179,26 @@ pub fn transport_glyph(playing: bool, buffering: bool, waited: bool) -> Transpor
 /// Whether movement is kept to a minimum: the app's own switch, or the system's animations turned off
 /// (Developer options, or the accessibility setting some people rely on) unless the listener asked the
 /// app to animate regardless.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn motion_reduced(reduce: bool, ignore_system: bool, system_off: bool) -> bool {
     reduce || (system_off && !ignore_system)
 }
 
 /// Whether the player's page goes black (see `nori_look::sleeve::player_black`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn player_black(amoled: bool, player_colours: bool) -> bool {
     sleeve::player_black(amoled, player_colours)
 }
 
 /// The sleeve band's colour matrix for the look's band tint (see `nori_look::sleeve::band_matrix`).
 /// Asked once per tint and kept.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn band_matrix(strength: f32, kr: f32, kg: f32, kb: f32) -> Vec<f32> {
     sleeve::band_matrix(strength, kr, kg, kb).to_vec()
 }
 
-/// How lit a line of lyrics is (see `nori_look::lyrics::line_strength`).
-#[uniffi::export]
-pub fn lyric_line_strength(synced: bool, line: i32, active: i32) -> f32 {
-    nori_look::lyrics::line_strength(synced, line, active)
-}
-
 /// Whether the screen stays on for the lyrics.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_keep_screen_on(asked: bool, shown: bool, playing: bool) -> bool {
     nori_look::lyrics::keeps_screen_on(asked, shown, playing)
 }
@@ -206,7 +206,8 @@ pub fn lyrics_keep_screen_on(asked: bool, shown: bool, playing: bool) -> bool {
 // ---- the seek bar ------------------------------------------------------------------------------------------
 
 /// The times either side of the seek bar, in whole seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SeekTimes {
     pub at_s: i64,
     pub left_s: i64,
@@ -215,7 +216,7 @@ pub struct SeekTimes {
 /// The seek bar shows one of three places: the finger's, while it is down (`drag`, a share of the bar);
 /// the place a released scrub asked for (`held_ms`, -1 for none) until the player is really there;
 /// otherwise the music's. The time left is counted from the same place.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn seek_times(dragging: bool, drag: f32, held_ms: i64, position_ms: i64, duration_ms: i64) -> SeekTimes {
     let d = duration_ms.max(1) as f32;
     let shown = if dragging {
@@ -228,21 +229,10 @@ pub fn seek_times(dragging: bool, drag: f32, held_ms: i64, position_ms: i64, dur
     SeekTimes { at_s: shown / 1000, left_s: (duration_ms - shown).max(0) / 1000 }
 }
 
-/// [`seek_times`] for a frame of a scrub, over JNI with primitives: `at_s << 32 | left_s`. The times are
-/// asked on every frame a finger moves the bar, and a uniffi record each frame would be garbage.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_look_CoverLook_seekTimes(
-    _: jni::JNIEnv, _: jni::objects::JClass, dragging: jni::sys::jboolean, drag: jni::sys::jfloat, held_ms: jni::sys::jlong,
-    position_ms: jni::sys::jlong, duration_ms: jni::sys::jlong,
-) -> jni::sys::jlong {
-    let t = seek_times(dragging != 0, drag, held_ms, position_ms, duration_ms);
-    ((t.at_s.clamp(0, u32::MAX as i64)) << 32) | t.left_s.clamp(0, u32::MAX as i64)
-}
-
 /// What the middle of the seek bar's times says: an error, or the sleep timer (`sleep_left_ms` None when
 /// none is set by time), or nothing - it holds its place so the two times either side never move. It
 /// said "Mixing" through every crossfade once, which is a word about the plumbing rather than the music.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn seek_middle(error: Option<String>, sleep_end_of_track: bool, sleep_left_ms: Option<i64>) -> String {
     if let Some(e) = error {
         return e;
@@ -256,7 +246,8 @@ pub fn seek_middle(error: Option<String>, sleep_end_of_track: bool, sleep_left_m
 // ---- the queue panel ---------------------------------------------------------------------------------------
 
 /// The queue as the panel lists it.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct QueueRows {
     /// Positions in the queue in the order they will play (under shuffle not the list's own order).
     pub order: Vec<u32>,
@@ -266,7 +257,7 @@ pub struct QueueRows {
 
 /// `order` is the player's play order; when it does not cover the queue (the player has not said yet)
 /// the list's own order stands in.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_rows(order: Vec<u32>, len: u32, shuffle: bool) -> QueueRows {
     let order = if order.len() == len as usize { order } else { (0..len).collect() };
     QueueRows { order, reorderable: !shuffle }
@@ -278,13 +269,16 @@ mod tests {
 
     #[test]
     fn a_swipe_turns_past_a_third_or_flicked() {
-        assert_eq!(swipe_turn(-310.0, 0.0, 1000.0, true, true), -1);
-        assert_eq!(swipe_turn(-290.0, 0.0, 1000.0, true, true), 0);
-        assert_eq!(swipe_turn(-20.0, -1_001.0, 1000.0, true, true), -1);
-        assert_eq!(swipe_turn(-20.0, -999.0, 1000.0, true, true), 0);
-        assert_eq!(swipe_turn(-500.0, -5_000.0, 1000.0, true, false), 0, "no record that way");
-        assert_eq!(swipe_turn(400.0, 0.0, 1000.0, true, false), 1);
-        assert_eq!(swipe_turn(40.0, 1_200.0, 1000.0, false, true), 0);
+        assert_eq!(swipe_turn(-310.0, 0.0, 1000.0, true, true, false), -1);
+        assert_eq!(swipe_turn(-290.0, 0.0, 1000.0, true, true, false), 0);
+        assert_eq!(swipe_turn(-20.0, -1_001.0, 1000.0, true, true, false), -1);
+        assert_eq!(swipe_turn(-20.0, -999.0, 1000.0, true, true, false), 0);
+        assert_eq!(swipe_turn(-500.0, -5_000.0, 1000.0, true, false, false), 0, "no record that way");
+        assert_eq!(swipe_turn(400.0, 0.0, 1000.0, true, false, false), 1);
+        assert_eq!(swipe_turn(40.0, 1_200.0, 1000.0, false, true, false), 0);
+        // The now playing bar takes the slower flick it always did.
+        assert_eq!(swipe_turn(-20.0, -950.0, 1000.0, true, true, true), -1);
+        assert_eq!(swipe_turn(-20.0, -899.0, 1000.0, true, true, true), 0);
     }
 
     #[test]

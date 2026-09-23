@@ -26,12 +26,16 @@ const DAY: i64 = 24 * HOUR;
 const BROWSE: i64 = 2 * MINUTE;
 
 /// A read of the server. The cached ones come first; the rest always ask.
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Read {
     /// getAlbumList2 of `kind` (newest, recent, frequent, random, alphabeticalByName, ...). "byYear" means
     /// this year's albums; "random" is never stored, or it would be the same shuffle every time.
     AlbumList { kind: String, size: i32, offset: i32, genre: Option<String> },
     AlbumsByYear { from: i32, to: i32, size: i32, offset: i32 },
+    /// The first `size` starred albums, the same request and stored answer as that `AlbumList`, with this
+    /// session's marks laid over it: the home page's favourites shelf, which follows the hearts.
+    FavouriteAlbums { size: i32 },
     ArtistIndex,
     AlbumById { id: String },
     ArtistById { id: String },
@@ -67,7 +71,8 @@ pub enum Read {
 }
 
 /// A parsed answer. The variant follows the read.
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Page {
     Albums { v: Vec<Album> },
     Artists { v: Vec<Artist> },
@@ -92,7 +97,8 @@ pub enum Page {
 
 /// What is stored for a read. `digest` identifies the stored bytes (None: nothing stored) and goes back
 /// into [`Client::read_fetch`], which only returns a page when the server's answer differs from it.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Stored {
     pub page: Option<Page>,
     pub digest: Option<u64>,
@@ -103,6 +109,7 @@ pub struct Stored {
 #[derive(Clone, Copy)]
 enum Parser {
     AlbumList,
+    FavouriteAlbums,
     Artists,
     Album,
     AlbumSongs,
@@ -169,6 +176,10 @@ fn spec(read: Read) -> Spec {
             s("getAlbumList2", p, fresh, Parser::AlbumList)
         }
         Read::AlbumsByYear { from, to, size, offset } => by_year(from, to, size, offset),
+        Read::FavouriteAlbums { size } => {
+            let p = pairs(&[("type", "starred".into()), ("size", size.to_string()), ("offset", "0".into())]);
+            s("getAlbumList2", p, Some(BROWSE), Parser::FavouriteAlbums)
+        }
         Read::ArtistIndex => s("getArtists", vec![], Some(BROWSE), Parser::Artists),
         Read::AlbumById { id: i } => s("getAlbum", id(i), Some(BROWSE), Parser::Album),
         Read::ArtistById { id: i } => s("getArtist", id(i), Some(BROWSE), Parser::Artist),
@@ -233,6 +244,7 @@ impl Client {
         let c = &self.core;
         Ok(match parser {
             Parser::AlbumList => Page::Albums { v: c.parse_album_list(body)? },
+            Parser::FavouriteAlbums => Page::Albums { v: crate::stars::star_overlay_albums(c.parse_album_list(body)?) },
             Parser::Artists => Page::Artists { v: c.parse_artists(body)? },
             Parser::Album => Page::AlbumPage { v: c.parse_album(body)? },
             Parser::AlbumSongs => Page::Songs { v: c.parse_album(body)?.songs },
@@ -243,10 +255,16 @@ impl Client {
             Parser::Playlists => Page::Playlists { v: c.parse_playlists(body)? },
             Parser::Playlist => Page::PlaylistPage { v: c.parse_playlist(body)? },
             Parser::PlaylistSongs => Page::Songs { v: c.parse_playlist(body)?.songs },
-            Parser::Starred => Page::StarredPage { v: c.parse_starred(body)? },
+            // This session's marks are laid over the favourites wherever they are read, stored or fresh,
+            // so an unstarred item leaves them at once rather than when the server's new answer comes.
+            Parser::Starred => Page::StarredPage { v: crate::stars::star_overlay(c.parse_starred(body)?) },
             Parser::Genres => Page::Genres { v: c.parse_genres(body)? },
             Parser::Radio => Page::Stations { v: c.parse_radio(body)? },
-            Parser::Lyrics => Page::LyricsPage { v: c.parse_lyrics(body)? },
+            Parser::Lyrics => {
+                let mut v = c.parse_lyrics(body)?;
+                crate::look::keep(&mut v);
+                Page::LyricsPage { v }
+            }
             Parser::Indexes => Page::Artists { v: c.parse_indexes(body)? },
             Parser::Directory => Page::DirectoryPage { v: c.parse_directory(body)? },
             Parser::Search => Page::Found { v: c.parse_search(body)? },
@@ -258,7 +276,7 @@ impl Client {
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// The stored answer for `read`, parsed, and whether it is young enough to skip the server. A stored
     /// answer that no longer parses is not shown, and the server is asked. Reads that are never stored
@@ -373,6 +391,22 @@ mod tests {
         fake.answer(r#"{"subsonic-response":{"status":"ok","lyricsList":{}}}"#);
         block(c.read_fetch(Read::LyricsBySong { song_id: "s 1".into() }, None)).unwrap();
         assert!(c.core.cache_get("getLyricsBySongId&id=s 1&enhanced=true".into()).unwrap().is_some());
+    }
+
+    #[test]
+    fn favourite_albums_share_the_starred_list_and_wear_this_sessions_marks() {
+        let (c, fake) = setup();
+        fake.answer(r#"{"subsonic-response":{"status":"ok","albumList2":{"album":[{"id":"fa-1","name":"A"},{"id":"fa-2","name":"B"}]}}}"#);
+        block(c.read_fetch(Read::AlbumList { kind: "starred".into(), size: 20, offset: 0, genre: None }, None)).unwrap();
+        crate::stars::star_mark(crate::client::Starrable::Album, "fa-2".into(), false);
+        match c.read_stored(Read::FavouriteAlbums { size: 20 }).unwrap().page {
+            Some(Page::Albums { v }) => assert_eq!(v.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), ["fa-1"]),
+            other => panic!("{other:?}"),
+        }
+        match c.read_stored(Read::AlbumList { kind: "starred".into(), size: 20, offset: 0, genre: None }).unwrap().page {
+            Some(Page::Albums { v }) => assert_eq!(v.len(), 2, "the album grid is not a favourites answer"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

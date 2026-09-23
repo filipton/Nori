@@ -3,13 +3,14 @@ package dev.nori.music.app.vm
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.nori.music.ffi.HistoryEntry
-import dev.nori.music.ffi.ListeningStats
+import dev.nori.music.ffi.SmartPage
+import dev.nori.music.ffi.StatsPage
 import dev.nori.music.ffi.SmartEdit
 import dev.nori.music.ffi.SmartPlaylist
-import dev.nori.music.ffi.Song
 import dev.nori.music.ffi.smartEditPrepare
 import dev.nori.music.ffi.Note
 import dev.nori.music.ffi.wordsNote
+import dev.nori.music.net.said
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,8 +24,9 @@ class SmartViewModel(app: Application) : NoriViewModel(app) {
     private val _saved = MutableStateFlow<List<SmartPlaylist>>(emptyList())
     val saved: StateFlow<List<SmartPlaylist>> = _saved
     val defaults: List<SmartPlaylist> = nori.library.smartDefaults()
-    private val _songs = MutableStateFlow<Load<List<Song>>>(Load.Loading)
-    val songs: StateFlow<Load<List<Song>>> = _songs
+    private val _songs = MutableStateFlow<Load<SmartPage>>(Load.Loading)
+    /** The playlist's songs and their caption, both the core's. */
+    val songs: StateFlow<Load<SmartPage>> = _songs
 
     init { refresh() }
     private fun refresh() = viewModelScope.launch { _saved.value = runCatching { nori.library.smartPlaylists() }.getOrDefault(emptyList()) }
@@ -33,7 +35,7 @@ class SmartViewModel(app: Application) : NoriViewModel(app) {
 
     fun open(json: String) = viewModelScope.launch {
         _songs.value = Load.Loading
-        _songs.value = runCatching { Load.Ready(nori.library.smartSongs(json)) }.getOrElse { Load.Failed(it.message ?: wordsNote(Note.COULD_NOT_EVALUATE)) }
+        _songs.value = runCatching { Load.Ready(nori.library.smartPage(json)) }.getOrElse { Load.Failed(it.said ?: wordsNote(Note.COULD_NOT_EVALUATE)) }
     }
 
     /** Null when saved; otherwise what is wrong with the definition. */
@@ -50,8 +52,9 @@ class SmartViewModel(app: Application) : NoriViewModel(app) {
 class HistoryViewModel(app: Application) : NoriViewModel(app) {
     private val _entries = MutableStateFlow(Grown.empty<HistoryEntry>())
     val entries: StateFlow<List<HistoryEntry>> = _entries
-    private val _stats = MutableStateFlow<ListeningStats?>(null)
-    val stats: StateFlow<ListeningStats?> = _stats
+    private val _stats = MutableStateFlow<StatsPage?>(null)
+    /** The stats with their words and tiles, all the core's. */
+    val stats: StateFlow<StatsPage?> = _stats
     private var exhausted = false
 
     init { loadMore() }
@@ -69,7 +72,7 @@ class HistoryViewModel(app: Application) : NoriViewModel(app) {
 
     /** [days] 0 means everything. */
     fun loadStats(days: Int) = viewModelScope.launch {
-        _stats.value = runCatching { withContext(Dispatchers.IO) { nori.core.statsDays(days.toUInt()) } }.getOrNull()
+        _stats.value = runCatching { withContext(Dispatchers.IO) { nori.core.statsPage(days.toUInt()) } }.getOrNull()
     }
 
     fun clear() = viewModelScope.launch { nori.library.clearHistory(); _entries.value = Grown.empty(); exhausted = true }

@@ -12,6 +12,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.graphics.isUnspecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -124,6 +126,40 @@ fun LookText(
         onTextLayout = onTextLayout, overflow = overflow, softWrap = softWrap, maxLines = maxLines, color = color,
     )
 }
+
+/**
+ * A time that changes every second as a song plays ("3:07", "-3:07"), drawn from the twelve glyphs it
+ * can be made of, each laid out once for [style]. A new second is read in the draw phase and drawn:
+ * no recomposition, and no text layout, which made two paragraphs a second - half of what the open
+ * player allocated. The box is as wide as [widest] can be (every digit counted as the widest one), so
+ * the time never moves what is beside it; [end] draws it against the box's right edge.
+ */
+@Composable
+fun LookTime(text: () -> String, widest: String, color: ColorProducer, style: TextStyle, end: Boolean, modifier: Modifier = Modifier) {
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 0)
+    val glyphs = remember(measurer, style) { Array(TIME_GLYPHS.length) { measurer.measure(TIME_GLYPHS[it].toString(), style) } }
+    val advance = remember(glyphs) { FloatArray(glyphs.size) { glyphs[it].multiParagraph.maxIntrinsicWidth } }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val digit = remember(advance) { (0..9).maxOf { advance[it] } }
+    val width = remember(widest, advance) { widest.sumOf { c -> (if (c in '0'..'9') digit else advance.getOrElse(TIME_GLYPHS.indexOf(c)) { 0f }).toDouble() }.toFloat() }
+    val size = with(density) { androidx.compose.ui.unit.DpSize(width.toDp(), glyphs[0].size.height.toDp()) }
+    Box(modifier.size(size).drawBehind {
+        val t = text()
+        var total = 0f
+        for (c in t) { val i = TIME_GLYPHS.indexOf(c); if (i >= 0) total += advance[i] }
+        var x = if (end) this.size.width - total else 0f
+        val col = color()
+        for (c in t) {
+            val i = TIME_GLYPHS.indexOf(c)
+            if (i < 0) continue
+            drawText(glyphs[i], col, androidx.compose.ui.geometry.Offset(x, 0f))
+            x += advance[i]
+        }
+    })
+}
+
+/** What a time under the seek bar is made of: nori-core's `fmt::duration` writes only these. */
+private const val TIME_GLYPHS = "0123456789:-"
 
 /**
  * Material's Icon, but tinted while it is drawn: the tint is read in the draw phase, and the colour

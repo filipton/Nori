@@ -346,7 +346,14 @@ check "a transition is planned at a track boundary ($planned)" test "${planned:-
 # The tracks are measured before they are played, so the first meeting of two songs is a real mix
 # rather than a fade; the measurement only runs on audio already on the device, so this is a report
 # rather than a check - an empty cache legitimately has nothing to measure yet.
-check "the tracks coming up are measured before they are played ($ahead)" test "${ahead:-0}" -ge 1
+# Only a song on the device can be measured: when every unmeasured one is still to be fetched (an earlier
+# section cleared the stream cache), there is nothing to measure yet, and that is said rather than failed.
+away=$(adb logcat -d -s nori:I | grep -oE "measuring ahead: [0-9]+ of [0-9]+ unmeasured, [0-9]+ not on" | tail -1 | awk '{print $3, $7}')
+if [ "${ahead:-0}" -eq 0 ] && [ -n "$away" ] && [ "${away% *}" = "${away#* }" ] && [ "${away% *}" -gt 0 ]; then
+  echo "  NOTE  the tracks coming up are not on the device yet (${away% *} unmeasured, all still to fetch)"
+else
+  check "the tracks coming up are measured before they are played ($ahead)" test "${ahead:-0}" -ge 1
+fi
 echo "     (analysis events seen: $analysed)"
 "$app" set crossfadeKeepAlbums true >/dev/null
 

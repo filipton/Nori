@@ -6,8 +6,11 @@ import dev.nori.music.data.StarKind
 import dev.nori.music.downloads.DownloadState
 import dev.nori.music.downloads.DownloadMark
 import dev.nori.music.ffi.DownloadSections
+import dev.nori.music.net.said
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import dev.nori.music.ffi.Album
@@ -50,7 +53,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     init { nori.downloads.resume() }
 
     private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
-        try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.message ?: words(Said.FAILED, "")) }
+        try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.said ?: words(Said.FAILED, "")) }
     }
 
     // ---- selection mode: long-press a song anywhere, then act on the whole selection ----
@@ -74,9 +77,10 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     /** What swiping a song row right and left does, as set in Settings. */
     val swipes: Pair<SwipeAction, SwipeAction> get() = nori.settings.value.let { it.swipeRight to it.swipeLeft }
 
-    fun playArtist(albums: List<Album>, shuffle: Boolean = false) = attempt(null) { nori.player.play(nori.library.artistSongs(albums), shuffle = shuffle) }
-    fun queueArtist(albums: List<Album>) = attempt(null) { enqueue(nori.library.artistSongs(albums)) }
-    fun downloadArtist(albums: List<Album>) = attempt(null) { download(nori.library.artistSongs(albums)) }
+    // By id: the core has the artist's albums from reading the page, so they need not be handed back.
+    fun playArtist(artistId: String, shuffle: Boolean = false) = attempt(null) { nori.player.play(nori.library.artistSongs(artistId), shuffle = shuffle) }
+    fun queueArtist(artistId: String) = attempt(null) { enqueue(nori.library.artistSongs(artistId)) }
+    fun downloadArtist(artistId: String) = attempt(null) { download(nori.library.artistSongs(artistId)) }
 
     fun play(songs: List<Song>, index: Int = 0) = nori.player.play(songs, index)
 
@@ -142,7 +146,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
         is TestRef.Search -> nori.library.search(ref.text).songs.take(1)
         // Straight from what is already on the device: the only way to start playback with the
         // network off, and therefore the only honest test of offline playback.
-        is TestRef.Downloaded -> nori.downloads.state.value.done.drop(ref.index.toInt()).take(1)
+        is TestRef.Downloaded -> withContext(Dispatchers.IO) { nori.downloads.state.value.done }.drop(ref.index.toInt()).take(1)
         TestRef.Nothing -> emptyList()
     }
 
@@ -258,9 +262,22 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
      * only while the screen is watching. Null until the first answer, which is not the same as empty.
      */
     val downloadSections: StateFlow<DownloadSections?> =
-        combine(nori.downloads.state, nori.downloads.marks) { _, _ -> runCatching { nori.core.downloadSections() }.getOrNull() }
+        // A song finishing changes the table and its mark together: the changes are only the signal, and
+        // the ones that arrive while the lists are being worked out are asked for once, not once each.
+        combine(nori.downloads.state, nori.downloads.marks) { _, _ -> }
+            .conflate()
+            .map { runCatching { nori.core.downloadSections() }.getOrNull() }
             .flowOn(kotlinx.coroutines.Dispatchers.IO)
             .stateIn<DownloadSections?>(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * Every downloaded song, newest first, for the library's downloads page: read again when the table
+     * changes, and only while the page is watching. Null until the first answer.
+     */
+    val downloadedSongs: StateFlow<List<Song>?> =
+        nori.downloads.state.map { it.done }
+            .flowOn(kotlinx.coroutines.Dispatchers.IO)
+            .stateIn<List<Song>?>(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     fun retryDownloads(songs: List<Song>) = nori.downloads.retry(songs)
     fun cancelDownloads(songs: List<Song>) = nori.downloads.cancel(songs.map { it.id })

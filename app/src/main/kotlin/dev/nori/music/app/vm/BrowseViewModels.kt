@@ -34,7 +34,6 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import dev.nori.music.ffi.HomeShelf
 import dev.nori.music.ffi.browsePaging
@@ -42,8 +41,6 @@ import dev.nori.music.ffi.homePinned
 import dev.nori.music.ffi.homeRefreshDrops
 import dev.nori.music.ffi.homeShelves
 import dev.nori.music.ffi.songSorts
-import dev.nori.music.ffi.starOverlay
-import dev.nori.music.ffi.starOverlayAlbums
 
 /**
  * One row of the home page. Not every shelf is a shelf of albums: the playlists are playlists and the
@@ -89,10 +86,9 @@ class HomeViewModel(app: Application) : NoriViewModel(app) {
         is HomeShelf.Albums -> {
             val sort = shelf.sort
             val size = shelf.size.toInt()
-            if (shelf.followsStars) combine(
-                combine(refreshes, nori.library.starsVersion) { _, v -> v }.flatMapLatest { nori.library.albums(sort, size = size) },
-                nori.library.starMarks,
-            ) { albums, _ -> Shelf.Albums(r, withContext(Dispatchers.Default) { starOverlayAlbums(albums) }) }
+            // Re-read on every star change, and the core lays this session's marks over what it reads.
+            if (shelf.followsStars) combine(refreshes, nori.library.starsVersion) { _, v -> v }.flatMapLatest { nori.library.favouriteAlbums(size) }
+                .map { Shelf.Albums(r, it) }
                 .catch { emit(Shelf.Albums(r, emptyList())) }.onStart { emit(Shelf.Albums(r, emptyList())) }
             else refreshes.flatMapLatest { nori.library.albums(sort, size = size) }
                 .catch { emit(emptyList()) }.onStart { emit(emptyList()) }.map { Shelf.Albums(r, it) }
@@ -193,12 +189,10 @@ class PlaylistsViewModel(app: Application) : NoriViewModel(app) {
 class StarredViewModel(app: Application) : NoriViewModel(app) {
     // Re-queried on every star change: the one-shot read would otherwise keep a removed favourite
     // until the screen is reopened. The stored answer paints first, so there is no loading flash.
+    // This session's marks are laid over it by the core as it is read, so an unstarred item leaves the
+    // list at once rather than when the server's new answer arrives.
     @OptIn(ExperimentalCoroutinesApi::class)
-    // This session's marks are applied on top (by the core, which keeps them), so an unstarred item
-    // leaves the list at once rather than when the server's new answer arrives.
-    val starred: StateFlow<Load<Starred>> = combine(nori.library.starsVersion.flatMapLatest { nori.library.starred() }, nori.library.starMarks) { s, _ ->
-        starOverlay(s)
-    }.flowOn(Dispatchers.Default).asLoad()
+    val starred: StateFlow<Load<Starred>> = nori.library.starsVersion.flatMapLatest { nori.library.starred() }.asLoad()
 }
 
 class GenresViewModel(app: Application) : NoriViewModel(app) {
@@ -310,7 +304,7 @@ class SongsViewModel(app: Application) : NoriViewModel(app) {
 }
 
 class DecadesViewModel(app: Application) : NoriViewModel(app) {
-    val decades: StateFlow<Load<List<Genre>>> = flow { emit(nori.library.decades()) }.asLoad()
+    val decades: StateFlow<Load<List<dev.nori.music.ffi.Decade>>> = flow { emit(nori.library.decades()) }.asLoad()
 }
 
 class FoldersViewModel(app: Application) : NoriViewModel(app) {

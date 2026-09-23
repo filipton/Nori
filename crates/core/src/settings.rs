@@ -8,15 +8,13 @@
 
 use std::collections::HashMap;
 
-use jni::objects::JClass;
-use jni::sys::{jboolean, jfloat};
-use jni::JNIEnv;
 use serde_json::{Map, Value};
 
 use crate::{EqKind, NamedPreset};
 
 /// One stored value, as the platform's key-value store holds it.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum PrefValue {
     Flag { v: bool },
     Number { v: i32 },
@@ -27,7 +25,8 @@ pub enum PrefValue {
 }
 
 /// What to write back: every value, and the keys that go.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PrefsWrite {
     pub put: HashMap<String, PrefValue>,
     pub remove: Vec<String>,
@@ -35,7 +34,8 @@ pub struct PrefsWrite {
 
 /// One equalizer filter. `kind` is an `EqKind` ordinal (the order is the wire format, so it must not
 /// change), `channel` 0 both, 1 left, 2 right.
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SoundBand {
     pub kind: i32,
     pub freq: f32,
@@ -49,7 +49,8 @@ const BAND_KINDS: i32 = 10;
 const BAND_CHANNELS: i32 = 3;
 
 /// One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SavedServer {
     pub id: String,
     pub name: String,
@@ -69,7 +70,8 @@ pub struct SavedServer {
 }
 
 /// One stream quality: `bit_rate` 0 and an empty `format` mean the original file.
-#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SavedQuality {
     pub bit_rate: i32,
     pub format: String,
@@ -77,7 +79,8 @@ pub struct SavedQuality {
 
 /// Every setting. The enums travel as their ordinals; each is in range once it has been through
 /// `settings_load`. The names and meanings are the platform's `Prefs`.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StoredPrefs {
     pub servers: Vec<SavedServer>,
     pub active_server_id: String,
@@ -158,7 +161,8 @@ pub struct StoredPrefs {
 }
 
 /// The part of the settings a sound profile remembers.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SoundSettings {
     pub eq_enabled: bool,
     pub eq_bands: Vec<SoundBand>,
@@ -194,11 +198,32 @@ impl StoredPrefs {
             bit_perfect: self.bit_perfect,
         }
     }
+
+    /// These settings with the part a sound profile remembers taken from `s`.
+    pub fn with_sound(self, s: SoundSettings) -> StoredPrefs {
+        StoredPrefs {
+            eq_enabled: s.eq_enabled,
+            eq_bands: s.eq_bands,
+            eq_preamp_db: s.eq_preamp_db,
+            crossfeed_db: s.crossfeed_db,
+            balance: s.balance,
+            mono: s.mono,
+            limiter: s.limiter,
+            limiter_threshold_db: s.limiter_threshold_db,
+            replay_gain: s.replay_gain,
+            preamp_db: s.preamp_db,
+            crossfade_sec: s.crossfade_sec,
+            hi_res: s.hi_res,
+            bit_perfect: s.bit_perfect,
+            ..self
+        }
+    }
 }
 
 /// A sound that cannot be made: a preset with no filters in it, or the profiles not reachable.
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-#[uniffi(flat_error)]
+#[derive(Debug, thiserror::Error)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Error))]
+#[cfg_attr(feature = "ffi", uniffi(flat_error))]
 pub enum SoundError {
     #[error("{0}")]
     NoFilters(String),
@@ -793,7 +818,8 @@ pub fn save(p: &StoredPrefs) -> PrefsWrite {
 
 /// What a change by name did: the settings after it, whether the stream cache has to shrink to a new
 /// limit now, and whether the active server's own profile changed (its connection is set up again).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingChange {
     pub prefs: StoredPrefs,
     pub apply_cache_limit: bool,
@@ -976,7 +1002,8 @@ pub fn remove_band(s: SoundSettings, index: u32) -> SoundSettings {
 
 /// How far each equalizer control goes. The screen's sliders span exactly this, and every edit made
 /// through the core is held inside it, so a value from anywhere else cannot leave the range either.
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Span {
     pub min: f32,
     pub max: f32,
@@ -988,7 +1015,8 @@ impl Span {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct EqRanges {
     /// A band's boost or cut, dB.
     pub gain: Span,
@@ -1021,7 +1049,8 @@ pub const EQ_RANGES: EqRanges = EqRanges {
 
 /// One kind of band as the editor shows it: its name, whether it has a gain to set, and which marks
 /// its label gets.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct BandKindInfo {
     pub label: String,
     pub uses_gain: bool,
@@ -1030,7 +1059,8 @@ pub struct BandKindInfo {
 }
 
 /// The words every enum setting is shown with, in ordinal order; asked once.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SettingLabels {
     pub auto_fill_kinds: Vec<String>,
     pub auto_fill_bases: Vec<String>,
@@ -1090,11 +1120,17 @@ impl SoundSettings {
     /// The pre-amp in effect: the one set, or the automatic one for these bands; none with the
     /// equalizer off.
     pub fn effective_preamp_db(&self) -> f32 {
-        if !self.eq_enabled {
-            return 0.0;
-        }
-        self.eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(self.eq_bands.iter().map(|b| (b.kind, b.gain_db))))
+        effective_preamp_db(self.eq_enabled, self.eq_preamp_db, self.eq_bands.iter().map(|b| (b.kind, b.gain_db)))
     }
+}
+
+/// [`SoundSettings::effective_preamp_db`] from its parts: whether the equalizer is on, the pre-amp set
+/// (none for automatic) and each band's kind and gain.
+pub fn effective_preamp_db(eq_enabled: bool, eq_preamp_db: Option<f32>, bands: impl IntoIterator<Item = (i32, f32)>) -> f32 {
+    if !eq_enabled {
+        return 0.0;
+    }
+    eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(bands))
 }
 
 /// The automatic pre-amp switched on, or off - and then it starts from the level it was at, so the
@@ -1105,7 +1141,8 @@ pub fn set_auto_preamp(s: SoundSettings, automatic: bool) -> SoundSettings {
 }
 
 /// One of the equalizer screen's other controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum EqLevel {
     Preamp,
     Balance,
@@ -1154,7 +1191,8 @@ pub fn profile_use(devices: &[String]) -> String {
 // ---- server profiles ----
 
 /// The saved servers and which one is in use.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ServerList {
     pub servers: Vec<SavedServer>,
     pub active_server_id: String,
@@ -1235,143 +1273,143 @@ pub fn profile_from_form(p: SavedServer, headers: &str) -> SavedServer {
 // ---- the doors ----
 
 /// Every enum setting's words, the band kinds and the equalizer's ranges; asked once.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn setting_labels() -> SettingLabels {
     labels()
 }
 
 /// The settings as a fresh install has them.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_defaults() -> StoredPrefs {
     StoredPrefs::default()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_set_band(sound: SoundSettings, index: u32, band: SoundBand) -> SoundSettings {
     set_band(sound, index, band)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_set_auto_preamp(sound: SoundSettings, automatic: bool) -> SoundSettings {
     set_auto_preamp(sound, automatic)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_set_level(sound: SoundSettings, level: EqLevel, value: f32) -> SoundSettings {
     set_level(sound, level, value)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_effective_preamp_db(sound: SoundSettings) -> f32 {
     sound.effective_preamp_db()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<String> {
     eq_bypass(hi_res, bit_perfect)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_band_name(band: SoundBand) -> String {
     band_label(&band)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_profile_use(devices: Vec<String>) -> String {
     profile_use(&devices)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn servers_activated(list: ServerList, profile: SavedServer) -> ServerList {
     servers_activate(list, profile)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn servers_updated(list: ServerList, profile: SavedServer) -> ServerList {
     servers_update(list, profile)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn servers_removed(list: ServerList, id: String) -> ServerList {
     servers_remove(list, &id)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_db(active_server_id: String) -> String {
     server_db_id(&active_server_id)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_new_id() -> String {
     new_server_id()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_headers_text(headers: HashMap<String, String>) -> String {
     format_headers(&headers)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_url_schemes(url: String) -> Vec<String> {
     url_schemes(&url)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_ready(profile: SavedServer) -> bool {
     profile_ready(&profile)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_from_form(profile: SavedServer, headers: String) -> SavedServer {
     profile_from_form(profile, &headers)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_label(name: String, url: String) -> String {
     label(&name, &url)
 }
 
 /// A saved profile's sound; `None` when the JSON is not one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sound_from_json(json: String) -> Option<SoundSettings> {
     sound_from(&json)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_graphic() -> Vec<SoundBand> {
     graphic()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_apply_preset(sound: SoundSettings, preset: NamedPreset) -> SoundSettings {
     apply_preset(sound, &preset)
 }
 
 /// A preset file the user picked or downloaded; an error, with what to say, when it has no filters.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_import(sound: SoundSettings, text: String) -> Result<SoundSettings, SoundError> {
     import(sound, &text, "that file had no filters in it")
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_add_band(sound: SoundSettings) -> SoundSettings {
     add_band(sound)
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_remove_band(sound: SoundSettings, index: u32) -> SoundSettings {
     remove_band(sound, index)
 }
 
 /// The ten graphic bands back, with the automatic pre-amp.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_reset_bands(sound: SoundSettings) -> SoundSettings {
     SoundSettings { eq_bands: graphic(), eq_preamp_db: None, ..sound }
 }
 
 /// Which of the app's own files are the app's database: `nori.db` (and an old `nori-<id>.db`) with its write-ahead
 /// log and shared memory. Indices into `names`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn storage_index_files(names: Vec<String>) -> Vec<u32> {
     names
         .iter()
@@ -1379,15 +1417,6 @@ pub fn storage_index_files(names: Vec<String>) -> Vec<u32> {
         .filter(|(_, n)| n.starts_with("nori") && (n.ends_with(".db") || n.ends_with("-wal") || n.ends_with("-shm")))
         .map(|(i, _)| i as u32)
         .collect()
-}
-
-/// Whether the sound chain has anything to do (see `nori_player::sound::sound_on`). Read once per
-/// settings change, possibly while a screen is drawn, so it is plain JNI: primitives in and out.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_Dsp_soundOn(
-    _: JNIEnv, _: JClass, eq_enabled: jboolean, crossfeed_db: jfloat, balance: jfloat, mono: jboolean, limiter: jboolean,
-) -> jboolean {
-    nori_player::sound::sound_on(eq_enabled != 0, crossfeed_db, balance, mono != 0, limiter != 0) as jboolean
 }
 
 #[cfg(test)]

@@ -265,9 +265,9 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     // old-line/new-line blend, and when the next line arrived before a blend had
                     // finished it restarted from a line two changes back - one frame of the wrong
                     // line fully lit. Nothing here can jump: a change mid-way just turns it round.
-                    // How lit each line is, by where the singing is, is the core's; asked when the line
-                    // being sung changes, not per frame.
-                    val target = remember(lyrics.synced, i, active) { dev.nori.music.ffi.lyricLineStrength(lyrics.synced, i, active) }
+                    // How lit each line is, by where the singing is, is the core's; asked over JNI when the
+                    // line being sung changes, not per frame.
+                    val target = remember(lyrics.synced, i, active) { LyricsClock.strength(lyrics.synced, i, active) }
                     val strength = remember { Animatable(target) }
                     LaunchedEffect(target, plain) {
                         if (plain) strength.snapTo(target)

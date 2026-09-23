@@ -99,9 +99,6 @@ import kotlin.math.roundToInt
  */
 fun isProviderCover(url: String): Boolean = CoverSize.providerMarks.any { url.contains(it) }
 
-/** "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from (nori-core's `fmt`). */
-fun providerOf(id: String): String? = dev.nori.music.ffi.providerOf(id)
-
 /**
  * The sizes covers are drawn at, nori-core's (`cover_rules`): two, not four, because a Subsonic server
  * renders each size it is asked for on demand. A list thumbnail and a grid card share one rendition, and
@@ -188,14 +185,14 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
 fun duration(seconds: Long): String {
     if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.duration(seconds)
     val i = seconds.toInt()
-    return Durations.made[i] ?: dev.nori.music.ffi.duration(seconds).also { Durations.made[i] = it }
+    return Durations.made[i] ?: dev.nori.music.look.CoverLook.duration(seconds, false).also { Durations.made[i] = it }
 }
 
 /** The time left, "-3:07" (nori-core's `fmt::duration_left`): kept the same way. */
 fun durationLeft(seconds: Long): String {
     if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.durationLeft(seconds)
     val i = seconds.toInt()
-    return Durations.left[i] ?: dev.nori.music.ffi.durationLeft(seconds).also { Durations.left[i] = it }
+    return Durations.left[i] ?: dev.nori.music.look.CoverLook.duration(seconds, true).also { Durations.left[i] = it }
 }
 
 private object Durations {
@@ -335,7 +332,9 @@ fun SongRow(
     song: Song, coverUrl: String?, onClick: () -> Unit, onMenu: () -> Unit, modifier: Modifier = Modifier,
     number: Int? = null, playing: Boolean = false, downloaded: Boolean = false,
     selected: Boolean = false, onLongClick: (() -> Unit)? = null, swipeRight: RowSwipe? = null, swipeLeft: RowSwipe? = null,
-    divider: Boolean = true, pageArtist: String? = null,
+    divider: Boolean = true,
+    /** The second line: the song's own (its explicit mark and artist), or what the page makes of it (an album's, without its own artist). */
+    line: String = song.line,
 ) {
     val scheme = MaterialTheme.colorScheme
     val swipe = if (swipeRight != null || swipeLeft != null) remember { SwipeState() } else null
@@ -363,17 +362,16 @@ fun SongRow(
                     song.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
                     color = if (playing) scheme.primary else scheme.onSurface,
                 )
-                // Once per row, not per recomposition (nori-core's `fmt::song_line`).
-                val second = remember(song.explicitStatus, song.artist, pageArtist) { dev.nori.music.ffi.songLine(song.explicitStatus, song.artist, pageArtist) }
-                if (second.isNotEmpty()) Text(
-                    second, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                // Worked out by the core when the song was read (`fmt::song_line`), not per row.
+                if (line.isNotEmpty()) Text(
+                    line, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant,
                 )
             }
             val tint = scheme.onSurfaceVariant
             if (song.isExternal) {
                 Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
-                remember(song.id) { providerOf(song.id) }?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
+                song.provider?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
             }
             // Every row's marks sit in columns of their own, the same width on every row: the heart, then
             // the download ring or tick, then the time, then the menu. A list of favourites then puts all
@@ -451,10 +449,10 @@ fun LazyListScope.songRows(
     /** The list a tap plays from, when [songs] is only a slice of it (one disc of an album, a filtered view). */
     context: List<Song> = songs,
     /**
-     * The artist the page is already about. A track by that artist then shows its title alone, the way
-     * Apple's album page does - repeating "Radiohead" down ten rows of a Radiohead album says nothing.
+     * Each row's second line where the page words them itself: an album's, which leaves the album's own
+     * artist off its tracks (the core's `DiscGroup.lines`). Otherwise each song's own.
      */
-    pageArtist: String? = null,
+    lines: List<String>? = null,
     /**
      * Rows keyed by song alone (the ids must be unique) that fade and slide when the list changes under
      * them - a favourite unstarred, a mix drawn again - instead of the rows below jumping up in one frame.
@@ -470,7 +468,7 @@ fun LazyListScope.songRows(
             selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, 
             swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
             divider = i < songs.lastIndex,
-            pageArtist = pageArtist,
+            line = lines?.getOrNull(i) ?: s.line,
         )
     }
 }
@@ -543,7 +541,7 @@ fun ArtistCard(name: String, subtitle: String, coverUrl: String?, size: Dp, onCl
 fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, modifier: Modifier = Modifier, fill: Boolean = false) =
     CoverCard(
         album.name,
-        remember(album.artist, album.year, album.id) { dev.nori.music.ffi.albumSubtitle(album.artist, album.year, album.id) },
+        album.subtitle,
         coverUrl, size, onClick, modifier, fill,
     )
 
@@ -634,11 +632,14 @@ fun EmptyNote(text: String, modifier: Modifier = Modifier) = Text(
 @Composable
 fun PrefetchCovers(urls: List<String?>) {
     val context = LocalContext.current
-    androidx.compose.runtime.LaunchedEffect(urls) {
-        val loader = coil3.SingletonImageLoader.get(context)
-        urls.filterNotNull().filterNot(::isProviderCover).forEach { url ->
-            loader.enqueue(ImageRequest.Builder(context).data(url).size(CoverSize.CARD).build())
-        }
+    androidx.compose.runtime.LaunchedEffect(urls) { prefetchCovers(context, urls) }
+}
+
+/** [PrefetchCovers] for a caller that works out [urls] outside composition, from a scroll observer. */
+fun prefetchCovers(context: android.content.Context, urls: List<String?>) {
+    val loader = coil3.SingletonImageLoader.get(context)
+    urls.filterNotNull().filterNot(::isProviderCover).forEach { url ->
+        loader.enqueue(ImageRequest.Builder(context).data(url).size(CoverSize.CARD).build())
     }
 }
 

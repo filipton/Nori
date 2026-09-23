@@ -6,6 +6,7 @@ import dev.nori.music.ffi.SearchResult
 import dev.nori.music.ffi.SearchScope
 import dev.nori.music.ffi.SearchSession
 import dev.nori.music.ffi.SearchView
+import dev.nori.music.net.said
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +45,8 @@ data class SearchUi(
 @OptIn(FlowPreview::class)
 class SearchViewModel(app: Application) : NoriViewModel(app) {
     private val session = SearchSession()
+    /** What is in the field, as typed; the session is told off the main thread. */
+    private val text = MutableStateFlow("")
     private val query = MutableStateFlow("")
     private val _ui = MutableStateFlow(SearchUi())
     val ui: StateFlow<SearchUi> = _ui
@@ -51,6 +54,13 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
 
     init {
         viewModelScope.launch { _ui.update { it.copy(history = nori.library.searchHistory()) } }
+        viewModelScope.launch {
+            text.collectLatest { t ->
+                val v = withContext(Dispatchers.Default) { session.typed(t) }
+                _ui.update { it.with(v) }
+                query.value = v.query
+            }
+        }
         viewModelScope.launch {
             query.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
@@ -62,22 +72,22 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
             query.debounce { if (it.isBlank()) 0L else nori.settings.value.liveSearchDelayMs.toLong() }.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
                 val v = try {
-                    val found = nori.library.search(q)
-                    withContext(Dispatchers.Default) { session.server(q, found) }
+                    // The core asks and takes the answer itself: it never comes out here to be handed back.
+                    nori.library.searchInto(session, q)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    session.failed(q, e.message)
+                    session.failed(q, e.said)
                 }
                 if (v != null) _ui.update { it.with(v) }
             }
         }
     }
 
+    /** The field follows the finger at once; what the search makes of it follows from the core. */
     fun setQuery(text: String) {
-        val v = session.typed(text)
-        _ui.update { it.with(v) }
-        query.value = v.query
+        _ui.update { it.copy(query = text) }
+        this.text.value = text
     }
 
     /** Called when the user acts on a result: that is a query worth remembering. */

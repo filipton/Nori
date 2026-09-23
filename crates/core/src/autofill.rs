@@ -43,14 +43,15 @@ fn refill_facts() -> (bool, usize) {
 
 /// The queue moved: whether to fetch songs for its end now ([`Client::autofill`]). A true answer is a
 /// fetch on the wire until [`autofill_arrived`].
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autofill_start() -> bool {
     let (ok, after) = refill_facts();
     REFILL.lock().start(ok, after)
 }
 
 /// What a next press does now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum FillNext {
     /// There is a song after: skip to it.
     Skip,
@@ -62,7 +63,7 @@ pub enum FillNext {
 }
 
 /// Next pressed with the queue's end in sight.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autofill_next() -> FillNext {
     let setting = crate::rules::prefs(|p| p.auto_fill);
     let (has_next, repeat_off, current) =
@@ -81,7 +82,7 @@ pub fn autofill_next() -> FillNext {
 }
 
 /// The fetch came back with `count` songs: whether they go in (see `Refill::arrived`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autofill_arrived(count: u32) -> bool {
     let after = crate::playlist::playlist_after() as usize;
     REFILL.lock().arrived(count as usize, after)
@@ -89,7 +90,7 @@ pub fn autofill_arrived(count: u32) -> bool {
 
 /// The songs that arrived are in the queue: whether to take a next that was pressed while they were on
 /// the way.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autofill_landed() -> bool {
     let (current, has_next) = crate::playlist::with(|p| (p.current_id().map(str::to_string), p.next().is_some()));
     REFILL.lock().landed(current.as_deref(), has_next)
@@ -227,7 +228,7 @@ impl Client {
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// What to append to the queue after the song playing, as the settings say (songs or an album, and
     /// chosen by what). Nothing for a provider's song or one the queue does not know; a failed read is
@@ -258,6 +259,8 @@ impl Client {
                 .take(SONGS)
                 .collect()
         };
+        // Kept for the queue they are about to join, so the platform does not hand them straight back.
+        queue::queue_register(fresh.clone());
         fresh
     }
 }

@@ -14,6 +14,8 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.MoreExecutors
+import dalvik.annotation.optimization.CriticalNative
+import dalvik.annotation.optimization.FastNative
 import dev.nori.music.Nori
 import dev.nori.music.ffi.Hand
 import dev.nori.music.ffi.NextAction
@@ -173,23 +175,36 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         }
     }
 
+    /** The core queue's revision the page's queue was read at; -1 when it was not read from the core. */
+    private var viewRev = -1L
+
+    /** The last radio title worked out, and what it was worked out from: asked again only when those change. */
+    private var radioAnnounced: String? = null
+    private var radioStation: String? = null
+    private var radioShown: String? = null
+
     private fun publish(p: Player, queueChanged: Boolean) {
         val old = _state.value
         val item = p.currentMediaItem
         val fresh = queueChanged || !old.connected
+        val look = fresh || p.shuffleModeEnabled != old.shuffle
         // The queue is the core's (crates/core/src/playlist.rs), read in one call; the controller's copy
-        // of it trails the service a little, so the core's is taken when both are the same length.
-        val view = if (fresh || p.shuffleModeEnabled != old.shuffle) dev.nori.music.ffi.playlistView().takeIf { it.songs.size == p.mediaItemCount } else null
-        val queue = view?.songs ?: if (fresh) dev.nori.music.ffi.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
-        val order = view?.order?.map { it.toInt() } ?: if (fresh || p.shuffleModeEnabled != old.shuffle) playOrder(p) else old.order
-        val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: if (fresh) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
+        // of it trails the service a little, so the core's is taken when both are the same length. A
+        // timeline change is not always a queue change (a song's source opening is one too), so the
+        // core's revision is asked first and a queue the page already holds is not copied over again.
+        val same = look && old.connected && viewRev >= 0 && PlaylistJni.rev() == viewRev && old.queue.size == p.mediaItemCount
+        val view = if (look && !same) dev.nori.music.ffi.playlistView().takeIf { it.songs.size == p.mediaItemCount } else null
+        if (look && !same) viewRev = view?.rev?.toLong() ?: -1L
+        val queue = view?.songs ?: if (fresh && !same) dev.nori.music.ffi.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
+        val order = view?.order?.map { it.toInt() } ?: if (look && !same) playOrder(p) else old.order
+        val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: if (fresh && !same) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
         // The song on the page is the one being heard. Into a transition the player has moved on to
         // the next song while the ending of this one still plays alone (see heard); the page stays
         // on this song until the mix is heard, and moves to the next one the moment it is, even while
         // the player is still on the old one. Which copy of a song queued twice that is, the heard
         // tracker decides (crates/player/src/heard.rs); a queue that has just changed is looked up anew.
         val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let { this.heardIndex }?.takeIf { it >= 0 }?.let { i ->
-            if (fresh) old.queue.getOrNull(i)?.id?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } else i
+            if (fresh && !same) old.queue.getOrNull(i)?.id?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } else i
         }?.takeIf { queue.getOrNull(it)?.id != item?.mediaId }
         _state.value = old.copy(
             connected = true, queue = queue, order = order, queued = queued,
@@ -198,18 +213,32 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             previousIndex = if (p.mediaItemCount == 0) -1 else p.previousMediaItemIndex,
             // For a stream the live metadata carries what the station announces (ICY title); which of that and
             // the station's name shows is the core's (words.rs radio_title).
-            radio = item?.takeIf { it.isRadio }?.let { dev.nori.music.ffi.radioTitle(p.mediaMetadata.title?.toString(), it.mediaMetadata.title?.toString()) },
+            radio = item?.takeIf { it.isRadio }?.let { radioTitle(p.mediaMetadata.title?.toString(), it.mediaMetadata.title?.toString()) },
             playing = p.isPlaying, buffering = p.playbackState == Player.STATE_BUFFERING && p.playWhenReady,
             // A weighted shuffle plays a pre-spread list with the player's shuffle off so the order sticks;
             // the core keeps the control lit until the user turns it off or starts a plain Play.
-            shuffle = p.shuffleModeEnabled || dev.nori.music.ffi.playlistShuffleShown(),
+            shuffle = p.shuffleModeEnabled || PlaylistJni.shuffleShown(),
             repeat = when (p.repeatMode) { Player.REPEAT_MODE_ALL -> Repeat.ALL; Player.REPEAT_MODE_ONE -> Repeat.ONE; else -> Repeat.OFF },
             // The heard song's length while the ear is a song behind the player, else the player's, else
             // the tags' (nori_player::heard::shown_duration_ms).
-            durationMs = dev.nori.music.ffi.shownDurationMs(heardIndex?.let { queue[it].duration.toLong() } ?: -1, p.duration, item?.mediaMetadata?.durationMs ?: 0),
+            durationMs = PlayheadJni.durationMs(heardIndex?.let { queue[it].duration.toLong() } ?: -1, p.duration, item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
             bridging = view?.bridging ?: old.bridging,
         )
+    }
+
+    /**
+     * What a stream shows as its title (words.rs radio_title). Every player event of a radio stream
+     * lands here, and nearly all of them leave the announcement as it was, so the core is asked only
+     * when it changed.
+     */
+    private fun radioTitle(announced: String?, station: String?): String? {
+        if (radioShown == null || announced != radioAnnounced || station != radioStation) {
+            radioAnnounced = announced
+            radioStation = station
+            radioShown = dev.nori.music.ffi.radioTitle(announced, station)
+        }
+        return radioShown
     }
 
     private fun playOrder(p: Player): List<Int> {
@@ -430,7 +459,26 @@ internal object PlayheadJni {
     init { System.loadLibrary("norimusic") }
 
     /** As [HeardJni.at], with the place the bar shows while the page shows queue index [shown] (-1: nothing). */
-    @JvmStatic external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int): Long
+    @JvmStatic @CriticalNative external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int): Long
     /** The last place shown, run on from then if [playing]: for while the controller cannot be asked. */
-    @JvmStatic external fun runOn(h: Long, nowMs: Long, playing: Boolean): Long
+    @JvmStatic @CriticalNative external fun runOn(h: Long, nowMs: Long, playing: Boolean): Long
+    /** The length the page shows: the heard song's ([heardS] seconds, -1 none), else the player's, else the tags'. */
+    @JvmStatic @CriticalNative external fun durationMs(heardS: Long, playerMs: Long, taggedMs: Long): Long
+}
+
+/**
+ * The core's queue (crates/core/src/playlist.rs) where it is asked on every player event or edit:
+ * primitives in and out, nothing copied.
+ */
+internal object PlaylistJni {
+    init { System.loadLibrary("norimusic") }
+
+    /** Changes whenever the list or its order does. */
+    @JvmStatic @CriticalNative external fun rev(): Long
+    /** Shuffle shown as on (the player's own, or a weighted shuffle's). */
+    @JvmStatic @CriticalNative external fun shuffleShown(): Boolean
+    /** The play order while shuffling, written into [out] when it is exactly that long; its length, -1 when not shuffling. */
+    @JvmStatic @FastNative external fun order(out: IntArray): Int
+    /** Whether the player's list matches the core's: ids and play order as `List.hashCode()` over them. */
+    @JvmStatic @CriticalNative external fun same(count: Int, current: Int, shuffling: Boolean, idsHash: Int, orderHash: Int): Boolean
 }

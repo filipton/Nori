@@ -5,13 +5,15 @@
 use crate::client::Client;
 
 /// A quality setting: `bit_rate` 0 and an empty `format` mean the original file.
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StreamQuality {
     pub bit_rate: u32,
     pub format: String,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StreamTarget {
     pub url: String,
     /// The cache key: `<id>:<bit rate><format>` in the rolling stream cache, `dl:<id>` for downloads.
@@ -19,16 +21,15 @@ pub struct StreamTarget {
 }
 
 /// A finished download's cache key.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_key(id: String) -> String {
     format!("dl:{id}")
 }
 
-/// The streamed copies of `id` among `keys`, whatever quality they were fetched at. Keys are
+/// Whether `key` is a streamed copy of `id`, at whatever quality it was fetched. Keys are
 /// `<id>:<quality>` and the quality never holds a colon, so this is exact.
-#[uniffi::export]
-pub fn stream_copies(id: String, keys: Vec<String>) -> Vec<String> {
-    keys.into_iter().filter(|k| k.rsplit_once(':').is_some_and(|(before, _)| before == id)).collect()
+pub fn is_copy(id: &str, key: &str) -> bool {
+    key.rsplit_once(':').is_some_and(|(before, _)| before == id)
 }
 
 impl Client {
@@ -44,7 +45,7 @@ impl Client {
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// The URL and cache key to stream `id` from now.
     pub fn stream_target(&self, id: String, metered: bool, wifi: StreamQuality, mobile: StreamQuality) -> StreamTarget {
@@ -122,7 +123,7 @@ mod tests {
         let t = c.download_target("s:1".into(), q(0, ""));
         assert_eq!(t.key, "dl:s:1");
         assert!(t.url.ends_with("&id=s%3A1"));
-        let keys = vec!["a:0".into(), "a:192opus".into(), "ab:0".into(), "dl:a".into(), "x:a:0".into()];
-        assert_eq!(stream_copies("a".into(), keys), vec!["a:0", "a:192opus"]);
+        let keys = ["a:0", "a:192opus", "ab:0", "dl:a", "x:a:0"];
+        assert_eq!(keys.into_iter().filter(|k| is_copy("a", k)).collect::<Vec<_>>(), ["a:0", "a:192opus"]);
     }
 }

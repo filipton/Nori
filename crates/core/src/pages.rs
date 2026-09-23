@@ -2,33 +2,42 @@
 //! the letters down the side of a long list, what a filter keeps. Worked out once per page (or once per
 //! keystroke for a filter) here, so the UI only lays out what it is handed.
 
-use crate::model::{Album, AlbumDetail};
+use crate::model::{Album, DiscTitle, Song};
 
 /// One disc of an album: its heading ("Disc 2 · Bonus") and the positions of its songs in the album's
 /// song list, in the album's order.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DiscGroup {
     pub disc: u32,
     /// Empty when the album has only the one disc, which needs no heading.
     pub heading: String,
     pub songs: Vec<u32>,
+    /// Each of those songs' second line on this page: a track by the album's own artist shows only its
+    /// explicit mark, the way Apple's album page does - repeating "Radiohead" down ten rows of a
+    /// Radiohead album says nothing ([`crate::fmt::song_line`]).
+    pub lines: Vec<String>,
 }
 
-/// An album's songs by disc, discs in order (a song with no disc number is on disc 1).
-#[uniffi::export]
-pub fn album_discs(detail: AlbumDetail) -> Vec<DiscGroup> {
+/// An album's songs by disc, discs in order (a song with no disc number is on disc 1). Made once when the
+/// album is read ([`AlbumDetail::new`](crate::model::AlbumDetail::new)).
+pub fn album_discs(album: &Album, songs: &[Song], disc_titles: &[DiscTitle]) -> Vec<DiscGroup> {
     let mut discs: Vec<DiscGroup> = Vec::new();
-    for (i, s) in detail.songs.iter().enumerate() {
+    for (i, s) in songs.iter().enumerate() {
         let disc = s.disc_number.max(1);
+        let line = crate::fmt::song_line(&s.explicit_status, &s.artist, Some(&album.artist));
         match discs.iter_mut().find(|d| d.disc == disc) {
-            Some(d) => d.songs.push(i as u32),
-            None => discs.push(DiscGroup { disc, heading: String::new(), songs: vec![i as u32] }),
+            Some(d) => {
+                d.songs.push(i as u32);
+                d.lines.push(line);
+            }
+            None => discs.push(DiscGroup { disc, heading: String::new(), songs: vec![i as u32], lines: vec![line] }),
         }
     }
     discs.sort_by_key(|d| d.disc);
     if discs.len() > 1 {
         for d in &mut discs {
-            let title = detail.disc_titles.iter().find(|t| t.disc == d.disc).map(|t| t.title.as_str());
+            let title = disc_titles.iter().find(|t| t.disc == d.disc).map(|t| t.title.as_str());
             d.heading = match title {
                 Some(t) if !t.trim().is_empty() => format!("Disc {} · {t}", d.disc),
                 _ => format!("Disc {}", d.disc),
@@ -57,7 +66,8 @@ fn release_kind(a: &Album) -> String {
 }
 
 /// One shelf of an artist's page: "Albums", "Singles", "Eps", and the positions of its releases.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ReleaseGroup {
     pub heading: String,
     pub albums: Vec<u32>,
@@ -65,8 +75,8 @@ pub struct ReleaseGroup {
 
 /// An artist's releases by kind, newest first within each, the kinds in [`RELEASE_ORDER`] (a kind
 /// named differently - "Ep" from a lower-case tag - after all of those, in the order they first come).
-#[uniffi::export]
-pub fn release_groups(albums: Vec<Album>) -> Vec<ReleaseGroup> {
+/// Made once when the artist is read ([`ArtistDetail::new`](crate::model::ArtistDetail::new)).
+pub fn release_groups(albums: &[Album]) -> Vec<ReleaseGroup> {
     let mut order: Vec<usize> = (0..albums.len()).collect();
     // Stable, newest first: equal years keep the server's order.
     order.sort_by(|&a, &b| albums[b].year.cmp(&albums[a].year));
@@ -117,14 +127,16 @@ fn lower(c: char) -> char {
 }
 
 /// A letter down the side of a long list and the first row that starts with it.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct IndexLetter {
     pub letter: String,
     pub row: u32,
 }
 
 /// What a filter keeps of a list (positions in the whole list), and its letters.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct IndexView {
     pub rows: Vec<u32>,
     /// The first row of each initial, in the kept rows' positions, by letter; '#' for anything that
@@ -140,14 +152,14 @@ const INDEX_FROM: usize = 3;
 /// A list's text, held once for the life of the page, so a filter typed into it sends only what was
 /// typed. Each row is one or more fields (a song's title and artist); a row is kept when any field
 /// contains the filter, in either case.
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct TextIndex {
     rows: Vec<Vec<String>>,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl TextIndex {
-    #[uniffi::constructor]
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(rows: Vec<Vec<String>>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self { rows })
     }
@@ -191,24 +203,39 @@ impl TextIndex {
 /// What makes a page's queue the one playing: its songs (an album also claims a song of its own record
 /// that some other queue carried along), or for an artist, whose page has no song list of its own, a
 /// song of one of its albums.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum PageOwn {
     Songs { ids: Vec<String>, album_id: Option<String> },
     Albums { ids: Vec<String> },
 }
 
 /// A page's own queue, held for the life of the page so that asking whether it is playing sends only
-/// the song playing.
-#[derive(uniffi::Object)]
+/// the song playing. The pages read from the server come with theirs (`AlbumDetail::queue` and the
+/// like), made from what was read, so their ids never cross to the platform and back.
+#[derive(Debug, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct PageQueue {
     songs: std::collections::HashSet<String>,
     album: Option<String>,
     albums: std::collections::HashSet<String>,
 }
 
-#[uniffi::export]
 impl PageQueue {
-    #[uniffi::constructor]
+    /// The queue of a page of `songs` (an album's, with `album_id`).
+    pub(crate) fn of_songs(songs: &[Song], album_id: Option<&str>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(PageQueue { songs: songs.iter().map(|s| s.id.clone()).collect(), album: album_id.map(String::from), albums: Default::default() })
+    }
+
+    /// The queue of an artist's page: a song of one of `albums`.
+    pub(crate) fn of_albums(albums: &[Album]) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(PageQueue { albums: albums.iter().map(|a| a.id.clone()).collect(), ..Default::default() })
+    }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl PageQueue {
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(own: PageOwn) -> std::sync::Arc<Self> {
         std::sync::Arc::new(match own {
             PageOwn::Songs { ids, album_id } => PageQueue { songs: ids.into_iter().collect(), album: album_id, albums: Default::default() },
@@ -224,7 +251,8 @@ impl PageQueue {
 }
 
 /// What the page's two big buttons press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum HeroPress {
     /// Start this page's songs (played or shuffled).
     Start,
@@ -235,7 +263,8 @@ pub enum HeroPress {
 }
 
 /// A page's Shuffle and Play as they stand.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HeroButtons {
     /// Shuffle lit: this page's queue is shuffling.
     pub shuffle_lit: bool,
@@ -253,7 +282,7 @@ pub struct HeroButtons {
 /// again), Shuffle lights while it is shuffling, and a second press on Shuffle turns shuffle off instead
 /// of drawing the same songs into a new queue. `here` is [`PageQueue::plays`]; `can_play` and
 /// `can_shuffle` say the page has songs to start.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn hero_buttons(here: bool, shuffle: bool, playing: bool, buffering: bool, can_play: bool, can_shuffle: bool) -> HeroButtons {
     let lit = shuffle && here;
     let pausing = here && (playing || buffering);
@@ -261,28 +290,58 @@ pub fn hero_buttons(here: bool, shuffle: bool, playing: bool, buffering: bool, c
         shuffle_lit: lit,
         shuffle_enabled: lit || can_shuffle,
         shuffle_press: if lit { HeroPress::ShuffleOff } else { HeroPress::Start },
-        play_label: (if pausing { "Pause" } else { "Play" }).into(),
+        play_label: hero_play_label(pausing).into(),
         pausing,
         play_enabled: here || can_play,
         play_press: if here { HeroPress::Toggle } else { HeroPress::Start },
     }
 }
 
+impl HeroPress {
+    fn bits(self) -> i32 {
+        match self {
+            HeroPress::Start => 0,
+            HeroPress::Toggle => 1,
+            HeroPress::ShuffleOff => 2,
+        }
+    }
+}
+
+impl HeroButtons {
+    /// The buttons in one int, for the JNI door the page asks on every play and pause
+    /// (`CoverLook.heroButtons`): bit 0 Shuffle lit, 1 Shuffle enabled, 2 pausing, 3 Play enabled, bits
+    /// 4-5 what Shuffle presses and 6-7 what Play presses (0 start, 1 toggle, 2 shuffle off). The label
+    /// follows from pausing ([`hero_play_label`]).
+    pub fn pack(&self) -> i32 {
+        self.shuffle_lit as i32
+            | (self.shuffle_enabled as i32) << 1
+            | (self.pausing as i32) << 2
+            | (self.play_enabled as i32) << 3
+            | self.shuffle_press.bits() << 4
+            | self.play_press.bits() << 6
+    }
+}
+
+/// What Play says: "Pause" while this page's queue sounds, else "Play".
+pub fn hero_play_label(pausing: bool) -> &'static str {
+    if pausing { "Pause" } else { "Play" }
+}
+
 /// The offer on a provider's album or playlist page, which octo-fiesta fetches whole into the library
 /// when it is starred: "Add the whole album to the library (Deezer)". None for the library's own.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn library_offer(id: String, is_external: bool) -> Option<String> {
     let playlist = id.starts_with("pl-");
     if !is_external && !playlist {
         return None;
     }
-    let provider = crate::fmt::provider_of(id).unwrap_or_else(|| "provider".into());
+    let provider = crate::fmt::provider_of(&id).unwrap_or_else(|| "provider".into());
     Some(format!("Add the whole {} to the library ({provider})", if playlist { "playlist" } else { "album" }))
 }
 
 /// A long list wants a way to narrow itself; one short enough to see whole does not. Kept while a
 /// filter is typed, so emptying the list does not take the field away under the finger.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn filter_offered(songs: u32, filtering: bool) -> bool {
     songs > FILTER_FROM || filtering
 }
@@ -290,13 +349,13 @@ pub fn filter_offered(songs: u32, filtering: bool) -> bool {
 const FILTER_FROM: u32 = 12;
 
 /// The similar artists worth a link: the ones the server can open (last.fm names some it does not have).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn similar_artists(similar: Vec<crate::Artist>) -> Vec<crate::Artist> {
     similar.into_iter().filter(|a| !a.id.is_empty()).collect()
 }
 
 /// An artist's biography as the page shows it: the text before the link the server appends to it.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn biography(text: String) -> String {
     match text.find("<a ") {
         Some(i) => text[..i].to_string(),
@@ -305,7 +364,7 @@ pub fn biography(text: String) -> String {
 }
 
 /// An artist's MusicBrainz page.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn musicbrainz_artist_url(id: String) -> String {
     format!("https://musicbrainz.org/artist/{id}")
 }
@@ -321,22 +380,29 @@ mod tests {
 
     #[test]
     fn discs_in_order_with_their_titles() {
-        let d = AlbumDetail {
-            songs: vec![song(2), song(0), song(1), song(2)],
-            disc_titles: vec![DiscTitle { disc: 2, title: "Bonus".into() }, DiscTitle { disc: 1, title: " ".into() }],
-            ..Default::default()
-        };
-        let g = album_discs(d);
+        let album = Album { artist: "Björk".into(), ..Default::default() };
+        let songs = vec![song(2), song(0), song(1), song(2)];
+        let titles = vec![DiscTitle { disc: 2, title: "Bonus".into() }, DiscTitle { disc: 1, title: " ".into() }];
+        let g = album_discs(&album, &songs, &titles);
         assert_eq!(g.iter().map(|x| (x.disc, x.heading.as_str(), x.songs.clone())).collect::<Vec<_>>(), [(1, "Disc 1", vec![1, 2]), (2, "Disc 2 · Bonus", vec![0, 3])]);
-        let one = album_discs(AlbumDetail { songs: vec![song(1), song(1)], ..Default::default() });
+        let one = album_discs(&album, &[song(1), song(1)], &[]);
         assert_eq!((one.len(), one[0].heading.as_str()), (1, ""));
+    }
+
+    #[test]
+    fn an_album_page_leaves_its_own_artist_off_the_rows() {
+        let album = Album { artist: "Björk".into(), ..Default::default() };
+        let by = |artist: &str, explicit: &str| Song { artist: artist.into(), explicit_status: explicit.into(), ..Default::default() };
+        let d = crate::model::AlbumDetail::new(album, vec![by("BJÖRK", ""), by("Björk", "explicit"), by("Thom Yorke", "")], vec![]);
+        assert_eq!(d.discs[0].lines, ["", "🅴 ", "Thom Yorke"]);
+        assert_eq!(d.caption, "3 songs · 0:00");
     }
 
     #[test]
     fn releases_by_kind_newest_first() {
         let a = |year: u32, types: &[&str], comp: bool| Album { year, release_types: types.iter().map(|t| t.to_string()).collect(), is_compilation: comp, ..Default::default() };
         let albums = vec![a(2001, &[], false), a(2010, &["album", "live"], false), a(2005, &["single"], false), a(2003, &["ep"], false), a(2020, &[], false), a(1999, &[], true)];
-        let g = release_groups(albums);
+        let g = release_groups(&albums);
         let got: Vec<(&str, Vec<u32>)> = g.iter().map(|x| (x.heading.as_str(), x.albums.clone())).collect();
         assert_eq!(got, [("Albums", vec![4, 0]), ("Singles", vec![2]), ("Lives", vec![1]), ("Compilations", vec![5]), ("Eps", vec![3])]);
     }
@@ -377,6 +443,9 @@ mod tests {
         let waiting = hero_buttons(false, false, false, false, false, false);
         assert!(!waiting.play_enabled && !waiting.shuffle_enabled);
         assert!(hero_buttons(true, false, false, false, false, false).play_enabled, "its own queue can always be resumed");
+        // Lit, enabled, pausing, Play enabled, Shuffle turns shuffle off (2), Play toggles (1).
+        assert_eq!(here.pack(), 0b1 | 0b10 | 0b100 | 0b1000 | 2 << 4 | 1 << 6);
+        assert_eq!(waiting.pack(), 0);
     }
 
     #[test]

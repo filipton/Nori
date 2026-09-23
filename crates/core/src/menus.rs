@@ -5,7 +5,8 @@
 use crate::Song;
 
 /// Something the song menu can do. The UI draws one icon per kind and does what it says.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SongAction {
     /// The heart; `on` is what pressing it sets.
     Favourite { on: bool },
@@ -29,7 +30,8 @@ pub enum SongAction {
 }
 
 /// One line of the song menu.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongMenuItem {
     pub action: SongAction,
     pub label: String,
@@ -38,7 +40,8 @@ pub struct SongMenuItem {
 }
 
 /// Where a song's download stands, as its menu needs to know.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SongDownload {
     None,
     /// Waiting or on its way.
@@ -52,7 +55,7 @@ pub enum SongDownload {
 /// What someone opens a menu for comes first: the heart (the one thing here about the song rather than
 /// the queue), queueing it, keeping it, going where it came from. A provider's song (not in the library)
 /// has no mix to seed or exclude from and no link to share: those need it on the server.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_menu(song: Song, starred: bool, download: SongDownload, player: bool) -> Vec<SongMenuItem> {
     let mut out = Vec::with_capacity(16);
     let mut add = |action: SongAction, label: String, more: bool| out.push(SongMenuItem { action, label, more });
@@ -77,7 +80,7 @@ pub fn song_menu(song: Song, starred: bool, download: SongDownload, player: bool
         add(SongAction::GoToArtist { id: id.clone(), name: song.artist.clone() }, "Go to artist".into(), false);
     }
     if song.is_external {
-        let provider = crate::fmt::provider_of(song.id.clone()).unwrap_or_else(|| "provider".into());
+        let provider = crate::fmt::provider_of(&song.id).unwrap_or_else(|| "provider".into());
         add(SongAction::AddToLibrary, format!("Add to library ({provider})"), false);
     }
     if player {
@@ -94,7 +97,8 @@ pub fn song_menu(song: Song, starred: bool, download: SongDownload, player: bool
 }
 
 /// One choice of the sleep timer.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SleepChoice {
     pub label: String,
     /// Minutes from now; 0 for the choices that are not a time.
@@ -105,7 +109,7 @@ pub struct SleepChoice {
 }
 
 /// The sleep timer's choices, "Off" first while one is running (it is a choice of all zeros).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sleep_choices(running: bool) -> Vec<SleepChoice> {
     let c = |label: String, minutes, end_of_track, songs| SleepChoice { label, minutes, end_of_track, songs };
     let mut out = Vec::with_capacity(10);
@@ -119,7 +123,8 @@ pub fn sleep_choices(running: bool) -> Vec<SleepChoice> {
 }
 
 /// What a sideways swipe on a song row does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum RowSwipeAct {
     Queue,
     PlayNext,
@@ -129,7 +134,8 @@ pub enum RowSwipeAct {
 }
 
 /// What a swipe uncovers under a row, and what letting go does.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RowSwipe {
     pub act: RowSwipeAct,
     pub label: String,
@@ -137,7 +143,7 @@ pub struct RowSwipe {
 
 /// The swipe set in the settings as stored (0 nothing, 1 add to queue, 2 play next, 3 favourite,
 /// 4 download), on a song whose heart is `starred`; None when that side does nothing.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn row_swipe(setting: u32, starred: bool) -> Option<RowSwipe> {
     let (act, label) = match setting {
         1 => (RowSwipeAct::Queue, "Add to queue"),
@@ -150,7 +156,8 @@ pub fn row_swipe(setting: u32, starred: bool) -> Option<RowSwipe> {
 }
 
 /// The mark a song row shows for its download.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum DownloadGlyph {
     None,
     /// Waiting or arriving: waiting and downloading share the ring, so one flows into the other.
@@ -161,7 +168,7 @@ pub enum DownloadGlyph {
 
 /// A row's download mark: this session's phase for the song when it has one (as `download_phase`: 0
 /// waiting, 1 downloading, 2 failed, 3 done; -1 none), else whether it is downloaded or in the queue.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_glyph(phase: i32, downloaded: bool, pending: bool) -> DownloadGlyph {
     match phase {
         3 => DownloadGlyph::Done,
@@ -174,7 +181,8 @@ pub fn download_glyph(phase: i32, downloaded: bool, pending: bool) -> DownloadGl
 }
 
 /// What a page's download entry does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum DownloadAct {
     /// Download every song of the page.
     All,
@@ -184,7 +192,8 @@ pub enum DownloadAct {
     Remove,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadEntry {
     pub label: String,
     pub act: DownloadAct,
@@ -192,7 +201,7 @@ pub struct DownloadEntry {
 
 /// A page's download entry, for `songs` songs of which `missing` are not downloaded: "Download" is the
 /// wrong word once they are all here, and so is offering all of them when only a few are missing.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_entry(songs: u32, missing: u32) -> DownloadEntry {
     let e = |label: String, act| DownloadEntry { label, act };
     match (songs, missing) {

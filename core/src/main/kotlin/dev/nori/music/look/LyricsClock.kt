@@ -1,5 +1,6 @@
 package dev.nori.music.look
 
+import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.ffi.Lyrics
 
 /**
@@ -10,9 +11,12 @@ import dev.nori.music.ffi.Lyrics
  * Made once per set of lyrics, then asked with the playhead every frame it matters: one JNI call with
  * primitives in and one `Long` out, the fields of which are read with the functions in the companion.
  * [close] frees it; a closed clock answers "nothing lit, never ask again".
+ *
+ * The core kept the timing of the lyrics it read under their [Lyrics.key], so the clock is started with
+ * that one number; only lyrics it no longer keeps are handed over whole.
  */
 class LyricsClock(lyrics: Lyrics, positionMs: Long) : AutoCloseable {
-    private var h = dev.nori.music.ffi.lyricsClock(lyrics, positionMs)
+    private var h = LyricsJni.kept(lyrics.key.toLong(), positionMs).takeIf { it != 0L } ?: dev.nori.music.ffi.lyricsClock(lyrics, positionMs)
 
     /** Whether the lyrics carry per-word times, so the active line can fill in as it is sung. */
     val sweeps: Boolean = LyricsJni.sweeps(h)
@@ -52,6 +56,9 @@ class LyricsClock(lyrics: Lyrics, positionMs: Long) : AutoCloseable {
         fun wait(step: Long): Int = ((step ushr WAIT_AT) and 0x1FF).toInt()
         /** Whether anything on screen changed. */
         fun redraw(step: Long): Boolean = (step ushr REDRAW_AT) and 1L == 1L
+
+        /** How lit [line] is while [active] is sung (`nori_look::lyrics::line_strength`). Primitives only. */
+        fun strength(synced: Boolean, line: Int, active: Int): Float = LyricsJni.strength(synced, line, active)
     }
 }
 
@@ -59,11 +66,14 @@ class LyricsClock(lyrics: Lyrics, positionMs: Long) : AutoCloseable {
 internal object LyricsJni {
     init { System.loadLibrary("norimusic") }
 
-    @JvmStatic external fun destroy(h: Long)
-    @JvmStatic external fun sweeps(h: Long): Boolean
+    @JvmStatic @CriticalNative external fun destroy(h: Long)
+    @JvmStatic @CriticalNative external fun sweeps(h: Long): Boolean
     /** `Step::pack`: sung (30 bits, 18 of them fraction), active + 1 (13), glide ms (10), wait (9), redraw (1). */
-    @JvmStatic external fun at(h: Long, positionMs: Long, sweep: Boolean, force: Boolean): Long
-    @JvmStatic external fun shown(h: Long): Long
-    @JvmStatic external fun tap(h: Long, line: Int): Long
-    @JvmStatic external fun nudge(h: Long, dir: Int): Long
+    @JvmStatic @CriticalNative external fun at(h: Long, positionMs: Long, sweep: Boolean, force: Boolean): Long
+    @JvmStatic @CriticalNative external fun shown(h: Long): Long
+    @JvmStatic @CriticalNative external fun tap(h: Long, line: Int): Long
+    @JvmStatic @CriticalNative external fun nudge(h: Long, dir: Int): Long
+    /** A clock on the lyrics the core read under [key]; 0 when it no longer keeps them. */
+    @JvmStatic @CriticalNative external fun kept(key: Long, positionMs: Long): Long
+    @JvmStatic @CriticalNative external fun strength(synced: Boolean, line: Int, active: Int): Float
 }

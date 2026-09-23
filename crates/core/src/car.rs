@@ -6,7 +6,8 @@ use crate::client::Client;
 use crate::Song;
 
 /// A folder in the tree: `id` is what is asked for next (see [`Client::browse_children`]).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct BrowseFolder {
     pub id: String,
     pub title: String,
@@ -16,7 +17,8 @@ pub struct BrowseFolder {
 }
 
 /// What a folder holds: more folders, or songs to play.
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct BrowsePage {
     pub folders: Vec<BrowseFolder>,
     pub songs: Vec<Song>,
@@ -43,7 +45,7 @@ fn root() -> Vec<BrowseFolder> {
     ]
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// The root folder of the tree.
     pub fn browse_root(&self) -> BrowseFolder {

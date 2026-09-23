@@ -79,6 +79,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.downloads.DownloadMark
 import dev.nori.music.downloads.DownloadPhase
+import dev.nori.music.downloads.DownloadLines
 import dev.nori.music.downloads.DownloadState
 import dev.nori.music.ffi.Song
 import kotlinx.coroutines.flow.StateFlow
@@ -283,7 +284,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
             }
         }
         LargeTitle("Downloads")
-        val summary = s?.let { beat.let { _ -> dev.nori.music.ffi.downloadSummary(it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
+        val summary = s?.let { beat.let { _ -> DownloadLines.summary(it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
         AnimatedContent(
             summary, Modifier.padding(start = Space.gutter, end = Space.gutter, bottom = 6.dp),
             transitionSpec = { fadeIn(tween(if (plain) 0 else 180)) togetherWith fadeOut(tween(if (plain) 0 else 120)) },
@@ -355,7 +356,7 @@ private fun activeSub(song: Song): String {
     val all = LocalDownloadMarks.current
     val progress = all?.marks?.value?.get(song.id)
         ?.takeIf { it.phase == DownloadPhase.DOWNLOADING }?.progress?.collectAsStateWithLifecycle()?.value
-    return progress.let { _ -> dev.nori.music.ffi.downloadRow(song.id, song.artist) }
+    return progress.let { _ -> DownloadLines.row(song.id, song.artist) }
 }
 
 /** A song on the downloads screen: the same proportions as a row in any song list. */

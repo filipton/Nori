@@ -43,8 +43,8 @@ import dev.nori.music.ffi.EqLevel
 import dev.nori.music.settings.Band
 import dev.nori.music.settings.BandChannel
 import dev.nori.music.settings.BandKind
+import dev.nori.music.settings.EqWords
 import dev.nori.music.settings.LABELS
-import dev.nori.music.settings.stored
 
 /** The limiter's gain reduction, sampled while this screen is resumed and dropped the moment it is not. */
 @Composable
@@ -62,7 +62,7 @@ private fun limiterMeter(): Float {
 }
 
 /** A band's label, its frequency and a mark for its channel or kind (nori-core's `settings::band_label`). */
-private fun bandLabel(b: Band): String = dev.nori.music.ffi.eqBandName(b.stored())
+private fun bandLabel(b: Band): String = EqWords.bandName(b.kind.ordinal, b.freq, b.channel.ordinal)
 
 /** How far each control goes: the core's, the same ranges it holds every edit in. */
 private val ranges get() = LABELS.eqRanges
@@ -118,7 +118,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
                 if (b.kind.usesGain) {
                     NoriSlider(b.gainDb, ranges.gain.min..ranges.gain.max, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
                     Text(
-                        signedDb(b.gainDb), Modifier.width(42.dp),
+                        remember(b.gainDb) { EqWords.signedDb(b.gainDb) }, Modifier.width(42.dp),
                         style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.End,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -140,7 +140,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
 
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(dev.nori.music.ffi.eqPreamp(p.effectivePreampDb, p.eqPreampDb == null))
+                Text(remember(p.effectivePreampDb, p.eqPreampDb == null) { EqWords.preamp(p.effectivePreampDb, p.eqPreampDb == null) })
                 Text("Automatic pulls the level down by the largest boost so the curve cannot clip", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             NoriSwitch(p.eqPreampDb == null, vm::setAutoPreamp)
@@ -151,21 +151,14 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Text("Balance", Modifier.width(80.dp))
             NoriSlider(p.balance, ranges.balance.min..ranges.balance.max, { v -> vm.setLevel(EqLevel.BALANCE, v) }, Modifier.weight(1f), centred = true)
-            Text(dev.nori.music.ffi.eqBalance(p.balance), Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
+            Text(remember(p.balance) { EqWords.balance(p.balance) }, Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
         }
         Toggle("Mono", "Both channels summed, for one-earbud listening", p.mono) { on -> vm.update { it.copy(mono = on) } }
         Toggle("Limiter", "Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.", p.limiter) { on -> vm.update { it.copy(limiter = on) } }
         if (p.limiter) {
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text(dev.nori.music.ffi.eqCeiling(p.limiterThresholdDb), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                // Proof that it is working: what it is pulling back, right now. Polled only while this
-                // screen is on top, so it costs nothing the rest of the time.
-                val reduction = limiterMeter()
-                Text(
-                    dev.nori.music.ffi.eqReduction(reduction),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text(remember(p.limiterThresholdDb) { EqWords.ceiling(p.limiterThresholdDb) }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                LimiterReduction()
             }
             NoriSlider(p.limiterThresholdDb, ranges.limiter.min..ranges.limiter.max, { v -> vm.setLevel(EqLevel.LIMITER, v) }, Modifier.padding(horizontal = Space.gutter))
         }
@@ -194,9 +187,24 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         ActionRow("Save current settings as a profile", Icons.Filled.Add, { naming = true }, divider = false)
 
         SectionTitle("Crossfeed")
-        Text(dev.nori.music.ffi.eqCrossfeed(p.crossfeedDb), Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(remember(p.crossfeedDb) { EqWords.crossfeed(p.crossfeedDb) }, Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         NoriSlider(p.crossfeedDb, ranges.crossfeed.min..ranges.crossfeed.max, { v -> vm.setLevel(EqLevel.CROSSFEED, v) }, Modifier.padding(horizontal = Space.gutter))
     }
+}
+
+/**
+ * Proof that the limiter is working: what it is pulling back, right now. Polled only while this screen
+ * is on top, so it costs nothing the rest of the time. Its own scope, so each reading redraws this one
+ * line rather than recomposing the whole screen every 120 ms.
+ */
+@Composable
+private fun LimiterReduction() {
+    val reduction = limiterMeter()
+    Text(
+        remember(reduction) { EqWords.reduction(reduction) },
+        style = MaterialTheme.typography.labelMedium,
+        color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -220,7 +228,7 @@ private fun ImportDialog(vm: SettingsViewModel, onDone: () -> Unit) {
 @Composable
 private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
     AlertDialog(
-        onDismissRequest = onDone, title = { Text("${dev.nori.music.ffi.eqHz(band.freq)} Hz") },
+        onDismissRequest = onDone, title = { Text("${EqWords.hz(band.freq)} Hz") },
         text = {
             Column {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -235,8 +243,8 @@ private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Uni
                 }
                 Text("Frequency", style = MaterialTheme.typography.labelMedium)
                 // Logarithmic: the slider position is the exponent, 20 Hz to 20 kHz.
-                NoriSlider(dev.nori.music.ffi.eqFreqToSlider(band.freq), 0f..1f, { x -> onChange(band.copy(freq = dev.nori.music.ffi.eqSliderToFreq(x))) })
-                Text(dev.nori.music.ffi.eqShape(band.kind.slope, band.q), style = MaterialTheme.typography.labelMedium)
+                NoriSlider(EqWords.freqToSlider(band.freq), 0f..1f, { x -> onChange(band.copy(freq = EqWords.sliderToFreq(x))) })
+                Text(EqWords.shape(band.kind.slope, band.q), style = MaterialTheme.typography.labelMedium)
                 NoriSlider(band.q, ranges.q.min..ranges.q.max, { q -> onChange(band.copy(q = q)) })
             }
         },

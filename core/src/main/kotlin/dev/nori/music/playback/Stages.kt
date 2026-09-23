@@ -7,37 +7,39 @@ import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.AudioProcessorChain
 import androidx.media3.common.audio.BaseAudioProcessor
 import androidx.media3.common.util.UnstableApi
+import dalvik.annotation.optimization.CriticalNative
+import dalvik.annotation.optimization.FastNative
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** The Rust side of speed/pitch and silence skipping; see crates/core/src/stages.rs. */
+/** The Rust side of speed/pitch and silence skipping; see crates/android/src/stages.rs. */
 internal object Stages {
     init { System.loadLibrary("norimusic") }
 
-    @JvmStatic external fun speed(sampleRate: Int, channels: Int, encoding: Int, speed: Float, pitch: Float): Long
-    @JvmStatic external fun silence(sampleRate: Int, channels: Int): Long
-    @JvmStatic external fun destroy(handle: Long)
-    @JvmStatic external fun flush(handle: Long)
+    @JvmStatic @CriticalNative external fun speed(sampleRate: Int, channels: Int, encoding: Int, speed: Float, pitch: Float): Long
+    @JvmStatic @CriticalNative external fun silence(sampleRate: Int, channels: Int): Long
+    @JvmStatic @CriticalNative external fun destroy(handle: Long)
+    @JvmStatic @CriticalNative external fun flush(handle: Long)
     /** The output's length, with [MOVED] set when [output] must be asked again; -1 when [input] is not direct. */
-    @JvmStatic external fun process(handle: Long, input: ByteBuffer, pos: Int, bytes: Int, keep: Boolean): Int
-    @JvmStatic external fun end(handle: Long, keep: Boolean): Int
+    @JvmStatic @FastNative external fun process(handle: Long, input: ByteBuffer, pos: Int, bytes: Int, keep: Boolean): Int
+    @JvmStatic @CriticalNative external fun end(handle: Long, keep: Boolean): Int
     /** A direct buffer over the stage's own output memory. */
     @JvmStatic external fun output(handle: Long): ByteBuffer
     /** With [handle] 0 (no stage made yet) these work from the nominal [speed]. */
-    @JvmStatic external fun mediaDurationUs(handle: Long, speed: Float, playoutUs: Long): Long
-    @JvmStatic external fun playoutDurationUs(handle: Long, speed: Float, mediaUs: Long): Long
+    @JvmStatic @CriticalNative external fun mediaDurationUs(handle: Long, speed: Float, playoutUs: Long): Long
+    @JvmStatic @CriticalNative external fun playoutDurationUs(handle: Long, speed: Float, mediaUs: Long): Long
     /** Whether speed and pitch change the sound at all (nori_player::speed::speed_active). */
-    @JvmStatic external fun speedActive(speed: Float, pitch: Float): Boolean
+    @JvmStatic @CriticalNative external fun speedActive(speed: Float, pitch: Float): Boolean
     /**
      * One tick of a volume fade (nori_player::transport::fade_step): the volume's bits in the low 32,
      * [FADE_DONE] set once it is over. See [fadeVolume] and [fadeDone].
      */
-    @JvmStatic external fun fadeStep(from: Float, to: Float, startMs: Long, nowMs: Long, ms: Int): Long
+    @JvmStatic @CriticalNative external fun fadeStep(from: Float, to: Float, startMs: Long, nowMs: Long, ms: Int): Long
 
     const val FADE_DONE = 1L shl 32
     fun fadeVolume(step: Long): Float = java.lang.Float.intBitsToFloat(step.toInt())
     fun fadeDone(step: Long): Boolean = step and FADE_DONE != 0L
-    @JvmStatic external fun skippedFrames(handle: Long): Long
+    @JvmStatic @CriticalNative external fun skippedFrames(handle: Long): Long
 
     const val MOVED = 1 shl 30
 }

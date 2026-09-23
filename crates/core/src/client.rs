@@ -22,7 +22,8 @@ const FOLDERED: [&str; 7] = ["getAlbumList2", "getArtists", "search3", "getRando
 
 /// The parts of a server profile the client acts on. The rest (headers, certificates, Wi-Fi only) are the
 /// platform's HTTP client's business.
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct NetProfile {
     pub url: String,
     /// A second address of the same server (typically the public one); tried when `url` does not answer.
@@ -34,7 +35,7 @@ pub struct NetProfile {
 }
 
 /// The client for one server profile, over that profile's core (its index and caches).
-#[derive(uniffi::Object)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Client {
     pub(crate) core: Arc<Core>,
     pub(crate) transport: Arc<dyn Transport>,
@@ -111,9 +112,9 @@ impl Client {
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
-    #[uniffi::constructor]
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(core: Arc<Core>, transport: Arc<dyn Transport>) -> Arc<Self> {
         Arc::new(Client { core, transport, profile: RwLock::new(NetProfile::default()), second: AtomicBool::new(false) })
     }
@@ -230,7 +231,8 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SyncStep {
     pub total: IngestStats,
     pub next_offset: Option<u32>,
@@ -239,20 +241,21 @@ pub struct SyncStep {
 /// The app's one database file; every server profile has its rows in it.
 pub const DB_FILE: &str = "nori.db";
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn db_file_name() -> String {
     DB_FILE.into()
 }
 
 /// A removed server profile's rows gone from the app's database at `db_path`.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn db_forget_server(db_path: String, server: String) -> crate::Result<()> {
     Ok(crate::db::forget_server(&crate::db::open_app(&db_path)?, &server)?)
 }
 
 // ---- writes -------------------------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Starrable {
     Song,
     Album,
@@ -270,7 +273,8 @@ impl Starrable {
 }
 
 /// Every change the app asks the server for.
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Write {
     Star { kind: Starrable, id: String, on: bool },
     CreatePlaylist { name: String, song_ids: Vec<String> },
@@ -331,7 +335,7 @@ fn request(w: Write) -> (&'static str, Vec<(String, String)>, &'static [&'static
     }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// Sends one change, or keeps it for later when the server cannot be reached.
     pub async fn write(&self, w: Write) -> NetResult<()> {

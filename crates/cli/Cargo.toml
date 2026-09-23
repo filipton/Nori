@@ -1,0 +1,16 @@
+[package]
+name = "nori-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A terminal client built from the core, nori-engine and the cpal output: the proof that a new client writes no player"
+
+[[bin]]
+name = "nori-cli"
+path = "src/main.rs"
+
+[dependencies]
+norimusic-core = { path = "../core", default-features = false }
+nori-engine = { path = "../engine", features = ["core"] }
+nori-output-cpal = { path = "../output-cpal" }
+nori-http = { path = "../http" }

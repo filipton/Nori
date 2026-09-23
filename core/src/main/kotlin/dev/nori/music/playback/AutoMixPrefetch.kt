@@ -4,11 +4,13 @@ import android.media.MediaCodec
 import android.media.MediaDataSource
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.os.Build
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.ContentMetadata
 import dev.nori.music.ffi.Core
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 
@@ -23,9 +25,11 @@ import java.util.concurrent.Future
  * CPU only on a thread that yields to everything else. A track that is not there yet is simply left for
  * the next time the queue moves, by which point the precacher has usually brought it in.
  *
- * Decoding is MediaCodec's, at whatever speed the CPU manages, reading through the same cache-first
- * [MediaSources] chain playback uses; the PCM goes straight into the streaming analyser and is never
- * held as a whole track.
+ * Decoding is the core's own decoder where it takes the codec: each packet the extractor splits off
+ * goes in through a direct buffer and is decoded and analysed in one call, so the samples never cross
+ * back. MediaCodec takes the rest, and anything the core gives up on half way. Either runs at whatever
+ * speed the CPU manages, reading through the same cache-first [MediaSources] chain playback uses; the
+ * PCM goes straight into the streaming analyser and is never held as a whole track.
  */
 @UnstableApi
 class AutoMixPrefetch(
@@ -68,7 +72,7 @@ class AutoMixPrefetch(
 
     /** Whether the whole file is already on the device, as a download or as a complete cache entry. */
     private fun onDevice(id: String): Boolean {
-        if (id in sources.downloaded) return true
+        if (sources.isDownloaded(id)) return true
         val key = runCatching { sources.streamKey(id) }.getOrNull() ?: return false
         val length = ContentMetadata.getContentLength(sources.streamCache.getContentMetadata(key))
         return length > 0 && sources.streamCache.getCachedBytes(key, 0, length) >= length
@@ -86,19 +90,24 @@ class AutoMixPrefetch(
             } ?: return
             val format = extractor.getTrackFormat(track)
             extractor.selectTrack(track)
-            val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
-            val ended = try {
-                codec.configure(format, null, null, 0)
-                codec.start()
-                // Handed over as it is created, so a decode that throws half way still has its handle freed.
-                decode(codec, extractor, if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000 else 0L) { analyser = it }
-            } finally {
-                runCatching { codec.stop() }
-                codec.release()
+            val expectedMs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000 else 0L
+            // Handed over as it is created, so a decode that throws half way still has its handle freed.
+            val ended = inCore(format, extractor, expectedMs) { analyser = it } ?: run {
+                // The core does not take this codec, or gave up on the stream: MediaCodec, from the start.
+                if (analyser != 0L) { AutoMixAnalyzer.destroy(analyser); analyser = 0L }
+                extractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC)
+                val codec = MediaCodec.createDecoderByType(format.getString(MediaFormat.KEY_MIME)!!)
+                try {
+                    codec.configure(format, null, null, 0)
+                    codec.start()
+                    decode(codec, extractor, expectedMs) { analyser = it }
+                } finally {
+                    runCatching { codec.stop() }
+                    codec.release()
+                }
             }
             // Only a whole song is an analysis of it (nori_player::transitions::whole_song decides, in
             // analysisFinishWhole); an interrupted decode is not even offered.
-            val expectedMs = if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) / 1000 else 0L
             if (!ended || analyser == 0L) {
                 android.util.Log.i("nori", "measuring $id ahead stopped before its end: not stored")
                 return
@@ -109,6 +118,42 @@ class AutoMixPrefetch(
             if (analyser != 0L) AutoMixAnalyzer.destroy(analyser)
             extractor.release()
             source.close()
+        }
+    }
+
+    /**
+     * The track decoded by the core (crates/core/src/automix/store.rs AutoMixAnalyzer.decode): one call
+     * per packet, the packet in a direct buffer kept for the whole track and the samples going straight
+     * into the analyser there. True once the extractor has run out, false when interrupted first; null
+     * when the core does not take this codec or cannot go on with the stream, for MediaCodec to measure.
+     */
+    private fun inCore(format: MediaFormat, extractor: MediaExtractor, expectedMs: Long, created: (Long) -> Unit): Boolean? {
+        val mime = format.getString(MediaFormat.KEY_MIME) ?: return null
+        val channels = if (format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) else return null
+        val rate = if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) format.getInteger(MediaFormat.KEY_SAMPLE_RATE) else return null
+        // The extractor names an AAC stream's profile rather than its RFC 6381 string; 2 is Low Complexity.
+        val codecs = if (format.containsKey(MediaFormat.KEY_AAC_PROFILE)) "mp4a.40." + format.getInteger(MediaFormat.KEY_AAC_PROFILE) else null
+        val codec = RustDecoderJni.takesExtracted(mime, codecs, channels)
+        if (codec == 0) return null
+        // No encoder delay is trimmed here, as none is by MediaCodec: only the decoder's own is dropped.
+        val decoder = RustDecoderJni.create(codec, rate, channels, setupData(format), false)
+        if (decoder == 0L) return null
+        try {
+            val shape = RustDecoderJni.shape(decoder)
+            val analyser = AutoMixAnalyzer.create(shape.toInt(), (shape ushr 32).toInt(), expectedMs)
+            created(analyser)
+            var input = ByteBuffer.allocateDirect(if (format.containsKey(MediaFormat.KEY_MAX_INPUT_SIZE)) format.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE).coerceAtLeast(MIN_INPUT) else DEFAULT_INPUT)
+            while (!Thread.currentThread().isInterrupted) {
+                if (Build.VERSION.SDK_INT >= 28) extractor.sampleSize.let { if (it > input.capacity()) input = ByteBuffer.allocateDirect(it.toInt()) }
+                // Before 28 the size cannot be asked, and a packet larger than the buffer is refused outright.
+                val read = try { extractor.readSampleData(input, 0) } catch (_: IllegalArgumentException) { return null }
+                if (read < 0) return true
+                if (AutoMixAnalyzer.decode(analyser, decoder, input, 0, read) == BROKEN) return null
+                extractor.advance()
+            }
+            return false
+        } finally {
+            RustDecoderJni.destroy(decoder)
         }
     }
 
@@ -207,6 +252,21 @@ class AutoMixPrefetch(
 
     private companion object {
         const val TIMEOUT_US = 10_000L
+        /** What [AutoMixAnalyzer.decode] answers when the core cannot go on with the stream. */
+        const val BROKEN = -2
+        /** A packet buffer for when the extractor does not say how large they get, and the least one made. */
+        const val DEFAULT_INPUT = 64 * 1024
+        const val MIN_INPUT = 8 * 1024
+
+        /** The codec's setup as the extractor hands it over (csd-0, csd-1, ...), joined in order. */
+        fun setupData(format: MediaFormat): ByteArray? {
+            val parts = generateSequence(0) { it + 1 }.map { "csd-$it" }.takeWhile(format::containsKey).mapNotNull(format::getByteBuffer).toList()
+            if (parts.isEmpty()) return null
+            val all = ByteArray(parts.sumOf { it.remaining() })
+            var at = 0
+            for (p in parts) { val n = p.remaining(); p.duplicate().get(all, at, n); at += n }
+            return all
+        }
         /** `C.ENCODING_PCM_16BIT`, as the Rust analyser numbers encodings. */
         const val PCM_16 = 2
     }

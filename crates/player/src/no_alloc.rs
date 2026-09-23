@@ -307,7 +307,7 @@ fn the_playhead_and_a_fade_tick_allocate_nothing() {
 fn decoding_a_packet_allocates_nothing_after_the_first() {
     use crate::decode::{Codec, Decoder};
     let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.mp3")).unwrap();
-    let frames = crate::decode::tests::mp3_frames(&file);
+    let frames = crate::sim::mp3_frames(&file);
     let mut d = Decoder::new(Codec::Mp3, 44_100, 2, None, true).unwrap();
     let mut out = vec![0i16; 1152 * 2];
     let mut outf = vec![0f32; 1152 * 2];
@@ -329,7 +329,7 @@ fn decoding_a_packet_allocates_nothing_after_the_first() {
 fn decoding_opus_allocates_nothing_after_the_first_packets() {
     use crate::decode::{Codec, Decoder};
     let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/tone440.opus")).unwrap();
-    let (setup, packets) = crate::decode::tests::ogg_opus(&file);
+    let (setup, packets) = crate::sim::ogg_opus(&file);
     let mut d = Decoder::new(Codec::Opus, 48_000, 2, Some(&setup), false).unwrap();
     let mut out = vec![0i16; 5760 * 2];
     for p in &packets[..4] {

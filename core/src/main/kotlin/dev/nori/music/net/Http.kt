@@ -7,6 +7,7 @@ import dev.nori.music.ffi.CoreException
 import dev.nori.music.ffi.FailureKind
 import dev.nori.music.ffi.getFailed
 import dev.nori.music.ffi.NetException
+import dev.nori.music.ffi.RequestPolicy
 import dev.nori.music.ffi.Transport
 import dev.nori.music.ffi.TransportException
 import dev.nori.music.ffi.TransportResponse
@@ -58,6 +59,13 @@ class Http(private val context: Context) {
     private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = policy.streamMaxRequestsPerHost.toInt(); maxRequests = policy.streamMaxRequests.toInt() }
     @Volatile private var profile: ServerProfile? = null
 
+    /**
+     * The core's [requestPolicy] answer per host, for this server profile: every request (each cover, each
+     * range of a stream) asks it, and the answer only depends on the host and port. Replaced whole, after
+     * the core has been told, when the profile changes, so an answer from the old one is never read.
+     */
+    @Volatile private var policies = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, RequestPolicy>>()
+
     @Volatile var api: OkHttpClient = build(null)
         private set
 
@@ -77,6 +85,7 @@ class Http(private val context: Context) {
         val old = profile
         // Which requests are the server's, and its Wi-Fi-only rule, are the core's (transport.rs request_policy).
         netServer(next?.url, next?.altUrl, next?.wifiOnly == true)
+        policies = java.util.concurrent.ConcurrentHashMap()
         profile = next
         // Only TLS settings need new clients; headers and the Wi-Fi rule are read per request.
         if (old?.allowSelfSigned != next?.allowSelfSigned || old?.clientCert != next?.clientCert || old?.clientCertPassword != next?.clientCertPassword) {
@@ -100,7 +109,7 @@ class Http(private val context: Context) {
                 // Third parties (LRCLIB, AutoEQ) must not receive a reverse-proxy token, and are not subject to the
                 // server's Wi-Fi-only setting: the core says which this is. The network is only looked at when
                 // the answer depends on it.
-                val rule = if (now != null) requestPolicy(request.url.toString()) else null
+                val rule = if (now != null) policyOf(request.url) else null
                 if (rule?.unmeteredOnly == true && metered) throw MeteredNetworkException()
                 chain.proceed(request.newBuilder().apply {
                     // Public services ask clients to identify themselves; some reject OkHttp's default outright.
@@ -110,6 +119,13 @@ class Http(private val context: Context) {
             }
         if (p != null && (p.allowSelfSigned || p.clientCert.isNotEmpty())) tls(b, p)
         return b.build()
+    }
+
+    /** [requestPolicy] for [url], asked of the core once per host and port. */
+    private fun policyOf(url: okhttp3.HttpUrl): RequestPolicy {
+        val known = policies
+        known[url.host]?.let { (port, rule) -> if (port == url.port) return rule }
+        return requestPolicy(url.toString()).also { known[url.host] = url.port to it }
     }
 
     /** Self-signed servers and client certificates. Both are per profile and opt-in. */
@@ -223,6 +239,12 @@ inline fun <T> lifted(block: () -> T): T = try {
     throw e.lift()
 }
 
+/**
+ * What a failure says. The core's exceptions carry no message of their own (uniffi's JNI bindings give
+ * them none); their `toString` is the core's wording.
+ */
+val Throwable.said: String? get() = message ?: if (this is CoreException || this is NetException) toString() else null
+
 /** What went wrong, in words a person can act on. */
 fun describeConnectionError(e: Throwable): String {
     val trouble = when (e) {
@@ -232,5 +254,5 @@ fun describeConnectionError(e: Throwable): String {
         is CoreException -> Trouble.Other
         else -> Trouble.Network(failureKind(e))
     }
-    return describeError(trouble, e.message ?: e.javaClass.simpleName)
+    return describeError(trouble, e.said ?: e.javaClass.simpleName)
 }

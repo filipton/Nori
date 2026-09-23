@@ -9,7 +9,7 @@ description = "How Nori plays music: the sound chain, AutoMix analysis, planning
 name = "nori_player"
 
 [features]
-# Synthetic tracks with a known tempo and structure, for other crates' tests.
+# Synthetic tracks with a known tempo and structure, and the simulated player in `sim`, for tests.
 synth = []
 
 [dependencies]
@@ -27,3 +27,5 @@ opus-rs = "0.1.34"
 # sinc resampler. It stays out of release builds.
 [dev-dependencies]
 rubato = "5.0.0"
+# The pipeline tests under tests/ drive the simulated player in `sim`, which lives behind `synth`.
+nori-player = { path = ".", features = ["synth"] }

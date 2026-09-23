@@ -59,7 +59,7 @@ fn finite(v: f64, fallback: f64) -> f64 {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct Biquad {
     b0: f64,
     b1: f64,
@@ -165,6 +165,11 @@ impl Crossfeed {
         }
     }
 
+    /// The same filters, whatever their memories hold.
+    fn same(&self, o: &Crossfeed) -> bool {
+        (self.a0_lo, self.b1_lo, self.a0_hi, self.a1_hi, self.b1_hi, self.gain) == (o.a0_lo, o.b1_lo, o.a0_hi, o.a1_hi, o.b1_hi, o.gain)
+    }
+
     #[inline]
     fn frame(&mut self, l: f64, r: f64) -> (f64, f64) {
         let x = [l, r];
@@ -181,6 +186,7 @@ impl Crossfeed {
 /// gain has the whole look-ahead window to arrive before the peak does. Below the knee the gain is *exactly* 1.0 and
 /// the samples come back out of the delay line untouched, which is what makes turning the limiter on free: a boost
 /// that never reaches the threshold costs a few ms of delay and nothing else.
+#[derive(Clone)]
 struct Limiter {
     /// `frames * channels`, a ring; allocated here, never in the per-buffer path.
     delay: Vec<f64>,
@@ -275,10 +281,16 @@ impl Limiter {
             self.gain = 1.0; // snap, so the chain goes back to bit-exact once it has released
         }
         let slot = self.pos * self.channels;
+        // The follower only gets within 0.1 % of its target inside the look-ahead, and on a peak far over
+        // the threshold that last sliver of gain is enough to cross the ceiling (by up to 0.13 dB, past full
+        // scale at a 0 dB threshold). The frame leaving now is known, so its gain is also held to the curve
+        // for its own peak: the ceiling is a ceiling. Below the knee this never engages.
+        let leaving = self.delay[slot..slot + self.channels].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        let gain = if leaving * self.gain > self.knee_start { self.gain.min(self.curve(leaving)) } else { self.gain };
         for (c, v) in x.iter_mut().enumerate() {
             let out = self.delay[slot + c];
             self.delay[slot + c] = *v;
-            *v = out * self.gain;
+            *v = out * gain;
         }
         self.pos = if self.pos + 1 == self.frames { 0 } else { self.pos + 1 };
         self.meter = self.meter.min(self.gain);
@@ -290,9 +302,13 @@ impl Limiter {
     }
 }
 
-/// The whole sample-domain chain: pre-amp, parametric equalizer, mono, crossfeed, balance, limiter.
-pub struct Equalizer {
-    rate: f64,
+/// How long the output takes to fade from the chain as it was to the chain as it is, after a change.
+const CHANGE_FADE_MS: f64 = 10.0;
+
+/// What the chain does to a frame, with its own filter memories. There are two of these for a moment
+/// after the settings change while music plays; see [`Equalizer`].
+#[derive(Clone)]
+struct Stages {
     channels: usize,
     /// Only the bands that do something, so a flat band costs nothing.
     filters: Vec<Biquad>,
@@ -305,65 +321,8 @@ pub struct Equalizer {
     limiter: Option<Limiter>,
 }
 
-/// Left and right gain for a balance in -1 (hard left) to 1 (hard right).
-fn balance_gains(balance: f64) -> (f64, f64) {
-    let b = finite(balance, 0.0).clamp(-1.0, 1.0);
-    let att = if b.abs() >= 1.0 { 0.0 } else { 10f64.powf(-b.abs() * BALANCE_RANGE_DB / 20.0) };
-    if b >= 0.0 {
-        (att, 1.0)
-    } else {
-        (1.0, att)
-    }
-}
-
-impl Equalizer {
-    pub fn new(rate: u32, channels: usize) -> Self {
-        Equalizer {
-            rate: rate as f64,
-            channels: channels.clamp(1, MAX_CHANNELS),
-            filters: Vec::new(),
-            state: Vec::new(),
-            preamp: 1.0,
-            crossfeed: None,
-            mono: false,
-            balance: (1.0, 1.0),
-            limiter: None,
-        }
-    }
-
-    /// `crossfeed_db` 0 turns crossfeed off; typical values are 3 to 6.
-    pub fn configure(&mut self, bands: &[Band], preamp_db: f64, crossfeed_db: f64) {
-        self.filters.clear();
-        for b in bands {
-            // A side band needs a side: on a mono stream there is nothing to route, so only `CH_BOTH` survives.
-            let routable = b.channel == CH_BOTH || (self.channels >= 2 && (b.channel == CH_LEFT || b.channel == CH_RIGHT));
-            let shaped = !uses_gain(b.kind) || b.gain_db.abs() >= 0.05;
-            if routable && shaped && b.freq > 0.0 && b.freq < self.rate / 2.0 && matches!(b.kind, PEAKING..=HIGH_SHELF_SLOPE) {
-                self.filters.push(Biquad::new(self.rate, &Band { gain_db: b.gain_db.clamp(-24.0, 24.0), ..*b }));
-            }
-        }
-        self.state.resize(self.filters.len(), [[0.0; 2]; MAX_CHANNELS]);
-        self.preamp = 10f64.powf(finite(preamp_db, 0.0).clamp(-30.0, 12.0) / 20.0);
-        self.crossfeed = (crossfeed_db > 0.0 && self.channels == 2).then(|| Crossfeed::new(self.rate, crossfeed_db.clamp(1.0, 15.0), 700.0));
-    }
-
-    /// The output stage. `balance` is -1 (left) to 1 (right); mono and balance are stereo ideas and are ignored
-    /// otherwise. `lookahead_ms` at or below 0 turns the limiter off, which is also the only way to get its delay back.
-    pub fn configure_output(&mut self, balance: f64, mono: bool, threshold_db: f64, release_ms: f64, lookahead_ms: f64) {
-        self.mono = mono && self.channels == 2;
-        self.balance = if self.channels == 2 { balance_gains(balance) } else { (1.0, 1.0) };
-        if lookahead_ms <= 0.0 {
-            self.limiter = None;
-            return;
-        }
-        let frames = Limiter::frames_for(self.rate, lookahead_ms);
-        let mut l = self.limiter.take().filter(|l| l.frames == frames).unwrap_or_else(|| Limiter::new(self.rate, self.channels, frames));
-        l.tune(self.rate, threshold_db, release_ms);
-        self.limiter = Some(l);
-    }
-
-    /// True when the chain would not change a single sample.
-    pub fn is_identity(&self) -> bool {
+impl Stages {
+    fn is_identity(&self) -> bool {
         self.filters.is_empty()
             && self.crossfeed.is_none()
             && self.limiter.is_none()
@@ -372,9 +331,18 @@ impl Equalizer {
             && (self.preamp - 1.0).abs() < 1e-6
     }
 
-    /// Peak gain reduction in the buffer just processed, for the UI meter. Zero when the limiter is off or idle.
-    pub fn gain_reduction_db(&self) -> f32 {
-        self.limiter.as_ref().map_or(0.0, |l| (-20.0 * l.meter.log10()) as f32)
+    /// Whether the two would sound the same. A limiter retuned is not a new sound: its gain glides to
+    /// the new curve by itself.
+    fn sounds_like(&self, o: &Stages) -> bool {
+        self.filters == o.filters
+            && self.preamp == o.preamp
+            && self.mono == o.mono
+            && self.balance == o.balance
+            && match (&self.crossfeed, &o.crossfeed) {
+                (Some(a), Some(b)) => a.same(b),
+                (a, b) => a.is_none() && b.is_none(),
+            }
+            && self.limiter.as_ref().map(|l| l.frames) == o.limiter.as_ref().map(|l| l.frames)
     }
 
     #[inline]
@@ -413,25 +381,177 @@ impl Equalizer {
         }
     }
 
+    #[inline]
+    fn frame(&mut self, f: &mut [f64]) {
+        for (c, v) in f.iter_mut().enumerate() {
+            *v = self.sample(c, *v);
+        }
+        self.output_stage(f);
+    }
+
+    fn reset(&mut self) {
+        self.state.iter_mut().for_each(|s| *s = [[0.0; 2]; MAX_CHANNELS]);
+        if let Some(c) = self.crossfeed.as_mut() {
+            (c.lo, c.hi, c.last) = ([0.0; 2], [0.0; 2], [0.0; 2]);
+        }
+        if let Some(l) = self.limiter.as_mut() {
+            l.reset();
+        }
+    }
+}
+
+/// The whole sample-domain chain: pre-amp, parametric equalizer, mono, crossfeed, balance, limiter.
+///
+/// A change to the settings while music plays does not switch from one sample to the next: that was a
+/// click every time, whether a band, mono, balance or crossfeed moved, and the limiter - whose look-ahead
+/// is a delay - cut five milliseconds out of the song when it went off and put five of silence in when
+/// it came on. The chain as it was keeps running beside the new one and the output fades over to it in
+/// [`CHANGE_FADE_MS`]; a new limiter fills its look-ahead first. Nothing fades before the first sample
+/// or after a reset, where there is nothing to be heard switching.
+pub struct Equalizer {
+    rate: f64,
+    channels: usize,
+    now: Stages,
+    /// The chain before the last change, running beside `now` while the output fades from it.
+    was: Stages,
+    /// Frames into that fade, negative while a new limiter's look-ahead fills; `None` when not fading.
+    fade: Option<i64>,
+    fade_len: i64,
+    /// Samples have gone through since the last reset, so a change from here on would be heard.
+    live: bool,
+}
+
+/// Left and right gain for a balance in -1 (hard left) to 1 (hard right).
+fn balance_gains(balance: f64) -> (f64, f64) {
+    let b = finite(balance, 0.0).clamp(-1.0, 1.0);
+    let att = if b.abs() >= 1.0 { 0.0 } else { 10f64.powf(-b.abs() * BALANCE_RANGE_DB / 20.0) };
+    if b >= 0.0 {
+        (att, 1.0)
+    } else {
+        (1.0, att)
+    }
+}
+
+impl Equalizer {
+    pub fn new(rate: u32, channels: usize) -> Self {
+        let channels = channels.clamp(1, MAX_CHANNELS);
+        let stages = Stages { channels, filters: Vec::new(), state: Vec::new(), preamp: 1.0, crossfeed: None, mono: false, balance: (1.0, 1.0), limiter: None };
+        Equalizer {
+            rate: rate as f64,
+            channels,
+            now: stages.clone(),
+            was: stages,
+            fade: None,
+            fade_len: ((rate as f64 * CHANGE_FADE_MS / 1000.0).round() as i64).max(1),
+            live: false,
+        }
+    }
+
+    /// Applies a change to the chain; heard, it fades in (see [`Equalizer`]). A change during a fade
+    /// carries on fading from the same old chain.
+    fn change(&mut self, apply: impl FnOnce(&mut Stages, f64)) {
+        if !self.live {
+            apply(&mut self.now, self.rate);
+            return;
+        }
+        if self.fade.is_none() {
+            self.was = self.now.clone();
+        }
+        let lookahead = self.now.limiter.as_ref().map(|l| l.frames);
+        apply(&mut self.now, self.rate);
+        let delay = self.now.limiter.as_ref().map_or(0, |l| l.frames as i64);
+        // Behind a limiter the change reaches the output only once its look-ahead has passed (a new
+        // limiter's is empty until then): the fade waits for it, or it would still be a switch.
+        if delay as usize != lookahead.unwrap_or(0) && delay > 0 || self.fade.is_none() && !self.now.sounds_like(&self.was) {
+            self.fade = Some(-delay);
+        }
+    }
+
+    /// `crossfeed_db` 0 turns crossfeed off; typical values are 3 to 6.
+    pub fn configure(&mut self, bands: &[Band], preamp_db: f64, crossfeed_db: f64) {
+        self.change(|s, rate| {
+            s.filters.clear();
+            for b in bands {
+                // A side band needs a side: on a mono stream there is nothing to route, so only `CH_BOTH` survives.
+                let routable = b.channel == CH_BOTH || (s.channels >= 2 && (b.channel == CH_LEFT || b.channel == CH_RIGHT));
+                let shaped = !uses_gain(b.kind) || b.gain_db.abs() >= 0.05;
+                if routable && shaped && b.freq > 0.0 && b.freq < rate / 2.0 && matches!(b.kind, PEAKING..=HIGH_SHELF_SLOPE) {
+                    s.filters.push(Biquad::new(rate, &Band { gain_db: b.gain_db.clamp(-24.0, 24.0), ..*b }));
+                }
+            }
+            s.state.resize(s.filters.len(), [[0.0; 2]; MAX_CHANNELS]);
+            s.preamp = 10f64.powf(finite(preamp_db, 0.0).clamp(-30.0, 12.0) / 20.0);
+            s.crossfeed = (crossfeed_db > 0.0 && s.channels == 2).then(|| Crossfeed::new(rate, crossfeed_db.clamp(1.0, 15.0), 700.0));
+        });
+    }
+
+    /// The output stage. `balance` is -1 (left) to 1 (right); mono and balance are stereo ideas and are ignored
+    /// otherwise. `lookahead_ms` at or below 0 turns the limiter off, which is also the only way to get its delay back.
+    pub fn configure_output(&mut self, balance: f64, mono: bool, threshold_db: f64, release_ms: f64, lookahead_ms: f64) {
+        self.change(|s, rate| {
+            s.mono = mono && s.channels == 2;
+            s.balance = if s.channels == 2 { balance_gains(balance) } else { (1.0, 1.0) };
+            if lookahead_ms <= 0.0 {
+                s.limiter = None;
+                return;
+            }
+            let frames = Limiter::frames_for(rate, lookahead_ms);
+            let mut l = s.limiter.take().filter(|l| l.frames == frames).unwrap_or_else(|| Limiter::new(rate, s.channels, frames));
+            l.tune(rate, threshold_db, release_ms);
+            s.limiter = Some(l);
+        });
+    }
+
+    /// True when the chain would not change a single sample.
+    pub fn is_identity(&self) -> bool {
+        self.fade.is_none() && self.now.is_identity()
+    }
+
+    /// How many frames the chain holds back: the limiter's look-ahead, 0 without one. At the end of a
+    /// stream that many frames of silence pushed through bring the last of the music out.
+    pub fn delay_frames(&self) -> usize {
+        self.now.limiter.as_ref().map_or(0, |l| l.frames)
+    }
+
+    /// Peak gain reduction in the buffer just processed, for the UI meter. Zero when the limiter is off or idle.
+    pub fn gain_reduction_db(&self) -> f32 {
+        self.now.limiter.as_ref().map_or(0.0, |l| (-20.0 * l.meter.log10()) as f32)
+    }
+
     /// One generic loop; `load` and `store` are the only things that differ between sample formats.
     #[inline]
     fn run<T: Copy>(&mut self, input: &[T], output: &mut [T], load: impl Fn(T) -> f64, store: impl Fn(f64) -> T) {
         let len = input.len().min(output.len());
         let (input, output) = (&input[..len], &mut output[..len]);
+        self.live |= len > 0;
         if self.is_identity() {
             output.copy_from_slice(input);
             return;
         }
         let n = self.channels;
-        if let Some(l) = self.limiter.as_mut() {
+        if let Some(l) = self.now.limiter.as_mut() {
             l.meter = 1.0;
         }
         let mut frame = [0f64; MAX_CHANNELS];
+        let mut old = [0f64; MAX_CHANNELS];
         for (x, y) in input.chunks_exact(n).zip(output.chunks_exact_mut(n)) {
             for (c, v) in x.iter().enumerate() {
-                frame[c] = self.sample(c, load(*v));
+                frame[c] = load(*v);
             }
-            self.output_stage(&mut frame[..n]);
+            match self.fade {
+                None => self.now.frame(&mut frame[..n]),
+                Some(at) => {
+                    old[..n].copy_from_slice(&frame[..n]);
+                    self.was.frame(&mut old[..n]);
+                    self.now.frame(&mut frame[..n]);
+                    // Raised cosine: no corner at either end of the fade.
+                    let g = if at < 0 { 0.0 } else { 0.5 - 0.5 * (std::f64::consts::PI * (at + 1) as f64 / self.fade_len as f64).cos() };
+                    for (v, o) in frame[..n].iter_mut().zip(&old[..n]) {
+                        *v = o + g * (*v - o);
+                    }
+                    self.fade = (at + 1 < self.fade_len).then_some(at + 1);
+                }
+            }
             for (c, v) in y.iter_mut().enumerate() {
                 *v = store(frame[c]);
             }
@@ -454,14 +574,12 @@ impl Equalizer {
         self.run(input, output, |x| x as f64, |y| y as f32);
     }
 
+    /// A new stream (a seek, a flush): the memories go, and so does any fade, since nothing is playing
+    /// through the change.
     pub fn reset(&mut self) {
-        self.state.iter_mut().for_each(|s| *s = [[0.0; 2]; MAX_CHANNELS]);
-        if let Some(c) = self.crossfeed.as_mut() {
-            (c.lo, c.hi, c.last) = ([0.0; 2], [0.0; 2], [0.0; 2]);
-        }
-        if let Some(l) = self.limiter.as_mut() {
-            l.reset();
-        }
+        self.now.reset();
+        self.fade = None;
+        self.live = false;
     }
 }
 
@@ -701,7 +819,10 @@ mod tests {
         assert!(l.abs() < 0.01 && r < -100.0, "hard left mutes the right: {l} / {r}");
 
         eq.configure_output(0.0, false, 0.0, 100.0, 0.0);
-        assert!(eq.is_identity(), "centred balance costs nothing");
+        assert!(!eq.is_identity(), "the change fades in first");
+        let (x, mut y) = (vec![0f32; 960], vec![0f32; 960]);
+        eq.process_f32(&x, &mut y);
+        assert!(eq.is_identity(), "and then centred balance costs nothing");
 
         // Two uncorrelated tones: the mono sum must keep the level, not lose 3 dB.
         eq.configure_output(0.0, true, 0.0, 100.0, 0.0);
@@ -711,7 +832,8 @@ mod tests {
         eq.process_f32(&x, &mut y);
         let db = 20.0 * (rms(&y[19200..]) / rms(&x[19200..])).log10();
         assert!(db.abs() < 0.3, "mono sum moved the level by {db} dB");
-        assert!(y.chunks_exact(2).all(|f| f[0] == f[1]), "both channels carry the same mono signal");
+        // Mono came on mid-stream, so it faded in over the first 10 ms.
+        assert!(y[960..].chunks_exact(2).all(|f| f[0] == f[1]), "both channels carry the same mono signal");
     }
 
     #[test]
@@ -746,6 +868,24 @@ mod tests {
         let d = 240; // 5 ms at 48 kHz
         assert_eq!(&y[d..], &x[..x.len() - d], "below the knee the samples come back untouched");
         assert_eq!(eq.gain_reduction_db(), 0.0);
+    }
+
+    #[test]
+    fn silence_pushed_through_brings_out_what_the_limiter_held_back() {
+        let mut eq = Equalizer::new(48000, 1);
+        eq.configure(&[], 0.0, 0.0);
+        eq.configure_output(0.0, false, -6.0, 120.0, 5.0);
+        let x = tone_at(1000.0, 0.25);
+        let mut y = vec![0f32; x.len()];
+        eq.process_f32(&x, &mut y);
+        let d = eq.delay_frames();
+        assert_eq!(d, 240, "5 ms at 48 kHz");
+        // The end of the stream: the last 5 ms are still inside, and silence brings them out whole.
+        let mut tail = vec![0f32; d];
+        eq.process_f32(&vec![0f32; d], &mut tail);
+        assert_eq!(&tail[..], &x[x.len() - d..]);
+        eq.configure_output(0.0, false, 0.0, 120.0, 0.0);
+        assert_eq!(eq.delay_frames(), 0, "no limiter, nothing held");
     }
 
     #[test]

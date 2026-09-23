@@ -6,7 +6,8 @@ use std::collections::HashSet;
 
 use crate::{Core, Result, SearchResult};
 
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SearchSplit {
     pub everything: SearchResult,
     /// Only the library's items; None when that is everything (there are no provider items).
@@ -37,7 +38,7 @@ fn distinct<T>(list: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
 
 /// The server's answer, ready to show. A merged provider result may repeat an id, and lists are keyed by
 /// id, so only the first of each is kept.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn search_split(result: SearchResult) -> SearchSplit {
     split(SearchResult {
         artists: distinct(result.artists, |a| &a.id),
@@ -47,7 +48,8 @@ pub fn search_split(result: SearchResult) -> SearchSplit {
 }
 
 /// Which of the answer the search screen shows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SearchScope {
     #[default]
     Everything,
@@ -58,13 +60,14 @@ pub enum SearchScope {
 }
 
 /// The scope chips and their words, in their order.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SearchScopeChip {
     pub scope: SearchScope,
     pub label: String,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn search_scopes() -> Vec<SearchScopeChip> {
     [(SearchScope::Everything, "Everything"), (SearchScope::Library, "In library"), (SearchScope::Providers, "Not in library yet")]
         .map(|(scope, label)| SearchScopeChip { scope, label: label.into() })
@@ -83,7 +86,8 @@ impl SearchSplit {
 }
 
 /// What the search screen shows now.
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SearchView {
     /// What is in the field, as typed.
     pub text: String,
@@ -141,12 +145,13 @@ impl Session {
 /// and once typing pauses the server is asked too, because only the server (octo-fiesta) knows what is
 /// not in the library yet. An answer is taken only while it is still the answer to what is in the field,
 /// and the index's never over the server's for the same query - both come back out of order.
-#[derive(uniffi::Object, Default)]
+#[derive(Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct SearchSession(parking_lot::Mutex<Session>);
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl SearchSession {
-    #[uniffi::constructor]
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self::default())
     }
@@ -191,6 +196,16 @@ impl SearchSession {
         Some(s.view())
     }
 
+    /// Asks the server for `query` and takes its answer as [`SearchSession::server`] does, so the answer
+    /// goes from the socket into the session without crossing to the platform and back. None when the
+    /// field has moved on; an error when the server could not be asked ([`SearchSession::failed`]).
+    pub async fn ask(&self, client: std::sync::Arc<crate::client::Client>, query: String) -> crate::client::NetResult<Option<SearchView>> {
+        let sizes = crate::browse::library_sizes();
+        let read = crate::cache_policy::Read::Search { query: query.clone(), songs: sizes.search_songs, albums: sizes.search_albums, artists: sizes.search_artists };
+        let crate::cache_policy::Page::Found { v } = client.read_now(read).await? else { return Ok(None) };
+        Ok(self.server(query, v))
+    }
+
     /// The server could not answer `query`: said, and the offline answer stays.
     pub fn failed(&self, query: String, reason: Option<String>) -> Option<SearchView> {
         let mut s = self.0.lock();
@@ -212,7 +227,7 @@ impl SearchSession {
 /// Shorter than this, a query is a keystroke on the way to one, not one worth remembering.
 const REMEMBER_MIN_UTF16: usize = 2;
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The offline index's answer to every keystroke, split like the server's (it never holds provider items).
     pub fn local_search_split(&self, query: String, limit: u32) -> Result<SearchSplit> {

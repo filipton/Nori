@@ -34,7 +34,7 @@ static PLANNER: Mutex<Planner> =
 /// Whether the output forbids touching samples at all (`AudioPolicy::transitions_off`). Called whenever
 /// the audio policy changes; the user's transition settings reach the planner by themselves
 /// ([`settings_changed`]).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn transition_setup(transitions_off: bool) {
     let mut p = PLANNER.lock();
     p.transitions_off = transitions_off;
@@ -76,7 +76,7 @@ fn transition_prefs(s: &crate::settings::StoredPrefs) -> crate::TransitionPrefs 
 
 /// The songs the player will play: the one before the current one first, then the current one and those
 /// after it, in play order. Handed in whenever that window changes.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn transition_window(window: Vec<crate::WindowSong>, shuffling: bool) {
     let mut p = PLANNER.lock();
     p.window = window;

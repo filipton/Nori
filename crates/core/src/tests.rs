@@ -120,5 +120,5 @@ fn browse_sorts_filters_and_groups_by_decade() {
     assert_eq!(core.browse_songs("year".into(), true, false, 1990, 1999, 0, 10).unwrap().iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["c", "a"]);
     assert_eq!(core.browse_songs("title".into(), false, true, 0, 0, 0, 10).unwrap().len(), 1);
     let d = core.browse_decades().unwrap();
-    assert_eq!((d[0].name.as_str(), d[0].song_count, d[1].name.as_str(), d[1].song_count), ("2000", 1, "1990", 2));
+    assert_eq!((d[0].start, d[0].name.as_str(), d[0].song_count, d[1].name.as_str(), d[1].song_count), (2000, "2000s", 1, "1990s", 2));
 }

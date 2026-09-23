@@ -20,7 +20,8 @@ const STATS_TOP: u32 = 10;
 // ---- the home page ----------------------------------------------------------
 
 /// What one row of the home page shows and where it comes from.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum HomeShelf {
     /// `getAlbumList2` of type `sort`, `size` albums. `follows_stars`: the one shelf that answers a star,
     /// the way the favourites screen does - asked again whenever something is starred, with this
@@ -57,19 +58,19 @@ fn shelf(row: &str) -> HomeShelf {
 /// The shelves of the rows the user kept (by name: RECENT, NEWEST, FREQUENT, RANDOM, STARRED, PLAYLISTS,
 /// TOP_SONGS, PINNED), one per row and in the same order. Only these are requested at all; a hidden
 /// shelf costs no request.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_shelves(rows: Vec<String>) -> Vec<HomeShelf> {
     rows.iter().map(|r| shelf(r)).collect()
 }
 
 /// The pinned playlists, in the order the server lists them.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_pinned(playlists: Vec<Playlist>, pins: Vec<String>) -> Vec<Playlist> {
     playlists.into_iter().filter(|p| pins.contains(&p.id)).collect()
 }
 
 /// The home rows (by name) with the one at `from` moved to `to`; unchanged when either is not a row.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_rows_moved(mut rows: Vec<String>, from: u32, to: u32) -> Vec<String> {
     let (from, to) = (from as usize, to as usize);
     if from < rows.len() && to < rows.len() {
@@ -82,7 +83,7 @@ pub fn home_rows_moved(mut rows: Vec<String>, from: u32, to: u32) -> Vec<String>
 /// The home rows (by name) with `row` switched on or off. A row switched off leaves the order; one
 /// switched back on comes back at the end of the page, where it can be seen, and can be carried up from
 /// there.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_rows_toggled(mut rows: Vec<String>, row: String, on: bool) -> Vec<String> {
     rows.retain(|r| *r != row);
     if on {
@@ -92,14 +93,14 @@ pub fn home_rows_toggled(mut rows: Vec<String>, row: String, on: bool) -> Vec<St
 }
 
 /// The rows of `all` (every row there is, in its own order) that are not shown.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_rows_hidden(all: Vec<String>, shown: Vec<String>) -> Vec<String> {
     all.into_iter().filter(|r| !shown.contains(r)).collect()
 }
 
 /// The favourite playlists with `id` made one (`on`) or not. A playlist is a favourite on this phone: the
 /// server has no way to star one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn pins_toggled(mut pins: Vec<String>, id: String, on: bool) -> Vec<String> {
     pins.retain(|p| *p != id);
     if on {
@@ -110,14 +111,15 @@ pub fn pins_toggled(mut pins: Vec<String>, id: String, on: bool) -> Vec<String> 
 
 /// The stored answers a manual refresh throws away first, so asking again really reaches the server
 /// rather than being told the two-minute-old copy is still fresh.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn home_refresh_drops() -> Vec<String> {
     ["getAlbumList2", "getPlaylists", "getStarred2"].map(String::from).to_vec()
 }
 
 // ---- long lists ---------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Paging {
     pub albums: u32,
     pub songs: u32,
@@ -125,7 +127,7 @@ pub struct Paging {
 }
 
 /// A page of the album grid that came back shorter than asked for is the last one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn albums_exhausted(got: u32) -> bool {
     got < ALBUM_PAGE
 }
@@ -133,7 +135,8 @@ pub fn albums_exhausted(got: u32) -> bool {
 // ---- album orders -------------------------------------------------------------
 
 /// The orders `getAlbumList2` knows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum AlbumSort {
     Newest,
     Recent,
@@ -185,14 +188,15 @@ impl AlbumSort {
 }
 
 /// One entry of the album grid's sort menu.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AlbumSortOption {
     pub sort: AlbumSort,
     pub label: String,
 }
 
 /// The album grid's sort menu, in its order.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sorts() -> Vec<AlbumSortOption> {
     [
         (AlbumSort::ByName, "A–Z"),
@@ -209,13 +213,14 @@ pub fn album_sorts() -> Vec<AlbumSortOption> {
 }
 
 /// The `type` the server is asked for.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sort_api(sort: AlbumSort) -> String {
     sort.api().into()
 }
 
 /// One entry of the list settings (`listPrefs`): which order a long list was left in.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ListPref {
     pub key: String,
     pub value: String,
@@ -225,25 +230,25 @@ const ALBUMS_SORT_KEY: &str = "albums.sort";
 const SONGS_SORT_KEY: &str = "songs.sort";
 
 /// The album grid's order as it was left (A–Z the first time).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sort_saved(prefs: std::collections::HashMap<String, String>) -> AlbumSort {
     prefs.get(ALBUMS_SORT_KEY).and_then(|n| AlbumSort::ALL.into_iter().find(|s| s.kept_as() == n)).unwrap_or(AlbumSort::ByName)
 }
 
 /// The list setting that remembers the album grid's order.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn album_sort_kept(sort: AlbumSort) -> ListPref {
     ListPref { key: ALBUMS_SORT_KEY.into(), value: sort.kept_as().into() }
 }
 
 /// The songs list's order as it was left (by title the first time), by [`song_sorts`] name.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_sort_saved(prefs: std::collections::HashMap<String, String>) -> String {
     prefs.get(SONGS_SORT_KEY).filter(|n| SONG_SORTS.iter().any(|s| s.0 == n.as_str())).cloned().unwrap_or_else(|| SONG_SORTS[0].0.into())
 }
 
 /// The list setting that remembers the songs list's order.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_sort_kept(name: String) -> ListPref {
     ListPref { key: SONGS_SORT_KEY.into(), value: name }
 }
@@ -251,31 +256,33 @@ pub fn song_sort_kept(name: String) -> ListPref {
 // ---- the library ----------------------------------------------------------------
 
 /// The library's sections, in the order their pills run.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn library_sections() -> Vec<String> {
     ["Albums", "Favourites", "Artists", "Songs", "Playlists", "Smart", "History", "Genres", "Decades", "Folders", "Radio", "Downloads"].map(String::from).to_vec()
 }
 
 /// A decade's years, first and last, from its first year.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct YearSpan {
     pub from: u32,
     pub to: u32,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn decade_years(start_year: u32) -> YearSpan {
     YearSpan { from: start_year, to: start_year + 9 }
 }
 
 /// Whether a new radio station can be added: it has a name and its stream is a web address.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn radio_can_add(name: String, url: String) -> bool {
     !name.trim().is_empty() && url.starts_with("http")
 }
 
 /// How many songs the library's own reads ask for at a time.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct LibrarySizes {
     /// A search on the server: songs, albums and artists. One big page: octo-fiesta repeats its
     /// provider results on every offset.
@@ -293,20 +300,21 @@ pub struct LibrarySizes {
     pub sync_page: u32,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn library_sizes() -> LibrarySizes {
     LibrarySizes { search_songs: 40, search_albums: 20, search_artists: 10, local_search: 30, smart_songs: 500, random_songs: 100, genre_songs: 200, sync_page: 500 }
 }
 
 /// Page sizes of the long lists. A page shorter than its size is the last one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn browse_paging() -> Paging {
     Paging { albums: ALBUM_PAGE, songs: SONG_PAGE, history: HISTORY_PAGE }
 }
 
 /// One way to order the "all songs" list: `name` is what the app stores and passes back, `key` the song
 /// field it sorts on.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongSortOption {
     pub name: String,
     pub key: String,
@@ -325,25 +333,27 @@ const SONG_SORTS: [(&str, &str, &str, bool); 7] = [
     ("LONGEST", "duration", "Longest", true),
 ];
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_sorts() -> Vec<SongSortOption> {
     SONG_SORTS.iter().map(|(name, key, label, descending)| SongSortOption { name: (*name).into(), key: (*key).into(), label: (*label).into(), descending: *descending }).collect()
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongsPage {
     pub songs: Vec<Song>,
     /// True when this was the last page.
     pub exhausted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HistoryPage {
     pub entries: Vec<HistoryEntry>,
     pub exhausted: bool,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The page of the "all songs" list at `offset`: sorted by the [song_sorts] entry called `sort` (an
     /// unknown name keeps index order), only starred songs when `starred_only`, only the years
@@ -366,6 +376,41 @@ impl Core {
         let from = if days == 0 { 0 } else { now - days as i64 * DAY_MS };
         Ok(history::summary(&self.db.lock(), from, now, STATS_TOP)?)
     }
+
+    /// [`Core::stats_days`] with its words and tiles, as the listening page shows them.
+    pub fn stats_page(&self, days: u32) -> Result<StatsPage> {
+        let stats = self.stats_days(days)?;
+        Ok(StatsPage { words: crate::fmt::stats_words(&stats), tiles: crate::fmt::stats_tiles(&stats), stats })
+    }
+
+    /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
+    pub fn browse_decades(&self) -> Result<Vec<Decade>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE server=sid() AND kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
+        let rows = st.query_map([db::SONG], |r| {
+            let start: u32 = r.get(0)?;
+            Ok(Decade { start, name: crate::words::words_decade(start), song_count: r.get(1)? })
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+/// The listening page: the stats, and what it says about them.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct StatsPage {
+    pub stats: ListeningStats,
+    pub words: crate::fmt::StatsWords,
+    pub tiles: Vec<crate::fmt::StatTileWords>,
+}
+
+/// A decade that has songs in the index: its first year, its name ("1990s") and how many songs.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct Decade {
+    pub start: u32,
+    pub name: String,
+    pub song_count: u32,
 }
 
 #[cfg(test)]

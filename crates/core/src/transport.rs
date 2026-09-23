@@ -11,7 +11,8 @@ pub const USER_AGENT: &str = "nori-music/0.1 (+https://github.com/filipton/nori-
 
 /// What the platform says was wrong when a request did not come back. The platform only sorts its own
 /// exceptions into these; the words shown for them are [`describe_error`]'s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum FailureKind {
     /// The server is set to Wi-Fi only and the phone is on a metered network.
     Metered,
@@ -41,7 +42,8 @@ impl FailureKind {
 }
 
 /// One link of what the platform says went wrong: its kind, and its own words.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Failure {
     pub kind: FailureKind,
     pub detail: Option<String>,
@@ -52,7 +54,7 @@ pub struct Failure {
 /// answered with an error status, or that the connection failed or timed out; `causes` is the chain of
 /// what the platform threw. A lookup, a connection or a wait that failed counts, and any I/O failure
 /// whose words say "offline"; a refused certificate, a Wi-Fi-only refusal or anything else does not.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn failure_networkish(status: bool, causes: Vec<Failure>) -> bool {
     status
         || causes.iter().any(|c| match c.kind {
@@ -65,18 +67,20 @@ pub fn failure_networkish(status: bool, causes: Vec<Failure>) -> bool {
 /// Whether a plain GET (for callers outside the client, AutoEQ) failed. octo-fiesta reports auth
 /// failures as 401 with a normal Subsonic error body, so the body counts either way; only an empty error
 /// answer is a failure.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn get_failed(status: u16, body_empty: bool) -> bool {
     body_empty && !(200..=299).contains(&status)
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct TransportResponse {
     pub status: u16,
     pub body: Vec<u8>,
 }
 
-#[derive(Debug, Clone, uniffi::Error)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Error))]
 pub enum TransportError {
     /// `detail` is the platform's own message, kept so a screen shows what it always showed.
     Failed { kind: FailureKind, detail: Option<String> },
@@ -91,6 +95,7 @@ impl fmt::Display for TransportError {
 
 impl std::error::Error for TransportError {}
 
+#[cfg(feature = "ffi")]
 impl From<uniffi::UnexpectedUniFFICallbackError> for TransportError {
     fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
         TransportError::Failed { kind: FailureKind::Other, detail: Some(e.reason) }
@@ -98,7 +103,7 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for TransportError {
 }
 
 /// One GET, implemented once by the platform. Rust never holds a socket; it asks for bytes here.
-#[uniffi::export(with_foreign)]
+#[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     /// The status and the whole body. `timeout_ms` 0 means the platform's usual timeouts; otherwise
@@ -110,8 +115,10 @@ pub trait Transport: Send + Sync {
     fn address_changed(&self);
 }
 
-/// Everything a request from the client can end in, as the platform will see it.
-#[derive(Debug, Clone, uniffi::Error)]
+/// Everything a request from the client can end in, as the platform will see it. Kotlin's exception carries
+/// no message (uniffi's JNI bindings give none), so its `toString` is the Display below.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Error), uniffi::export(Display))]
 pub enum NetError {
     Transport { kind: FailureKind, detail: Option<String> },
     Api { code: i32, reason: String },
@@ -181,7 +188,8 @@ pub(crate) async fn get(transport: &dyn Transport, url: String, timeout_ms: u32)
 const METERED_TEXT: &str = "This server is set to Wi-Fi only";
 
 /// What went wrong, sorted by the platform. `Api` carries the Subsonic error.
-#[derive(Debug, Clone, uniffi::Enum)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Trouble {
     Network { kind: FailureKind },
     Api { code: i32, reason: String },
@@ -192,7 +200,7 @@ pub enum Trouble {
 
 /// What went wrong, in words a person can act on. `fallback` is the platform's own message, used when
 /// there is nothing better to say.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn describe_error(trouble: Trouble, fallback: String) -> String {
     match trouble {
         Trouble::Network { kind: FailureKind::Metered } => METERED_TEXT.into(),
@@ -218,7 +226,8 @@ pub fn describe_error(trouble: Trouble, fallback: String) -> String {
 
 /// The platform's HTTP client settings. They are the app's network behaviour, so they live with the rest
 /// of it; the platform builds its client from them once.
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct NetPolicy {
     pub user_agent: String,
     /// Idle connections close after 20 s, while the radio is still up from the request that used them.
@@ -245,7 +254,7 @@ pub struct NetPolicy {
     pub stream_read_timeout_ms: u32,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn net_policy() -> NetPolicy {
     NetPolicy {
         user_agent: USER_AGENT.into(),
@@ -264,7 +273,8 @@ pub fn net_policy() -> NetPolicy {
 // ---- which requests go to the music server --------------------------------------------------------------
 
 /// A host and port as a request URL carries them, lower case, with the scheme's default port filled in.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
@@ -274,7 +284,7 @@ pub struct HostPort {
 /// means https). Only requests to these get the profile's headers and its Wi-Fi-only rule: third parties
 /// (LRCLIB, AutoEQ) must not receive a reverse-proxy token and are not subject to the server's setting.
 /// None when the address is blank or not an http(s) URL. Parsed once per profile, not per request.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_host(address: String) -> Option<HostPort> {
     if address.chars().all(char::is_whitespace) {
         return None;
@@ -288,14 +298,15 @@ pub fn server_host(address: String) -> Option<HostPort> {
 static SERVER: parking_lot::RwLock<(Vec<HostPort>, bool)> = parking_lot::RwLock::new((Vec::new(), false));
 
 /// The server profile changed (none: no server): its two addresses and its Wi-Fi-only setting.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn net_server(address: Option<String>, alt_address: Option<String>, wifi_only: bool) {
     let hosts = [address, alt_address].into_iter().flatten().filter_map(server_host).collect();
     *SERVER.write() = (hosts, wifi_only);
 }
 
 /// What a request is to the network policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct RequestPolicy {
     /// It goes to the music server: it carries the profile's headers (a reverse proxy's token).
     pub server: bool,
@@ -306,7 +317,7 @@ pub struct RequestPolicy {
 
 /// The policy for a request to `url`. Third parties (LRCLIB, AutoEQ) get neither the server's headers nor
 /// its Wi-Fi-only rule. Called once per request.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn request_policy(url: String) -> RequestPolicy {
     let s = SERVER.read();
     let server = !s.0.is_empty() && parse_host(&url).is_some_and(|h| s.0.contains(&h));

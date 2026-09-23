@@ -43,7 +43,6 @@ fn a_v1_database_migrates_to_v2() {
 
 #[test]
 fn the_streaming_handle_finishes_into_the_store() {
-    use ::jni::sys::jlong;
     let core = Core::new(String::new(), "t".into()).unwrap();
     // The handle a JNI create would return, built the same way.
     let s = Synth::new(128.0);
@@ -61,7 +60,7 @@ fn the_streaming_handle_finishes_into_the_store() {
     assert!((t.bpm - 128.0).abs() < 0.05);
     assert_eq!(core.analysis_get("x".into()).unwrap(), Some(t));
     assert_eq!(core.analysis_finish_stream("x".into(), 0).unwrap(), None);
-    store::test_destroy(h as jlong);
+    store::test_destroy(h);
 }
 
 fn store_handle(a: analysis::Analyzer) -> i64 {

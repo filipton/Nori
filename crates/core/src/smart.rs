@@ -51,7 +51,7 @@ use serde_json::{json, Map, Value};
 use crate::{db, mixes, model::*, Core, CoreError, Result};
 
 /// The editor's flat form of a definition.
-mod draft;
+pub mod draft;
 
 const DAY_MS: i64 = 86_400_000;
 const MAX_DEPTH: usize = 8;
@@ -798,19 +798,27 @@ fn default_definitions() -> Vec<SmartPlaylist> {
 }
 
 /// Checks a definition without running it; the error says where and what (`match.rules[1].op: ...`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_validate(json: String) -> Result<()> {
     parse(&json).map(|_| ())
 }
 
 /// Definitions the UI can offer as a starting point. They are not stored: save one with `smart_save` to keep
 /// or edit it. "Never played" is a random draw; change `sort.seed` to draw again.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_defaults() -> Vec<SmartPlaylist> {
     default_definitions()
 }
 
-#[uniffi::export]
+/// A smart playlist as its page shows it.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SmartPage {
+    pub songs: Vec<Song>,
+    pub caption: String,
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Newest first.
     pub fn smart_list(&self) -> Result<Vec<SmartPlaylist>> {
@@ -845,6 +853,12 @@ impl Core {
         let def = parse(&json)?;
         let downloaded = self.downloaded_for(&def)?;
         Ok(run(&self.db.lock(), &def, &downloaded, offset as usize, limit as usize, false, db::now_ms())?.0)
+    }
+
+    /// The playlist's page: its first `limit` songs and the caption over them, "12 songs · 48:10".
+    pub fn smart_page(&self, json: String, limit: u32) -> Result<SmartPage> {
+        let songs = self.smart_evaluate(json, 0, limit)?;
+        Ok(SmartPage { caption: crate::fmt::list_caption(&songs, true), songs })
     }
 
     /// How many songs the playlist has, its own caps applied.

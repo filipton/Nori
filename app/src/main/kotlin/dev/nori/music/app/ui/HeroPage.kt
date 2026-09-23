@@ -100,8 +100,17 @@ fun HeroPage(
     // when the song changes, not on every change of the player's state.
     val current = playerState.current
     val here = remember(queue, current?.id, current?.albumId) { queue?.plays(current?.id, current?.albumId) ?: false }
-    val buttons = remember(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null) {
-        dev.nori.music.ffi.heroButtons(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null)
+    // The core's answer (`pages::hero_buttons`) over JNI, one int, on every play and pause.
+    val bits = remember(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null) {
+        CoverLook.heroButtons(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null)
+    }
+    val pausing = bits and 4 != 0
+    val playLabel = remember(pausing) { CoverLook.heroPlayLabel(pausing) }
+    val buttons = remember(bits, playLabel) {
+        dev.nori.music.ffi.HeroButtons(
+            shuffleLit = bits and 1 != 0, shuffleEnabled = bits and 2 != 0, shufflePress = heroPress(bits shr 4),
+            playLabel = playLabel, pausing = pausing, playEnabled = bits and 8 != 0, playPress = heroPress(bits shr 6),
+        )
     }
 
     TintedTheme(palette) {
@@ -223,4 +232,11 @@ fun HeroPage(
             }
         }
     }
+}
+
+/** Two bits of `HeroButtons::pack`: what a button presses. */
+private fun heroPress(bits: Int) = when (bits and 3) {
+    1 -> dev.nori.music.ffi.HeroPress.TOGGLE
+    2 -> dev.nori.music.ffi.HeroPress.SHUFFLE_OFF
+    else -> dev.nori.music.ffi.HeroPress.START
 }

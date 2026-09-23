@@ -12,7 +12,8 @@ use super::{parse, Kind, FIELDS};
 use crate::{CoreError, SmartPlaylist};
 
 /// One condition as the form holds it: `value` is what was typed.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartEditRule {
     pub field: String,
     pub op: String,
@@ -20,7 +21,8 @@ pub struct SmartEditRule {
 }
 
 /// A smart playlist as the editor holds it. `limit` 0 is no limit.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartEdit {
     pub id: String,
     pub name: String,
@@ -33,7 +35,8 @@ pub struct SmartEdit {
 
 /// What the editor offers: the fields by type, what can be sorted by, and the operators of each field
 /// in the order the form lists them (the first is what a new choice of field starts with).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartSchema {
     pub texts: Vec<String>,
     pub numbers: Vec<String>,
@@ -48,7 +51,8 @@ pub struct SmartSchema {
 
 /// A draft ready to be stored: the rules for a new id and a missing name applied, and the definition
 /// checked. `error` says what is wrong; nothing is to be stored then.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartPrepared {
     pub id: String,
     pub name: String,
@@ -183,12 +187,12 @@ fn read(p: &SmartPlaylist) -> Option<SmartEdit> {
 }
 
 /// A new, empty draft: one rule waiting for a genre, a random order and 100 songs.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_new() -> SmartEdit {
     SmartEdit { id: String::new(), name: String::new(), all: true, rules: vec![default_rule()], sort_field: "random".into(), descending: false, limit: 100 }
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_schema() -> SmartSchema {
     let list = |k: Kind| names(move |x| x == k).map(String::from).collect::<Vec<_>>();
     let dates: Vec<String> = names(|k| matches!(k, Kind::DateMs | Kind::DateIso)).map(String::from).collect();
@@ -206,7 +210,7 @@ pub fn smart_edit_schema() -> SmartSchema {
 
 /// The draft the editor opens with: `playlist`'s own when this editor can show it (a built-in one as a
 /// copy, with no id, so saving makes a playlist of the user's own), otherwise a new one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_open(playlist: Option<SmartPlaylist>) -> SmartEdit {
     let Some(mut e) = playlist.as_ref().and_then(read) else { return smart_edit_new() };
     if e.id.starts_with("default-") {
@@ -217,7 +221,7 @@ pub fn smart_edit_open(playlist: Option<SmartPlaylist>) -> SmartEdit {
 
 /// Rule `at` now compares `field`: its operator goes back to that field's first, since the old one may
 /// not apply.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_field(mut edit: SmartEdit, at: u32, field: String) -> SmartEdit {
     let schema = smart_edit_schema();
     if let Some(r) = edit.rules.get_mut(at as usize) {
@@ -228,20 +232,20 @@ pub fn smart_edit_field(mut edit: SmartEdit, at: u32, field: String) -> SmartEdi
 }
 
 /// The operators rule `field` offers.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_ops(field: String) -> Vec<String> {
     smart_edit_schema().ops.remove(&field).unwrap_or_else(|| FLAG_OPS.map(String::from).to_vec())
 }
 
 /// Every field, in the order the editor lists them.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_fields() -> Vec<String> {
     let s = smart_edit_schema();
     s.texts.into_iter().chain(s.numbers).chain(s.dates).chain(s.flags).collect()
 }
 
 /// Rule `at` taken away; the form always keeps one rule to fill in.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_remove(mut edit: SmartEdit, at: u32) -> SmartEdit {
     if (at as usize) < edit.rules.len() {
         edit.rules.remove(at as usize);
@@ -253,7 +257,7 @@ pub fn smart_edit_remove(mut edit: SmartEdit, at: u32) -> SmartEdit {
 }
 
 /// A new empty rule at the end.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_add(mut edit: SmartEdit) -> SmartEdit {
     edit.rules.push(default_rule());
     edit
@@ -261,7 +265,7 @@ pub fn smart_edit_add(mut edit: SmartEdit) -> SmartEdit {
 
 /// What the value field of a rule with operator `op` says while empty; None when the operator takes no
 /// value, and there is no field.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_value_hint(op: String) -> Option<String> {
     if FLAG_OPS.contains(&op.as_str()) {
         None
@@ -275,32 +279,32 @@ pub fn smart_value_hint(op: String) -> Option<String> {
 }
 
 /// The limit as typed: a number, or none (0) for anything else.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_limit_typed(text: String) -> i32 {
     text.parse().unwrap_or(0)
 }
 
 /// The limit as the field shows it: empty for none.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_limit_text(limit: i32) -> String {
     if limit > 0 { limit.to_string() } else { String::new() }
 }
 
 /// The definition the draft stands for.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_json(edit: SmartEdit) -> String {
     to_json(&edit)
 }
 
 /// Reads back what this editor wrote; None for definitions with nested groups, which the caller keeps as raw JSON.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_read(playlist: SmartPlaylist) -> Option<SmartEdit> {
     read(&playlist)
 }
 
 /// A built-in definition ("default-...") is saved as a new playlist of the user's own, and a playlist
 /// with no name is called "Smart playlist".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_prepare(edit: SmartEdit) -> SmartPrepared {
     let json = to_json(&edit);
     // Worded exactly as the app has always shown it, which is the message of the error as it came across the FFI.

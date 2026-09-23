@@ -823,7 +823,7 @@ fun NoriSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifier
 }
 
 /** A decibel figure with its sign, one decimal, never "-0.0" (nori-core's `fmt::signed_db`). */
-fun signedDb(db: Float): String = dev.nori.music.ffi.signedDb(db)
+fun signedDb(db: Float): String = dev.nori.music.settings.EqWords.signedDb(db)
 
 
 /**
@@ -932,8 +932,10 @@ fun PlayPauseGlyph(
         if (buffering) kotlinx.coroutines.delay(stage.spinnerAfterMs)
         busy = buffering
     }
-    // Which glyph is the core's (`transport_glyph`), asked when one of the three changes.
-    val glyph = androidx.compose.runtime.remember(playing, buffering, busy) { dev.nori.music.ffi.transportGlyph(playing, buffering, busy) }
+    // Which glyph is the core's (`transport_glyph`), asked over JNI when one of the three changes.
+    val glyph = androidx.compose.runtime.remember(playing, buffering, busy) {
+        dev.nori.music.ffi.TransportGlyph.entries[dev.nori.music.look.CoverLook.transportGlyph(playing, buffering, busy)]
+    }
     androidx.compose.animation.AnimatedContent(
         glyph,
         transitionSpec = {

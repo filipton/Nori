@@ -17,7 +17,8 @@ const INSTANT_MIX: u32 = 50;
 const SHUFFLE_ALL: i32 = 200;
 
 /// What a plain tap on a song in a list does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TapPlan {
     /// Something is selected: the tap adds the song to the selection or takes it out.
     Select,
@@ -41,13 +42,14 @@ fn tap(selecting: bool, tap_action: i32) -> TapPlan {
 }
 
 /// What a tap on a song does, as the settings say; while songs are selected, a tap selects.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn tap_plan(selecting: bool) -> TapPlan {
     tap(selecting, crate::settings_store::with_prefs(|p| p.tap_action).unwrap_or(0))
 }
 
 /// How to shuffle a list.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ShufflePlan {
     /// Nothing to play.
     Empty,
@@ -59,7 +61,7 @@ pub enum ShufflePlan {
 
 /// Spreads artists and albums apart unless the user prefers a plain random order (weighted shuffle off
 /// in the settings).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn shuffle_plan(songs: Vec<Song>) -> ShufflePlan {
     let weighted = crate::settings_store::with_prefs(|p| p.weighted_shuffle).unwrap_or(true);
     plan_shuffle(songs, weighted, seed_now())
@@ -92,7 +94,7 @@ fn radio_fallback(seed: Song, random: Vec<Song>) -> Vec<Song> {
     std::iter::once(seed).chain(random).collect()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
     /// An endless-ish mix seeded from one song: [radio_queue], else [radio_fallback].
     pub async fn radio(&self, seed: Song) -> NetResult<Vec<Song>> {
@@ -133,7 +135,8 @@ impl Client {
 
 /// What the debug test bridge names: `album:<id>`, `song:<id>`, `search:<text>` (the first song found),
 /// `downloaded:<n>` (the n-th finished download, from 0), or nothing it knows.
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TestRef {
     Album { id: String },
     Song { id: String },
@@ -142,7 +145,7 @@ pub enum TestRef {
     Nothing,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn test_ref(text: String) -> TestRef {
     let Some((kind, arg)) = text.split_once(':') else { return TestRef::Nothing };
     let arg = arg.to_string();
@@ -157,13 +160,14 @@ pub fn test_ref(text: String) -> TestRef {
 
 /// An M3U file matched against the index: the songs for the new playlist, in the file's order, and the
 /// message to show once it exists (or, with no songs, instead of creating it).
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct M3uImport {
     pub song_ids: Vec<String>,
     pub message: String,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Tracks that are not in the index are reported, not guessed.
     pub fn m3u_import(&self, name: String, text: String) -> Result<M3uImport> {

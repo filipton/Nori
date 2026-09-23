@@ -1,7 +1,8 @@
 //! The app's short confirmations, worded here so every player says the same.
 
 /// A one-line confirmation after an action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Said {
     PlayingNext,
     AddedToQueue,
@@ -18,7 +19,7 @@ pub enum Said {
 }
 
 /// The confirmation `what`; `name` is the playlist it is about, where it is about one.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words(what: Said, name: String) -> String {
     match what {
         Said::PlayingNext => "Playing next".into(),
@@ -34,7 +35,7 @@ pub fn words(what: Said, name: String) -> String {
 
 /// What a heart says when pressed, or nothing with the favourite notice switched off in the settings.
 /// The heart itself always changes.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_favourite(on: bool) -> Option<String> {
     crate::settings_store::with_prefs(|p| p.favourite_notice).unwrap_or(true).then(|| favourite(on))
 }
@@ -42,7 +43,8 @@ pub fn words_favourite(on: bool) -> Option<String> {
 /// The system media controls' extra buttons (the notification, the lock screen): a heart beside previous
 /// and a shuffle toggle beside next. `heart` is none while no song of the library plays (nothing, or a
 /// radio stream): there is nothing to favourite.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SessionButtons {
     pub heart: Option<String>,
     pub starred: bool,
@@ -51,7 +53,7 @@ pub struct SessionButtons {
 }
 
 /// The session's buttons for the song playing now in the core's queue, `starred` or not, `shuffle` on or off.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_session_buttons(starred: bool, shuffle: bool) -> SessionButtons {
     let song = crate::playlist::with(|p| p.current_id().is_some_and(|id| !id.starts_with(crate::queue::RADIO_PREFIX)));
     session_buttons(song, starred, shuffle)
@@ -68,13 +70,13 @@ fn session_buttons(song: bool, starred: bool, shuffle: bool) -> SessionButtons {
 
 /// What a radio stream shows as its title: what the station announces now (its ICY title), or, while it
 /// announces nothing, the station's own name.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn radio_title(announced: Option<String>, station: Option<String>) -> Option<String> {
     announced.filter(|a| !a.trim().is_empty()).or(station)
 }
 
 /// What a radio stream is listed under where a song shows its artist.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_radio_artist() -> String {
     "Radio".into()
 }
@@ -88,13 +90,13 @@ fn counted(n: u32, one: &str, many: &str) -> String {
 }
 
 /// How many songs a list holds: "1 song", "12 songs".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_songs(songs: u32) -> String {
     counted(songs, "song", "songs")
 }
 
 /// The download queue's row in the library: "4 to go · 1 failed", or that nothing is downloading.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_download_queue(waiting: u32, failed: u32) -> String {
     match (waiting, failed) {
         (0, 0) => "Nothing downloading".into(),
@@ -105,7 +107,7 @@ pub fn words_download_queue(waiting: u32, failed: u32) -> String {
 }
 
 /// The bit-perfect switch's second line: what the DAC is doing, why it cannot, or what the switch is for.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_bit_perfect(device: Option<String>, on: bool, sample_rate: u32, bits: u32, blocked_by: Option<String>, supported: bool) -> String {
     match (device, blocked_by) {
         (d, _) if on => format!("On: {}, {:?} kHz, {bits}-bit.", d.as_deref().unwrap_or("null"), sample_rate as f64 / 1000.0),
@@ -117,7 +119,7 @@ pub fn words_bit_perfect(device: Option<String>, on: bool, sample_rate: u32, bit
 }
 
 /// What is actually going out, under the bit-perfect switch: "Offers … · playing … · output …".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_dac_detail(modes: Vec<String>, playing: Option<String>, track: Option<String>) -> Option<String> {
     let parts: Vec<String> = [
         (!modes.is_empty()).then(|| format!("Offers {}", modes.join(", "))),
@@ -133,7 +135,7 @@ pub fn words_dac_detail(modes: Vec<String>, playing: Option<String>, track: Opti
 /// The battery saver's second line. Whether it is paused is the player's own rule
 /// (`nori_player::policy::audio_policy`, the call the playback service makes with the same settings),
 /// so the note never says the chip decodes while the player has stood it down.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_offload(prefs: crate::AudioPrefs, output: crate::OutputState) -> String {
     let policy = nori_player::policy::audio_policy(&prefs, &output);
     if output.usb {
@@ -147,7 +149,7 @@ pub fn words_offload(prefs: crate::AudioPrefs, output: crate::OutputState) -> St
 
 /// The sleep timer under the seek bar: "Sleep · end of track", or the minutes left rounded up, never
 /// fewer than one ("Sleep · 12 min").
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_sleep(end_of_track: bool, left_ms: i64) -> String {
     if end_of_track {
         "Sleep · end of track".into()
@@ -157,88 +159,88 @@ pub fn words_sleep(end_of_track: bool, left_ms: i64) -> String {
 }
 
 /// After songs were put in the download queue.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_downloading(songs: u32) -> String {
     format!("Downloading {}", counted(songs, "song", "songs"))
 }
 
 /// After downloads were given back.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_downloads_removed(songs: u32) -> String {
     format!("Removed {}", counted(songs, "download", "downloads"))
 }
 
 /// How many releases an artist has: "1 release", "12 releases".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_releases(n: u32) -> String {
     counted(n, "release", "releases")
 }
 
 /// How many albums an artist has, under their name in the artists list: "1 album", "12 albums".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_albums(n: u32) -> String {
     counted(n, "album", "albums")
 }
 
 /// A folder's caption: "2 folders · 14 songs".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_folder(folders: u32, songs: u32) -> String {
     format!("{} · {}", counted(folders, "folder", "folders"), counted(songs, "song", "songs"))
 }
 
 /// A folder's title: its name, or "Folder" for one the server did not name.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_folder_title(name: String) -> String {
     if name.is_empty() { "Folder".into() } else { name }
 }
 
 /// A decade by its first year: "1990s".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_decade(start_year: u32) -> String {
     format!("{start_year}s")
 }
 
 /// The favourite songs row: how many of the starred songs are in the library (a provider's song that was
-/// starred is being fetched by the server, not yet something to play).
-#[uniffi::export]
-pub fn words_favourite_songs(songs: Vec<crate::Song>) -> String {
+/// starred is being fetched by the server, not yet something to play). Carried by the favourites answer.
+pub fn words_favourite_songs(songs: &[crate::Song]) -> String {
     words_songs(songs.iter().filter(|s| !s.is_external).count() as u32)
 }
 
 /// A playlist's line in the library: "12 songs · 48:10".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_playlist_line(songs: u32, seconds: u32) -> String {
     format!("{} · {}", words_songs(songs), crate::fmt::duration(seconds as i64))
 }
 
 /// What the player's title says with no song: the station playing, or that nothing is.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_player_idle(radio: Option<String>) -> String {
     radio.unwrap_or_else(|| "Nothing playing".into())
 }
 
 /// The line under the player's title while the offline bridge plays downloads in place of the queue.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_bridging() -> String {
     "Playing downloads until you’re online".into()
 }
 
 /// The now playing bar's second line: what went wrong with the song showing, else its artist, else
 /// (a station) "Radio".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_bar_line(error: Option<String>, artist: Option<String>) -> String {
     error.or(artist).unwrap_or_else(|| "Radio".into())
 }
 
 /// Where lyrics came from, for the credit line under them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum LyricsOrigin {
     Server,
     Lrclib,
 }
 
 /// A lyrics source's name: "your server", "LRCLIB".
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_lyrics_origin(origin: LyricsOrigin) -> String {
     match origin {
         LyricsOrigin::Server => "your server",
@@ -251,7 +253,7 @@ pub fn words_lyrics_origin(origin: LyricsOrigin) -> String {
 /// they came without timings, that they did - unsung words are all one brightness and a tap on one goes
 /// nowhere, which looks broken unless the corner says why. The server's timed words say "Timing" (the
 /// corner opens the nudge buttons); the server's untimed words have no corner at all (None).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_lyrics_credit(origin: LyricsOrigin, synced: bool) -> Option<String> {
     let source = (origin != LyricsOrigin::Server).then(|| words_lyrics_origin(origin));
     if source.is_none() && !synced {
@@ -262,19 +264,20 @@ pub fn words_lyrics_credit(origin: LyricsOrigin, synced: bool) -> Option<String>
 }
 
 /// The heading over the queue in the player: what plays after this song.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_up_next() -> String {
     "Playing next".into()
 }
 
 /// The toast when the phone has no output picker to open.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_playing_through(output: String) -> String {
     format!("Playing through {output}")
 }
 
 /// Stopping every download, and whether it asks first.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StopAll {
     /// More than one song would leave the queue: ask before doing it.
     pub asks: bool,
@@ -282,7 +285,7 @@ pub struct StopAll {
     pub text: String,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_stop_all(unfinished: u32) -> StopAll {
     let (that, leave) = if unfinished == 1 { ("has", "leaves") } else { ("have", "leave") };
     StopAll {
@@ -293,7 +296,8 @@ pub fn words_stop_all(unfinished: u32) -> StopAll {
 }
 
 /// The empty-list, failure and help lines around the app, by where they are shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Note {
     /// No index yet: the songs and decades lists.
     NoIndex,
@@ -314,7 +318,7 @@ pub enum Note {
     CouldNotEvaluate,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_note(note: Note) -> String {
     match note {
         Note::NoIndex => "No songs on this phone yet. Settings, then Library and lists, then Update.",
@@ -337,7 +341,8 @@ pub fn words_note(note: Note) -> String {
 }
 
 /// The download notification's words that do not change: the batch is over, and its button.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DownloadNoticeWords {
     pub complete: String,
     pub cancel: String,
@@ -345,13 +350,13 @@ pub struct DownloadNoticeWords {
     pub result_timeout_ms: i64,
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_download_notice() -> DownloadNoticeWords {
     DownloadNoticeWords { complete: "Downloads complete".into(), cancel: "Cancel".into(), result_timeout_ms: 8_000 }
 }
 
 /// The home-screen widget's title with nothing playing yet.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_widget_idle() -> String {
     "Nori".into()
 }
@@ -444,7 +449,7 @@ mod tests {
         assert_eq!((words_folder_title(String::new()), words_folder_title("Rock".into())), ("Folder".into(), "Rock".into()));
         assert_eq!(words_decade(1990), "1990s");
         let s = |ext| crate::Song { is_external: ext, ..Default::default() };
-        assert_eq!(words_favourite_songs(vec![s(false), s(true), s(false)]), "2 songs");
+        assert_eq!(words_favourite_songs(&[s(false), s(true), s(false)]), "2 songs");
         assert_eq!(words_playlist_line(12, 2890), "12 songs · 48:10");
         assert_eq!(words_playlist_line(1, 200), "1 song · 3:20");
         assert_eq!(words_player_idle(None), "Nothing playing");

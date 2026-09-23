@@ -1,24 +1,25 @@
 //! Which streamed songs leave the local cache when it is over its limit: least recently used first, and
 //! before those, whatever an earlier run of the app cached and this one has not used since - untouched
-//! since the restart is the stalest there is. The platform's cache holds the bytes and says what it
-//! holds; this keeps the order they were used in and says what goes.
+//! since the restart is the stalest there is. The platform's cache holds the bytes; this knows the keys it
+//! holds (told once what an earlier run left, then of each use) and names what goes, one key at a time,
+//! so the platform never hands the whole list over.
 
 use std::collections::HashMap;
 
-use jni::objects::{JClass, JObjectArray, JString};
-use jni::JNIEnv;
 use parking_lot::Mutex;
 
 struct Order {
-    /// When each key was last used, in touches since the process started.
-    used: HashMap<String, u64>,
-    clock: u64,
+    /// When each key was last used, in touches since the process started; what an earlier run left and
+    /// this one has not used counts down from -1, older than anything touched.
+    used: HashMap<String, i64>,
+    clock: i64,
+    left: i64,
 }
 
 static ORDER: Mutex<Option<Order>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut Order) -> R) -> R {
-    f(ORDER.lock().get_or_insert_with(|| Order { used: HashMap::new(), clock: 0 }))
+    f(ORDER.lock().get_or_insert_with(|| Order { used: HashMap::new(), clock: 0, left: 0 }))
 }
 
 /// `key` was read or written just now.
@@ -35,62 +36,69 @@ pub fn touch(key: &str) {
     });
 }
 
-/// Of `held` (what the cache holds now), the order to drop them in until it fits: never used by this
-/// process first, then the least recently used.
-pub fn eviction_order(held: &[String]) -> Vec<String> {
+/// What the cache held when this process first looked: the keys not known yet join as never used.
+pub fn seed<'a>(held: impl IntoIterator<Item = &'a str>) {
     with(|o| {
-        o.used.retain(|k, _| held.contains(k));
-        let mut keys: Vec<(u64, &String)> = held.iter().map(|k| (o.used.get(k).copied().unwrap_or(0), k)).collect();
-        keys.sort_by_key(|(t, _)| *t);
-        keys.into_iter().map(|(_, k)| k.clone()).collect()
+        for k in held {
+            if !o.used.contains_key(k) {
+                o.left -= 1;
+                o.used.insert(k.to_string(), o.left);
+            }
+        }
+    });
+}
+
+/// The next key to drop: never used by this process first, then the least recently used. It is forgotten
+/// here as it is handed out; if the cache still holds it after, its next use makes it known again.
+pub fn next() -> Option<String> {
+    with(|o| {
+        let key = o.used.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone())?;
+        o.used.remove(&key);
+        Some(key)
     })
 }
 
-/// A cache span was read or written. Called from the cache's own callbacks, a few times a song; a key
-/// already known is found without allocating.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_StreamCacheJni_touch(mut env: JNIEnv, _: JClass, key: JString) {
-    let Ok(k) = env.get_string(&key) else { return };
-    let k: std::borrow::Cow<str> = (&k).into();
-    touch(&k);
+/// The streamed copies of `id` the cache holds, whatever quality they were fetched at, forgotten here as
+/// they are handed out (the caller drops them).
+pub fn copies(id: &str) -> Vec<String> {
+    with(|o| {
+        let keys: Vec<String> = o.used.keys().filter(|k| crate::stream::is_copy(id, k)).cloned().collect();
+        for k in &keys {
+            o.used.remove(k);
+        }
+        keys
+    })
 }
 
-/// The keys the cache holds, reordered in place into the order they should go in.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_StreamCacheJni_order(mut env: JNIEnv, _: JClass, keys: JObjectArray) {
-    let n = env.get_array_length(&keys).unwrap_or(0);
-    let mut held = Vec::with_capacity(n.max(0) as usize);
-    for i in 0..n {
-        let Ok(o) = env.get_object_array_element(&keys, i) else { return };
-        let s = JString::from(o);
-        let Ok(v) = env.get_string(&s) else { return };
-        held.push(String::from(v));
-    }
-    for (i, k) in eviction_order(&held).iter().enumerate() {
-        let Ok(s) = env.new_string(k) else { return };
-        if env.set_object_array_element(&keys, i as i32, s).is_err() {
-            return;
-        }
-    }
+/// The cache was emptied.
+pub fn clear() {
+    with(|o| o.used.clear());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
-
     #[test]
     fn what_this_run_never_used_goes_first_then_the_stalest() {
+        // One test holds the whole order: tests run side by side and it is one per process.
+        clear();
         touch("sc-a");
         touch("sc-b");
+        seed(["sc-a", "sc-old", "sc-b"]);
         touch("sc-a");
-        let held = s(&["sc-a", "sc-old", "sc-b"]);
-        assert_eq!(eviction_order(&held), s(&["sc-old", "sc-b", "sc-a"]));
-        // A key the cache no longer holds is forgotten.
-        eviction_order(&s(&["sc-a"]));
-        assert!(!with(|o| o.used.contains_key("sc-b")));
+        assert_eq!([next(), next(), next(), next()], [Some("sc-old".into()), Some("sc-b".into()), Some("sc-a".into()), None]);
+        // A key handed out is used again: it is known again.
+        touch("sc-b");
+        assert_eq!(next().as_deref(), Some("sc-b"));
+
+        touch("x:0");
+        touch("x:192opus");
+        touch("xy:0");
+        seed(["x:320mp3"]);
+        let mut c = copies("x");
+        c.sort();
+        assert_eq!(c, ["x:0", "x:192opus", "x:320mp3"]);
+        assert_eq!(next().as_deref(), Some("xy:0"), "only the copies were dropped");
     }
 }

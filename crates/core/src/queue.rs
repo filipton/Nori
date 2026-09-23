@@ -27,7 +27,7 @@ fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
 pub(crate) const RADIO_PREFIX: &str = "radio:";
 
 /// Songs about to be queued. One call per list.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_register(songs: Vec<Song>) {
     let now = db::now_ms();
     with(|s| {
@@ -38,7 +38,6 @@ pub fn queue_register(songs: Vec<Song>) {
 }
 
 /// A queued song, if it is known.
-#[uniffi::export]
 pub fn queue_song(id: String) -> Option<Song> {
     with(|s| s.songs.get(&id).map(|(song, _)| song.clone()))
 }
@@ -46,13 +45,13 @@ pub fn queue_song(id: String) -> Option<Song> {
 /// The queue as the app lists it, in the player's order. A song the store does not know (an item a
 /// system controller added from outside) comes back with its id only. The store keeps these and what
 /// was registered in the last minute, and lets the rest go.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_songs(ids: Vec<String>) -> Vec<Song> {
     let now = db::now_ms();
     with(|s| {
         let listed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
         s.songs.retain(|id, (_, at)| listed.contains(id.as_str()) || now - *at < KEEP_MS);
-        ids.iter().map(|id| s.songs.get(id).map_or_else(|| Song { id: id.clone(), ..Default::default() }, |(song, _)| song.clone())).collect()
+        ids.iter().map(|id| s.songs.get(id).map_or_else(|| Song::only_id(id.clone()), |(song, _)| song.clone())).collect()
     })
 }
 
@@ -139,7 +138,7 @@ pub const STARRED: u32 = 2;
 pub const EXTERNAL: u32 = 4;
 
 /// A queued song's flags ([`EXPLICIT`], [`STARRED`], [`EXTERNAL`]); 0 when it is not known.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_flags(id: String) -> u32 {
     with(|s| {
         s.songs.get(&id).map_or(0, |(song, _)| {
@@ -167,7 +166,7 @@ pub(crate) fn analysable(id: &str) -> bool {
 
 /// Of the queued songs `ids`, those that can be fetched ahead: not a radio stream, not a provider's
 /// song (fetching one makes the provider download it for the server).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_fetchable(ids: Vec<String>) -> Vec<String> {
     with(|s| {
         ids.into_iter()

@@ -27,7 +27,7 @@ class Precacher(private val sources: MediaSources) {
         running = worker.submit {
             for (id in ids) {
                 if (Thread.currentThread().isInterrupted) return@submit
-                if (id in sources.downloaded) continue
+                if (sources.isDownloaded(id)) continue
                 runCatching { CacheWriter(sources.streamCached.createDataSource(), sources.resolve(DataSpec(songUri(id))), null, null).also { writer = it }.cache() }
                 writer = null
             }

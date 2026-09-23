@@ -389,8 +389,8 @@ internal fun <T> SwipeCarousel(
             val release: (Float) -> Unit = { v ->
                 val o = offset
                 val w = size.width.toFloat()
-                // The same gesture as the sleeve's, by the same rule (the core's `swipe_turn`).
-                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter)
+                // The same gesture as the sleeve's, by the same rule (the core's `swipe_turn`), with the bar's slower flick.
+                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter, bar = true)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()

@@ -60,7 +60,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
         out.mkdirs()
         val args = mutableListOf("cargo", "ndk")
         targets.get().forEach { args += listOf("-t", it) }
-        args += listOf("-o", out.absolutePath, "build", "-p", "norimusic")
+        args += listOf("-o", out.absolutePath, "build", "-p", "nori-android")
         if (profile.get() == "release") args += "--release"
         exec.exec {
             workingDir = workDir.get().asFile
@@ -77,19 +77,12 @@ abstract class UniffiBindgenTask @Inject constructor(private val exec: ExecOpera
 
     @TaskAction
     fun run() {
-        val wd = workDir.get().asFile
+        // The JNI generator reads the crates' sources (src:), so nothing has to be built for the host first.
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
         exec.exec {
-            workingDir = wd
-            commandLine("cargo", "build", "-q", "-p", "norimusic")
-        }
-        exec.exec {
-            workingDir = wd
-            commandLine(
-                "cargo", "run", "-q", "-p", "uniffi-bindgen", "--",
-                "generate", "--library", "target/debug/libnorimusic.so",
-                "--language", "kotlin", "--no-format",
-                "--out-dir", outputDir.get().asFile.absolutePath,
-            )
+            workingDir = workDir.get().asFile
+            commandLine("cargo", "run", "-q", "-p", "uniffi-bindgen", "--", "bindings", "src:nori-android", out.absolutePath)
         }
     }
 }
@@ -108,7 +101,7 @@ val cargoNdkBuild = tasks.register<CargoNdkTask>("cargoNdkBuild") {
 
 val uniffiBindgen = tasks.register<UniffiBindgenTask>("uniffiBindgen") {
     group = "rust"
-    description = "Generate Kotlin bindings with uniffi"
+    description = "Generate the Kotlin bindings with uniffi-bindgen-kotlin-jni"
     crates.set(File(cargoRoot, "crates"))
     workDir.set(cargoRoot)
     outputDir.set(layout.buildDirectory.dir("generated/uniffi"))
@@ -129,6 +122,5 @@ dependencies {
     api(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.guava)
     implementation(libs.androidx.core.ktx)
-    implementation("${libs.jna.get()}@aar")
     testImplementation("junit:junit:4.13.2")
 }

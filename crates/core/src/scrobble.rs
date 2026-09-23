@@ -19,7 +19,8 @@ struct Scrobbler {
 static SCROBBLER: Mutex<Scrobbler> = Mutex::new(Scrobbler { song: None, started_at: 0, heard_ms: 0, playing_since: 0 });
 
 /// What to tell the server when a song is left.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ScrobbleSend {
     /// The song just left, if it was heard long enough to count, and when it started.
     pub submit_id: Option<String>,
@@ -39,7 +40,7 @@ fn edge(s: &mut Scrobbler, playing: bool, now: i64) {
 }
 
 /// Playback started or stopped at `now_ms` (a monotonic clock).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn scrobble_playing(playing: bool, now_ms: i64) {
     edge(&mut SCROBBLER.lock(), playing, now_ms);
 }
@@ -51,7 +52,8 @@ pub fn needed_ms(duration_s: i64, percent: i32) -> i64 {
 }
 
 /// Why the player's song changed, for [`scrobble_track`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TrackChange {
     /// Onto another song (or onto nothing).
     Moved,
@@ -74,7 +76,7 @@ fn followed(id: Option<String>, why: TrackChange) -> Option<String> {
 /// The player's song changed to `id` (`why`), playing or not, at `now_ms` (monotonic) and `wall_ms`.
 /// Records the song left in the history when the taste model is on, and says what to send when
 /// scrobbling is, counting a play at the share of the song the settings ask for.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn scrobble_track(id: Option<String>, why: TrackChange, playing: bool, now_ms: i64, wall_ms: i64, tz_offset_ms: i32) -> ScrobbleSend {
     let (taste_model, scrobble, percent) = crate::settings_store::with_prefs(|p| (p.taste_model, p.scrobble, p.scrobble_percent)).unwrap_or((true, true, 50));
     track(followed(id, why), playing, now_ms, wall_ms, tz_offset_ms, taste_model, scrobble, percent)

@@ -22,6 +22,7 @@ import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.offline.Downloader
 import androidx.media3.exoplayer.offline.DownloaderFactory
 import androidx.media3.exoplayer.scheduler.Scheduler
+import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.Nori
 import dev.nori.music.ffi.Core
 import dev.nori.music.ffi.DownloadKnown
@@ -34,9 +35,39 @@ import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
-data class DownloadState(val done: List<Song> = emptyList(), val pending: List<Song> = emptyList()) {
-    val doneIds: Set<String> = done.mapTo(HashSet()) { it.id }
-    val pendingIds: Set<String> = pending.mapTo(HashSet()) { it.id }
+/**
+ * The downloads table as the screens read it: how many songs are downloaded and how many are still to
+ * come, and whether one song is either - asked of the core's memory of the table, not copied here, so a
+ * song finishing costs the same with ten downloads as with ten thousand. A new value whenever the table
+ * changes. The songs themselves are only read when something asks for them, off the main thread.
+ */
+class DownloadState internal constructor(
+    val doneCount: Int = 0,
+    val pendingCount: Int = 0,
+    private val version: Long = 0,
+    private val songs: (Boolean) -> List<Song> = { emptyList() },
+) {
+    val doneIds: Set<String> = Membership(DownloadsJni.DONE, doneCount)
+    val pendingIds: Set<String> = Membership(DownloadsJni.PENDING, pendingCount)
+
+    /** Every downloaded song, newest first: read from the core the first time it is asked, never on the main thread. */
+    val done: List<Song> by lazy { songs(true) }
+    /** Every song still to download, newest first; read as [done] is. */
+    val pending: List<Song> by lazy { songs(false) }
+
+    override fun equals(other: Any?) = other is DownloadState && other.version == version
+    override fun hashCode() = version.hashCode()
+
+    /**
+     * One side of the table as a set: a lookup is one question to the core. Equal only to itself, so
+     * nothing compares two of them song by song; a change to the table is a new [DownloadState].
+     */
+    private inner class Membership(private val kind: Int, override val size: Int) : AbstractSet<String>() {
+        override fun contains(element: String) = size > 0 && DownloadsJni.held(element) == kind
+        override fun iterator() = songs(kind == DownloadsJni.DONE).map { it.id }.iterator()
+        override fun equals(other: Any?) = this === other
+        override fun hashCode() = System.identityHashCode(this)
+    }
 }
 
 /**
@@ -96,19 +127,14 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
 
                 override fun onDownloadChanged(m: DownloadManager, d: Download, e: Exception?) {
                     follow(d)
-                    if (d.state == Download.STATE_COMPLETED) io.execute {
-                        // The download is the permanent copy now; the streamed one is the same bytes
-                        // twice, so it goes. (A song streamed before it was downloaded lives in both.)
-                        sources.dropStreamCopies(d.request.id)
-                        core.downloadDone(d.request.id); publish()
-                    }
+                    if (d.state == Download.STATE_COMPLETED) settle(d.request.id, true)
                 }
 
                 override fun onDownloadRemoved(m: DownloadManager, d: Download) {
                     val flags = DownloadsJni.removed(d.request.id)
                     progress.remove(d.request.id)
                     if (flags and DownloadsJni.MARKS != 0) refreshMarks()
-                    io.execute { core.downloadRemove(d.request.id); publish() }
+                    settle(d.request.id, false)
                     if (flags and DownloadsJni.DRAINED != 0) summarise()
                 }
             })
@@ -125,10 +151,40 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         io.execute { publish(); reconcile() }
     }
 
+    /** The table's counts, from the core's memory of it: nothing is read or copied, however many songs it holds. */
     private fun publish() {
-        val next = DownloadState(core.downloads(true), core.downloads(false))
-        sources.downloaded = next.doneIds
-        _state.value = next
+        val n = core.downloadCounts()
+        _state.value = DownloadState(n.done.toInt(), n.pending.toInt(), n.version.toLong(), ::songs)
+    }
+
+    private fun songs(done: Boolean): List<Song> = runCatching { core.downloads(done) }.getOrDefault(emptyList())
+
+    /** Downloads that finished (true) or left the queue (false) and are not written down yet, in order. */
+    private val settledIds = ArrayList<String>()
+    private val settledDone = ArrayList<Boolean>()
+
+    /**
+     * Writes down that a download finished or went. They are gathered and written together, in one call
+     * and one transaction, followed by one [publish]: stopping a library's worth of downloads reports each
+     * song on its own, and writing each on its own was a call, a statement and a count per song.
+     */
+    private fun settle(id: String, finished: Boolean) {
+        val first = synchronized(settledIds) {
+            settledIds.add(id); settledDone.add(finished)
+            settledIds.size == 1
+        }
+        if (first) io.execute(::writeSettled)
+    }
+
+    private fun writeSettled() {
+        val (ids, done) = synchronized(settledIds) {
+            (ArrayList(settledIds) to ArrayList(settledDone)).also { settledIds.clear(); settledDone.clear() }
+        }
+        // A finished download is the permanent copy; the streamed one is the same bytes twice, so it
+        // goes. (A song streamed before it was downloaded lives in both.)
+        for (i in ids.indices) if (done[i]) sources.dropStreamCopies(ids[i])
+        runCatching { core.downloadSettle(ids, done) }.onFailure { Log.w(TAG, "could not write ${ids.size} settled downloads", it) }
+        publish()
     }
 
     /**
@@ -190,16 +246,21 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         if (flags and DownloadsJni.DRAINED != 0) summarise()
     }
 
-    /** The core's phases as the screens read them, each with its song's progress flow. */
+    /**
+     * The core's phases as the screens read them, each with its song's progress flow. Only the marks that
+     * moved since the last time come over; a song that lost its mark and is not waiting any more also
+     * loses its progress. Runs on the main thread, the only one that applies them.
+     */
     private fun refreshMarks() {
-        val m = dev.nori.music.ffi.downloadMarks()
-        val next = HashMap<String, DownloadMark>(m.ids.size)
+        val m = dev.nori.music.ffi.downloadMarksChanged()
+        if (m.ids.isEmpty()) return
+        val next = HashMap(_marks.value)
         for (i in m.ids.indices) {
             val id = m.ids[i]
-            val phase = when (m.phases[i]) { 1 -> DownloadPhase.DOWNLOADING; 2 -> DownloadPhase.FAILED; else -> DownloadPhase.DONE }
-            next[id] = DownloadMark(phase, progressOf(id), m.at[i])
+            val phase = when (m.phases[i]) { 0 -> null; 1 -> DownloadPhase.DOWNLOADING; 2 -> DownloadPhase.FAILED; else -> DownloadPhase.DONE }
+            if (phase != null) next[id] = DownloadMark(phase, progressOf(id), m.at[i])
+            else if (next.remove(id) != null && DownloadsJni.held(id) != DownloadsJni.PENDING) progress.remove(id)
         }
-        progress.keys.retainAll(next.keys + (_state.value.pendingIds))
         _marks.value = next
     }
 
@@ -225,7 +286,10 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         val retries = q.again.map(::request)
         main.post {
             for (r in requests) add(r)
-            for (r in retries) if (!manager.currentDownloads.any { it.request.id == r.id }) { unmark(listOf(r.id)); add(r) }
+            if (retries.isEmpty()) return@post
+            // Listed once: media3 hands out a fresh copy of its list each time it is asked.
+            val working = manager.currentDownloads.mapTo(HashSet()) { it.request.id }
+            for (r in retries) if (r.id !in working) { unmark(listOf(r.id)); add(r) }
         }
     }
 
@@ -261,20 +325,24 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         if (ids.isEmpty()) return
         unmark(ids)
         remove(ids)
-        io.execute { ids.forEach { core.downloadRemove(it) }; publish() }
+        for (id in ids) settle(id, false)
     }
 
     /**
-     * Everything not yet downloaded, in one go: straight to the manager rather than one service intent
-     * per song, which for a whole library queued would be thousands. Finished downloads stay, which
-     * media3's own "remove all" would not leave.
+     * Everything not yet downloaded, in one go: the core takes it out of the table and forgets its marks
+     * in one call and says which songs they were, and they go straight to the manager rather than one
+     * service intent per song, which for a whole library queued would be thousands. Finished downloads
+     * stay, which media3's own "remove all" would not leave.
      */
-    fun cancelAll() {
-        val ids = _state.value.pending.map { it.id }
-        if (ids.isEmpty()) return
-        unmark(ids)
-        main.post { ids.forEach { manager.removeDownload(it) } }
-        io.execute { ids.forEach { core.downloadRemove(it) }; publish() }
+    fun cancelAll() = io.execute {
+        val ids = runCatching { core.downloadCancelAll() }.getOrElse { Log.w(TAG, "could not stop the downloads", it); return@execute }
+        if (ids.isEmpty()) return@execute
+        for (id in ids) progress.remove(id)
+        publish()
+        main.post {
+            refreshMarks()
+            for (id in ids) manager.removeDownload(id)
+        }
     }
 
     /**
@@ -383,21 +451,41 @@ internal object DownloadsJni {
     const val DRAINED = 2
     const val MARKS = 4
 
+    /** What [held] says of a song. */
+    const val PENDING = 1
+    const val DONE = 2
+
+    /** Whether a song is in the downloads table: 0 no, [PENDING] queued or failed, [DONE] downloaded. */
+    @JvmStatic external fun held(id: String): Int
     @JvmStatic external fun followed(id: String, state: Int, now: Long): Int
     @JvmStatic external fun removed(id: String): Int
     @JvmStatic external fun unmark(id: String): Int
     @JvmStatic external fun startFraction(id: String): Float
     @JvmStatic external fun open(id: String, now: Long): Int
     /** Per chunk: the progress to show, or NaN when it has not moved enough to draw. */
-    @JvmStatic external fun note(slot: Int, length: Long, bytes: Long, now: Long): Float
+    @JvmStatic @CriticalNative external fun note(slot: Int, length: Long, bytes: Long, now: Long): Float
     /** 0 unchanged, 1 changed, 2 the batch is over. */
-    @JvmStatic external fun notice(listed: Int, waiting: Int, now: Long): Int
+    @JvmStatic @CriticalNative external fun notice(listed: Int, waiting: Int, now: Long): Int
     @JvmStatic external fun noticeTitle(): String
     @JvmStatic external fun noticeText(): String
-    @JvmStatic external fun noticePermille(): Int
+    @JvmStatic @CriticalNative external fun noticePermille(): Int
     /** "title\ntext", or empty when there is nothing to say. */
     @JvmStatic external fun summary(): String
-    @JvmStatic external fun summaryFailed(): Int
+    @JvmStatic @CriticalNative external fun summaryFailed(): Int
+}
+
+/**
+ * The downloads screen's lines, in the core's words (crates/core/src/transfers.rs). A running row's line
+ * is asked whenever its ring moves and the summary once a second, so they come over JNI, written in a
+ * buffer the core keeps.
+ */
+object DownloadLines {
+    init { System.loadLibrary("norimusic") }
+
+    /** A running song's second line: [artist], then "45% · 2.1 MB/s · 1:20 left". */
+    @JvmStatic external fun row(id: String, artist: String): String
+    /** "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading". */
+    @JvmStatic external fun summary(active: Int, queued: Int, failed: Int): String
 }
 
 /** Asks the app to open on its downloads screen. The activity answers it; the core only names it. */

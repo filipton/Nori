@@ -1,6 +1,6 @@
 //! The transition engine (`nori_player::engine`) as Android reaches it. `TransitionSink` stays a media3
 //! AudioSink and forwards every call here; the engine calls back into it for the real output below
-//! (`down*`) and for what only the app knows (`host*`: plans, the analysis store, logging).
+//! (`down*`), and the core answers what only the app knows (`nori_core::automix::host`).
 //!
 //! media3's output insists that a buffer it took only part of is offered again as the same Java
 //! object. So audio passing straight through goes down as the decoder's own buffer, and each queued
@@ -11,14 +11,40 @@ use std::sync::OnceLock;
 
 use jni::objects::{GlobalRef, JByteBuffer, JClass, JMethodID, JObject, JString, JValue};
 use jni::signature::{Primitive, ReturnType};
-use jni::sys::{jboolean, jint, jlong};
+use jni::sys::{jboolean, jint, jlong, jobject};
 use jni::JNIEnv;
 use parking_lot::Mutex;
 
-use nori_player::automix::analysis::Analyzer;
+use nori_core::automix::host::CoreHost;
 use nori_player::burst::{Burst, Fed};
-use nori_player::engine::{Downstream, Heard, Host, Plan, StreamFormat, TransitionEngine, POSITION_NOT_SET};
+use nori_player::engine::{Downstream, StreamFormat, TransitionEngine, POSITION_NOT_SET};
 use nori_player::pcm::{Encoding, Format};
+
+use crate::{native, Class};
+
+pub(crate) static CLASS: Class = Class {
+    name: c"dev/nori/music/playback/TransitionEngineJni",
+    methods: &[
+        native!(c"create", c"()J", create),
+        native!(c"destroy", c"(J)V", destroy),
+        native!(c"replan", c"(J)V", replan),
+        native!(c"setLockRate", c"(JZ)V", set_lock_rate),
+        native!(c"setOffset", c"(JJ)V", set_offset),
+        native!(c"configure", c"(JLdev/nori/music/playback/TransitionSink;JLjava/lang/String;IIII)V", configure),
+        native!(c"handleBuffer", c"(JLdev/nori/music/playback/TransitionSink;JLjava/nio/ByteBuffer;IIJJ)J", handle_buffer),
+        native!(c"handleDiscontinuity", c"(JLdev/nori/music/playback/TransitionSink;J)V", handle_discontinuity),
+        native!(c"position", c"(JLdev/nori/music/playback/TransitionSink;JZJ)J", position),
+        native!(c"playToEnd", c"(JLdev/nori/music/playback/TransitionSink;J)Z", play_to_end),
+        native!(c"status", c"(J)Ljava/nio/ByteBuffer;", status),
+        native!(c"mixing", c"()Z", mixing),
+        native!(c"setBurst", c"(JZ)V", set_burst),
+        native!(c"restartBurst", c"(J)V", restart_burst),
+        native!(c"holding", c"()Z", holding),
+        native!(c"queueEmpty", c"(JLdev/nori/music/playback/TransitionSink;J)Z", queue_empty),
+        native!(c"flush", c"(JLdev/nori/music/playback/TransitionSink;J)V", flush),
+        native!(c"reset", c"(JLdev/nori/music/playback/TransitionSink;J)V", reset),
+    ],
+};
 
 struct Handle {
     engine: Mutex<TransitionEngine<i32>>,
@@ -38,6 +64,8 @@ struct Handle {
 }
 
 fn handle<'a>(h: jlong) -> Option<&'a Handle> {
+    // SAFETY: a non-zero `h` is a pointer `create` made with `Box::into_raw`, and Kotlin never passes
+    // one on after `destroy`.
     (h != 0).then(|| unsafe { &*(h as *const Handle) })
 }
 
@@ -49,20 +77,6 @@ struct Methods {
 }
 
 static METHODS: OnceLock<Methods> = OnceLock::new();
-
-/// The engine's latest word on what the ear has, for [`crate::heard::HeardClock`].
-pub(crate) static HEARD: Mutex<Heard> = Mutex::new(Heard {
-    id: None,
-    us: 0,
-    at_ms: 0,
-    until_us: i64::MAX,
-    mixing: false,
-    next_id: None,
-    next_from_us: 0,
-    next_rate: 1.0,
-    from_id: None,
-    audible_us: i64::MAX,
-});
 
 fn methods(env: &mut JNIEnv, sink: &JObject) -> Option<&'static Methods> {
     if let Some(m) = METHODS.get() {
@@ -103,6 +117,8 @@ struct Down<'a, 'e> {
 impl Down<'_, '_> {
     fn down_handle_buffer(&mut self, buf: &JObject, pts_us: i64) -> jni::errors::Result<i64> {
         let args = [JValue::Object(buf).as_jni(), JValue::Long(pts_us).as_jni()];
+        // SAFETY: the method id was looked up on the sink's own class with this signature: a ByteBuffer
+        // and a long in, a long out.
         unsafe { self.env.call_method_unchecked(self.sink, self.methods.handle_buffer, ReturnType::Primitive(Primitive::Long), &args) }.and_then(|v| v.j())
     }
 
@@ -141,6 +157,9 @@ impl Downstream for Down<'_, '_> {
                             let (_, _, g) = self.wrappers.swap_remove(i);
                             self.env.call_method(g.as_obj(), "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)]).map(|_| g)
                         }
+                        // SAFETY: `data` is a chunk of the engine's pool, whose memory stays where it is while
+                        // the engine lives; the wrapper is only offered to the output while that chunk is
+                        // being played out, and never after `destroy`.
                         None => unsafe { self.env.new_direct_byte_buffer(data.as_ptr() as *mut u8, data.len()) }.and_then(|b| {
                             // A buffer made here starts big-endian, as Java's do; media3 checks for
                             // little-endian (native) and throws otherwise.
@@ -199,6 +218,8 @@ impl Downstream for Down<'_, '_> {
             }
         }
         let args = [JValue::Bool(source_ended as jboolean).as_jni()];
+        // SAFETY: the method id was looked up on the sink's own class with this signature: a boolean in,
+        // a long out.
         let v = unsafe { self.env.call_method_unchecked(self.sink, self.methods.position, ReturnType::Primitive(Primitive::Long), &args) }.and_then(|v| v.j());
         if self.failed_now() {
             return POSITION_NOT_SET;
@@ -207,46 +228,11 @@ impl Downstream for Down<'_, '_> {
     }
 }
 
-struct App<'a, 'e> {
-    env: JNIEnv<'e>,
-    sink: &'a JObject<'e>,
-    now_ms: i64,
-}
-
-/// What only the app knows. Plans, analyses and the log are the core's own (`super::planner`,
-/// `crate::alog`); the one thing that still reaches Kotlin is the nudge that the heard song changed, so a
-/// page on screen follows the ear at once.
-impl Host for App<'_, '_> {
-    fn plan_for(&mut self, outgoing_id: &str) -> Option<Plan> {
-        super::planner::plan_for(outgoing_id)
-    }
-
-    fn wants_analysis(&mut self, song_id: &str) -> Option<u64> {
-        super::planner::wants_analysis(song_id)
-    }
-
-    fn analysed(&mut self, song_id: &str, analyzer: Analyzer, _channels: usize, frames: u64, rate: u32) {
-        super::planner::analysed(song_id, analyzer, frames, rate);
-    }
-
-    fn heard_changed(&mut self) {
-        let _ = self.env.call_method(self.sink, "hostHeardChanged", "()V", &[]);
-    }
-
-    fn log(&mut self, message: &str) {
-        crate::alog::info(message);
-    }
-
-    fn now_ms(&self) -> i64 {
-        self.now_ms
-    }
-}
-
-/// Runs `f` on the engine with the output below and the app as the sink provides them, then tells
-/// Kotlin what the ear is at if that changed.
+/// Runs `f` on the engine with the output below and the core as the host, then tells the core what
+/// the ear is at if that changed.
 fn with<'e, R>(
     env: &mut JNIEnv<'e>, h: jlong, sink: &JObject<'e>, now_ms: jlong, input: Option<(&JByteBuffer<'e>, usize, usize)>, prefetched: Option<(bool, i64)>,
-    f: impl FnOnce(&mut TransitionEngine<i32>, &mut Fed<'_, Down<'_, 'e>>, &mut App<'_, 'e>) -> R,
+    f: impl FnOnce(&mut TransitionEngine<i32>, &mut Fed<'_, Down<'_, 'e>>, &mut CoreHost<&mut dyn FnMut()>) -> R,
 ) -> Option<R> {
     let h = handle(h)?;
     let methods = methods(env, sink)?;
@@ -257,8 +243,14 @@ fn with<'e, R>(
     e.lock_rate = h.lock_rate.load(Ordering::Relaxed);
     let mut chunk = h.chunk.lock();
     let mut wrappers = h.wrappers.lock();
+    // SAFETY: the clones are used only within this call, on this thread, while `env` is alive.
     let mut down = Down { env: unsafe { env.unsafe_clone() }, sink, methods, prefetched, input, chunk: &mut chunk, wrappers: &mut wrappers, failed: false };
-    let mut app = App { env: unsafe { env.unsafe_clone() }, sink, now_ms };
+    let mut app_env = unsafe { env.unsafe_clone() };
+    // The one thing that still reaches Kotlin: a page on screen follows the ear at once.
+    let mut heard_changed = || {
+        let _ = app_env.call_method(sink, "hostHeardChanged", "()V", &[]);
+    };
+    let mut app = CoreHost { now_ms, heard_changed: &mut heard_changed as &mut dyn FnMut() };
     let mut burst = h.burst.lock();
     let r = f(&mut e, &mut Fed::new(&mut down, &mut burst, now_ms), &mut app);
     h.status[1].store(burst.bytes_written as i64, Ordering::Relaxed);
@@ -266,27 +258,19 @@ fn with<'e, R>(
     if down.failed || env.exception_check().unwrap_or(true) {
         return Some(r);
     }
-    // Where the app reads what the ear has (crates/core/src/heard.rs). Asked about on every position
-    // query while a hold or mix runs, so it is copied in place, reusing the strings it already has.
     h.status[0].store(e.has_pending_data() as i64, Ordering::Relaxed);
-    let heard = e.heard();
-    let mut shared = HEARD.lock();
-    if *shared != *heard {
-        shared.assign(heard);
-    }
+    nori_core::heard::publish(e.heard());
     Some(r)
 }
 
 /// Whether a mix is being heard right now (for the test bridge and logs).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_mixing(_: JNIEnv, _: JClass) -> jboolean {
-    HEARD.lock().mixing as jboolean
+extern "system" fn mixing() -> jboolean {
+    nori_core::heard::mixing() as jboolean
 }
 
 /// Whether the ear is behind the player on a held ending (for logs).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_holding(_: JNIEnv, _: JClass) -> jboolean {
-    HEARD.lock().id.is_some() as jboolean
+extern "system" fn holding() -> jboolean {
+    nori_core::heard::holding() as jboolean
 }
 
 fn stream(id: Option<String>, rate: jint, channels: jint, encoding: jint) -> StreamFormat {
@@ -302,8 +286,7 @@ fn opt_string(env: &mut JNIEnv, s: &JString) -> Option<String> {
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_create(_: JNIEnv, _: JClass) -> jlong {
+extern "system" fn create() -> jlong {
     let h = Handle {
         engine: Mutex::new(TransitionEngine::new()),
         replan: AtomicBool::new(false),
@@ -316,37 +299,34 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_create(_
     Box::into_raw(Box::new(h)) as jlong
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_destroy(_: JNIEnv, _: JClass, h: jlong) {
+extern "system" fn destroy(h: jlong) {
     if h != 0 {
+        // SAFETY: `h` came from `create` and Kotlin destroys it once.
         drop(unsafe { Box::from_raw(h as *mut Handle) });
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_replan(_: JNIEnv, _: JClass, h: jlong) {
+extern "system" fn replan(h: jlong) {
     if let Some(h) = handle(h) {
         h.replan.store(true, Ordering::Relaxed);
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_setLockRate(_: JNIEnv, _: JClass, h: jlong, on: jboolean) {
+extern "system" fn set_lock_rate(h: jlong, on: jboolean) {
     if let Some(h) = handle(h) {
         h.lock_rate.store(on != 0, Ordering::Relaxed);
     }
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_setOffset(_: JNIEnv, _: JClass, h: jlong, offset_us: jlong) {
+extern "system" fn set_offset(h: jlong, offset_us: jlong) {
     if let Some(h) = handle(h) {
         h.engine.lock().set_output_stream_offset_us(offset_us);
     }
 }
 
 /// `encoding` is media3's (2 = 16-bit, 4 = float; anything else is not samples).
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_configure<'e>(
+#[allow(clippy::too_many_arguments)]
+extern "system" fn configure<'e>(
     mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong, id: JString<'e>, rate: jint, channels: jint, encoding: jint, token: jint,
 ) {
     let id = opt_string(&mut env, &id);
@@ -355,27 +335,22 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_configur
 
 /// Offers `len` bytes of `buffer` from `pos`; `down_position_us` is the output's clock, read just before.
 /// Returns `(taken << 32) | bytes used`.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_handleBuffer<'e>(
+#[allow(clippy::too_many_arguments)]
+extern "system" fn handle_buffer<'e>(
     mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong, buffer: JByteBuffer<'e>, pos: jint, len: jint, pts_us: jlong, down_position_us: jlong,
 ) -> jlong {
-    let Ok(base) = env.get_direct_buffer_address(&buffer) else { return 0 };
-    if base.is_null() || pos < 0 || len < 0 {
-        return 0;
-    }
-    let data = unsafe { std::slice::from_raw_parts(base.add(pos as usize), len as usize) };
+    let Some(data) = crate::region(&env, &buffer, pos, len) else { return 0 };
+    let data: &[u8] = data;
     let input = Some((&buffer, data.as_ptr() as usize, data.len()));
     with(&mut env, h, &sink, now_ms, input, Some((false, down_position_us)), |e, d, a| e.handle_buffer(d, a, data, pts_us))
         .map_or(0, |(taken, used)| ((taken as jlong) << 32) | used as jlong)
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_handleDiscontinuity<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
+extern "system" fn handle_discontinuity<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
     with(&mut env, h, &sink, now_ms, None, None, |e, d, a| e.handle_discontinuity(d, a));
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_position<'e>(
+extern "system" fn position<'e>(
     mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong, source_ended: jboolean, down_position_us: jlong,
 ) -> jlong {
     let prefetched = Some((source_ended != 0, down_position_us));
@@ -383,26 +358,24 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_position
 }
 
 /// Whatever is held goes out; true when everything queued went down.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_playToEnd<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) -> jboolean {
+extern "system" fn play_to_end<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) -> jboolean {
     with(&mut env, h, &sink, now_ms, None, None, |e, d, a| e.play_to_end_of_stream(d, a)).unwrap_or(true) as jboolean
 }
 
 /// A direct buffer over the engine's status words (see `Handle::status`), made once per engine.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_status<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong) -> JObject<'e> {
-    let Some(h) = handle(h) else { return JObject::null() };
+extern "system" fn status(mut env: JNIEnv, _: JClass, h: jlong) -> jobject {
+    let Some(h) = handle(h) else { return std::ptr::null_mut() };
     let p = h.status.as_ptr() as *mut u8;
-    unsafe { env.new_direct_byte_buffer(p, std::mem::size_of::<[AtomicI64; 2]>()) }.map(JObject::from).unwrap_or(JObject::null())
+    // SAFETY: the status words live in their own box for as long as the handle, which Kotlin keeps
+    // longer than the buffer it reads them through.
+    unsafe { env.new_direct_byte_buffer(p, std::mem::size_of::<[AtomicI64; 2]>()) }.map_or(std::ptr::null_mut(), |b| b.into_raw())
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_queueEmpty<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) -> jboolean {
+extern "system" fn queue_empty<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) -> jboolean {
     with(&mut env, h, &sink, now_ms, None, None, |e, d, _| e.queue_empty(d)).unwrap_or(true) as jboolean
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_flush<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
+extern "system" fn flush<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
     if let Some(hd) = handle(h) {
         *hd.chunk.lock() = None;
         hd.burst.lock().restart();
@@ -410,8 +383,7 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_flush<'e
     with(&mut env, h, &sink, now_ms, None, None, |e, _, a| e.flush(a));
 }
 
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_reset<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
+extern "system" fn reset<'e>(mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong) {
     if let Some(hd) = handle(h) {
         *hd.chunk.lock() = None;
         hd.burst.lock().restart();
@@ -420,8 +392,7 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_reset<'e
 }
 
 /// Bursts on or off: off while the output decodes by itself, or the equalizer is being tuned.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_setBurst(_: JNIEnv, _: JClass, h: jlong, on: jboolean) {
+extern "system" fn set_burst(h: jlong, on: jboolean) {
     if let Some(h) = handle(h) {
         h.burst.lock().enabled = on != 0;
     }
@@ -429,8 +400,7 @@ pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_setBurst
 
 /// Playing or pausing: the output may have been stopped and its clock reset meanwhile, so what was
 /// written before means nothing now.
-#[no_mangle]
-pub extern "system" fn Java_dev_nori_music_playback_TransitionEngineJni_restartBurst(_: JNIEnv, _: JClass, h: jlong) {
+extern "system" fn restart_burst(h: jlong) {
     if let Some(h) = handle(h) {
         h.burst.lock().restart();
     }

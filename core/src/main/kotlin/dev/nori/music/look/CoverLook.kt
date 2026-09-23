@@ -1,5 +1,8 @@
 package dev.nori.music.look
 
+import dalvik.annotation.optimization.CriticalNative
+import dalvik.annotation.optimization.FastNative
+
 /**
  * How a page looks, worked out in Rust (crates/look) so every app built on it dresses the same record
  * the same way: a cover's colours and everything dressed in them - the theme's roles, the plates behind
@@ -72,7 +75,7 @@ object CoverLook {
      * Looks [from] and [to] mixed at [t] into [out], all [LEN] entries (`nori_look::dress::mix`): one frame
      * of a page cross-fading. Primitives only, so a frame crosses once and allocates nothing.
      */
-    @JvmStatic external fun mix(from: IntArray, to: IntArray, t: Float, out: IntArray)
+    @JvmStatic @FastNative external fun mix(from: IntArray, to: IntArray, t: Float, out: IntArray)
 
     /** A page's look ([LEN] entries) and its wash, [WASH] x [WASH] pixels, or null on AMOLED black. */
     class Colours(val look: IntArray, val wash: android.graphics.Bitmap?)
@@ -116,12 +119,28 @@ object CoverLook {
      * the finger's place while [dragging], else a held seek ([heldMs] -1 for none), else the music's.
      * Primitives only: it is asked on every frame a finger moves the bar.
      */
-    @JvmStatic external fun seekTimes(dragging: Boolean, drag: Float, heldMs: Long, positionMs: Long, durationMs: Long): Long
+    @JvmStatic @CriticalNative external fun seekTimes(dragging: Boolean, drag: Float, heldMs: Long, positionMs: Long, durationMs: Long): Long
 
-    @JvmStatic external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
+    /** A time under the seek bar, "3:07", or "-3:07" when [left] (`nori-core fmt::duration`): one Java string, no bridge objects. */
+    @JvmStatic external fun duration(seconds: Long, left: Boolean): String
+
+    @JvmStatic @CriticalNative external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
+
+    /** Which glyph the play button shows (`nori-core stage::transport_glyph`): 0 play, 1 pause, 2 spinner. */
+    @JvmStatic @CriticalNative external fun transportGlyph(playing: Boolean, buffering: Boolean, waited: Boolean): Int
+
+    /**
+     * A page's Shuffle and Play (`nori-core pages::hero_buttons`), packed by `HeroButtons::pack`: bit 0
+     * Shuffle lit, 1 Shuffle enabled, 2 pausing, 3 Play enabled, bits 4-5 and 6-7 what Shuffle and Play
+     * press (0 start, 1 toggle, 2 shuffle off). Primitives only: it is asked on every play and pause.
+     */
+    @JvmStatic @CriticalNative external fun heroButtons(here: Boolean, shuffle: Boolean, playing: Boolean, buffering: Boolean, canPlay: Boolean, canShuffle: Boolean): Int
+
+    /** What Play says, "Pause" or "Play" (`nori-core pages::hero_play_label`). */
+    @JvmStatic external fun heroPlayLabel(pausing: Boolean): String
 
     @JvmStatic private external fun deriveBitmap(bitmap: android.graphics.Bitmap, dark: Boolean, amoled: Boolean, out: IntArray, wash: android.graphics.Bitmap?): Int
-    @JvmStatic private external fun plain(roles: IntArray, out: IntArray)
-    @JvmStatic private external fun tones(seed: Int, dark: Boolean, out: IntArray)
-    @JvmStatic private external fun amoled(out: IntArray)
+    @JvmStatic @FastNative private external fun plain(roles: IntArray, out: IntArray)
+    @JvmStatic @FastNative private external fun tones(seed: Int, dark: Boolean, out: IntArray)
+    @JvmStatic @FastNative private external fun amoled(out: IntArray)
 }

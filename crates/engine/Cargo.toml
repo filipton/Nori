@@ -1,0 +1,23 @@
+[package]
+name = "nori-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nori's player for platforms without one: loading, demuxing, the sound chain, transitions and output through a small adapter"
+
+[lib]
+name = "nori_engine"
+
+[features]
+# The core's queue, transition planner, settings and stream addresses, for a client that links the core.
+core = ["dep:norimusic-core"]
+
+[dependencies]
+nori-player = { path = "../player" }
+parking_lot = "0.12"
+# Containers: the format readers only. Decoding is nori-player's, so every platform hears the same samples.
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "flac", "aac", "isomp4", "ogg", "wav", "pcm", "vorbis", "alac"] }
+norimusic-core = { path = "../core", default-features = false, optional = true }
+
+[dev-dependencies]
+nori-player = { path = "../player", features = ["synth"] }

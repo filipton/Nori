@@ -2,9 +2,16 @@
 //! mapped onto the player's, and the doors the Kotlin glue calls when a device is attached or removed
 //! and when the output format changes. Event rate only, never per buffer.
 
-use nori_player::dac::{self, DacDecision, DacMode, DacStep};
-use nori_player::outputs::{self, OutputKind, Seen};
+use nori_player::dac::{self, DacMode};
+use nori_player::outputs::{self, OutputKind};
 
+// Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
+pub use nori_player::dac::DacDecision;
+#[cfg(any(feature = "ffi", test))]
+pub use nori_player::dac::DacStep;
+pub use nori_player::outputs::Seen;
+
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct Seen {
     pub current: String,
@@ -12,6 +19,7 @@ pub struct Seen {
     pub usb: bool,
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum DacStep {
     Release,
@@ -19,6 +27,7 @@ pub enum DacStep {
     Prefer { index: u32 },
 }
 
+#[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct DacDecision {
     pub step: DacStep,
@@ -45,7 +54,8 @@ fn kind(t: i32) -> OutputKind {
 }
 
 /// The glyph the player's output button shows for where the sound is going.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum OutputGlyph {
     Headphones,
     Bluetooth,
@@ -54,7 +64,8 @@ pub enum OutputGlyph {
 }
 
 /// The output button as it stands.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct OutputLook {
     pub glyph: OutputGlyph,
     /// The sound is going somewhere other than the phone's speaker: the glyph takes the accent.
@@ -65,7 +76,7 @@ pub struct OutputLook {
 
 /// The output button for `output`, one of the names outputs are remembered by ("USB: …",
 /// "Bluetooth: …", "Wired headphones", the speaker, or a device's own name).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn output_look(output: String) -> OutputLook {
     let glyph = if output.starts_with("USB") || output.starts_with("Wired") {
         OutputGlyph::Headphones
@@ -99,32 +110,32 @@ fn modes(rates: &[u32], encodings: &[i32]) -> Vec<DacMode> {
 
 /// The output devices Android lists now, as parallel lists of `AudioDeviceInfo` types and product
 /// names, against the list of every output seen so far.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_refresh(types: Vec<i32>, names: Vec<String>, known: Vec<String>, fake_usb: Option<String>) -> Seen {
     let attached: Vec<(OutputKind, &str)> = types.iter().zip(&names).map(|(t, n)| (kind(*t), n.as_str())).collect();
     outputs::refresh(&attached, &known, fake_usb.as_deref())
 }
 
 /// The name the phone's own speaker goes by (`nori_player::outputs::SPEAKER`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_speaker() -> String {
     nori_player::outputs::SPEAKER.into()
 }
 
 /// The name of the sound profile that changes nothing (`nori_player::device::FLAT`).
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn device_flat() -> String {
     nori_player::device::FLAT.into()
 }
 
 /// The list of outputs as it comes back from storage.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_known(stored: Vec<String>) -> Vec<String> {
     outputs::initial_known(&stored)
 }
 
 /// The list without `output`, or `None` when it stays as it is.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn outputs_forget(known: Vec<String>, current: String, output: String) -> Option<Vec<String>> {
     outputs::forget(&known, &current, &output)
 }
@@ -132,7 +143,7 @@ pub fn outputs_forget(known: Vec<String>, current: String, output: String) -> Op
 /// The decision about an attached DAC; see `nori_player::dac::decide`. Modes are parallel lists of
 /// sample rates and `AudioFormat` encodings; `applied_*` are the modes of the port the preferred mode
 /// is held for, when it is the same port.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 #[allow(clippy::too_many_arguments)]
 pub fn dac_decide(
     enabled: bool, platform_ok: bool, name: String, rates: Vec<u32>, encodings: Vec<i32>, playing_rate: u32, playing_encoding: i32,
@@ -143,13 +154,14 @@ pub fn dac_decide(
 }
 
 /// What the AudioTrack was opened with, for the user to check.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn dac_track_line(rate: u32, encoding: i32, offloaded: bool) -> String {
     dac::track_line(rate, bits(encoding), offloaded)
 }
 
 /// A DAC that is not there, as the test bridge describes it.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MockDac {
     pub name: String,
     pub rates: Vec<u32>,
@@ -159,7 +171,7 @@ pub struct MockDac {
 
 /// `name@44100/16,96000/24`: the rates and bit depths the pretend DAC offers bit-perfect ("16", "24",
 /// "32" or "float"; 16 when left out). A mode that does not read is left out.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn dac_mock(spec: String) -> MockDac {
     let name = match spec.split_once('@') {
         Some((n, _)) if !n.is_empty() => n.to_string(),

@@ -68,7 +68,7 @@ const OTHER_COLOUR: u32 = 0xFF5C_6BC0;
 
 /// A mix tile's colours: its own, the deeper one its gradient runs to (45 % of the way to black), and
 /// that deeper colour at 0, 72 and 94 % for the band rising under the tile's name.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_tile_colours(id: String) -> Vec<u32> {
     use nori_look::compose::{blend, with_alpha};
     let seed = if id == FAVOURITES_MIX { FAVOURITES_COLOUR } else { spec_of(&id).map_or(OTHER_COLOUR, |s| s.colour) };
@@ -104,7 +104,8 @@ fn distinct(songs: impl IntoIterator<Item = Song>) -> Vec<Song> {
 // ---- what crosses to the app -----------------------------------------------
 
 /// One entry of the catalogue, for a player that lists the mixes itself.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixSpec {
     pub id: String,
     pub title: String,
@@ -113,7 +114,8 @@ pub struct MixSpec {
 }
 
 /// A "For you" tile: what it is called and up to four cover ids of what is in it.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixTile {
     pub id: String,
     pub title: String,
@@ -122,7 +124,8 @@ pub struct MixTile {
 }
 
 /// A mix page: exactly the songs that play, in the order they play.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixSheet {
     pub id: String,
     pub title: String,
@@ -132,9 +135,16 @@ pub struct MixSheet {
     /// False for favourites (they follow the hearts) and for top songs (there is only one draw of those).
     pub refreshable: bool,
     pub favourites: bool,
+    /// The line under the title, "12 songs · 48:10" ([`crate::fmt::list_caption`]); empty with no songs.
+    pub caption: String,
 }
 
-#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
+fn caption(songs: &[Song]) -> String {
+    if songs.is_empty() { String::new() } else { crate::fmt::list_caption(songs, false) }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum MixLookup {
     /// No mix has this id; `message` says so in words.
     Unknown { message: String },
@@ -143,7 +153,8 @@ pub enum MixLookup {
     Ready { sheet: MixSheet },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, uniffi::Enum)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum MixDraw {
     Unknown,
     /// This period's draw was already there.
@@ -155,7 +166,8 @@ pub enum MixDraw {
 }
 
 /// What warming the row did: whether any tile changed, and which mixes need the server's random songs.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixWarm {
     pub changed: bool,
     pub needs_fallback: Vec<String>,
@@ -211,7 +223,7 @@ fn draw(c: &Connection, kind: Kind, seed: u64, now_ms: i64) -> Vec<Song> {
 
 /// Every tile that can be named without the index: favourites first, then the mixes when the taste model
 /// is on (switched off, it draws nothing and offers only favourites). No covers yet.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_tiles(taste: bool) -> Vec<MixTile> {
     let mut out = vec![MixTile { id: FAVOURITES_MIX.into(), title: "Favourites".into(), covers: vec![], favourites: true }];
     if taste {
@@ -221,13 +233,13 @@ pub fn mix_tiles(taste: bool) -> Vec<MixTile> {
 }
 
 /// The mixes "For you" offers, in order.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_catalogue() -> Vec<MixSpec> {
     MIXES.iter().map(|s| MixSpec { id: s.id.into(), title: s.title.into(), weekly: s.weekly, refreshable: s.refreshable() }).collect()
 }
 
 /// Drawn off the main thread: a mix takes a few milliseconds of the index.
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Draws mix `id` unless this period's draw is already here; `again` asks for a different one.
     /// `today_epoch_day` is the local date as days since 1970-01-01. `fallback` is None on the first call
@@ -296,7 +308,7 @@ impl Core {
         if id == FAVOURITES_MIX {
             return self.board(|b| match &b.favourites {
                 Some(songs) => MixLookup::Ready {
-                    sheet: MixSheet { id: id.clone(), title: "Favourites".into(), covers: cover_ids(songs), songs: songs.clone(), refreshable: false, favourites: true },
+                    sheet: MixSheet { id: id.clone(), title: "Favourites".into(), covers: cover_ids(songs), caption: caption(songs), songs: songs.clone(), refreshable: false, favourites: true },
                 },
                 None => MixLookup::NotDrawn,
             });
@@ -304,7 +316,7 @@ impl Core {
         let Some(spec) = spec_of(&id) else { return MixLookup::Unknown { message: format!("There is no mix called {id}") } };
         self.board(|b| match b.drawn.get(spec.id) {
             Some(d) => MixLookup::Ready {
-                sheet: MixSheet { id: spec.id.into(), title: spec.title.into(), songs: d.songs.clone(), covers: cover_ids(&d.songs), refreshable: spec.refreshable(), favourites: false },
+                sheet: MixSheet { id: spec.id.into(), title: spec.title.into(), songs: d.songs.clone(), covers: cover_ids(&d.songs), refreshable: spec.refreshable(), favourites: false, caption: caption(&d.songs) },
             },
             None => MixLookup::NotDrawn,
         })

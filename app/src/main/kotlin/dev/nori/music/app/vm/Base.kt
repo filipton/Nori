@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.nori.music.Nori
+import dev.nori.music.net.said
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -68,7 +69,7 @@ abstract class NoriViewModel(app: Application) : AndroidViewModel(app) {
     /** Collected only while a screen is looking, and for five seconds after, so a rotation does not refetch. */
     protected fun <T> Flow<T>.asLoad(): StateFlow<Load<T>> =
         map<T, Load<T>> { Load.Ready(it) }
-            .catch { emit(Load.Failed(it.message ?: it.javaClass.simpleName)) }
+            .catch { emit(Load.Failed(it.said ?: it.javaClass.simpleName)) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Load.Loading)
 
     fun cover(id: String?, size: Int): String? = nori.library.coverUrl(id, size)

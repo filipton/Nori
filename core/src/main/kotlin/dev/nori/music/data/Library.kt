@@ -124,6 +124,13 @@ class Library(
     suspend fun search(query: String): SearchResult =
         call(Read.Search(query, sizes.searchSongs, sizes.searchAlbums, sizes.searchArtists)) { (it as Page.Found).v }
 
+    /**
+     * The server's answer to [query], taken into [session] by the core (`SearchSession::ask`) without
+     * coming out here; null when the field has moved on.
+     */
+    suspend fun searchInto(session: dev.nori.music.ffi.SearchSession, query: String): dev.nori.music.ffi.SearchView? =
+        withContext(Dispatchers.IO) { lifted { session.ask(client, query) } }
+
     suspend fun searchHistory(): List<String> = withContext(Dispatchers.IO) { core.searchHistory() }
     suspend fun forgetSearches() = withContext(Dispatchers.IO) { core.searchForget() }
 
@@ -135,12 +142,28 @@ class Library(
 
     fun artists(): Flow<List<Artist>> = cached(Read.ArtistIndex) { (it as Page.Artists).v }
     fun album(id: String): Flow<AlbumDetail> = cached(Read.AlbumById(id)) { (it as Page.AlbumPage).v }
+
+    /** The home page's favourite albums: the starred album list with this session's marks laid over it by the core. */
+    fun favouriteAlbums(size: Int): Flow<List<Album>> = cached(Read.FavouriteAlbums(size)) { (it as Page.Albums).v }
     fun artist(id: String): Flow<ArtistDetail> = cached(Read.ArtistById(id)) { (it as Page.ArtistPage).v }
     fun artistInfo(id: String): Flow<ArtistInfo> = cached(Read.ArtistAbout(id)) { (it as Page.About).v }
     fun topSongs(artist: String): Flow<List<Song>> = cached(Read.TopSongs(artist)) { (it as Page.Songs).v }
     fun playlists(): Flow<List<Playlist>> = cached(Read.PlaylistList) { (it as Page.Playlists).v }
     fun playlist(id: String): Flow<PlaylistDetail> = cached(Read.PlaylistById(id)) { (it as Page.PlaylistPage).v }
+    /** The favourites, with this session's marks laid over them by the core as they are read. */
     fun starred(): Flow<Starred> = cached(Read.StarredItems) { (it as Page.StarredPage).v }
+
+    /**
+     * The starred songs handed to the mixes (the core's `mix_favourites_stored` and `_refresh`): read and
+     * handed inside the core, the stored answer first and the server's when it differs. Emits after each.
+     */
+    fun handFavourites(): Flow<Unit> = flow {
+        val c = client
+        val stored = lifted { c.mixFavouritesStored() }
+        if (stored.handed) emit(Unit)
+        if (stored.fresh) return@flow
+        if (lifted { c.mixFavouritesRefresh(stored.digest) }) emit(Unit)
+    }.flowOn(Dispatchers.IO)
     fun genres(): Flow<List<Genre>> = cached(Read.GenreList) { (it as Page.Genres).v }
     fun radio(): Flow<List<RadioStation>> = cached(Read.RadioList) { (it as Page.Stations).v }
     fun lyrics(songId: String): Flow<Lyrics> = cached(Read.LyricsBySong(songId)) { (it as Page.LyricsPage).v }
@@ -175,7 +198,7 @@ class Library(
     suspend fun instantMix(song: Song): List<Song> = withContext(Dispatchers.IO) { lifted { client.instantMix(song) } }
 
     /** Every album of an artist (a provider's left out), in order, as one list of songs. */
-    suspend fun artistSongs(albums: List<Album>): List<Song> = withContext(Dispatchers.IO) { client.artistSongs(albums) }
+    suspend fun artistSongs(artistId: String): List<Song> = withContext(Dispatchers.IO) { lifted { client.artistSongsOf(artistId) } }
 
     suspend fun shuffleAll(): List<Song> = withContext(Dispatchers.IO) { lifted { client.shuffleAll() } }
 
@@ -183,8 +206,8 @@ class Library(
     fun smartDefaults() = dev.nori.music.ffi.smartDefaults()
     suspend fun smartSave(id: String, name: String, json: String): String = withContext(Dispatchers.IO) { core.smartSave(id, name, json) }
     suspend fun smartDelete(id: String) = withContext(Dispatchers.IO) { core.smartDelete(id) }
-    suspend fun smartSongs(json: String): List<Song> =
-        withContext(Dispatchers.IO) { core.smartEvaluate(json, 0u, sizes.smartSongs) }
+    suspend fun smartPage(json: String): dev.nori.music.ffi.SmartPage =
+        withContext(Dispatchers.IO) { core.smartPage(json, sizes.smartSongs) }
 
     fun m3uExport(name: String, songs: List<Song>): String = dev.nori.music.ffi.m3uExport(name, songs)
 
@@ -197,7 +220,7 @@ class Library(
         core.browseSongs(sort, descending, starredOnly, (years?.first ?: 0).toUInt(), (years?.last ?: 0).toUInt(), offset.toUInt(), limit.toUInt())
     }
 
-    suspend fun decades(): List<Genre> = withContext(Dispatchers.IO) { core.browseDecades() }
+    suspend fun decades(): List<dev.nori.music.ffi.Decade> = withContext(Dispatchers.IO) { core.browseDecades() }
 
 
     suspend fun randomSongs(): List<Song> = call(Read.RandomSongs(sizes.randomSongs, null)) { (it as Page.Songs).v }

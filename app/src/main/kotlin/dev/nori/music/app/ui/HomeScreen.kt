@@ -177,7 +177,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
             SectionTitle(title)
             LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(playlists, key = { it.id }, contentType = { "playlist" }) { p ->
-                    CoverCard(p.name, remember(p.songCount) { dev.nori.music.ffi.wordsSongs(p.songCount) }, vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
+                    CoverCard(p.name, p.songsLine, vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
                 }
             }
         }
