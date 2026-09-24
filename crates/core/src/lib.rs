@@ -2,53 +2,29 @@
 //! SQLite index. No sockets and no threads of its own; every call is coarse
 //! (one response, one page) so the FFI crossing stays off the hot path.
 
-pub mod api;
-pub mod autoeq;
 pub mod automix;
-pub mod db;
-pub mod lyrics;
-pub mod dsp;
-pub mod alog;
 pub mod transfers;
-pub mod look;
 pub mod queue;
-pub mod background;
-pub mod scrobble;
-pub mod rules;
 pub mod bridge;
-pub mod heard;
 pub mod history;
 pub mod m3u;
 pub mod mixes;
-pub mod model;
-pub mod outputs;
 pub mod profiles;
-pub mod settings;
-pub mod settings_store;
-pub mod settings_schema;
 pub mod perf_log;
-pub mod fmt;
-pub mod pages;
 pub mod smart;
-pub mod stars;
 pub mod actions;
 pub mod browse;
 pub mod covers;
 pub mod search;
 pub mod words;
-pub mod transport;
 pub mod client;
 pub mod cache_policy;
 pub mod lrclib;
 pub mod stream;
 pub mod autofill;
 pub mod car;
-pub mod decoder;
-pub mod stream_cache;
 pub mod playlist;
 pub mod library;
-pub mod menus;
-pub mod rows;
 pub mod stage;
 
 use std::sync::Arc;
@@ -57,27 +33,22 @@ use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
-pub use model::*;
+pub use nori_db::{self as db, background};
+pub use nori_model::{alog, lines, model, CoreError};
+pub use nori_devices::{autoeq, outputs};
+pub use nori_library::{menus, pages, rows, stars};
+pub use nori_lyrics::lyrics::lyrics_from_lrc;
+pub use nori_lyrics::{look, lyrics};
+pub use nori_net::{api, transport};
+pub use nori_queue::{heard, rules, scrobble};
+pub use nori_transfers::stream_cache;
+pub use nori_settings::{decoder, dsp, settings, settings_schema, settings_store};
+pub use nori_settings::settings::parse_eq_preset;
+pub use nori_words::fmt;
+pub use nori_model::model::*;
+pub use nori_library::pages::{AlbumDetail, ArtistDetail, PlaylistDetail, Starred};
 
-// Kotlin's exception carries no message (uniffi's JNI bindings give none), so its `toString` is this Display.
-#[derive(Debug, thiserror::Error)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Error), uniffi::export(Display))]
-pub enum CoreError {
-    #[error("{reason}")]
-    Api { code: i32, reason: String },
-    #[error("bad response: {reason}")]
-    Parse { reason: String },
-    #[error("database: {reason}")]
-    Db { reason: String },
-}
-
-impl From<rusqlite::Error> for CoreError {
-    fn from(e: rusqlite::Error) -> Self {
-        CoreError::Db { reason: e.to_string() }
-    }
-}
-
-type Result<T> = std::result::Result<T, CoreError>;
+use nori_model::Result;
 
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -296,21 +267,14 @@ fn parse(body: &[u8]) -> Result<Response> {
 
 // ---- the object Kotlin holds -----------------------------------------------
 
-/// The core the app is using now, for the parts of the core that run without Kotlin (the transition
-/// planner on the audio thread, analyses finished in the background).
-static ACTIVE: Mutex<std::sync::Weak<Core>> = Mutex::new(std::sync::Weak::new());
-
-/// The core the app is using now, if there is one.
-pub(crate) fn active() -> Option<Arc<Core>> {
-    ACTIVE.lock().upgrade()
-}
-
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Core {
-    db: Mutex<Connection>,
+    /// Shared with nori-db's active database while this is the newest core ([`nori_db::active`]).
+    db: Arc<Mutex<Connection>>,
     server: RwLock<api::Server>,
-    /// The downloads table's ids, for asking about one song without the database (transfers.rs).
-    held: Mutex<transfers::Held>,
+    /// The downloads table's ids, for asking about one song without the database (transfers.rs); shared
+    /// with nori-transfers' active downloads while this is the newest core.
+    held: Arc<Mutex<transfers::Held>>,
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -320,9 +284,12 @@ impl Core {
     pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
         let db = db::open(&db_path, &server)?;
         let held = transfers::Held::load(&db)?;
-        let core = Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()), held: Mutex::new(held) });
-        // The newest core is the one the app is using: the audio path finds the database through it.
-        *ACTIVE.lock() = Arc::downgrade(&core);
+        let core = Arc::new(Core { db: Arc::new(Mutex::new(db)), server: RwLock::new(api::Server::default()), held: Arc::new(Mutex::new(held)) });
+        // The newest core is the one the app is using: the parts of the core that run without Kotlin (the
+        // transition planner on the audio thread, analyses finished in the background, a song asked
+        // about by a list row) find its database and its downloads through these.
+        nori_db::set_active(&core.db);
+        transfers::set_active_held(&core.held);
         Ok(core)
     }
 
@@ -659,6 +626,14 @@ impl Core {
         self.download_settle(vec![id], vec![false])
     }
 
+    /// The ids alone of [`Self::downloads`], in the same order: for walking them without the songs.
+    pub fn download_ids(&self, done: bool) -> Result<Vec<String>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT id FROM downloads WHERE server=sid() AND done=?1 ORDER BY ts DESC")?;
+        let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|id| id.ok()).collect())
+    }
+
     pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
         let c = self.db.lock();
         let mut st = c.prepare_cached("SELECT json FROM downloads WHERE server=sid() AND done=?1 ORDER BY ts DESC")?;
@@ -774,49 +749,6 @@ impl Core {
     }
 }
 
-/// LRC or plain lyrics text, from a third-party provider, into the app's lyrics shape.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn lyrics_from_lrc(text: String) -> Lyrics {
-    lyrics::from_lrc(&text)
-}
-
-/// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
-/// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn parse_eq_preset(text: String) -> EqPreset {
-    let mut preset = EqPreset::default();
-    for line in text.lines() {
-        let t: Vec<&str> = line.split_whitespace().collect();
-        let after = |key: &str| t.iter().position(|w| w.eq_ignore_ascii_case(key)).and_then(|i| t.get(i + 1)).and_then(|v| v.parse::<f32>().ok());
-        if t.first().is_some_and(|w| w.eq_ignore_ascii_case("preamp:")) {
-            preset.preamp_db = t.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        } else if t.first().is_some_and(|w| w.eq_ignore_ascii_case("filter")) {
-            let Some(on) = t.iter().position(|w| w.eq_ignore_ascii_case("ON")) else { continue };
-            let token = t.get(on + 1).map(|k| k.to_ascii_uppercase()).unwrap_or_default();
-            let kind = match token.as_str() {
-                "PK" | "PEQ" | "MODAL" => EqKind::Peaking,
-                "LS" | "LSC" | "LSQ" => EqKind::LowShelf,
-                "HS" | "HSC" | "HSQ" => EqKind::HighShelf,
-                "LSC 6DB" | "LS 6DB" | "LS6" => EqKind::LowShelfSlope,
-                "HSC 6DB" | "HS 6DB" | "HS6" => EqKind::HighShelfSlope,
-                "LP" | "LPQ" => EqKind::LowPass,
-                "HP" | "HPQ" => EqKind::HighPass,
-                "BP" => EqKind::BandPass,
-                "NO" | "NOTCH" => EqKind::Notch,
-                "AP" => EqKind::AllPass,
-                _ => continue,
-            };
-            // Only the shelving and peaking kinds carry a gain; a pass filter line has none.
-            let Some(freq) = after("Fc") else { continue };
-            let gain_db = after("Gain").unwrap_or(0.0);
-            if matches!(kind, EqKind::Peaking | EqKind::LowShelf | EqKind::HighShelf | EqKind::LowShelfSlope | EqKind::HighShelfSlope) && after("Gain").is_none() {
-                continue;
-            }
-            preset.bands.push(EqBand { kind, freq, gain_db, q: after("Q").unwrap_or(0.71) });
-        }
-    }
-    preset
-}
 
 #[cfg(test)]
 pub mod tests;

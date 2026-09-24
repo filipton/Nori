@@ -69,7 +69,7 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.Load
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.LyricLine
+import dev.nori.music.ffi.model.LyricLine
 import dev.nori.music.look.CoverLook
 import androidx.compose.ui.graphics.ColorProducer
 import dev.nori.music.look.LyricsClock
@@ -128,7 +128,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     val look = LocalLook.current
-                    LookText(noteText(dev.nori.music.ffi.Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
+                    LookText(noteText(dev.nori.music.ffi.words.Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
                 }
             }
         }
@@ -298,7 +298,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
         // on the next tap, and stays open while the offset is not zero so the number can be read.
         var tuning by remember(lyrics) { mutableStateOf(false) }
         // Whose words these are and whether they are timed, in the core's words; None: no corner at all.
-        val credit = remember(found.source, lyrics.synced) { dev.nori.music.ffi.wordsLyricsCredit(found.source, lyrics.synced) }
+        val credit = remember(found.source, lyrics.synced) { dev.nori.music.ffi.words.wordsLyricsCredit(found.source, lyrics.synced) }
         val open = tuning || nudgeMs != 0L
         if (credit != null) androidx.compose.material3.Surface(
             onClick = { if (lyrics.synced) tuning = !tuning },
@@ -322,10 +322,10 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     dim, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall,
                 )
                 if (open) {
-                    if (nudgeMs != 0L) LookText(remember(nudgeMs) { dev.nori.music.ffi.nudgeSeconds(nudgeMs) }, bright, style = MaterialTheme.typography.labelSmall)
-                    TextButton({ nudgeMs = clock.nudge(-1) }) { LookText("Later", accent, style = MaterialTheme.typography.labelLarge) }
-                    TextButton({ nudgeMs = clock.nudge(1) }) { LookText("Sooner", accent, style = MaterialTheme.typography.labelLarge) }
-                    if (nudgeMs != 0L) TextButton({ nudgeMs = clock.nudge(0) }) { LookText("Reset", accent, style = MaterialTheme.typography.labelLarge) }
+                    if (nudgeMs != 0L) LookText(remember(nudgeMs) { dev.nori.music.ffi.words.nudgeSeconds(nudgeMs) }, bright, style = MaterialTheme.typography.labelSmall)
+                    TextButton({ nudgeMs = clock.nudge(-1) }) { LookText(say.later, accent, style = MaterialTheme.typography.labelLarge) }
+                    TextButton({ nudgeMs = clock.nudge(1) }) { LookText(say.sooner, accent, style = MaterialTheme.typography.labelLarge) }
+                    if (nudgeMs != 0L) TextButton({ nudgeMs = clock.nudge(0) }) { LookText(say.reset, accent, style = MaterialTheme.typography.labelLarge) }
                 }
             }
         }
@@ -337,7 +337,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
  * whole middle of the screen instead of fighting the title block for it.
  */
 @Composable
-private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: dev.nori.music.ffi.Song?) {
+private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: dev.nori.music.ffi.model.Song?) {
     val menu = LocalSongMenu.current
     val marks = LocalStarMarks.current
     Row(
@@ -370,8 +370,8 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
         }
         song?.let { s ->
             val starred = marks.effectiveStar(dev.nori.music.data.StarKind.SONG, s.id, s.starred)
-            TitleCircle(if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, "Favourite", starred) { actions.star(s, !starred) }
-            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { menu(s) }
+            TitleCircle(if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder, say.favourite, starred) { actions.star(s, !starred) }
+            TitleCircle(Icons.Filled.MoreHoriz, say.more, false) { menu(s) }
         }
     }
 }

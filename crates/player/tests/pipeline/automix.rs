@@ -121,3 +121,41 @@ fn the_song_playing_is_measured_as_it_plays_and_kept_only_whole() {
     p.run_until(30_000, |p| p.ended());
     assert!(!p.app.analyses.contains_key("b"), "b was heard in part only: {:?}", p.app.log);
 }
+
+#[test]
+fn with_nothing_measured_it_fades_and_the_bar_waits_until_the_next_song_is_heard() {
+    // The first boundary on a phone that has never heard these songs: they were still on their way
+    // when measuring ahead looked, so nothing is measured. The planner fades blind, and the page must
+    // not put the next title up while the last song plays on at the start of that fade.
+    let prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, ..prefs_off() };
+    let mut p = Player::with_prefs(vec![song("a", 120.0), song("b", 96.0), song("c", 120.0)], prefs);
+    p.measure_on_move = false;
+    p.play_from(0);
+    assert!(p.run_until(5_000, |p| p.app.logged("transition a -> b: EqualPowerFade 10666 ms at 21334")), "{:?}", p.app.log);
+    assert!(p.app.logged("not analysed"), "{:?}", p.app.log);
+    assert!(p.app.analyses.is_empty(), "nothing was measured: {:?}", p.app.log);
+    assert!(p.run_until(30_000, |p| p.mixing()), "the fade is heard: {:?}", p.app.log);
+    // An equal-power fade as long as the songs allow (a third of one): b is the louder from its middle
+    // on, and not before.
+    let mut on_a = 0;
+    // The song the page shows: the one the ear is on, else the player's own.
+    let shown = |p: &mut Player| p.bar().index.or(p.current());
+    while shown(&mut p) == Some(0) {
+        p.run_for(100);
+        on_a += 100;
+        assert!(on_a <= 6_500, "a handed over by the middle of the fade");
+    }
+    assert!((5_200..=5_500).contains(&on_a), "a is shown until the fade's middle: {on_a} ms");
+    assert_eq!(shown(&mut p), Some(1));
+    let seen = p.bar();
+    assert!((5_200..5_700).contains(&seen.ms), "b is entered where it is heard, halfway through the fade: {}", seen.ms);
+    // Once the whole fade has been heard nothing is left of it: a player that wakes while a mix is
+    // named would otherwise wake four times a second until the next ending.
+    assert!(p.run_until(12_000, |p| !p.mixing()), "{:?}", p.app.log);
+    p.run_for(1_000);
+    assert!(p.heard().next_id.is_none() && p.heard().id.is_none(), "{:?}", p.heard());
+    assert!(p.run_to_end(120_000), "the queue plays to its end: {:?}", p.app.log);
+    assert_eq!(p.app.log.iter().filter(|l| l.contains("mixing: the next track arrived")).count(), 2, "{:?}", p.app.log);
+    assert!(!p.app.logged("letting the ending play"), "{:?}", p.app.log);
+    assert!(p.sink.gaps.is_empty(), "{:?}", p.sink.gaps);
+}

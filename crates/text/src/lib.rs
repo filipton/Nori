@@ -192,6 +192,28 @@ pub fn general(v: f64, sig: i32) -> String {
     general_in(v, sig, decimal())
 }
 
+/// A length of time as a clock shows it, "3:07", or "1:02:03" from an hour; `left` puts a minus in front
+/// ("-3:07", the time left in a song).
+pub fn duration(seconds: i64, left: bool) -> String {
+    let mut buf = [0u8; 32];
+    let n = write_duration(seconds, left, &mut buf);
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+}
+
+/// [duration] written into `buf` without allocating; the length written. The player's times ask for it
+/// over JNI once a second, straight into a Java string.
+pub fn write_duration(seconds: i64, left: bool, buf: &mut [u8; 32]) -> usize {
+    use std::io::Write;
+    let s = seconds;
+    let mut w = &mut buf[..];
+    let _ = if s >= 3600 {
+        write!(w, "{}{}:{:02}:{:02}", if left { "-" } else { "" }, s / 3600, s / 60 % 60, s % 60)
+    } else {
+        write!(w, "{}{}:{:02}", if left { "-" } else { "" }, s / 60, s % 60)
+    };
+    32 - w.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

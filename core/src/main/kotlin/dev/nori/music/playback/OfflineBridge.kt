@@ -8,9 +8,9 @@ import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.exoplayer.ExoPlayer
-import dev.nori.music.ffi.QueueEdit
-import dev.nori.music.ffi.Failure
-import dev.nori.music.ffi.failureNetworkish
+import dev.nori.music.ffi.queue.QueueEdit
+import dev.nori.music.ffi.net.Failure
+import dev.nori.music.ffi.net.failureNetworkish
 import dev.nori.music.net.failureKind
 
 /**
@@ -55,7 +55,7 @@ class OfflineBridge(
      * network has, or more downloads go in before it if it has not.
      */
     fun onTrack() {
-        val s = dev.nori.music.ffi.playlistBridgeState()
+        val s = dev.nori.music.ffi.queue.playlistBridgeState()
         if (!s.bridging) return stopWatching()
         if (!s.nextIsParked) return
         if (networkUp()) resume() else runCatching { core().bridgeStart() }.getOrNull()?.let(apply)
@@ -63,7 +63,7 @@ class OfflineBridge(
 
     /** Network came back: the bridge's songs go and the parked song plays. */
     fun resume() {
-        dev.nori.music.ffi.playlistUnbridge()?.let { apply(it); Log.i(TAG, "resumed the parked queue") }
+        dev.nori.music.ffi.queue.playlistUnbridge()?.let { apply(it); Log.i(TAG, "resumed the parked queue") }
         stopWatching()
     }
 

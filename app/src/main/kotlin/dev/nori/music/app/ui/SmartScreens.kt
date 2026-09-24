@@ -65,7 +65,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.foundation.layout.fillMaxSize
 import dev.nori.music.app.vm.PlayerViewModel
 
-import dev.nori.music.ffi.SmartEditRule
+import dev.nori.music.ffi.library.SmartEditRule
 import dev.nori.music.app.vm.SmartViewModel
 
 @Composable
@@ -81,11 +81,16 @@ private fun <T> Pick(value: T, options: List<T>, modifier: Modifier = Modifier, 
  * never changes in one frame. Nothing here moves on its own: it is drawn once and then only redrawn
  * when its covers change.
  */
+/** Mix tiles' colours by mix id, kept across scrolling: a tile scrolled back into view used to ask the core again. */
+private val tileColours = android.util.LruCache<String, List<androidx.compose.ui.graphics.Color>>(64)
+
 @Composable
 private fun MixArt(card: MixCard, size: androidx.compose.ui.unit.Dp, onClick: (() -> Unit)? = null, large: Boolean = false) {
     // The tile's colour, the deeper one it runs to and the band under its name (nori-core's
     // `mix_tile_colours`), once per mix.
-    val c = remember(card.id) { dev.nori.music.ffi.mixTileColours(card.id).map { androidx.compose.ui.graphics.Color(it.toInt()) } }
+    val c = remember(card.id) {
+        tileColours[card.id] ?: dev.nori.music.ffi.library.mixTileColours(card.id).map { androidx.compose.ui.graphics.Color(it.toInt()) }.also { tileColours.put(card.id, it) }
+    }
     val seed = c[0]
     val deep = c[1]
     val white = androidx.compose.ui.graphics.Color.White
@@ -167,12 +172,12 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
             queue = queue,
             art = { MixArt(MixCard(m.id, m.title, m.covers, m.favourites), 236.dp, large = true) },
             actions = {
-                if (m.refreshable) CircleButton(Icons.Filled.Refresh, "New mix") { vm.refresh() }
-                MoreCircle(listOf("Add to queue" to { actions.enqueue(m.songs) }, downloadEntry(m.songs, done, actions)))
+                if (m.refreshable) CircleButton(Icons.Filled.Refresh, say.newMix) { vm.refresh() }
+                MoreCircle(listOf(say.addToQueue to { actions.enqueue(m.songs) }, downloadEntry(m.songs, done, actions)))
             },
         ) {
             if (m.songs.isEmpty()) item(key = "empty") {
-                EmptyNote(if (m.favourites) dev.nori.music.ffi.Note.NO_FAVOURITE_SONGS else dev.nori.music.ffi.Note.NOTHING_TO_MIX)
+                EmptyNote(if (m.favourites) dev.nori.music.ffi.words.Note.NO_FAVOURITE_SONGS else dev.nori.music.ffi.words.Note.NOTHING_TO_MIX)
             }
             songRows(m.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, animated = true)
         }
@@ -184,23 +189,23 @@ fun SmartList(vm: SmartViewModel = viewModel()) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-        item { ActionRow("New smart playlist", Icons.Filled.Add, { nav.smartEdit("") }) }
+        item { ActionRow(say.newSmartPlaylist, Icons.Filled.Add, { nav.smartEdit("") }) }
         items(saved, key = { it.id }) { p ->
             NavRow(
                 p.name, { nav.smart(p.id) },
                 action = {
-                    TextButton({ nav.smartEdit(p.id) }) { Text("Edit") }
-                    IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Close, "Delete", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    TextButton({ nav.smartEdit(p.id) }) { Text(say.edit) }
+                    IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Close, say.delete, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
                 },
             )
         }
-        item { SectionTitle("Ready made") }
+        item { SectionTitle(say.readyMade) }
         items(vm.defaults, key = { it.id }) { p ->
             Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text("Copy") }
+                Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text(say.copyIt) }
             }
         }
-        item { Text(noteText(dev.nori.music.ffi.Note.SMART_HELP), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text(noteText(dev.nori.music.ffi.words.Note.SMART_HELP), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
@@ -218,18 +223,18 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
     val playing by player.currentId.collectAsStateWithLifecycle()
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text(playlist?.name ?: "Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            TextButton({ nav.smartEdit(id) }) { Text("Edit") }
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(playlist?.name ?: say.smartPlaylist, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            TextButton({ nav.smartEdit(id) }) { Text(say.edit) }
         }
         LoadBox(load) { page ->
             val songs = page.songs
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-                        Button({ actions.play(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text("Play") }
-                        OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text("Shuffle") }
-                        TextButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Text("Get") }
+                        Button({ actions.play(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text(say.play) }
+                        OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text(say.shuffle) }
+                        TextButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Text(say.get) }
                     }
                     Text(page.caption, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
                 }
@@ -244,20 +249,20 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     // What the form opens with, and every change to its rules, are the core's (`smart/draft.rs`).
-    var draft by remember(id, saved.size) { mutableStateOf(dev.nori.music.ffi.smartEditOpen(vm.find(id))) }
-    val fields = remember { dev.nori.music.ffi.smartEditFields() }
-    val sorts = remember { dev.nori.music.ffi.smartEditSchema().sorts }
+    var draft by remember(id, saved.size) { mutableStateOf(dev.nori.music.ffi.library.smartEditOpen(vm.find(id))) }
+    val fields = remember { dev.nori.music.ffi.library.smartEditFields() }
+    val sorts = remember { dev.nori.music.ffi.library.smartEditSchema().sorts }
     var error by remember { mutableStateOf<String?>(null) }
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp + LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Smart playlist", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
-            TextButton({ error = vm.save(draft) { nav.back() } }) { Text("Save", style = MaterialTheme.typography.titleSmall) }
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(say.smartPlaylist, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            TextButton({ error = vm.save(draft) { nav.back() } }) { Text(say.save, style = MaterialTheme.typography.titleSmall) }
         }
-        FormField(draft.name, { draft = draft.copy(name = it) }, Modifier.fillMaxWidth().padding(horizontal = Space.gutter), label = { Text("Name") }, singleLine = true)
+        FormField(draft.name, { draft = draft.copy(name = it) }, Modifier.fillMaxWidth().padding(horizontal = Space.gutter), label = { Text(say.name) }, singleLine = true)
         Row(Modifier.padding(horizontal = Space.gutter, vertical = 12.dp), Arrangement.spacedBy(8.dp)) {
-            Chip("Match all", draft.all) { draft = draft.copy(all = true) }
-            Chip("Match any", !draft.all) { draft = draft.copy(all = false) }
+            Chip(say.matchAll, draft.all) { draft = draft.copy(all = true) }
+            Chip(say.matchAny, !draft.all) { draft = draft.copy(all = false) }
         }
         // One rule, one card: the field and the comparison on the first line, what to compare against on
         // the second. In a row they fought over the width and the value box ended up a sliver.
@@ -270,14 +275,14 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
             ) {
                 Column(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Pick(r.field, fields) { f -> draft = dev.nori.music.ffi.smartEditField(draft, i.toUInt(), f) }
-                        Pick(r.op, remember(r.field) { dev.nori.music.ffi.smartEditOps(r.field) }) { o -> set(r.copy(op = o)) }
+                        Pick(r.field, fields) { f -> draft = dev.nori.music.ffi.library.smartEditField(draft, i.toUInt(), f) }
+                        Pick(r.op, remember(r.field) { dev.nori.music.ffi.library.smartEditOps(r.field) }) { o -> set(r.copy(op = o)) }
                         Spacer(Modifier.weight(1f))
-                        IconButton({ draft = dev.nori.music.ffi.smartEditRemove(draft, i.toUInt()) }, Modifier.size(38.dp)) {
-                            Icon(Icons.Filled.Close, "Remove rule", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        IconButton({ draft = dev.nori.music.ffi.library.smartEditRemove(draft, i.toUInt()) }, Modifier.size(38.dp)) {
+                            Icon(Icons.Filled.Close, say.removeRule, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
-                    val hint = remember(r.op) { dev.nori.music.ffi.smartValueHint(r.op) }
+                    val hint = remember(r.op) { dev.nori.music.ffi.library.smartValueHint(r.op) }
                     if (hint != null) FormField(
                         r.value, { set(r.copy(value = it)) }, Modifier.fillMaxWidth().padding(end = 8.dp), singleLine = true,
                         placeholder = { Text(hint) },
@@ -285,18 +290,18 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
                 }
             }
         }
-        ActionRow("Add rule", Icons.Filled.Add, { draft = dev.nori.music.ffi.smartEditAdd(draft) }, divider = false)
+        ActionRow(say.addRule, Icons.Filled.Add, { draft = dev.nori.music.ffi.library.smartEditAdd(draft) }, divider = false)
         Row(Modifier.padding(start = Space.gutter, end = Space.gutter, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Sort by", style = MaterialTheme.typography.bodyLarge)
+            Text(say.sortBy, style = MaterialTheme.typography.bodyLarge)
             Pick(draft.sortField, sorts) { draft = draft.copy(sortField = it) }
             Spacer(Modifier.weight(1f))
-            Chip("Descending", draft.descending) { draft = draft.copy(descending = !draft.descending) }
+            Chip(say.descending, draft.descending) { draft = draft.copy(descending = !draft.descending) }
         }
         Row(Modifier.padding(horizontal = Space.gutter, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Limit", style = MaterialTheme.typography.bodyLarge)
+            Text(say.limit, style = MaterialTheme.typography.bodyLarge)
             FormField(
-                remember(draft.limit) { dev.nori.music.ffi.smartLimitText(draft.limit) }, { draft = draft.copy(limit = dev.nori.music.ffi.smartLimitTyped(it)) },
-                Modifier.padding(start = 12.dp).width(130.dp), singleLine = true, placeholder = { Text("none") },
+                remember(draft.limit) { dev.nori.music.ffi.library.smartLimitText(draft.limit) }, { draft = draft.copy(limit = dev.nori.music.ffi.library.smartLimitTyped(it)) },
+                Modifier.padding(start = 12.dp).width(130.dp), singleLine = true, placeholder = { Text(say.noLimit) },
             )
         }
         error?.let { Text(it, Modifier.padding(Space.gutter), color = MaterialTheme.colorScheme.error) }
@@ -312,8 +317,8 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
     LaunchedEffect(list, entries.size) { snapshotFlow { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= entries.size - 30 }.collect { if (it) vm.loadMore() } }
     val songs = remember(entries) { entries.map { it.song } }
     LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-        item { Row(Modifier.padding(horizontal = 8.dp)) { TextButton(nav::stats) { Text("Listening stats") }; TextButton(vm::clear) { Text("Clear history") } } }
-        if (entries.isEmpty()) item { Text(noteText(dev.nori.music.ffi.Note.NO_HISTORY), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Row(Modifier.padding(horizontal = 8.dp)) { TextButton(nav::stats) { Text(say.listeningStats) }; TextButton(vm::clear) { Text(say.clearHistory) } } }
+        if (entries.isEmpty()) item { Text(noteText(dev.nori.music.ffi.words.Note.NO_HISTORY), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         songRows(songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "h")
     }
 }
@@ -321,15 +326,15 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
 /** The year in review, any time of year: everything comes from one query in the core. */
 @Composable
 fun StatsScreen(vm: HistoryViewModel = viewModel()) {
-    val periods = remember { dev.nori.music.ffi.statsPeriods() }
-    var days by remember { mutableStateOf(dev.nori.music.ffi.statsDefaultDays()) }
+    val periods = remember { dev.nori.music.ffi.words.statsPeriods() }
+    var days by remember { mutableStateOf(dev.nori.music.ffi.words.statsDefaultDays()) }
     LaunchedEffect(days) { vm.loadStats(days.toInt()) }
     val s by vm.stats.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp + LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Listening", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(say.listening, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
         }
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(periods) { p -> Chip(p.label, days == p.days) { days = p.days } }
@@ -352,7 +357,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
         }
 
         words.habit?.let { said ->
-            SectionTitle("When you listen")
+            SectionTitle(say.whenYouListen)
             HourChart(words.hours)
             Text(
                 said,
@@ -361,13 +366,13 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
             )
         }
 
-        if (st.topSongs.isNotEmpty()) SectionTitle("Top songs")
+        if (st.topSongs.isNotEmpty()) SectionTitle(say.topSongs)
         st.topSongs.forEachIndexed { i, t -> RankRow(i + 1, t.song.title, t.song.artist, "${t.plays}") }
-        if (st.topArtists.isNotEmpty()) SectionTitle("Top artists")
+        if (st.topArtists.isNotEmpty()) SectionTitle(say.topArtists)
         st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, words.artistTimes[i], "${t.plays}") }
-        if (st.topAlbums.isNotEmpty()) SectionTitle("Top albums")
+        if (st.topAlbums.isNotEmpty()) SectionTitle(say.topAlbums)
         st.topAlbums.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
-        if (st.topGenres.isNotEmpty()) SectionTitle("Top genres")
+        if (st.topGenres.isNotEmpty()) SectionTitle(say.topGenres)
         st.topGenres.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
     }
 }
@@ -406,7 +411,7 @@ private fun HourChart(perHour: List<Float>) {
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), Arrangement.SpaceBetween) {
-            remember { dev.nori.music.ffi.statsHourTicks() }.forEach { Caption(it) }
+            remember { dev.nori.music.ffi.words.statsHourTicks() }.forEach { Caption(it) }
         }
     }
 }

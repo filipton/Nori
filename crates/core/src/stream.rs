@@ -1,38 +1,32 @@
-//! Where a song's audio comes from and under which name it is cached. Songs are resolved when they are
-//! opened, not when they are queued, so the quality follows the network the phone is on at that moment.
-//! Both caches are keyed by song id and quality, never by URL, so a replayed track costs no radio time.
+//! Where the client streams a song from: the quality for the network the phone is on and the profile's
+//! address, a download's permanent copy, and the songs fetched ahead with their addresses. The keys and
+//! the network state are nori-net's (`nori_net::stream`).
 
 use crate::client::Client;
 
-/// A quality setting: `bit_rate` 0 and an empty `format` mean the original file.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct StreamQuality {
-    pub bit_rate: u32,
-    pub format: String,
-}
+pub use nori_net::stream::*;
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct StreamTarget {
-    pub url: String,
-    /// The cache key: `<id>:<bit rate><format>` in the rolling stream cache, `dl:<id>` for downloads.
-    pub key: String,
-}
-
-/// A finished download's cache key.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn download_key(id: String) -> String {
-    format!("dl:{id}")
-}
-
-/// Whether `key` is a streamed copy of `id`, at whatever quality it was fetched. Keys are
-/// `<id>:<quality>` and the quality never holds a colon, so this is exact.
-pub fn is_copy(id: &str, key: &str) -> bool {
-    key.rsplit_once(':').is_some_and(|(before, _)| before == id)
+/// The URL and cache key `id` opens from now, through the client the app streams through: a finished
+/// download is the permanent copy, anything else streams at the quality for the network the platform
+/// last said it is on. None before a client exists.
+pub fn resolve_now(id: &str) -> Option<StreamTarget> {
+    let client = crate::client::active_client()?;
+    let kept = crate::transfers::held(id) == 2;
+    Some(client.resolve(id.to_string(), kept, !kept && metered()))
 }
 
 impl Client {
+    /// [`Self::precache_targets`] over `ids`, `held` saying whether each is downloaded or queued for it.
+    fn fetches(&self, ids: Vec<String>, metered: bool, wifi: &StreamQuality, mobile: &StreamQuality, held: impl Fn(&str) -> i32) -> Vec<Fetch> {
+        crate::rules::precache_list(ids, |id| held(id) != 0)
+            .into_iter()
+            .map(|id| {
+                let t = self.stream_target(id.clone(), metered, wifi.clone(), mobile.clone());
+                Fetch { id, url: t.url, key: t.key }
+            })
+            .collect()
+    }
+
     /// The quality to stream at: the metered or the Wi-Fi setting, and through the profile's second
     /// (usually public) address an optional ceiling on top, as opus unless a format was chosen.
     fn quality(&self, metered: bool, wifi: StreamQuality, mobile: StreamQuality) -> StreamQuality {
@@ -52,6 +46,16 @@ impl Client {
         let q = self.quality(metered, wifi, mobile);
         let key = format!("{id}:{}{}", q.bit_rate, q.format);
         StreamTarget { url: self.core.stream_url(id, q.bit_rate, q.format), key }
+    }
+
+    /// What the precacher fetches now, in order, each with its address and key: [`crate::rules::queue_precache`]'s
+    /// songs as [`crate::rules::precache_list`] filters them, and none that is downloaded or in the download
+    /// queue (a download arrives for good; the rolling cache would keep it twice). One call per song
+    /// start, where the list, its filtering and each song's download state and address were a call each.
+    pub fn precache_targets(&self, metered: bool) -> Vec<Fetch> {
+        let q = |s: &crate::settings::SavedQuality| StreamQuality { bit_rate: s.bit_rate.max(0) as u32, format: s.format.clone() };
+        let (wifi, mobile) = crate::rules::prefs(|p| (q(&p.wifi), q(&p.mobile)));
+        self.fetches(crate::rules::queue_precache(metered), metered, &wifi, &mobile, crate::transfers::held)
     }
 
     /// Only the cache key [`Self::stream_target`] would give: for asking whether a song is already cached.
@@ -109,12 +113,39 @@ mod tests {
     }
 
     #[test]
+    fn the_songs_ahead_come_with_where_they_are_fetched_from() {
+        let (c, _) = client(NetProfile { url: "h".into(), ..Default::default() });
+        let ids = ["a", "radio:1", "ext-2", "queued", "done", "b"].map(String::from).to_vec();
+        let held = |id: &str| match id {
+            "queued" => 1,
+            "done" => 2,
+            _ => 0,
+        };
+        let f = c.fetches(ids, true, &q(0, ""), &q(192, "opus"), held);
+        assert_eq!(f.iter().map(|f| (f.id.as_str(), f.key.as_str())).collect::<Vec<_>>(), [("a", "a:192opus"), ("b", "b:192opus")]);
+        assert!(f[0].url.ends_with("&id=a&maxBitRate=192&format=opus&estimateContentLength=true"), "{}", f[0].url);
+    }
+
+    #[test]
     fn a_download_opens_as_itself_and_anything_else_streams() {
         let (c, _) = client(NetProfile { url: "h".into(), ..Default::default() });
         assert_eq!(c.resolve("s1".into(), true, true).key, "dl:s1", "the permanent copy, whatever the network");
         // The settings' defaults: the original on Wi-Fi, 192k opus on a metered network.
         assert_eq!(c.resolve("s1".into(), false, false).key, "s1:0");
         assert_eq!(c.resolve("s1".into(), false, true).key, "s1:192opus");
+    }
+
+    #[test]
+    fn a_song_opened_in_rust_follows_the_network_the_platform_last_named() {
+        // The newest client is the one resolve_now streams through; tests run side by side, so this one
+        // makes its client last and asks at once.
+        let (c, _) = client(NetProfile { url: "h".into(), ..Default::default() });
+        network_metered(true);
+        let metered = resolve_now("s1").unwrap();
+        network_metered(false);
+        let wifi = resolve_now("s1").unwrap();
+        drop(c);
+        assert_eq!((metered.key.as_str(), wifi.key.as_str()), ("s1:192opus", "s1:0"));
     }
 
     #[test]

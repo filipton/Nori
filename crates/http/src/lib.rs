@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nori_engine::{Body, ByteSource};
-use norimusic::transport::{FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
+use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
 use ureq::Agent;
 
 /// The largest API answer taken; a whole library page is far below it.

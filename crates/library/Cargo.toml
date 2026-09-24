@@ -1,0 +1,30 @@
+[package]
+name = "nori-library"
+version.workspace = true
+edition.workspace = true
+
+# The music library as the app shows it: play history and the taste model, mixes, smart playlists, M3U,
+# browsing and search over the index, this session's stars, how each page is laid out, the song menus and
+# the car's browse tree.
+[lib]
+name = "nori_library"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+parking_lot = "0.12"
+# The local day and year from the C library's time zone.
+libc = "0.2"
+nori-model = { path = "../model" }
+nori-db = { path = "../db" }
+nori-words = { path = "../words" }
+nori-net = { path = "../net" }
+# The "For you" tiles take their colours from the look crate's colour maths.
+nori-look = { path = "../look" }

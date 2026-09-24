@@ -1,23 +1,11 @@
-//! The player's sleeve and the pages' gradients: the geometry every platform lays the artwork out by,
-//! and the stops of every gradient that dissolves a picture into its page. A gradient's colours are the
-//! page's look (`dress`); these are where along it each colour sits and how strongly. All of it was tuned
-//! by eye on the Android app against Apple's player (`w4` is the screenshot it was measured on) and is
-//! kept here with the reasons, so another app draws the same page.
+//! The pages' gradients: the stops of every gradient that dissolves a picture into its page. A
+//! gradient's colours are the page's look (`dress`); these are where along it each colour sits and how
+//! strongly, as shares of the picture they dissolve, whatever its box. All of it was tuned by eye on the
+//! Android app against Apple's player (`w4` is the screenshot it was measured on) and is kept here with
+//! the reasons, so another app draws the same page. The sleeve's box itself, how tall it is on a phone
+//! held upright and how far it runs under the title, is the phone's layout (PlayerScreen.kt).
 
 use crate::cover::MELT;
-
-/// Width over height of the player's sleeve. Album art is square - Apple's too - so theirs is the square
-/// scaled up and cropped at the left and right edges to fill a taller box: that is how it can touch the
-/// top edge and still reach down behind the title, which no square can do.
-pub const SLEEVE: f32 = 0.74;
-
-/// How much of the sleeve's height runs on underneath the title block instead of above it: with the
-/// sleeve at [`SLEEVE`], the title lands where `w4` has it (56.5 % of the screen) with the picture's soft
-/// tail behind it.
-pub const SLEEVE_UNDER_TEXT: f32 = 0.095;
-
-/// How much of the screen's width a record held by a finger takes: it lifts off the page, smaller.
-pub const LIFTED_WIDTH: f32 = 0.86;
 
 /// One stop of a gradient: where along it (0..1) and how opaque (0..1).
 #[derive(Debug, Clone, Copy, PartialEq)]

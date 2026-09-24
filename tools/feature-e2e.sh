@@ -57,7 +57,7 @@ echo "-- favourites, and does the server agree"
 # that check samples it - which reads as "a downloaded song does not play offline" and is not that.
 pick=$(api getRandomSongs "&size=30" | python3 -c "
 import sys,json
-songs=json.load(sys.stdin)['subsonic-response']['randomSongs']['song']
+songs=[s for s in json.load(sys.stdin)['subsonic-response']['randomSongs']['song'] if not s['id'].startswith('ext-') and s.get('suffix')!='Remote']
 s=next((s for s in songs if s.get('duration',0) >= 90), songs[0])
 print(s['id'], s.get('duration',0), s['title'], sep='|')")
 id=${pick%%|*}; rest=${pick#*|}; secs=${rest%%|*}; title=${rest#*|}
@@ -106,7 +106,8 @@ echo "-- the album page answers for its own queue"
 # The hero's pills answer for the queue the page started: Play becomes Pause while that queue sounds,
 # and a second press on Shuffle switches shuffle off where it stands instead of drawing the same songs
 # into a new queue. Picked: an album whose songs all run past a minute, so no track ends on its own in
-# the middle and resets the position these checks compare.
+# the middle and resets the position these checks compare - and all the server's own: octo-fiesta mixes
+# a provider's songs into an album, and a shuffle that drew one asked the server to download it.
 "$app" wake >/dev/null
 aid=""
 # Not the album of the song playing now: its pill rightly reads Pause before anything is tapped.
@@ -119,7 +120,10 @@ for x in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[])
 import sys,json
 t='''$playing_title'''
 sys.exit(0 if any(x.get('title')==t for x in json.load(sys.stdin)['subsonic-response']['album']['song']) else 1)" && continue
-  d=$(api getAlbum "&id=$a" | python3 -c "import sys,json;print(min(x.get('duration',0) for x in json.load(sys.stdin)['subsonic-response']['album']['song']))" 2>/dev/null)
+  d=$(api getAlbum "&id=$a" | python3 -c "
+import sys,json
+s=json.load(sys.stdin)['subsonic-response']['album']['song']
+print(0 if any(x['id'].startswith('ext-') or x.get('suffix')=='Remote' for x in s) else min(x.get('duration',0) for x in s))" 2>/dev/null)
   [ "${d:-0}" -ge 60 ] && { aid=$a; break; }
 done
 if [ -z "$aid" ]; then
@@ -182,7 +186,8 @@ for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[])
 import sys,json
 held=set(open('$dl/held').read().split())
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
-print('$a' if not any(x['id'] in held for x in s) else '')"; done | grep . | head -1)
+own=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
+print('$a' if own and not any(x['id'] in held for x in s) else '')"; done | grep . | head -1)
 rm -rf "$dl"
 if [ -n "$bid" ]; then
   "$app" play "album:$bid" >/dev/null; sleep 4; "$app" do pause >/dev/null; sleep 1
@@ -215,7 +220,7 @@ echo "-- downloads run side by side and survive a force stop"
 # octo-fiesta fetch it), with nothing of it downloaded yet.
 # Albums with any song downloaded already are left out: every run downloads one, so a random pick
 # of albums this suite has fetched before would report nothing to do.
-held=$(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select distinct json_extract(json,'\$.albumId') from items where kind=2 and id in (select song_id from downloads)\"" 2>/dev/null | tr -d '\r')
+held=$(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select distinct json_extract(json,'\$.albumId') from items where kind=2 and id in (select id from downloads)\"" 2>/dev/null | tr -d '\r')
 aid=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):

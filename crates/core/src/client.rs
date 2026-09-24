@@ -12,27 +12,11 @@ use parking_lot::RwLock;
 use crate::transport::{self, FailureKind, NetError, Transport};
 use crate::{Core, IngestStats, ServerConfig};
 
-pub(crate) type NetResult<T> = std::result::Result<T, NetError>;
+pub use nori_net::requests::{NetProfile, NetResult, Starrable, SyncStep, Write};
+pub(crate) use nori_net::requests::{blank, pairs, request, FOLDERED};
 
 /// How long the first address gets to answer before the second one is used.
 const ADDRESS_PROBE_MS: u32 = 2_500;
-
-/// The endpoints that take `musicFolderId`.
-const FOLDERED: [&str; 7] = ["getAlbumList2", "getArtists", "search3", "getRandomSongs", "getStarred2", "getSongsByGenre", "getIndexes"];
-
-/// The parts of a server profile the client acts on. The rest (headers, certificates, Wi-Fi only) are the
-/// platform's HTTP client's business.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct NetProfile {
-    pub url: String,
-    /// A second address of the same server (typically the public one); tried when `url` does not answer.
-    pub alt_url: String,
-    /// Browsing and search are restricted to this music folder; empty means all.
-    pub music_folder_id: String,
-    /// Bitrate ceiling while connected through `alt_url`; 0 means none.
-    pub alt_max_bit_rate: u32,
-}
 
 /// The client for one server profile, over that profile's core (its index and caches).
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
@@ -44,13 +28,11 @@ pub struct Client {
     pub(crate) second: AtomicBool,
 }
 
-/// Kotlin's `isBlank`: nothing but whitespace.
-pub(crate) fn blank(s: &str) -> bool {
-    s.chars().all(char::is_whitespace)
-}
+/// The client the app streams through now: for a player that opens its songs in Rust (`stream::resolve_now`).
+static ACTIVE_CLIENT: parking_lot::Mutex<std::sync::Weak<Client>> = parking_lot::Mutex::new(std::sync::Weak::new());
 
-pub(crate) fn pairs(p: &[(&str, String)]) -> Vec<(String, String)> {
-    p.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+pub(crate) fn active_client() -> Option<Arc<Client>> {
+    ACTIVE_CLIENT.lock().upgrade()
 }
 
 async fn ping(core: &Core, transport: &dyn Transport, timeout_ms: u32) -> NetResult<()> {
@@ -116,7 +98,10 @@ impl Client {
 impl Client {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(core: Arc<Core>, transport: Arc<dyn Transport>) -> Arc<Self> {
-        Arc::new(Client { core, transport, profile: RwLock::new(NetProfile::default()), second: AtomicBool::new(false) })
+        let client = Arc::new(Client { core, transport, profile: RwLock::new(NetProfile::default()), second: AtomicBool::new(false) });
+        // The newest client is the one the app streams through, as the newest core is the one it uses.
+        *ACTIVE_CLIENT.lock() = Arc::downgrade(&client);
+        client
     }
 
     /// The profile's addresses, folder and bitrate cap; called when the profile is opened or edited.
@@ -231,109 +216,10 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SyncStep {
-    pub total: IngestStats,
-    pub next_offset: Option<u32>,
-}
-
-/// The app's one database file; every server profile has its rows in it.
-pub const DB_FILE: &str = "nori.db";
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn db_file_name() -> String {
-    DB_FILE.into()
-}
-
-/// A removed server profile's rows gone from the app's database at `db_path`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn db_forget_server(db_path: String, server: String) -> crate::Result<()> {
-    Ok(crate::db::forget_server(&crate::db::open_app(&db_path)?, &server)?)
-}
+/// The app's one database file, and dropping a removed profile's rows from it: the database's own.
+pub use nori_db::{db_file_name, db_forget_server, DB_FILE};
 
 // ---- writes -------------------------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum Starrable {
-    Song,
-    Album,
-    Artist,
-}
-
-impl Starrable {
-    pub(crate) fn param(self) -> &'static str {
-        match self {
-            Starrable::Song => "id",
-            Starrable::Album => "albumId",
-            Starrable::Artist => "artistId",
-        }
-    }
-}
-
-/// Every change the app asks the server for.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum Write {
-    Star { kind: Starrable, id: String, on: bool },
-    CreatePlaylist { name: String, song_ids: Vec<String> },
-    AddToPlaylist { id: String, song_ids: Vec<String> },
-    RemoveFromPlaylist { id: String, index: i32 },
-    DeletePlaylist { id: String },
-    CreateRadio { name: String, stream_url: String },
-    DeleteRadio { id: String },
-    /// `submission` false marks "now playing"; true counts the play.
-    Scrobble { id: String, submission: bool, time_ms: Option<i64> },
-    /// The queue handed to another device.
-    SaveQueue { ids: Vec<String>, current: Option<String>, position_ms: i64 },
-}
-
-/// What a star change makes stale. The favourite albums shelf on the home page is an album list like any
-/// other, so the stored answer for that one list has to go as well; the prefix stops short of the size
-/// and the offset, and leaves the newest, recent and frequent lists alone.
-const STAR_STALE: [&str; 5] = ["getStarred2", "getAlbum", "getArtist", "getPlaylist", "getAlbumList2&type=starred"];
-
-fn request(w: Write) -> (&'static str, Vec<(String, String)>, &'static [&'static str]) {
-    let one = |k: &str, v: String| vec![(k.to_string(), v)];
-    let many = |k: &str, ids: Vec<String>| ids.into_iter().map(|v| (k.to_string(), v)).collect::<Vec<_>>();
-    match w {
-        Write::Star { kind, id, on } => (if on { "star" } else { "unstar" }, one(kind.param(), id), &STAR_STALE),
-        Write::CreatePlaylist { name, song_ids } => {
-            let mut p = one("name", name);
-            p.extend(many("songId", song_ids));
-            ("createPlaylist", p, &["getPlaylist"])
-        }
-        Write::AddToPlaylist { id, song_ids } => {
-            let mut p = one("playlistId", id);
-            p.extend(many("songIdToAdd", song_ids));
-            ("updatePlaylist", p, &["getPlaylist"])
-        }
-        Write::RemoveFromPlaylist { id, index } => {
-            ("updatePlaylist", pairs(&[("playlistId", id), ("songIndexToRemove", index.to_string())]), &["getPlaylist"])
-        }
-        Write::DeletePlaylist { id } => ("deletePlaylist", one("id", id), &["getPlaylist"]),
-        Write::CreateRadio { name, stream_url } => {
-            ("createInternetRadioStation", pairs(&[("name", name), ("streamUrl", stream_url)]), &["getInternetRadioStations"])
-        }
-        Write::DeleteRadio { id } => ("deleteInternetRadioStation", one("id", id), &["getInternetRadioStations"]),
-        Write::Scrobble { id, submission, time_ms } => {
-            let mut p = pairs(&[("id", id), ("submission", submission.to_string())]);
-            if let Some(t) = time_ms {
-                p.push(("time".into(), t.to_string()));
-            }
-            ("scrobble", p, &[])
-        }
-        Write::SaveQueue { ids, current, position_ms } => {
-            let mut p = many("id", ids);
-            if let Some(c) = current {
-                p.push(("current".into(), c));
-            }
-            p.push(("position".into(), position_ms.to_string()));
-            ("savePlayQueue", p, &[])
-        }
-    }
-}
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
@@ -519,18 +405,6 @@ pub(crate) mod tests {
         assert!(matches!(block(c.write(Write::Star { kind: Starrable::Song, id: "1".into(), on: false })), Err(NetError::Api { code: 50, .. })));
         assert!(c.core.pending_list().unwrap().is_empty());
         assert!(c.core.cache_get("getStarred2".into()).unwrap().is_some(), "nothing changed, nothing is stale");
-    }
-
-    #[test]
-    fn write_parameters_keep_their_order() {
-        let (_, p, s) = request(Write::SaveQueue { ids: vec!["a".into(), "b".into()], current: None, position_ms: 7 });
-        assert_eq!(p, pairs(&[("id", "a".into()), ("id", "b".into()), ("position", "7".into())]));
-        assert!(s.is_empty());
-        let (e, p, s) = request(Write::Star { kind: Starrable::Artist, id: "x".into(), on: false });
-        assert_eq!((e, p), ("unstar", pairs(&[("artistId", "x".into())])));
-        assert_eq!(s, &STAR_STALE);
-        let (e, p, _) = request(Write::Scrobble { id: "s".into(), submission: false, time_ms: None });
-        assert_eq!((e, p), ("scrobble", pairs(&[("id", "s".into()), ("submission", "false".into())])));
     }
 
     #[test]

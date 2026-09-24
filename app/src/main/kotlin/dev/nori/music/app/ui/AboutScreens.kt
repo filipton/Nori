@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import dev.nori.music.app.BuildConfig
+import dev.nori.music.ffi.settings.Credit
 
 /** A row that says something: a title, a line under it, and optionally something at its end or a tap. */
 @Composable
@@ -41,85 +42,43 @@ internal fun InfoRow(title: String, detail: String, end: String? = null, onClick
 /**
  * What this is and what it is built out of. Most of a bug report is answered here - which build, which
  * commit, which phone, which audio engine at which version - and a tap on the top row copies all of it.
+ * The lines and the report are the core's (`words_about_android`); this hands it what only Android knows.
  */
 @Composable
 internal fun AboutContent(section: @Composable (String, @Composable ColumnScope.() -> Unit) -> Unit, openLicences: () -> Unit) {
     val clipboard = LocalClipboardManager.current
-    val facts = remember { BuildFacts.collect() }
+    val facts = remember {
+        dev.nori.music.ffi.words.wordsAboutAndroid(
+            BuildConfig.VERSION_NAME, BuildConfig.CORE_VERSIONS, BuildConfig.DEBUG, BuildConfig.GIT_SHA,
+            Build.SUPPORTED_ABIS.firstOrNull(), Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
+        )
+    }
     section("Nori") {
-        InfoRow("Nori ${BuildConfig.VERSION_NAME}", facts.build, end = "Copy") { clipboard.setText(AnnotatedString(facts.report())) }
+        InfoRow(facts.title, facts.build, end = say.copyIt) { clipboard.setText(AnnotatedString(facts.report)) }
     }
-    section("Under the hood") {
-        InfoRow("Playback", facts.playback)
-        InfoRow("Library and search", facts.library)
-        InfoRow("AutoMix", facts.automix)
-        InfoRow("Interface", facts.ui)
+    section(say.underTheHood) {
+        InfoRow(say.playback, facts.playback)
+        InfoRow(say.libraryAndSearch, facts.library)
+        InfoRow(say.automix, facts.automix)
+        InfoRow(say.interfaceTitle, facts.ui)
     }
-    section("Open source") {
-        InfoRow("Nori is free software", "MIT licence  ·  Copyright (c) 2026 filipton", end = "MIT")
-        InfoRow("Licences", "The libraries, fonts and data this app is made of, and their terms", onClick = openLicences)
-    }
-}
-
-/** The facts About shows, gathered once; none of them change while the app runs. */
-private class BuildFacts(val build: String, val playback: String, val library: String, val automix: String, val ui: String) {
-    fun report(): String = listOf(
-        "Nori ${BuildConfig.VERSION_NAME} ($build)",
-        "Playback: $playback",
-        "Library: $library",
-        "AutoMix: $automix",
-        "Interface: $ui",
-    ).joinToString("\n")
-
-    companion object {
-        fun collect(): BuildFacts {
-            val versions = BuildConfig.CORE_VERSIONS.split(';')
-                .mapNotNull { it.split('=').takeIf { p -> p.size == 2 && p[1].isNotBlank() }?.let { p -> p[0] to p[1] } }
-                .toMap()
-            fun v(name: String) = versions[name]?.let { " $it" }.orEmpty()
-            val kind = if (BuildConfig.DEBUG) "debug" else "release"
-            val sha = BuildConfig.GIT_SHA.ifBlank { "no commit" }
-            val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown ABI"
-            return BuildFacts(
-                build = "$kind $sha  ·  $abi  ·  Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
-                playback = "Media3 ExoPlayer${v("media3")}  ·  OkHttp${v("okhttp")}  ·  equalizer, crossfeed and limiter in the Rust core",
-                library = "SQLite with full-text search through rusqlite${v("rusqlite")}  ·  Rust core reached through uniffi${v("uniffi")}",
-                automix = "Beat and key analysis on this phone with RustFFT${v("rustfft")}  ·  tempo changes by Signalsmith Stretch${v("signalsmith-stretch")}",
-                ui = "Jetpack Compose and Material 3 (BOM${v("composeBom")})  ·  covers through Coil${v("coil")}",
-            )
-        }
+    section(say.openSource) {
+        InfoRow(say.freeSoftware, say.licenceLine, end = "MIT")
+        InfoRow(say.licences, say.licencesDetail, onClick = openLicences)
     }
 }
 
 /**
- * One thing worth crediting: what it is, whose it is, under what terms, and which bundled text those
- * terms are (`assets/licences/<file>.txt`; null for a service with no licence to reproduce).
- */
-private data class Credit(val name: String, val what: String, val copyright: String, val license: String, val file: String?)
-
-/**
- * Everything the app is built from that is not ours. A static list, because the set changes with the
- * code and not with the user: a line here, and in NOTICE, is added in the same commit that adds the
- * dependency. Where a library offers MIT or Apache-2.0, the MIT text is the one shown. The core's own
- * crates are credited by the core (`settings_schema::core_credits`), so every app on it lists them alike.
+ * Everything the app is built from that is not ours, grouped: the core's crates, Android's libraries,
+ * the typeface and the third parties' data. What each is, whose and under which terms is the core's
+ * (`settings_schema::core_credits`, `android_credits`, `data_credits`), so every app on it lists them
+ * alike; each names the bundled text its terms are (`assets/licences/<file>.txt`; none for a service).
  */
 private val CREDITS by lazy {
     listOf(
-        "Rust core" to dev.nori.music.ffi.coreCredits().map { Credit(it.name, it.what, it.copyright, it.licence, it.file) },
-        "Android" to listOf(
-            Credit("AndroidX Media3", "Playback, the media session and the notification", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-            Credit("Jetpack Compose and Material 3", "The user interface toolkit", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-            Credit("Material Icons", "The icons", "Copyright Google LLC", "Apache-2.0", "Apache-2.0"),
-            Credit("AndroidX Navigation, Lifecycle, Activity, Core", "The app's plumbing", "Copyright The Android Open Source Project", "Apache-2.0", "Apache-2.0"),
-            Credit("OkHttp", "Every network request", "Copyright Square, Inc.", "Apache-2.0", "Apache-2.0"),
-            Credit("Coil", "Loading and caching covers", "Copyright Coil Contributors", "Apache-2.0", "Apache-2.0"),
-            Credit("kotlinx.coroutines", "The concurrency the app is written in", "Copyright JetBrains s.r.o. and Kotlin Programming Language contributors", "Apache-2.0", "Apache-2.0"),
-        ),
-        "Fonts and data" to listOf(
-            Credit("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", "OFL-1.1"),
-            Credit("AutoEQ", "Headphone correction curves, fetched when you ask for them", "Copyright (c) 2018 Jaakko Pasanen", "MIT", "MIT"),
-            Credit("LRCLIB", "Synced lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", null),
-        ),
+        say.rustCore to dev.nori.music.ffi.settings.coreCredits(),
+        "Android" to dev.nori.music.ffi.settings.androidCredits(),
+        say.fontsAndData to dev.nori.music.ffi.settings.dataCredits(),
     )
 }
 
@@ -132,7 +91,7 @@ internal fun LicencesContent(section: @Composable (String, @Composable ColumnSco
     var open by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Credit?>(null) }
     CREDITS.forEach { (heading, credits) ->
         section(heading) {
-            credits.forEach { c -> InfoRow(c.name, c.what, end = c.license) { open = c } }
+            credits.forEach { c -> InfoRow(c.name, c.what, end = c.licence) { open = c } }
         }
     }
     open?.let { c -> LicenceText(c) { open = null } }
@@ -146,14 +105,14 @@ private fun LicenceText(c: Credit, dismiss: () -> Unit) {
     }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = dismiss,
-        confirmButton = { androidx.compose.material3.TextButton(dismiss) { Text("Close") } },
+        confirmButton = { androidx.compose.material3.TextButton(dismiss) { Text(say.close) } },
         title = { Text(c.name) },
         text = {
             Column(Modifier.verticalScroll(androidx.compose.foundation.rememberScrollState())) {
                 Text(c.copyright, style = MaterialTheme.typography.bodyMedium)
-                Text(c.license, Modifier.padding(top = 4.dp, bottom = 12.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text(c.licence, Modifier.padding(top = 4.dp, bottom = 12.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 Text(
-                    text ?: if (c.file == null) "No licence text to reproduce." else "The licence text could not be read.",
+                    text ?: if (c.file == null) say.noLicenceText else say.licenceUnreadable,
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

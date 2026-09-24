@@ -51,7 +51,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.HomeViewModel
 import dev.nori.music.settings.HomeRow
-import dev.nori.music.ffi.Album
+import dev.nori.music.ffi.model.Album
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -78,19 +78,19 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
             // top of the page: what belongs at the top of this screen is music.
             item(key = "title") {
                 var menu by remember { mutableStateOf(false) }
-                LargeTitle("Listen now", Modifier.arriving(arrival, 0, rise)) {
+                LargeTitle(say.listenNow, Modifier.arriving(arrival, 0, rise)) {
                     Box {
-                        IconButton({ menu = true }) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(22.dp)) }
+                        IconButton({ menu = true }) { Icon(Icons.Filled.MoreHoriz, say.more, Modifier.size(22.dp)) }
                         DropdownMenu(menu, { menu = false }) {
-                            DropdownMenuItem({ Text("Shuffle everything") }, { actions.shuffleAll(); menu = false })
-                            DropdownMenuItem({ Text("Resume from server") }, { actions.resumeFromServer(); menu = false })
-                            DropdownMenuItem({ Text("Rearrange rows") }, { rearranging = true; menu = false })
+                            DropdownMenuItem({ Text(say.shuffleEverything) }, { actions.shuffleAll(); menu = false })
+                            DropdownMenuItem({ Text(say.resumeFromServer) }, { actions.resumeFromServer(); menu = false })
+                            DropdownMenuItem({ Text(say.rearrangeRows) }, { rearranging = true; menu = false })
                         }
                     }
                 }
             }
             // Favourites are always here; the mixes join them when the taste model is on (MixesViewModel).
-            item(key = "mixes") { Column(Modifier.arriving(arrival, 1, rise)) { SectionTitle("For you"); MixTiles() } }
+            item(key = "mixes") { Column(Modifier.arriving(arrival, 1, rise)) { SectionTitle(say.forYou); MixTiles() } }
             // The shelves carry on the count the sections above started, so each one arrives a moment
             // after the one over it; an empty shelf is not drawn and does not take a place in the order.
             var place = 2
@@ -165,7 +165,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.shelf(
 /** Playlists laid out as the albums are, so a shelf of them reads as the same kind of thing. */
 private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
     title: String,
-    playlists: List<dev.nori.music.ffi.Playlist>,
+    playlists: List<dev.nori.music.ffi.model.Playlist>,
     vm: HomeViewModel,
     arrival: State<Float>,
     place: Int,
@@ -187,7 +187,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
 /** A shelf of songs plays from where it is tapped, the rest of the shelf behind it, as a list would. */
 private fun androidx.compose.foundation.lazy.LazyListScope.songShelf(
     title: String,
-    songs: List<dev.nori.music.ffi.Song>,
+    songs: List<dev.nori.music.ffi.model.Song>,
     vm: HomeViewModel,
     actions: dev.nori.music.app.vm.ActionsViewModel,
     arrival: State<Float>,
@@ -282,9 +282,9 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val shown = prefs.homeRows
     // Which rows are left out, and where one switched on or off goes, are the core's (browse.rs).
-    val hidden = remember(shown) { dev.nori.music.ffi.homeRowsHidden(HomeRow.entries.map { it.name }, shown.map { it.name }).map(HomeRow::valueOf) }
+    val hidden = remember(shown) { dev.nori.music.ffi.library.homeRowsHidden(HomeRow.entries.map { it.name }, shown.map { it.name }).map(HomeRow::valueOf) }
     fun toggled(row: HomeRow, on: Boolean) = settings.update { p ->
-        p.copy(homeRows = dev.nori.music.ffi.homeRowsToggled(p.homeRows.map { it.name }, row.name, on).map(HomeRow::valueOf))
+        p.copy(homeRows = dev.nori.music.ffi.library.homeRowsToggled(p.homeRows.map { it.name }, row.name, on).map(HomeRow::valueOf))
     }
     // Tracked by which shelf is being held, never by its position: the position changes the instant the
     // list reorders, and a gesture keyed on that is cancelled mid-drag - which is why a row could only
@@ -296,10 +296,10 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
 
     Column(Modifier.fillMaxSize()) {
-        LargeTitle("Rows") {
-            androidx.compose.material3.TextButton(onDone) { Text("Done", style = MaterialTheme.typography.titleSmall) }
+        LargeTitle(say.rows) {
+            androidx.compose.material3.TextButton(onDone) { Text(say.done, style = MaterialTheme.typography.titleSmall) }
         }
-        Caption("Hold a row to move it", Modifier.padding(start = Space.gutter, bottom = 8.dp))
+        Caption(say.holdARowToMoveIt, Modifier.padding(start = Space.gutter, bottom = 8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             items(shown, key = { it.name }) { row ->
                 val dragged = held == row
@@ -345,7 +345,7 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
                 Hairline()
             }
             if (hidden.isNotEmpty()) {
-                item(key = "hidden") { SectionTitle("Not shown") }
+                item(key = "hidden") { SectionTitle(say.notShown) }
                 items(hidden, key = { it.name }) { row ->
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 14.dp),

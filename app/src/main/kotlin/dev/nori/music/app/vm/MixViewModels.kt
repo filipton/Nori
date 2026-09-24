@@ -3,11 +3,11 @@ package dev.nori.music.app.vm
 import android.app.Application
 import androidx.lifecycle.viewModelScope
 import dev.nori.music.Nori
-import dev.nori.music.ffi.MixLookup
-import dev.nori.music.ffi.MixSheet
-import dev.nori.music.ffi.MixTile
-import dev.nori.music.ffi.Song
-import dev.nori.music.ffi.mixTiles
+import dev.nori.music.ffi.library.MixLookup
+import dev.nori.music.ffi.library.MixSheet
+import dev.nori.music.ffi.library.MixTile
+import dev.nori.music.ffi.model.Song
+import dev.nori.music.ffi.library.mixTiles
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow

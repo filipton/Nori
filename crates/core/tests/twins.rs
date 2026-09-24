@@ -2,9 +2,9 @@
 //! (copied into testdata/twins/CoreTwins.kt) answered on the JVM, written by tools/twins.sh. Every answer
 //! must match exactly; the only floats are volume fractions, compared bit for bit.
 
-use norimusic::automix::ahead;
-use norimusic::rows::{merge_rows, Row};
-use norimusic::{autoeq, car, covers, heard, menus, rules, search, stream_cache};
+use nori_core::automix::ahead;
+use nori_core::rows::{merge_rows, Row};
+use nori_core::{autoeq, car, covers, heard, menus, rules, search, stream_cache};
 
 const TABLE: &str = include_str!("../testdata/twins/core_twins.tsv");
 

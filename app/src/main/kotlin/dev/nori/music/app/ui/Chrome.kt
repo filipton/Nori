@@ -240,29 +240,30 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     // player because the bar is on screen whenever something is playing, so a skip from the
     // notification or the lock screen is covered too.
     val context = androidx.compose.ui.platform.LocalContext.current
-    // Which songs either side is the core's (`cover_neighbours`, the skips' own targets, shuffle included).
-    val around = remember(state.current?.coverArt, state.index, state.nextIndex, state.previousIndex, state.queue) {
-        val either = dev.nori.music.ffi.coverNeighbours(state.index, state.previousIndex, state.nextIndex, 1, state.queue.size.toUInt())
-        (listOf(vm.cover(state.current?.coverArt, CoverSize.ROW)) + either.map { vm.cover(state.queue[it.toInt()].coverArt, CoverSize.ROW) })
-            .filterNotNull().filterNot(::isProviderCover)
-    }
+    // Which songs either side is the core's (`covers_around`, the skips' own targets, shuffle included),
+    // worked out once per skip with the covers fetched ahead.
+    val near by vm.coversNear.collectAsStateWithLifecycle()
+    val around = remember(near) { near.mapNotNull { vm.cover(it, CoverSize.ROW) }.filterNot(::isProviderCover) }
     LaunchedEffect(around, dark, prefs.coverColors, prefs.amoled, prefs.playerColours) {
         if (!prefs.coverColors) return@LaunchedEffect
         for (url in around) {
-            warmCoverPalette(context, url, dark, prefs.amoled)
             // The full-screen player keeps the record's colours where the bar goes black, so that is a
-            // second set of colours for the same cover.
-            if (prefs.playerColours) warmCoverPalette(context, url, dark, false)
+            // second set of colours for the same cover, worked out from the same decode.
+            warmCoverPalette(context, url, dark, prefs.amoled, andPlain = prefs.playerColours)
         }
     }
     val scheme = MaterialTheme.colorScheme
     val sheet = LocalPlayerSheet.current
+    // Under the open player the bar is still composed and drawn, only covered: a title walking there
+    // redrew the whole screen every frame for nobody. Read through derivedStateOf so a drag of the sheet
+    // recomposes nothing here until it lands.
+    val covered by remember(sheet) { androidx.compose.runtime.derivedStateOf { sheet.progress.value >= 1f } }
     Surface(
         shape = CardShape, color = slab, contentColor = content,
         shadowElevation = 10.dp,
         border = androidx.compose.foundation.BorderStroke(androidx.compose.ui.unit.Dp.Hairline, edge),
         modifier = Modifier.fillMaxWidth()
-            .semantics { contentDescription = "Now playing bar" }
+            .semantics { contentDescription = say.nowPlayingBar }
             .onGloballyPositioned { sheet.miniTop = it.positionInRoot().y }
             // Up opens the player, following the finger the whole way; see PlayerSheet.
             .dragsSheet(sheet),
@@ -274,7 +275,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
             // What is playing slides aside for the next (or last) song, which comes in from the other
             // edge already showing; the buttons stay where they are. Radio has no neighbours.
             val song = state.current
-            val track: @Composable (dev.nori.music.ffi.Song?, Boolean) -> Unit = { s, real ->
+            val track: @Composable (dev.nori.music.ffi.model.Song?, Boolean) -> Unit = { s, real ->
                 Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Cover(
                         vm.cover(s?.coverArt, CoverSize.ROW), 42.dp,
@@ -287,18 +288,17 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                     )
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                         // A long title here reads itself out twice when the song comes on and then
-                        // settles back to the ellipsis. The full player scrolls its title for as long
-                        // as it is open; this bar is open for as long as the app is, and a line
-                        // walking there all afternoon is exactly the kind of thing the missing
-                        // progress bar above is missing for.
+                        // settles, as the full player's does (see readable). Only the row really
+                        // showing: the neighbours wait off either edge at alpha zero, and a long title
+                        // there walked after every change of song, a frame each time, on every page.
                         Text(
-                            s?.title ?: title, Modifier.readable(iterations = 2),
+                            s?.title ?: title, Modifier.readable(iterations = if (real && !covered) READ_OUT else 0),
                             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodyLarge,
                         )
                         val error = if (real) state.error else null
                         Text(
-                            remember(error, s?.artist) { dev.nori.music.ffi.wordsBarLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            remember(error, s?.artist) { dev.nori.music.ffi.words.wordsBarLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
                             color = if (real && state.error != null) scheme.error else look.color(CoverLook.CHROME_CONTENT_65),
                         )
@@ -322,7 +322,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                 FavoriteHeart(starred, tint = content, muted = look.color(CoverLook.CHROME_CONTENT_75)) { actions.star(s, !starred) }
             }
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
-            IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
+            IconButton(vm::next) { Icon(Icons.Filled.FastForward, say.next, Modifier.size(25.dp)) }
         }
         }
     }
@@ -389,8 +389,8 @@ internal fun <T> SwipeCarousel(
             val release: (Float) -> Unit = { v ->
                 val o = offset
                 val w = size.width.toFloat()
-                // The same gesture as the sleeve's, by the same rule (the core's `swipe_turn`), with the bar's slower flick.
-                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter, bar = true)
+                // The same gesture as the sleeve's, by the same rule (swipeTurn), with the bar's slower flick.
+                val go = swipeTurn(o, v, w, hasBefore, hasAfter, bar = true)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
@@ -428,7 +428,7 @@ internal fun <T> SwipeCarousel(
                 val w = size.width.toFloat()
                 val moved = offset + d
                 val allowed = (moved > 0f && hasBefore) || (moved < 0f && hasAfter)
-                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * stage.give).coerceIn(-w * stage.giveLimit, w * stage.giveLimit)
+                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * GIVE).coerceIn(-w * GIVE_LIMIT, w * GIVE_LIMIT)
             }
         },
     ) {

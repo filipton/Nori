@@ -5,7 +5,7 @@ import androidx.lifecycle.viewModelScope
 import dev.nori.music.data.StarKind
 import dev.nori.music.downloads.DownloadState
 import dev.nori.music.downloads.DownloadMark
-import dev.nori.music.ffi.DownloadSections
+import dev.nori.music.ffi.transfers.DownloadSections
 import dev.nori.music.net.said
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -13,9 +13,9 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
-import dev.nori.music.ffi.Album
-import dev.nori.music.ffi.Playlist
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.model.Playlist
+import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,17 +27,17 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import dev.nori.music.ffi.Said
-import dev.nori.music.ffi.ShufflePlan
-import dev.nori.music.ffi.TapPlan
-import dev.nori.music.ffi.TestRef
+import dev.nori.music.ffi.words.Said
+import dev.nori.music.ffi.queue.ShufflePlan
+import dev.nori.music.ffi.queue.TapPlan
+import dev.nori.music.ffi.queue.TestRef
 import dev.nori.music.ffi.coverWants
-import dev.nori.music.ffi.shufflePlan
-import dev.nori.music.ffi.tapPlan
-import dev.nori.music.ffi.testRef
-import dev.nori.music.ffi.words
-import dev.nori.music.ffi.wordsDownloading
-import dev.nori.music.ffi.wordsDownloadsRemoved
+import dev.nori.music.ffi.queue.shufflePlan
+import dev.nori.music.ffi.queue.tapPlan
+import dev.nori.music.ffi.queue.testRef
+import dev.nori.music.ffi.words.words
+import dev.nori.music.ffi.words.wordsDownloading
+import dev.nori.music.ffi.words.wordsDownloadsRemoved
 import dev.nori.music.ffi.wordsFavourite
 
 /** Everything that can be done to a song, album or playlist from any screen. One instance per activity. */
@@ -46,7 +46,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     /** One-line confirmations and failures, for a snackbar or whatever the UI uses. */
     val messages = _messages.receiveAsFlow()
     /** This session's star changes, so every heart on screen can prefer them over its snapshot. */
-    val starMarks: StateFlow<dev.nori.music.ffi.StarMarks> = nori.library.starMarks
+    val starMarks: StateFlow<dev.nori.music.ffi.library.StarMarks> = nori.library.starMarks
     val downloads: StateFlow<DownloadState> = nori.downloads.state
 
     // A process started in the background could not restart the download service; with a screen up it can.
@@ -140,10 +140,14 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
         private set
 
     /** The songs a test bridge reference names (see the core's `test_ref`). */
+    /**
+     * What a test reference plays. Never a provider song: asking the server for an `ext-` item makes
+     * octo-fiesta fetch it, so the test tools pass over them, even inside an album that mixes them in.
+     */
     private suspend fun songsOf(ref: TestRef): List<Song> = when (ref) {
-        is TestRef.Album -> nori.library.album(ref.id).first().songs
-        is TestRef.Song -> listOfNotNull(nori.library.song(ref.id))
-        is TestRef.Search -> nori.library.search(ref.text).songs.take(1)
+        is TestRef.Album -> nori.library.album(ref.id).first().songs.filterNot { it.id.startsWith("ext-") }
+        is TestRef.Song -> listOfNotNull(nori.library.song(ref.id)).filterNot { it.id.startsWith("ext-") }
+        is TestRef.Search -> nori.library.search(ref.text).songs.filterNot { it.id.startsWith("ext-") }.take(1)
         // Straight from what is already on the device: the only way to start playback with the
         // network off, and therefore the only honest test of offline playback.
         is TestRef.Downloaded -> withContext(Dispatchers.IO) { nori.downloads.state.value.done }.drop(ref.index.toInt()).take(1)
@@ -161,7 +165,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
         when (val plan = shufflePlan(songs)) {
             ShufflePlan.Empty -> {}
             ShufflePlan.PlayerShuffle -> nori.player.play(songs, shuffle = true)
-            is ShufflePlan.Order -> nori.player.playShuffledOrder(plan.songs)
+            is ShufflePlan.Order -> nori.player.playShuffledOrder(songs, plan.order)
         }
     }
 
@@ -191,8 +195,8 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun resumeFromServer() = attempt(null) {
         // What to do with what the server kept is the core's (`resume_from_server`).
         when (val plan = nori.library.resumeFromServer()) {
-            is dev.nori.music.ffi.ResumePlan.Nothing -> _messages.send(plan.message)
-            is dev.nori.music.ffi.ResumePlan.Play -> { nori.player.play(plan.songs, plan.index.toInt()); nori.player.seekTo(plan.positionMs.toLong()) }
+            is dev.nori.music.ffi.library.ResumePlan.Nothing -> _messages.send(plan.message)
+            is dev.nori.music.ffi.library.ResumePlan.Play -> { nori.player.play(plan.songs, plan.index.toInt()); nori.player.seekTo(plan.positionMs.toLong()) }
         }
     }
 
@@ -231,17 +235,16 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     /**
-     * Fetches the artwork of songs being downloaded into the image cache, at the two sizes the app
-     * asks for. Covers are only kept once something has drawn them, so a song downloaded from a menu -
-     * without its cover ever being on screen - arrives on the device with no picture, and shows a blank
-     * plate for the rest of its life offline.
+     * Fetches the artwork of songs being downloaded onto the disk, at the two sizes the app asks for.
+     * Covers are only kept once something has drawn them, so a song downloaded from a menu - without its
+     * cover ever being on screen - arrives on the device with no picture, and shows a blank plate for the
+     * rest of its life offline. Not decoded: nothing is drawing them now, and hundreds of them would push
+     * the covers on screen out of memory.
      */
     private fun warmCovers(songs: List<Song>) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-        val context = getApplication<Application>()
-        val loader = coil3.SingletonImageLoader.get(context)
+        val loader = dev.nori.music.data.CoverLoader.get(getApplication<Application>())
         for (want in coverWants(songs.mapNotNull { it.coverArt }, 500u)) {
-            val size = want.size.toInt()
-            loader.enqueue(coil3.request.ImageRequest.Builder(context).data(nori.library.coverUrl(want.id, size)).size(size).build())
+            nori.library.coverUrl(want.id, want.size.toInt())?.let(loader::warm)
         }
     }
 

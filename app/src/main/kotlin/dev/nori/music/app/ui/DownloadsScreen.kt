@@ -81,7 +81,7 @@ import dev.nori.music.downloads.DownloadMark
 import dev.nori.music.downloads.DownloadPhase
 import dev.nori.music.downloads.DownloadLines
 import dev.nori.music.downloads.DownloadState
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
@@ -106,14 +106,14 @@ fun rememberDownloadMarks(actions: ActionsViewModel): DownloadMarks {
 }
 
 /** The glyph a row's mark shows (the core's `download_glyph`). */
-private typealias Glyph = dev.nori.music.ffi.DownloadGlyph
+private typealias Glyph = dev.nori.music.ffi.library.DownloadGlyph
 
 /** The core's answer for each phase and state, asked once each: a row asks on every composition. */
 private object Glyphs {
     private val made = arrayOfNulls<Glyph>(20)
     fun of(phase: Int, downloaded: Boolean, pending: Boolean): Glyph {
         val i = (phase + 1) * 4 + (if (downloaded) 2 else 0) + (if (pending) 1 else 0)
-        return made[i] ?: dev.nori.music.ffi.downloadGlyph(phase, downloaded, pending).also { made[i] = it }
+        return made[i] ?: dev.nori.music.ffi.library.downloadGlyph(phase, downloaded, pending).also { made[i] = it }
     }
 }
 
@@ -136,7 +136,7 @@ val MARK_SLOT = 26.dp
 fun DownloadSlot(id: String, downloaded: Boolean, tint: Color) {
     val all = LocalDownloadMarks.current
     if (all == null) {
-        if (downloaded) Icon(Icons.Filled.DownloadDone, "Downloaded", Modifier.size(MARK), tint)
+        if (downloaded) Icon(Icons.Filled.DownloadDone, say.downloaded, Modifier.size(MARK), tint)
         return
     }
     val mark = all.marks.value[id]
@@ -172,7 +172,7 @@ private fun MarkBody(glyph: Glyph, drawn: Glyph, mark: DownloadMark?, growIn: Bo
     // A song that was already downloaded when the row appeared has nothing to change into but gone,
     // which the presence above handles: it is drawn as the plain icon it always was.
     if (drawn == Glyph.DONE && mark == null && !growIn) {
-        Icon(Icons.Filled.DownloadDone, "Downloaded", box.size(MARK), tint)
+        Icon(Icons.Filled.DownloadDone, say.downloaded, box.size(MARK), tint)
         return
     }
     AnimatedContent(
@@ -187,8 +187,8 @@ private fun MarkBody(glyph: Glyph, drawn: Glyph, mark: DownloadMark?, growIn: Bo
     ) { g ->
         when (g) {
             Glyph.RING -> DownloadRing(mark?.progress, MARK, 1.5.dp, tint.copy(alpha = 0.3f), accent, plain)
-            Glyph.FAILED -> Icon(Icons.Outlined.ErrorOutline, "Download failed", Modifier.size(MARK), tint.copy(alpha = 0.85f))
-            else -> Icon(Icons.Filled.DownloadDone, "Downloaded", Modifier.size(MARK), tint)
+            Glyph.FAILED -> Icon(Icons.Outlined.ErrorOutline, say.downloadFailed, Modifier.size(MARK), tint.copy(alpha = 0.85f))
+            else -> Icon(Icons.Filled.DownloadDone, say.downloaded, Modifier.size(MARK), tint)
         }
     }
 }
@@ -263,27 +263,27 @@ fun DownloadsScreen(actions: ActionsViewModel) {
     val s = sections
     val unfinished = s?.let { it.active.size + it.queued.size + it.failed.size } ?: 0
     // Whether stopping everything asks first, and what it says, are the core's (`words_stop_all`).
-    val stop = remember(unfinished) { dev.nori.music.ffi.wordsStopAll(unfinished.toUInt()) }
+    val stop = remember(unfinished) { dev.nori.music.ffi.words.wordsStopAll(unfinished.toUInt()) }
     if (confirm) AlertDialog(
         onDismissRequest = { confirm = false },
         title = { Text(stop.title) },
         text = { Text(stop.text) },
-        confirmButton = { TextButton({ actions.cancelAllDownloads(); confirm = false }) { Text("Stop all") } },
-        dismissButton = { TextButton({ confirm = false }) { Text("Cancel") } },
+        confirmButton = { TextButton({ actions.cancelAllDownloads(); confirm = false }) { Text(say.stopAll) } },
+        dismissButton = { TextButton({ confirm = false }) { Text(say.cancel) } },
     )
     Column {
         Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = Space.gutter - 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
             Spacer(Modifier.weight(1f))
             AnimatedVisibility(unfinished > 0, enter = fadeIn(tween(if (plain) 0 else 200)), exit = fadeOut(tween(if (plain) 0 else 200))) {
                 Text(
-                    "Stop all",
+                    say.stopAll,
                     Modifier.clip8().clickable { if (stop.asks) confirm = true else actions.cancelAllDownloads() }.padding(horizontal = 8.dp, vertical = 8.dp),
                     style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
                 )
             }
         }
-        LargeTitle("Downloads")
+        LargeTitle(say.downloads)
         val summary = s?.let { beat.let { _ -> DownloadLines.summary(it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
         AnimatedContent(
             summary, Modifier.padding(start = Space.gutter, end = Space.gutter, bottom = 6.dp),
@@ -300,32 +300,32 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                 item(key = "h-$key", contentType = "header") { SectionHeader(title, moving(plain), action) }
                 itemsIndexed(songs, key = { _, song -> song.id }, contentType = { _, _ -> "download" }) { i, song -> row(i, song) }
             }
-            section("active", "Downloading", s.active) { i, song ->
+            section("active", say.downloading, s.active) { i, song ->
                 DownloadRow(song, cover(song.coverArt), DownloadPhase.DOWNLOADING, i < s.active.lastIndex, plain, moving(plain), sub = activeSub(song)) {
                     StopControl(song, plain) { actions.cancelDownloads(listOf(song)) }
                 }
             }
-            section("queued", "Waiting", s.queued) { i, song ->
+            section("queued", say.waiting, s.queued) { i, song ->
                 DownloadRow(song, cover(song.coverArt), DownloadPhase.QUEUED, i < s.queued.lastIndex, plain, moving(plain)) {
                     StopControl(song, plain) { actions.cancelDownloads(listOf(song)) }
                 }
             }
             section(
-                "failed", "Failed", s.failed,
-                action = { Text("Retry all", Modifier.clip8().clickable { actions.retryDownloads(s.failed) }.padding(8.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) },
+                "failed", say.failed, s.failed,
+                action = { Text(say.retryAll, Modifier.clip8().clickable { actions.retryDownloads(s.failed) }.padding(8.dp), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary) },
             ) { i, song ->
                 DownloadRow(song, cover(song.coverArt), DownloadPhase.FAILED, i < s.failed.lastIndex, plain, moving(plain)) {
-                    IconButton({ actions.retryDownloads(listOf(song)) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Refresh, "Retry", Modifier.size(20.dp), MaterialTheme.colorScheme.primary) }
-                    IconButton({ actions.cancelDownloads(listOf(song)) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), MaterialTheme.colorScheme.onSurfaceVariant) }
+                    IconButton({ actions.retryDownloads(listOf(song)) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Refresh, say.retry, Modifier.size(20.dp), MaterialTheme.colorScheme.primary) }
+                    IconButton({ actions.cancelDownloads(listOf(song)) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Close, say.remove, Modifier.size(19.dp), MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
             }
-            section("finished", "Finished", s.finished) { i, song ->
+            section("finished", say.finished, s.finished) { i, song ->
                 DownloadRow(
                     song, cover(song.coverArt), DownloadPhase.DONE, i < s.finished.lastIndex, plain,
                     moving(plain),
                     onClick = { actions.play(s.finished, i) },
                 ) {
-                    Box(Modifier.size(40.dp), Alignment.Center) { Icon(Icons.Filled.DownloadDone, "Downloaded", Modifier.size(MARK), MaterialTheme.colorScheme.onSurfaceVariant) }
+                    Box(Modifier.size(40.dp), Alignment.Center) { Icon(Icons.Filled.DownloadDone, say.downloaded, Modifier.size(MARK), MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
             }
             if (s.active.isEmpty() && s.queued.isEmpty() && s.failed.isEmpty() && s.finished.isEmpty()) item(key = "empty", contentType = "empty") {
@@ -334,9 +334,9 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Icon(Icons.Outlined.Downloading, null, Modifier.size(44.dp), MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                    Text(noteText(dev.nori.music.ffi.Note.NO_DOWNLOADS), Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                    Text(noteText(dev.nori.music.ffi.words.Note.NO_DOWNLOADS), Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                     Text(
-                        noteText(dev.nori.music.ffi.Note.NO_DOWNLOADS_HELP),
+                        noteText(dev.nori.music.ffi.words.Note.NO_DOWNLOADS_HELP),
                         Modifier.padding(top = 6.dp), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -356,7 +356,7 @@ private fun activeSub(song: Song): String {
     val all = LocalDownloadMarks.current
     val progress = all?.marks?.value?.get(song.id)
         ?.takeIf { it.phase == DownloadPhase.DOWNLOADING }?.progress?.collectAsStateWithLifecycle()?.value
-    return progress.let { _ -> DownloadLines.row(song.id, song.artist) }
+    return progress.let { _ -> DownloadLines.row(song.id) }
 }
 
 /** A song on the downloads screen: the same proportions as a row in any song list. */
@@ -367,7 +367,7 @@ private fun DownloadRow(
     onClick: (() -> Unit)? = null, trailing: @Composable RowScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val couldNot = noteText(dev.nori.music.ffi.Note.DOWNLOAD_FAILED)
+    val couldNot = noteText(dev.nori.music.ffi.words.Note.DOWNLOAD_FAILED)
     Column(modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
@@ -404,7 +404,7 @@ private fun StopControl(song: Song, plain: Boolean, onStop: () -> Unit) {
     val mark = all?.marks?.value?.get(song.id)
     val scheme = MaterialTheme.colorScheme
     Box(
-        Modifier.size(40.dp).clip8().clickable(onClickLabel = "Stop download", onClick = onStop),
+        Modifier.size(40.dp).clip8().clickable(onClickLabel = say.stopDownload, onClick = onStop),
         Alignment.Center,
     ) {
         DownloadRing(mark?.takeIf { it.phase == DownloadPhase.DOWNLOADING }?.progress, 24.dp, 1.5.dp, scheme.onSurfaceVariant.copy(alpha = 0.3f), scheme.primary, plain)

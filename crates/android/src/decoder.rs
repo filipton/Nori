@@ -8,7 +8,7 @@ use jni::JNIEnv;
 use nori_player::decode::{Codec, Decoder, Fault};
 use parking_lot::Mutex;
 
-use crate::{native, region, Class};
+use crate::{native, region, string, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/RustDecoderJni",
@@ -34,28 +34,16 @@ pub(crate) fn handle<'a>(h: jlong) -> Option<&'a Mutex<Decoder>> {
     (h != 0).then(|| unsafe { &*(h as *const Mutex<Decoder>) })
 }
 
-fn codecs(env: &mut JNIEnv, codecs: &JString) -> Option<String> {
-    if codecs.is_null() {
-        None
-    } else {
-        env.get_string(codecs).ok().map(Into::into)
-    }
-}
-
 /// [`nori_core::decoder::takes_extracted`] as a codec number, 0 for the platform's decoder.
-extern "system" fn takes_extracted(mut env: JNIEnv, _: JClass, mime: JString, codecs_: JString, channels: jint) -> jint {
-    let Ok(m) = env.get_string(&mime) else { return 0 };
-    let m: String = m.into();
-    let c = codecs(&mut env, &codecs_);
-    nori_core::decoder::takes_extracted(&m, c.as_deref(), channels).map_or(0, Codec::id)
+extern "system" fn takes_extracted(env: JNIEnv, _: JClass, mime: JString, codecs: JString, channels: jint) -> jint {
+    let c = string(&env, &codecs);
+    with_str(&env, &mime, |m| nori_core::decoder::takes_extracted(m, c.as_deref(), channels).map_or(0, Codec::id)).unwrap_or(0)
 }
 
 /// The codec number for `mime`, or 0 when the platform's decoder should take the stream.
-extern "system" fn takes(mut env: JNIEnv, _: JClass, mime: JString, codecs_: JString, channels: jint, chip_takes_it: jboolean) -> jint {
-    let Ok(m) = env.get_string(&mime) else { return 0 };
-    let m: String = m.into();
-    let c = codecs(&mut env, &codecs_);
-    nori_core::decoder::takes(&m, c.as_deref(), channels, chip_takes_it != 0).map_or(0, Codec::id)
+extern "system" fn takes(env: JNIEnv, _: JClass, mime: JString, codecs: JString, channels: jint, chip_takes_it: jboolean) -> jint {
+    let c = string(&env, &codecs);
+    with_str(&env, &mime, |m| nori_core::decoder::takes(m, c.as_deref(), channels, chip_takes_it != 0).map_or(0, Codec::id)).unwrap_or(0)
 }
 
 /// A decoder for one stream; 0 when it cannot be made (the platform's decoder then takes over).

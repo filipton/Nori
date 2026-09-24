@@ -40,15 +40,15 @@ fn the_streaming_handle_finishes_into_the_store() {
     assert!((t.bpm - 128.0).abs() < 0.05);
     assert_eq!(core.analysis_get("x".into()).unwrap(), Some(t));
     assert_eq!(core.analysis_finish_stream("x".into(), 0).unwrap(), None);
-    store::test_destroy(h);
+    store::free_stream_handle(h);
 }
 
 fn store_handle(a: analysis::Analyzer) -> i64 {
-    store::test_handle(a)
+    store::stream_handle(a, 1)
 }
 
 fn with_handle(h: i64, f: impl FnOnce(&mut analysis::Analyzer)) {
-    store::test_with(h, f)
+    f(&mut store::stream(h).unwrap().analyzer())
 }
 
 

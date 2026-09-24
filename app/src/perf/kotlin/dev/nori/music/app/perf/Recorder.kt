@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.TrafficStats
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
@@ -25,8 +26,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import dev.nori.music.Nori
 import dev.nori.music.app.PerfHooks
+import dev.nori.music.ffi.PerfCounters
+import dev.nori.music.ffi.PerfDevice
+import dev.nori.music.ffi.PerfFrames
+import dev.nori.music.ffi.PerfOutput
+import dev.nori.music.ffi.PerfPage
+import dev.nori.music.ffi.PerfStretch
+import dev.nori.music.ffi.PerfThread
 import dev.nori.music.playback.PlaybackService
-import dev.nori.music.settings.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.asCoroutineDispatcher
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -37,13 +44,17 @@ import java.io.File
 /**
  * The perf build's recorder: what the app costs, stretch by stretch, on the owner's own phone.
  *
- * A stretch is a span of one state (screen off and playing, the player open, charging, ... see [key])
- * with one set of the settings that change the cost. The counters are read when the state or those
+ * A stretch is a span of one state (screen off and playing, the player open, charging, ...) with one set
+ * of the settings that change the cost. Which state that is, what two readings of the counters make, how
+ * the stretches add up and how the page and the report say it are the core's (perf_log.rs); this reads
+ * Android's counters and draws the page. The counters are read when the state or those
  * settings change, which ends one stretch and starts the next, and when the Performance page opens
  * (the stretch so far). Nothing here ticks: every read is set off by a broadcast (screen on or off,
  * power connected, the service's play/pause), an activity starting or stopping, the player sheet or
  * a settings change. While the phone sleeps with music playing nothing here runs at all, so the
- * recorder adds no wakeups of its own to the numbers it records.
+ * recorder adds no wakeups of its own to the numbers it records. Why a stretch cost what it did is read
+ * at its ends as well: every thread's name, CPU time and wakeups, the AudioTrack the player opened, and
+ * the bytes the app moved over the network.
  *
  * Everything happens on one background thread, which sleeps in its looper between events. The frame
  * listener is there only while an activity is started, so it costs nothing with the screen off.
@@ -64,7 +75,7 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
     private var settings = ""
 
     // The stretch under way: where it started, and the frames drawn since.
-    private var start: Counters? = null
+    private var start: PerfCounters? = null
     private var startKey = ""
     private var startCfg = ""
     private var frames = 0L
@@ -76,6 +87,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
     val shown = mutableStateOf<Shown?>(null)
     val callBench = mutableStateOf("")
     val coverBench = mutableStateOf("")
+    /** The page's fixed words, the core's. */
+    val words by lazy { dev.nori.music.ffi.words.wordsPerf() }
 
     private val events = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -139,11 +152,12 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
         ContextCompat.registerReceiver(app, events, filter, null, handler, ContextCompat.RECEIVER_NOT_EXPORTED)
         handler.post {
             charging = batteryIntent()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)?.let { it != 0 } ?: false
-            // A settings change that alters the cost ends the stretch as a change of state does.
+            // A settings change that alters the cost ends the stretch as a change of state does. The line
+            // is the core's, read from the settings it keeps, which have the change before this hears of it.
             val prefs = Nori.get(app).settings.prefs
-            settings = cfg(prefs.value)
+            settings = cfg()
             CoroutineScope(handler.asCoroutineDispatcher()).launch {
-                prefs.map(::cfg).distinctUntilChanged().collect { settings = it; changed() }
+                prefs.map { cfg() }.distinctUntilChanged().collect { settings = it; changed() }
             }
             changed()
         }
@@ -156,41 +170,28 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
     @Composable
     override fun Page() = PerfPage(this)
 
-    /** The state a stretch is filed under; the names are [STATES]'s. */
-    private fun key(): String = when {
-        charging -> "charging"
-        !screenOn -> if (playing) "off-playing" else "off-paused"
-        !playing -> "on-paused"
-        !foreground -> "on-playing-away"
-        playerOpen -> "on-playing-player"
-        else -> "on-playing-app"
-    }
+    /** The state a stretch is filed under (the core's `perf_state`). */
+    private fun key(): String = dev.nori.music.ffi.perfState(charging, screenOn, playing, foreground, playerOpen)
 
     /**
-     * The settings that change what playing costs, in one line, the playback path first: ExoPlayer (with
-     * the Rust sink, or offloaded to the audio chip) or the Rust player. The path is the one the service
-     * runs, which took the setting when it started; with no service yet, the one it will start with.
-     * Last, which decoder draws the covers, since scrolling a library costs what they cost.
+     * The settings that change what playing costs, in one line (the core's `perf_config`), the playback
+     * path first: the one the service runs, which took the setting when it started; with no service yet,
+     * the one it will start with.
      */
-    private fun cfg(p: Prefs) = "engine ${PlaybackService.engine ?: if (p.playbackEngine == 1) "rust" else "exoplayer"}, " +
-        "eq ${onOff(p.eqEnabled)}, automix ${onOff(p.autoMix)}, crossfade ${p.crossfadeSec} s, " +
-        "offload ${onOff(p.offload)}, hi-res ${onOff(p.hiRes)}, bit-perfect ${onOff(p.bitPerfect)}, " +
-        "covers ${if (p.coreCovers) "rust" else "android"}"
-
-    private fun onOff(b: Boolean) = if (b) "on" else "off"
+    private fun cfg(): String = dev.nori.music.ffi.perfConfig(PlaybackService.engine)
 
     /** Something happened: when it moved the app into another state, one stretch ends and the next begins. */
     private fun changed() {
         // The service may have started (or stopped) since, and with it the path that plays.
-        settings = cfg(Nori.get(app).settings.value)
+        settings = cfg()
         val key = key()
         if (start != null && key == startKey && settings == startCfg) return
         val now = counters()
-        start?.let { s -> stretch(s, now)?.let { dev.nori.music.ffi.perfLogAdd(now.wallMs, it.json()) } }
+        start?.let { s -> stretch(s, now, live = false)?.let { dev.nori.music.ffi.perfLogAdd(now.wallMs, it) } }
         begin(now, key)
     }
 
-    private fun begin(now: Counters, key: String) {
+    private fun begin(now: PerfCounters, key: String) {
         start = now
         startKey = key
         startCfg = settings
@@ -199,9 +200,27 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
 
     /** What the page shows, read again: the kept stretches and the one under way so far. */
     fun refresh() = handler.post {
-        val live = start?.let { stretch(it, counters(), shortest = 0) }
-        val kept = dev.nori.music.ffi.perfLogRows(0).mapNotNull(Stretch::parse)
-        main.post { shown.value = Shown(kept, live) }
+        val live = start?.let { stretch(it, counters(), live = true) }
+        val page = dev.nori.music.ffi.perfPage(live)
+        main.post { shown.value = Shown(page, live) }
+    }
+
+    /**
+     * The report, made on this thread (it reads every stretch kept) and handed to the system's share
+     * sheet: the stretches as the page last read them, and the benchmarks' results.
+     */
+    fun share(context: Context, calls: String, covers: String) {
+        val live = shown.value?.live
+        handler.post {
+            val device = PerfDevice(
+                Build.MANUFACTURER, Build.MODEL, Build.DEVICE, Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
+                dev.nori.music.app.BuildConfig.VERSION_NAME, dev.nori.music.app.BuildConfig.GIT_SHA, dev.nori.music.app.BuildConfig.BUILD_TYPE,
+            )
+            val text = dev.nori.music.ffi.perfReport(live, device, calls, covers)
+            main.post {
+                context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), null))
+            }
+        }
     }
 
     /** "Start fresh": everything kept is forgotten, and the stretch under way starts again from now. */
@@ -217,99 +236,85 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
 
     /** A benchmark takes seconds, so on a thread of its own; its cost lands in the stretch under way. */
     private fun bench(into: androidx.compose.runtime.MutableState<String>, body: () -> String) {
-        into.value = "running..."
+        into.value = words.running
         Thread({
-            val result = runCatching(body).getOrElse { "failed: $it" }
+            val result = runCatching(body).getOrElse { dev.nori.music.ffi.words.wordsPerfFailed(it.toString()) }
             main.post { into.value = result }
         }, "bench").start()
     }
 
-    /** The difference between two readings, filed under the state that began at [a]; none for a blink. */
-    private fun stretch(a: Counters, b: Counters, shortest: Long = SHORTEST_MS): Stretch? {
-        val ms = b.elapsedMs - a.elapsedMs
-        if (ms < shortest) return null
-        // Only threads alive at both ends: one that ended in between would take its whole count with it.
-        var wakeups = 0L
-        for ((tid, n) in b.switches) a.switches[tid]?.let { wakeups += n - it }
-        val gauge = listOfNotNull(a.gaugeUa, b.gaugeUa).takeIf { it.isNotEmpty() }?.let { g -> g.sumOf { kotlin.math.abs(it) } / g.size / 1000.0 }
-        return Stretch(
-            state = startKey, startWall = a.wallMs, ms = ms, cpuMs = b.cpuMs - a.cpuMs, wakeups = wakeups,
-            allocBytes = b.allocBytes - a.allocBytes, gcs = b.gcs - a.gcs, pssKb = b.pssKb,
-            uah = if (a.chargeUah != null && b.chargeUah != null) a.chargeUah - b.chargeUah else null,
-            pct = a.capacityPct - b.capacityPct, gaugeMa = gauge,
-            tempMin = minOf(a.tempDeci, b.tempDeci), tempMax = maxOf(a.tempDeci, b.tempDeci),
-            frames = frames, janky = janky, worstMs = worstNs / 1e6,
-            cfg = startCfg + ", " + (if (PlaybackService.offloadWanted) "offloaded" else "on the CPU"),
-        )
+    /**
+     * The difference between two readings, filed under the state that began at [a] (the core's
+     * `perf_stretch`); none for a blink, unless it is the [live] one the page shows.
+     */
+    private fun stretch(a: PerfCounters, b: PerfCounters, live: Boolean): PerfStretch? =
+        dev.nori.music.ffi.perfStretch(startKey, startCfg, a, b, PerfFrames(frames, janky, worstNs), PlaybackService.offloadWanted, output(), live)
+
+    /**
+     * The AudioTrack the player last opened, as the platform describes it now, against what was asked of
+     * it; none with no player. A track released since reads as what it last said, or not at all.
+     */
+    private fun output(): PerfOutput? {
+        val opened = PlaybackService.track ?: return null
+        val t = opened.track
+        return runCatching {
+            val device = t.routedDevice
+            PerfOutput(
+                engine = opened.engine, rate = t.sampleRate, channels = t.channelCount, encoding = t.audioFormat,
+                askedBytes = opened.askedBytes.toLong(), sizeFrames = t.bufferSizeInFrames.toLong(),
+                capacityFrames = t.bufferCapacityInFrames.toLong(), modeAsked = opened.askedMode, mode = t.performanceMode,
+                offloaded = Build.VERSION.SDK_INT >= 29 && t.isOffloadedPlayback,
+                deviceType = device?.type ?: 0, deviceName = device?.productName?.toString().orEmpty(),
+                underruns = t.underrunCount, playState = t.playState,
+            )
+        }.getOrNull()
     }
 
     private fun batteryIntent(): Intent? = app.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
 
-    /** Everything a stretch is measured by, read now. A few milliseconds, most of it the PSS. */
-    private fun counters(): Counters {
+    /**
+     * Everything a stretch is measured by, read now. A few milliseconds, most of it the PSS and a file or
+     * two per thread (its name and CPU time in `stat`, its wakeups in `status`).
+     */
+    private fun counters(): PerfCounters {
         val stat = runCatching { File("/proc/self/stat").readText().substringAfterLast(") ").split(' ') }.getOrNull()
         // utime and stime, fields 14 and 15 of the whole line: 11 and 12 once the name is cut off.
         val ticks = stat?.let { (it.getOrNull(11)?.toLongOrNull() ?: 0L) + (it.getOrNull(12)?.toLongOrNull() ?: 0L) } ?: 0L
-        val switches = HashMap<Int, Long>()
+        val threads = ArrayList<PerfThread>()
         File("/proc/self/task").listFiles()?.forEach { task ->
             val tid = task.name.toIntOrNull() ?: return@forEach
             runCatching {
-                File(task, "status").useLines { lines ->
+                // The name is the one in brackets, which may itself hold spaces and brackets: up to the last one.
+                val line = File(task, "stat").readText()
+                val name = line.substringAfter('(').substringBeforeLast(')')
+                val f = line.substringAfterLast(") ").split(' ')
+                val cpu = ((f.getOrNull(11)?.toLongOrNull() ?: 0L) + (f.getOrNull(12)?.toLongOrNull() ?: 0L)) * msPerTick
+                val switches = File(task, "status").useLines { lines ->
                     lines.firstOrNull { it.startsWith("voluntary_ctxt_switches") }?.substringAfter(':')?.trim()?.toLongOrNull()
-                }
-            }.getOrNull()?.let { switches[tid] = it }
+                } ?: return@runCatching
+                threads += PerfThread(tid, name, cpu.toLong(), switches)
+            }
         }
         val memory = Debug.MemoryInfo().also { Debug.getMemoryInfo(it) }
         val b = batteryIntent()
         fun prop(id: Int) = battery.getIntProperty(id).takeIf { it != Int.MIN_VALUE && it != 0 }
-        return Counters(
+        return PerfCounters(
             elapsedMs = SystemClock.elapsedRealtime(), wallMs = System.currentTimeMillis(),
-            cpuMs = (ticks * msPerTick).toLong(), switches = switches,
+            cpuMs = (ticks * msPerTick).toLong(), threads = threads,
             allocBytes = runtimeStat("art.gc.bytes-allocated"), gcs = runtimeStat("art.gc.gc-count"),
             pssKb = memory.totalPss.toLong(),
             chargeUah = prop(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)?.toLong(),
             capacityPct = battery.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY),
             gaugeUa = (prop(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE) ?: prop(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW))?.toLong(),
             tempDeci = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0,
+            rxBytes = TrafficStats.getUidRxBytes(Process.myUid()).takeIf { it != TrafficStats.UNSUPPORTED.toLong() },
+            txBytes = TrafficStats.getUidTxBytes(Process.myUid()).takeIf { it != TrafficStats.UNSUPPORTED.toLong() },
         )
     }
 
     private fun runtimeStat(name: String) = Debug.getRuntimeStat(name)?.toLongOrNull() ?: 0L
 
-    companion object {
-        /** Stretches shorter than this are the blinks between two states (the screen going off stops the activity too). */
-        const val SHORTEST_MS = 3_000L
-
-        /** Every state a stretch is filed under, in the order the page lists them, with its name. */
-        val STATES = linkedMapOf(
-            "off-playing" to "Screen off, playing",
-            "off-paused" to "Screen off, paused",
-            "on-playing-player" to "Screen on, playing, player open",
-            "on-playing-app" to "Screen on, playing, other page",
-            "on-playing-away" to "Screen on, playing, another app",
-            "on-paused" to "Screen on, paused",
-            "charging" to "Charging",
-        )
-    }
 }
 
-/** One reading of every counter. */
-internal class Counters(
-    val elapsedMs: Long,
-    val wallMs: Long,
-    val cpuMs: Long,
-    /** Voluntary context switches per thread: each is a thread going to sleep and being woken again. */
-    val switches: Map<Int, Long>,
-    val allocBytes: Long,
-    val gcs: Long,
-    val pssKb: Long,
-    /** What is left in the battery, where the phone counts it (µAh). */
-    val chargeUah: Long?,
-    val capacityPct: Int,
-    /** The fuel gauge's current, its own average where it keeps one (µA, either sign by maker). */
-    val gaugeUa: Long?,
-    /** Battery temperature in tenths of a degree. */
-    val tempDeci: Int,
-)
-
-internal class Shown(val kept: List<Stretch>, val live: Stretch?)
+/** The page as the core laid it out, and the stretch under way it was read with (for the report). */
+internal class Shown(val page: PerfPage, val live: PerfStretch?)

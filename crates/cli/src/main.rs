@@ -25,11 +25,11 @@ use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Do
 use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, State, Store, WavOutput};
 use nori_http::Http;
 use nori_output_cpal::CpalOutput;
-use norimusic::client::{Client, NetProfile};
-use norimusic::settings::StoredPrefs;
-use norimusic::settings_store::{settings_open, settings_put, APPLY_AUDIO, APPLY_GAIN, REPLAN};
-use norimusic::transport::Transport;
-use norimusic::{Core, Param, ServerConfig, Song};
+use nori_core::client::{Client, NetProfile};
+use nori_core::settings::StoredPrefs;
+use nori_core::settings_store::{settings_open, settings_put, APPLY_AUDIO, APPLY_GAIN, REPLAN, SOUND};
+use nori_core::transport::Transport;
+use nori_core::{Core, Param, ServerConfig, Song};
 
 /// The core's calls are async over a transport that answers at once: polling them once finishes them.
 fn block_on<F: Future>(f: F) -> F::Output {
@@ -186,8 +186,8 @@ impl Cli {
     }
 
     fn queue(&mut self, songs: Vec<Song>, start_ms: i64) {
-        norimusic::queue::queue_register(songs.clone());
-        norimusic::playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), 0, false);
+        nori_core::queue::queue_register(songs.clone());
+        nori_core::playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), 0, false);
         self.songs = songs;
         self.engine.queue_changed();
         self.engine.play_at(0, start_ms);
@@ -204,14 +204,14 @@ impl Cli {
 
     /// The settings as the core keeps them now: a device's own sound may have been loaded since.
     fn kept(&self) -> StoredPrefs {
-        norimusic::settings_store::settings_current().unwrap_or_else(|| self.prefs.clone())
+        nori_core::settings_store::settings_current().unwrap_or_else(|| self.prefs.clone())
     }
 
     /// New settings: kept by the core, and whatever they change applied.
     fn put(&mut self, prefs: StoredPrefs) {
         let effects = settings_put(prefs.clone());
         self.prefs = prefs;
-        if effects & APPLY_AUDIO != 0 {
+        if effects & (APPLY_AUDIO | SOUND) != 0 {
             self.engine.set_settings(settings(&self.prefs));
         }
         if effects & APPLY_GAIN != 0 {
@@ -342,6 +342,8 @@ fn main() {
                 Event::Position { index, ms } => println!("  {} at {}", shown.title(index), clock(ms)),
                 Event::Error { id, message } => println!("error: {id} {message}"),
                 Event::Output { name } => println!("output: {name}"),
+                Event::Stopped => println!("stopped"),
+                Event::Buffering(on) => println!("{}", if on { "buffering" } else { "playing again" }),
             }
         }
     });
@@ -417,10 +419,10 @@ mod shown {
     use std::sync::Mutex;
 
     #[derive(Default)]
-    pub struct Titles(Mutex<Vec<norimusic::Song>>);
+    pub struct Titles(Mutex<Vec<nori_core::Song>>);
 
     impl Titles {
-        pub fn set(&self, songs: &[norimusic::Song]) {
+        pub fn set(&self, songs: &[nori_core::Song]) {
             *self.0.lock().unwrap() = songs.to_vec();
         }
 
@@ -428,7 +430,7 @@ mod shown {
             super::title(&self.0.lock().unwrap(), index)
         }
 
-        pub fn song(&self, index: usize) -> Option<norimusic::Song> {
+        pub fn song(&self, index: usize) -> Option<nori_core::Song> {
             self.0.lock().unwrap().get(index).cloned()
         }
     }

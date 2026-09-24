@@ -14,10 +14,12 @@ Linked into the Rust core (crates/core)
     where the crate offers both)
   Signalsmith Stretch — Copyright (c) 2022 Geraint Luff / Signalsmith Audio Ltd., MIT;
     Rust binding Copyright 2024 Colin Marc, MIT
+  zune-jpeg, jpeg-decoder, png, image-webp, gif (cover art, crates/covers) — MIT (dual-licensed MIT or
+    Apache-2.0; zune-jpeg also Zlib)
 
 Android libraries
   AndroidX (Media3, Compose, Material 3, Palette, Navigation, Lifecycle, Activity, Core), Material
-  Icons, OkHttp, Coil, kotlinx.coroutines — Apache License 2.0
+  Icons, OkHttp, kotlinx.coroutines — Apache License 2.0
 
 Fetched only when asked for, not bundled
   AutoEQ headphone curves — Copyright (c) 2018 Jaakko Pasanen, MIT

@@ -32,7 +32,7 @@ android {
             .joinToString(";") { "$it=${locked(it)}" }
         val catalog = rootProject.file("gradle/libs.versions.toml").takeIf { it.exists() }?.readText().orEmpty()
         fun cat(key: String): String = Regex("(?m)^" + Regex.escape(key) + "\\s*=\\s*\"([^\"]+)\"").find(catalog)?.groupValues?.get(1) ?: ""
-        val android = listOf("media3", "composeBom", "coil", "okhttp").joinToString(";") { "$it=${cat(it)}" }
+        val android = listOf("media3", "composeBom", "okhttp").joinToString(";") { "$it=${cat(it)}" }
         buildConfigField("String", "CORE_VERSIONS", "\"$rust;$android\"")
     }
 
@@ -109,6 +109,4 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons)
-    implementation(libs.coil.compose)
-    implementation(libs.coil.okhttp)
 }

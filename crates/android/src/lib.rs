@@ -17,9 +17,6 @@ use jni::objects::{JByteBuffer, JString};
 use jni::sys::{jint, jstring, JNINativeMethod, JNI_ERR, JNI_OK, JNI_VERSION_1_6};
 use jni::JNIEnv;
 
-// The generated scaffolding names the core by its package name.
-extern crate nori_core as norimusic_core;
-
 include!(concat!(env!("OUT_DIR"), "/uniffi_bindgen_kotlin_jni.uniffi.rs"));
 
 mod covers;
@@ -107,6 +104,18 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
     JNI_VERSION_1_6
 }
 
+/// This thread's JNIEnv, the thread attached to the JVM under its own name ("nori-track", "nori-load")
+/// for the rest of its life and detached when it ends. Attached without a name, as the jni crate does it,
+/// the JVM renamed every thread of ours "Thread-NN", and a thread list could not tell them apart.
+pub(crate) fn attached(vm: &'static jni::JavaVM) -> Option<JNIEnv<'static>> {
+    if let Ok(env) = vm.get_env() {
+        return Some(env);
+    }
+    // SAFETY: the live JavaVM; the two jni-sys versions describe the same C structures.
+    let ok = unsafe { uniffi_bindgen_kotlin_jni_runtime::attach_for_life(vm.get_java_vm_pointer().cast()) };
+    if ok { vm.get_env().ok() } else { None }
+}
+
 fn register(env: &mut JNIEnv, class: &Class) {
     let raw = env.get_raw();
     // SAFETY: `raw` is the live JNIEnv of the thread loading the library, and every name and signature is
@@ -163,11 +172,20 @@ pub(crate) fn java_string(env: &JNIEnv, s: &str) -> jstring {
 }
 
 /// A Java string's contents, for as long as the closure runs; `None` for a null reference.
-pub(crate) fn with_str<R>(env: &mut JNIEnv, s: &JString, f: impl FnOnce(&str) -> R) -> Option<R> {
+pub(crate) fn with_str<R>(env: &JNIEnv, s: &JString, f: impl FnOnce(&str) -> R) -> Option<R> {
     if s.is_null() {
         return None;
     }
-    let v = env.get_string(s).ok()?;
+    // SAFETY: every door is registered with RegisterNatives under a signature whose parameter is a
+    // java.lang.String, so the JVM has checked the type already. jni's checked `get_string` would look the
+    // String class up, ask for the object's class and compare them on every call, leaving two local
+    // references behind, for an answer that cannot change.
+    let v = unsafe { env.get_string_unchecked(s) }.ok()?;
     let v: std::borrow::Cow<str> = (&v).into();
     Some(f(&v))
+}
+
+/// A Java string's contents as an owned `String`; `None` for a null reference.
+pub(crate) fn string(env: &JNIEnv, s: &JString) -> Option<String> {
+    with_str(env, s, str::to_string)
 }

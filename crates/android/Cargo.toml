@@ -11,10 +11,24 @@ crate-type = ["cdylib"]
 name = "norimusic"
 
 [dependencies]
-nori-core = { package = "norimusic-core", path = "../core" }
+nori-core = { path = "../core" }
+# Every crate whose exports the scaffolding covers, each with its uniffi records on.
+nori-model = { path = "../model", features = ["ffi"] }
+nori-db = { path = "../db", features = ["ffi"] }
+nori-words = { path = "../words", features = ["ffi"] }
+nori-net = { path = "../net", features = ["ffi"] }
+nori-library = { path = "../library", features = ["ffi"] }
+nori-automix = { path = "../automix", features = ["ffi"] }
+nori-settings = { path = "../settings", features = ["ffi"] }
+nori-lyrics = { path = "../lyrics", features = ["ffi"] }
+nori-devices = { path = "../devices", features = ["ffi"] }
+nori-queue = { path = "../queue", features = ["ffi"] }
+nori-transfers = { path = "../transfers", features = ["ffi"] }
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
 nori-covers = { path = "../covers" }
+# The cover loader's transport (covers.rs) is the core's async Transport trait.
+async-trait = "0.1"
 # The Rust playback path (player.rs, track.rs): the engine playing the core's queue into an AudioTrack.
 nori-engine = { path = "../engine", features = ["core"] }
 libc = "0.2"

@@ -222,7 +222,7 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   under the hero fades and rises once via `Arrive` (300 ms). Player title block cross-fades on
   song id (220 / 160 ms).
 - Left: page content that is composed late mid-slide (Compose Navigation), player sheet contents
-  that are already on the rising surface, Cover Coil crossfade, loaders, lyrics, downloads,
+  that are already on the rising surface, Cover picture fade-in, loaders, lyrics, downloads,
   switches, seek / volume - already eased or intentional snaps under `reduceMotion`.
 - Status: **done**
 

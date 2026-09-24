@@ -1,0 +1,31 @@
+[package]
+name = "nori-settings"
+version.workspace = true
+edition.workspace = true
+
+# The settings: their codec and rules, the live copy kept in the app's database, the settings screen as
+# data, and what follows them by itself - the sound chain and the decoder's choice.
+[lib]
+name = "nori_settings"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-library/ffi", "nori-automix/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+parking_lot = "0.12"
+thiserror = "2"
+nori-model = { path = "../model" }
+nori-db = { path = "../db" }
+nori-words = { path = "../words" }
+# The settings screen's search is a page's text filter.
+nori-library = { path = "../library" }
+# A change reaches the transition planner by itself.
+nori-automix = { path = "../automix" }
+nori-player = { path = "../player" }
+nori-look = { path = "../look" }

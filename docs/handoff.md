@@ -516,8 +516,8 @@ look like waiting. The pieces:
   loading state, whose content now fades in over it) and by the lyrics, placed where the first line
   will be.
 - `Modifier.loadingSheen`: a faint band crossing a cover's plate while it loads, same 250 ms grace.
-  Every `Cover` uses it, fades its picture in (coil crossfade, which skips memory hits) and fades in
-  the note glyph when there is no picture.
+  Every `Cover` uses it, fades its picture in (260 ms, skipped for a picture already in memory) and
+  fades in the note glyph when there is no picture.
 - The player's sleeve (`SleeveArt`) keeps the old cover while the next one loads and cross-fades;
   after 600 ms without it, the old one fades out to the sheen so it never stands under the wrong
   title. The page colours cross-fade with it and hold the old palette while the new one is worked out.

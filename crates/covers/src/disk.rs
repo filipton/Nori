@@ -4,6 +4,11 @@
 //! The index is only in memory, rebuilt from the directory when it is opened: it is what is in the
 //! directory, not state of the app's (so it stays out of the app's database), and a file's modification
 //! time is its last use, set again on every read, so the order survives a restart.
+//!
+//! What changes the directory (a file renamed into place, a file deleted) is done under the index's lock,
+//! together with the index's own change, so the two cannot disagree: a trim or a remove cannot delete a
+//! file a concurrent put has just put in place, nor a put's file be indexed at another put's size.
+//! Writing a file and reading one are done outside it; they are the slow part.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -51,6 +56,9 @@ impl Key {
 struct Entry {
     bytes: u64,
     used: u64,
+    /// Which put wrote the file (the clock then): a read that fails forgets the file only if it is still
+    /// the one it tried to read.
+    written: u64,
 }
 
 /// Which files there are and in which order they were last used.
@@ -64,19 +72,20 @@ struct Index {
 }
 
 impl Index {
-    fn touch(&mut self, key: Key) -> bool {
-        let Some(e) = self.files.get_mut(&key) else { return false };
+    /// Counts a use of the file `key`; which put wrote it, or None when it is not kept.
+    fn touch(&mut self, key: Key) -> Option<u64> {
+        let e = self.files.get_mut(&key)?;
         self.order.remove(&e.used);
         self.clock += 1;
         e.used = self.clock;
         self.order.insert(self.clock, key);
-        true
+        Some(e.written)
     }
 
     fn insert(&mut self, key: Key, bytes: u64) {
         self.remove(key);
         self.clock += 1;
-        self.files.insert(key, Entry { bytes, used: self.clock });
+        self.files.insert(key, Entry { bytes, used: self.clock, written: self.clock });
         self.order.insert(self.clock, key);
         self.bytes += bytes;
     }
@@ -133,8 +142,9 @@ impl DiskCache {
         for (_, key, bytes) in found {
             index.insert(key, bytes);
         }
-        let cache = DiskCache { dir, limit, index: Mutex::new(index) };
-        cache.trim();
+        let cache = DiskCache { dir, limit, index: Mutex::new(Index::default()) };
+        cache.trim(&mut index);
+        *cache.index.lock() = index;
         Ok(cache)
     }
 
@@ -151,9 +161,7 @@ impl DiskCache {
     /// Reads the cover `key` into `buf` (cleared first); false when it is not kept. A read counts as a
     /// use.
     pub fn read(&self, key: Key, buf: &mut Vec<u8>) -> bool {
-        if !self.index.lock().touch(key) {
-            return false;
-        }
+        let Some(written) = self.index.lock().touch(key) else { return false };
         buf.clear();
         let path = self.path(key);
         let read = File::open(&path).and_then(|mut f| {
@@ -163,8 +171,12 @@ impl DiskCache {
             Ok(())
         });
         if read.is_err() {
-            // Deleted behind the cache's back: forget it.
-            self.index.lock().remove(key);
+            // Deleted behind the cache's back: forget it, unless a put has put a new one in its place
+            // since.
+            let mut index = self.index.lock();
+            if index.files.get(&key).is_some_and(|e| e.written == written) {
+                index.remove(key);
+            }
             return false;
         }
         true
@@ -178,18 +190,30 @@ impl DiskCache {
         }
         let path = self.path(key);
         let tmp = path.with_extension(format!("{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
-        let written = File::create(&tmp).and_then(|mut f| f.write_all(bytes)).and_then(|_| fs::rename(&tmp, &path));
+        let written = File::create(&tmp).and_then(|mut f| f.write_all(bytes)).and_then(|_| {
+            let mut index = self.index.lock();
+            fs::rename(&tmp, &path)?;
+            index.insert(key, bytes.len() as u64);
+            self.trim(&mut index);
+            Ok(())
+        });
         if written.is_err() {
             let _ = fs::remove_file(&tmp);
-            return written;
         }
-        self.index.lock().insert(key, bytes.len() as u64);
-        self.trim();
-        Ok(())
+        written
     }
 
     pub fn remove(&self, key: Key) {
-        if self.index.lock().remove(key) {
+        let mut index = self.index.lock();
+        if index.remove(key) {
+            let _ = fs::remove_file(self.path(key));
+        }
+    }
+
+    /// Deletes every cover, for a user who asked for the space back.
+    pub fn clear(&self) {
+        let mut index = self.index.lock();
+        for key in std::mem::take(&mut *index).files.into_keys() {
             let _ = fs::remove_file(self.path(key));
         }
     }
@@ -203,10 +227,10 @@ impl DiskCache {
         &self.dir
     }
 
-    /// Deletes what is over the limit, outside the lock.
-    fn trim(&self) {
+    /// Deletes what is over the limit, under the lock `index` is held by: a file or two after a put.
+    fn trim(&self, index: &mut Index) {
         let mut gone = Vec::new();
-        self.index.lock().over(self.limit, &mut gone);
+        index.over(self.limit, &mut gone);
         for key in gone {
             let _ = fs::remove_file(self.path(key));
         }
@@ -280,6 +304,83 @@ mod tests {
         fs::remove_file(c.path(Key::of("a"))).unwrap();
         assert!(!c.read(Key::of("a"), &mut Vec::new()));
         assert_eq!(c.bytes(), 0);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// Whether the index and the directory say the same: every file kept is indexed at its size, and
+    /// nothing indexed is missing.
+    fn agree(c: &DiskCache) -> Result<(), String> {
+        let index = c.index.lock();
+        let mut on_disk = HashMap::new();
+        for e in fs::read_dir(&c.dir).unwrap() {
+            let e = e.unwrap();
+            if let Some(key) = e.file_name().to_str().and_then(Key::parse) {
+                on_disk.insert(key, e.metadata().unwrap().len());
+            }
+        }
+        for (key, e) in &index.files {
+            if on_disk.get(key) != Some(&e.bytes) {
+                return Err(format!("{key:?} indexed at {} bytes, on disk {:?}", e.bytes, on_disk.get(key)));
+            }
+        }
+        if on_disk.len() != index.files.len() {
+            return Err(format!("{} files on disk, {} indexed", on_disk.len(), index.files.len()));
+        }
+        if index.bytes != on_disk.values().sum::<u64>() {
+            return Err(format!("{} bytes indexed, {} on disk", index.bytes, on_disk.values().sum::<u64>()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn threads_putting_reading_and_trimming_the_same_covers_leave_the_index_and_the_directory_agreeing() {
+        let d = dir("race");
+        let c = std::sync::Arc::new(DiskCache::open(&d, 60).unwrap());
+        let keys: Vec<Key> = (0..3).map(|i| Key::of(&i.to_string())).collect();
+        // Short rounds, each checked once its threads are done: a race that leaves the two disagreeing
+        // is mended by a later put of the same cover, so one long run would hide it.
+        for round in 0..300 {
+            let go = std::sync::Arc::new(std::sync::Barrier::new(4));
+            let threads: Vec<_> = (0..4)
+                .map(|t| {
+                    let (c, keys, go) = (c.clone(), keys.clone(), go.clone());
+                    std::thread::spawn(move || {
+                        let mut buf = Vec::new();
+                        go.wait();
+                        for i in 0..40usize {
+                            let key = keys[(i * 7 + t + round) % keys.len()];
+                            match (i + t) % 5 {
+                                0..=2 => c.put(key, &vec![t as u8; 10 + t * 10]).unwrap(),
+                                3 => {
+                                    c.read(key, &mut buf);
+                                }
+                                _ => c.remove(key),
+                            }
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            if let Err(e) = agree(&c) {
+                fs::remove_dir_all(&d).unwrap();
+                panic!("round {round}: {e}");
+            }
+        }
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn clearing_deletes_every_cover_and_the_cache_goes_on() {
+        let d = dir("clear");
+        let c = DiskCache::open(&d, 100).unwrap();
+        c.put(Key::of("a"), &[1; 4]).unwrap();
+        c.put(Key::of("b"), &[2; 4]).unwrap();
+        c.clear();
+        assert_eq!((c.bytes(), fs::read_dir(&d).unwrap().count()), (0, 0));
+        c.put(Key::of("c"), &[3; 4]).unwrap();
+        assert!(c.contains(Key::of("c")) && c.bytes() == 4);
         fs::remove_dir_all(&d).unwrap();
     }
 }

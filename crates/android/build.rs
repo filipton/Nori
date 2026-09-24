@@ -19,8 +19,12 @@ fn main() {
     assert!(!scaffolding.contains("JNI_OnLoad"), "the generated scaffolding has a second JNI_OnLoad");
     std::fs::write(&path, scaffolding).expect("the scaffolding is writable");
 
-    // The scaffolding is read out of the core's sources, which cargo does not watch for this crate.
-    for input in ["build.rs", "../core/src", "../core/Cargo.toml", "../core/uniffi.toml"] {
-        println!("cargo:rerun-if-changed={input}");
+    // The scaffolding is read out of the sources of every crate that exports something, which cargo does
+    // not watch for this crate.
+    println!("cargo:rerun-if-changed=build.rs");
+    for krate in ["core", "model", "db", "words", "net", "library", "automix", "settings", "lyrics", "devices", "queue", "transfers"] {
+        for input in ["src", "Cargo.toml", "uniffi.toml"] {
+            println!("cargo:rerun-if-changed=../{krate}/{input}");
+        }
     }
 }

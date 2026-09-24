@@ -1,0 +1,23 @@
+[package]
+name = "nori-words"
+version.workspace = true
+edition.workspace = true
+
+# Every word the app says (words.rs) and every number it writes on screen (fmt.rs), worked out once so
+# each front end says the same.
+[lib]
+name = "nori_words"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+nori-model = { path = "../model" }
+nori-player = { path = "../player" }
+nori-text = { path = "../text" }
+
+[dev-dependencies]
+serde_json = "1"

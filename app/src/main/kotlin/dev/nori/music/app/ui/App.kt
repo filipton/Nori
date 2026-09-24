@@ -46,7 +46,7 @@ import androidx.navigation.compose.rememberNavController
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Song
 
 /** Plain screens sit below the status bar; album, artist and playlist pages draw under it. */
 @Composable
@@ -66,28 +66,28 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
      * later; with it the header is there from the first frame and only the songs arrive. The last few
      * are kept, so going back and forward between albums does not lose them.
      */
-    private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.Album>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Album>?) = size > 8
+    private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.model.Album>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Album>?) = size > 8
     }
-    private val artists = object : LinkedHashMap<String, dev.nori.music.ffi.Artist>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Artist>?) = size > 8
+    private val artists = object : LinkedHashMap<String, dev.nori.music.ffi.model.Artist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Artist>?) = size > 8
     }
-    private val playlists = object : LinkedHashMap<String, dev.nori.music.ffi.Playlist>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Playlist>?) = size > 8
+    private val playlists = object : LinkedHashMap<String, dev.nori.music.ffi.model.Playlist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Playlist>?) = size > 8
     }
-    fun albumHint(id: String): dev.nori.music.ffi.Album? = albums[id]
-    fun artistHint(id: String): dev.nori.music.ffi.Artist? = artists[id]
-    fun playlistHint(id: String): dev.nori.music.ffi.Playlist? = playlists[id]
+    fun albumHint(id: String): dev.nori.music.ffi.model.Album? = albums[id]
+    fun artistHint(id: String): dev.nori.music.ffi.model.Artist? = artists[id]
+    fun playlistHint(id: String): dev.nori.music.ffi.model.Playlist? = playlists[id]
 
-    fun album(id: String, hint: dev.nori.music.ffi.Album? = null) {
+    fun album(id: String, hint: dev.nori.music.ffi.model.Album? = null) {
         if (hint != null) albums[id] = hint
         go("album/${Uri.encode(id)}")
     }
-    fun artist(id: String, hint: dev.nori.music.ffi.Artist? = null) {
+    fun artist(id: String, hint: dev.nori.music.ffi.model.Artist? = null) {
         if (hint != null) artists[id] = hint
         go("artist/${Uri.encode(id)}")
     }
-    fun playlist(id: String, hint: dev.nori.music.ffi.Playlist? = null) {
+    fun playlist(id: String, hint: dev.nori.music.ffi.model.Playlist? = null) {
         if (hint != null) playlists[id] = hint
         go("playlist/${Uri.encode(id)}")
     }
@@ -139,10 +139,10 @@ val LocalSongMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 val LocalPlayerMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 
 private val tabs = listOf(
-    Tab("home", "Home", Icons.Filled.Home),
-    Tab("search", "Search", Icons.Filled.Search),
-    Tab("library", "Library", Icons.Filled.LibraryMusic),
-    Tab("settings", "Settings", Icons.Filled.Settings),
+    Tab("home", say.home, Icons.Filled.Home),
+    Tab("search", say.search, Icons.Filled.Search),
+    Tab("library", say.library, Icons.Filled.LibraryMusic),
+    Tab("settings", say.settings, Icons.Filled.Settings),
 )
 
 /**
@@ -225,20 +225,20 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                 val st = player2.state.value
                 val p = settings.prefs.value
                 """{"route":"${if (sheet.isOpen) "player" else controller.currentBackStackEntry?.destination?.route}",""" +
-                    """"playing":${st.playing},"title":"${st.current?.title.orEmpty()}","artist":"${st.current?.artist.orEmpty()}",""" +
+                    """"playing":${st.playing},"title":"${st.current?.title.orEmpty().replace("\"", "'")}","artist":"${st.current?.artist.orEmpty().replace("\"", "'")}",""" +
                     """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
                     // The next songs in the order they will play, and which of them were added by hand.
                     st.order.drop(st.order.indexOf(st.index) + 1).take(8).let { up ->
                         """"upNext":"${up.joinToString(" ") { st.queue[it].id }}","upNextQueued":"${up.joinToString(" ") { if (it in st.queued) "1" else "0" }}","shuffle":${st.shuffle},"""
                     } +
-                    """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"parkedId":"${dev.nori.music.ffi.playlistBridgeState().parked.orEmpty()}","songId":"${dev.nori.music.ffi.playlistBridgeState().current.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
-                    """"dspActive":${dev.nori.music.playback.Equalizer.active != null},"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
+                    """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"parkedId":"${dev.nori.music.ffi.queue.playlistBridgeState().parked.orEmpty()}","songId":"${dev.nori.music.ffi.queue.playlistBridgeState().current.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
+                    """"dspActive":${dev.nori.music.playback.Equalizer.inChain},"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     // Whichever player plays: the Rust one answers from its own engine and output.
                     dev.nori.music.playback.PlaybackService.rustPlayer.let { r ->
                         """"engine":"${if (r != null) "rust" else "exo"}","mixing":${r?.mixing ?: dev.nori.music.playback.TransitionSink.mixing},"""
                     } +
-                    """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.downloadSpeedEta()[1]},""" +
+                    """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.transfers.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.transfers.downloadSpeedEta()[1]},""" +
                     """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten},""" +
                     // Everything the app's Java side has allocated since it started, for allocation checks.
                     """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +

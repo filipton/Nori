@@ -120,16 +120,17 @@ pub struct Heard {
     pub us: i64,
     /// [`Host::now_ms`] when `us` was read: the sound moves on between readings.
     pub at_ms: i64,
-    /// Where in the held song the ear leaves it for the mix, in the song's own time.
+    /// Where in the held song the ear leaves it for the next one - where the next song becomes the louder
+    /// in the mix - in the song's own time.
     pub until_us: i64,
     /// A mix is being heard right now.
     pub mixing: bool,
-    /// The song a hold is mixing into, where the ear lands in it when the mix becomes audible (its
-    /// planned skip, plus however late the hold began), and how fast it runs through the mix.
+    /// The song a hold is mixing into, where the ear lands in it when it takes over (its planned skip,
+    /// plus however far into the mix that is), and how fast it runs through the mix.
     pub next_id: Option<String>,
     pub next_from_us: i64,
     pub next_rate: f32,
-    /// The song whose ending is being mixed out of, and where in it the mix becomes audible.
+    /// The song whose ending is being mixed out of, and where in it the next song takes over.
     pub from_id: Option<String>,
     pub audible_us: i64,
 }
@@ -213,6 +214,9 @@ pub struct TransitionEngine<C: Clone> {
     held_offset_us: i64,
     /// How far into the planned transition the hold began: nought unless a seek landed inside it.
     late_us: i64,
+    /// How long after the mix is first heard the incoming song becomes the louder of the two
+    /// (`mixer::crossover_ms`, less any late start): until then the ear is on the ending, and so is the page.
+    takeover_us: i64,
     /// How much of the outgoing track has been swallowed into the hold, µs.
     held_us: i64,
     /// The last position given to the player, which may never go backwards.
@@ -302,6 +306,7 @@ impl<C: Clone> TransitionEngine<C> {
             held_id: None,
             held_offset_us: 0,
             late_us: 0,
+            takeover_us: 0,
             held_us: 0,
             reported: i64::MIN,
             shift_us: 0,
@@ -626,7 +631,7 @@ impl<C: Clone> TransitionEngine<C> {
             host.log(&format!("transition: late hold, {} ms in", self.late_us / 1000));
         }
         self.held_from_us = pts_us + (before / fb) as i64 * 1_000_000 / out.rate as i64;
-        self.heard.audible_us = self.held_from_us - self.held_offset_us;
+        self.heard.audible_us = self.held_from_us - self.held_offset_us + self.takeover_us;
         self.held_at = host.now_ms();
         let at = down.position_us(false);
         let runway = if at == POSITION_NOT_SET { i64::MAX } else { self.held_from_us - at };
@@ -724,7 +729,12 @@ impl<C: Clone> TransitionEngine<C> {
         self.held_id = self.playing_id.clone().or_else(|| self.current_id.clone());
         self.held_offset_us = self.offset_us;
         self.heard.next_rate = if p.stretching() { p.tempo_ratio } else { 1.0 };
-        self.heard.next_from_us = p.in_skip_us + (self.late_us.clamp(0, p.duration_us) as f64 * self.heard.next_rate as f64) as i64;
+        // A fade that starts with the incoming song silent is still the outgoing song to the ear: the page
+        // moves on where the incoming one becomes the louder, not where the fade begins - a blind
+        // twelve-second fade used to put the next title up while the last song played on to its end.
+        let late = self.late_us.clamp(0, p.duration_us);
+        self.takeover_us = (crate::automix::mixer::crossover_ms(&p.mixer) * 1000 - late).max(0);
+        self.heard.next_from_us = p.in_skip_us + ((late + self.takeover_us) as f64 * self.heard.next_rate as f64) as i64;
         self.heard.next_id = Some(p.incoming_id.clone());
         self.heard.from_id = self.held_id.clone();
         self.heard.audible_us = i64::MAX;
@@ -1236,10 +1246,21 @@ impl<C: Clone> TransitionEngine<C> {
         }
         let ear = at - self.shift_us;
         let was_heard = self.heard.id.is_some();
+        // The mix is heard but the incoming song is not the louder yet: the clock below is already the
+        // incoming song's, and the ear is still on the ending, where the mix began plus the time since.
+        let taking_over = self.shift_us == 0
+            && self.mix_from_us != TIME_UNSET
+            && self.held_from_us != TIME_UNSET
+            && at >= self.mix_from_us
+            && at < self.mix_from_us + self.takeover_us;
         match &self.held_id {
-            Some(id) if self.reported > ear + 20_000 => {
-                self.heard.us = ear - self.held_offset_us;
-                self.heard.until_us = if self.held_from_us != TIME_UNSET { self.held_from_us - self.held_offset_us } else { i64::MAX };
+            Some(id) if self.reported > ear + 20_000 || taking_over => {
+                let start = (self.held_from_us != TIME_UNSET).then(|| self.held_from_us - self.held_offset_us);
+                self.heard.us = match start {
+                    Some(start) if taking_over && self.reported <= ear + 20_000 => start + at - self.mix_from_us,
+                    _ => ear - self.held_offset_us,
+                };
+                self.heard.until_us = start.map_or(i64::MAX, |start| start + self.takeover_us);
                 self.heard.at_ms = host.now_ms();
                 // Asked on every position query: the id is copied only when it names another song.
                 if self.heard.id.as_ref() != Some(id) {
@@ -1258,6 +1279,13 @@ impl<C: Clone> TransitionEngine<C> {
         }
         if self.mix_from_us != TIME_UNSET && self.mixed_end_us != TIME_UNSET && at >= self.mixed_end_us {
             self.mix_from_us = TIME_UNSET;
+            // The whole mix has been heard: the page is on the next song in the player's own word, and
+            // a mix still named here kept a player that wakes for one (nori-engine) waking four times
+            // a second until the next song's ending.
+            if self.phase == Phase::Pass {
+                self.heard.next_id = None;
+                self.heard.from_id = None;
+            }
         }
         self.heard.mixing = self.mix_from_us != TIME_UNSET && at >= self.mix_from_us;
         self.reported
@@ -1299,6 +1327,7 @@ impl<C: Clone> TransitionEngine<C> {
         self.reported = i64::MIN;
         self.held_id = None;
         self.late_us = 0;
+        self.takeover_us = 0;
         self.heard.next_id = None;
         self.heard.from_id = None;
         self.shift_us = 0;
@@ -1633,7 +1662,9 @@ mod tests {
         assert!(h.log.iter().any(|l| l.contains("late hold, 500 ms in")), "{:?}", h.log);
         e.configure(&mut d, &mut h, stream("b", FMT), 2);
         e.handle_discontinuity(&mut d, &mut h);
-        assert_eq!(e.heard().next_from_us, 500_000, "the next song is entered where the fade would have reached it");
+        // Half a second in, and the two-second fade's incoming song takes over a second in: the page
+        // follows it there, half a second after the mix is first heard, a second into the next song.
+        assert_eq!(e.heard().next_from_us, 1_000_000, "the next song is entered where the fade hands it over");
     }
 
     #[test]
@@ -1650,7 +1681,8 @@ mod tests {
         let heard = e.heard();
         assert_eq!(heard.id.as_deref(), Some("a"));
         assert_eq!(heard.us, 500_000);
-        assert!((heard.until_us - 1_000_000).abs() <= 23, "the ear leaves a where the mix begins, to the frame: {}", heard.until_us);
+        // The two-second fade begins a second in and crosses over in its middle: the ear is on a until then.
+        assert!((heard.until_us - 2_000_000).abs() <= 23, "the ear leaves a where b becomes the louder, to the frame: {}", heard.until_us);
     }
 
     #[test]

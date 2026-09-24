@@ -2,14 +2,14 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.HistoryEntry
-import dev.nori.music.ffi.SmartPage
-import dev.nori.music.ffi.StatsPage
-import dev.nori.music.ffi.SmartEdit
-import dev.nori.music.ffi.SmartPlaylist
-import dev.nori.music.ffi.smartEditPrepare
-import dev.nori.music.ffi.Note
-import dev.nori.music.ffi.wordsNote
+import dev.nori.music.ffi.model.HistoryEntry
+import dev.nori.music.ffi.library.SmartPage
+import dev.nori.music.ffi.library.StatsPage
+import dev.nori.music.ffi.library.SmartEdit
+import dev.nori.music.ffi.model.SmartPlaylist
+import dev.nori.music.ffi.library.smartEditPrepare
+import dev.nori.music.ffi.words.Note
+import dev.nori.music.ffi.words.wordsNote
 import dev.nori.music.net.said
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow

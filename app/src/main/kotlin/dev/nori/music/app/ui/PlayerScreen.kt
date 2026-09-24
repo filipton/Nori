@@ -1,6 +1,5 @@
 package dev.nori.music.app.ui
 
-import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
@@ -560,15 +559,15 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             // "favourited" is a distinction the server makes and nobody else does.
                             TitleCircle(
                                 if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                "Favourite", starred,
+                                say.favourite, starred,
                             ) { actions.star(s, !starred) }
-                            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { playerMenu(s) }
+                            TitleCircle(Icons.Filled.MoreHoriz, say.more, false) { playerMenu(s) }
                         }
                     }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (state.bridging) LookText(
-                    remember { dev.nori.music.ffi.wordsBridging() }, { live.color(CoverLook.ON_55) },
+                    remember { dev.nori.music.ffi.words.wordsBridging() }, { live.color(CoverLook.ON_55) },
                     Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 2.dp),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -589,27 +588,27 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     IconButton(
                         {
                             // The player's own rule (`queue_previous_restarts`), so the sleeve and the sound agree.
-                            val rewinds = dev.nori.music.ffi.queuePreviousRestarts(vm.positionMs, state.previousIndex >= 0)
+                            val rewinds = dev.nori.music.ffi.queue.queuePreviousRestarts(vm.positionMs, state.previousIndex >= 0)
                             if (rewinds || !slide.ask(1)) vm.previous()
                         },
                         Modifier.size(72.dp),
-                    ) { LookIcon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp), ink) }
+                    ) { LookIcon(Icons.Filled.FastRewind, say.previous, Modifier.size(55.dp), ink) }
                     IconButton(vm::toggle, Modifier.size(84.dp)) {
                         PlayPauseGlyph(state.playing, state.buffering, 70.dp, 28.dp, ink)
                     }
-                    IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { LookIcon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp), ink) }
+                    IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { LookIcon(Icons.Filled.FastForward, say.next, Modifier.size(55.dp), ink) }
                 }
 
                 if (page == Panel.ART) Spacer(Modifier.weight(0.17f))
                 Box(kept("volume")) { VolumeRow(vm) }
 
                 Row(kept("icons").fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                    PanelButton(Icons.Filled.Lyrics, "Lyrics", page == Panel.LYRICS, nudge = (-1.5).dp) { choose(Panel.LYRICS) }
+                    PanelButton(Icons.Filled.Lyrics, say.lyrics, page == Panel.LYRICS, nudge = (-1.5).dp) { choose(Panel.LYRICS) }
                     // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
                     // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
                     // which is where a setting for the evening belongs.
                     OutputButton()
-                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", page == Panel.QUEUE, size = 30.dp, nudge = 0.5.dp) { choose(Panel.QUEUE) }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, say.queue, page == Panel.QUEUE, size = 30.dp, nudge = 0.5.dp) { choose(Panel.QUEUE) }
                 }
                 if (page == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
@@ -625,9 +624,9 @@ private data class PlayerTitleMeta(
     val artistId: String?, val albumId: String?,
 )
 
-private fun playerTitleMeta(song: dev.nori.music.ffi.Song?, radio: String?) = song?.let {
+private fun playerTitleMeta(song: dev.nori.music.ffi.model.Song?, radio: String?) = song?.let {
     PlayerTitleMeta(it.id, it.title, it.artist, it.album.orEmpty(), it.artistId, it.albumId)
-} ?: PlayerTitleMeta(null, dev.nori.music.ffi.wordsPlayerIdle(radio), "", "", null, null)
+} ?: PlayerTitleMeta(null, dev.nori.music.ffi.words.wordsPlayerIdle(radio), "", "", null, null)
 
 /**
  * Where the sound is going, and one tap to change it. The glyph says which kind of output is carrying
@@ -646,11 +645,11 @@ private fun OutputButton() {
     val context = LocalContext.current
     val look = LocalLook.current
     // Which glyph, and whether the sound has gone elsewhere, are the core's (`output_look`).
-    val o = remember(output) { dev.nori.music.ffi.outputLook(output) }
+    val o = remember(output) { dev.nori.music.ffi.devices.outputLook(output) }
     val icon = when (o.glyph) {
-        dev.nori.music.ffi.OutputGlyph.HEADPHONES -> Icons.Filled.Headphones
-        dev.nori.music.ffi.OutputGlyph.BLUETOOTH -> Icons.Filled.Bluetooth
-        dev.nori.music.ffi.OutputGlyph.CAST -> Icons.Filled.Cast
+        dev.nori.music.ffi.devices.OutputGlyph.HEADPHONES -> Icons.Filled.Headphones
+        dev.nori.music.ffi.devices.OutputGlyph.BLUETOOTH -> Icons.Filled.Bluetooth
+        dev.nori.music.ffi.devices.OutputGlyph.CAST -> Icons.Filled.Cast
     }
     IconButton({ openOutputPicker(context, output) }) {
         LookIcon(icon, o.description, Modifier.size(27.dp)) { look.color(if (o.elsewhere) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
@@ -686,7 +685,7 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
             )
         }.isSuccess
     ) return
-    android.widget.Toast.makeText(context, dev.nori.music.ffi.wordsPlayingThrough(output), android.widget.Toast.LENGTH_SHORT).show()
+    android.widget.Toast.makeText(context, dev.nori.music.ffi.words.wordsPlayingThrough(output), android.widget.Toast.LENGTH_SHORT).show()
 }
 
 /**
@@ -710,16 +709,17 @@ private const val MIX_SLIDE = 2
  * `w4` that spans where a full-width square would have ended and the flowers below that line are as
  * sharp as the ones above it, with a strip of red tape running across it unbroken: it is the picture,
  * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
- * and still reach down behind the title, which no square can do.
+ * and still reach down behind the title, which no square can do. A phone's box: a desktop window
+ * lays its player out otherwise, so the ratio is the phone's layout and not the core's.
  */
-private val SLEEVE: Float get() = stage.sleeve
+private const val SLEEVE = 0.74f
 
 /**
  * How much of the sleeve's height runs on underneath the title block instead of above it. With the
  * sleeve at [SLEEVE] this puts the title where `w4` has it, 56.5 % of the screen, with the picture's
  * blurred tail behind it.
  */
-private val SLEEVE_UNDER_TEXT: Float get() = stage.sleeveUnderText
+private const val SLEEVE_UNDER_TEXT = 0.095f
 
 /** Drag it down, or tap it, to put the player away. */
 @Composable
@@ -978,7 +978,7 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, mea
                     clip = true
                 },
         ) {
-            if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            if (art.current == null) Cover(rowUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp, plate = false)
             SleeveImage(art, Modifier.fillMaxSize())
         }
     }
@@ -1038,7 +1038,6 @@ private fun SleeveCarousel(
     previousTint: String?, nextTint: String?,
     onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide, shift: PageShift,
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     // Where the record is, in pixels, written straight from the finger. It was an Animatable, snapped
@@ -1072,12 +1071,8 @@ private fun SleeveCarousel(
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 18.dp.toPx() }
     val radius = with(density) { 22.dp.toPx() }
-    @Composable fun neighbour(url: String?) = coil3.compose.rememberAsyncImagePainter(
-        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
-        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
-    )
-    val before = neighbour(previousUrl)
-    val after = neighbour(nextUrl)
+    val before = rememberCover(previousUrl, CoverSize.FULL)
+    val after = rememberCover(nextUrl, CoverSize.FULL)
     // A pointerInput block keyed on Unit is created once and never replaced, so anything it closes over
     // is whatever it was on the first composition - back then there was no queue, so the addresses were
     // null. That is what left a record landing under a name the sleeve could never match: the picture
@@ -1086,10 +1081,9 @@ private fun SleeveCarousel(
     // these instead, which are read at the moment they are used.
     val hasBefore by androidx.compose.runtime.rememberUpdatedState(previousUrl != null)
     val hasAfter by androidx.compose.runtime.rememberUpdatedState(nextUrl != null)
-    // The painters too: a coil painter is rebuilt when its request changes, so the one a gesture caught
-    // on the first composition is a dead painter with no picture in it - which is why a record could
-    // land with nothing to draw, and the cover of the song being left stayed in the middle until the
-    // sleeve caught up.
+    // The covers too: one is made per address, so the one a gesture caught on the first composition is
+    // a cover of nothing, with no picture in it - which is why a record could land with nothing to draw,
+    // and the cover of the song being left stayed in the middle until the sleeve caught up.
     val afterNow by androidx.compose.runtime.rememberUpdatedState(after)
     val beforeNow by androidx.compose.runtime.rememberUpdatedState(before)
     val nextUrlNow by androidx.compose.runtime.rememberUpdatedState(nextUrl)
@@ -1220,7 +1214,7 @@ private fun SleeveCarousel(
         fun arrive(rest: Float) {
             // Only hold the picture over if it is really there: as a bare plate it is a grey square, and
             // the sleeve's own cross-fade is the better answer.
-            val picture = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
+            val picture = painter.painter
             landed = picture
             landedUrl = url.takeIf { picture != null }
             // What the player has been asked for, whether or not there was a picture to hold over. The
@@ -1328,8 +1322,8 @@ private fun SleeveCarousel(
                 holding = false
                 val o = offset
                 val w = size.width.toFloat()
-                // Past a third of the way or flicked (the core's `swipe_turn`, shared with the bar).
-                val go = dev.nori.music.ffi.swipeTurn(o, v, w, hasBefore, hasAfter, bar = false)
+                // Past a third of the way or flicked (swipeTurn, shared with the bar).
+                val go = swipeTurn(o, v, w, hasBefore, hasAfter, bar = false)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
@@ -1361,7 +1355,7 @@ private fun SleeveCarousel(
                 val next = offset + d
                 // Towards a record that is not there it gives a little and no more.
                 val allowed = (next > 0f && hasBefore) || (next < 0f && hasAfter)
-                offset = if (allowed) next.coerceIn(-w, w) else (offset + d * stage.give).coerceIn(-w * stage.giveLimit, w * stage.giveLimit)
+                offset = if (allowed) next.coerceIn(-w, w) else (offset + d * GIVE).coerceIn(-w * GIVE_LIMIT, w * GIVE_LIMIT)
             }
         },
     ) {
@@ -1395,8 +1389,8 @@ private fun SleeveCarousel(
         // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
         // than a flat grey card: the covers are fetched ahead (PlayerViewModel) but a cold queue, or a
         // slow server, can still be reached before they land.
-        val afterHere = after.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
-        val beforeHere = before.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
+        val afterHere = after.image != null
+        val beforeHere = before.image != null
         // A neighbour only shows while a finger pulls it in; waiting for its picture it shimmers then and
         // only then. With nothing either side, or a picture that never comes, a sheen on the unseen
         // record ran for ever - and redrew the whole app every frame, on every screen, the player being
@@ -1413,10 +1407,10 @@ private fun SleeveCarousel(
                 SleeveImage(art, Modifier.fillMaxSize())
             }
             Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (offset < 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!afterHere && afterShown)) {
-                androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                after.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
             Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (offset > 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!beforeHere && beforeShown)) {
-                androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                before.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
             // It is the record that is showing, so it moves with the record: held still in the middle it
             // covered the next change from on top, which is the "cover stuck over the animation".
@@ -1572,8 +1566,32 @@ internal class SleeveSlide {
 /** A record sent across by a button rather than a thumb: the same move, a little quicker. */
 private const val BUTTON_STIFFNESS = 950f
 
-/** How much of the screen's width a held record takes. */
-private val LIFTED_WIDTH: Float get() = stage.liftedWidth
+/** How much of the screen's width a record held by a finger takes: it lifts off the page, smaller. */
+private const val LIFTED_WIDTH = 0.86f
+
+/** A slow drag changes the record past this share of the width; the same share arms a row's swipe. */
+internal const val TURN = 0.3f
+/** A release faster than this, in pixels a second, changes the record whatever the distance: on the player's sleeve... */
+private const val FLICK_PX_S = 1_000f
+/** ...and on the now playing bar, a small strip under the thumb, where a flick is shorter and slower. */
+private const val BAR_FLICK_PX_S = 900f
+/** Towards a record that is not there a drag gives this much of the finger's travel, and no more than [GIVE_LIMIT] of the width. */
+internal const val GIVE = 0.2f
+internal const val GIVE_LIMIT = 0.06f
+
+/**
+ * Where a sideways drag on a row of records goes when the finger lifts at [offset] pixels (negative:
+ * towards the next) with [velocity] pixels a second, on a row [width] wide: -1 to the next record, 1 to
+ * the one before, 0 back where it was. Past [TURN] of the width, or flicked; never towards a record that
+ * is not there. [bar] is the now playing bar, which takes a slower flick than the sleeve. How a touch
+ * feels is the platform's own, and this is a few comparisons Compose makes on the release itself.
+ */
+internal fun swipeTurn(offset: Float, velocity: Float, width: Float, hasBefore: Boolean, hasAfter: Boolean, bar: Boolean): Int {
+    val flick = if (bar) BAR_FLICK_PX_S else FLICK_PX_S
+    return if (offset < 0f && hasAfter && (velocity < -flick || offset < -width * TURN)) -1
+    else if (offset > 0f && hasBefore && (velocity > flick || offset > width * TURN)) 1
+    else 0
+}
 
 /** The scale of a record [side] tall at lift [l], on a sleeve [width] wide: 1 at rest, the whole square at 86 % of the width held. */
 private fun liftedScale(l: Float, width: Float, side: Float): Float {
@@ -1587,23 +1605,19 @@ private fun liftedScale(l: Float, width: Float, side: Float): Float {
 
 @Composable
 private fun rememberSleeveArt(url: String?): SleeveArt {
-    val context = LocalContext.current
     val art = remember { SleeveArt() }
-    val painter = coil3.compose.rememberAsyncImagePainter(
-        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
-        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
-    )
-    val state by painter.state.collectAsState()
-    LaunchedEffect(state) {
-        when (val st = state) {
-            is coil3.compose.AsyncImagePainter.State.Success -> if (st.painter !== art.current) {
+    val cover = rememberCover(url, CoverSize.FULL)
+    val picture = cover.painter
+    LaunchedEffect(cover, cover.state, picture) {
+        when {
+            picture != null -> if (picture !== art.current) {
                 art.loading = false
                 val swiped = art.snapNext.also { art.snapNext = false }
-                val instant = swiped || art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
+                val instant = swiped || art.current == null && art.previous == null && cover.fromMemory
                 // The picture on screen stays underneath at full strength while the new one covers it; one
                 // already fading out to the plate carries on from where it is.
                 art.current?.let { art.previous = it; art.previousAlpha.snapTo(1f) }
-                art.current = st.painter
+                art.current = picture
                 if (instant || AppMotion.reduce) art.fade.snapTo(1f)
                 else { art.fade.snapTo(0f); art.fade.animateTo(1f, androidx.compose.animation.core.tween(if (art.previous == null) 320 else 480)) }
                 art.previous = null
@@ -1613,13 +1627,12 @@ private fun rememberSleeveArt(url: String?): SleeveArt {
                 // frame of the previous cover that appeared as the record grew back.
                 art.shownUrl = url
             }
-            is coil3.compose.AsyncImagePainter.State.Loading -> {
+            cover.state == CoverImage.LOADING -> {
                 if (art.current == null) art.loading = true
                 else { delay(HOLD_MS); art.loading = true; art.letGo() }
             }
             // Nothing to show for this song: back to the plate rather than keep the last cover.
-            is coil3.compose.AsyncImagePainter.State.Error -> { art.loading = false; art.letGo() }
-            else -> {}
+            else -> { art.loading = false; art.letGo() }
         }
     }
     return art
@@ -1736,13 +1749,15 @@ private fun VolumeRow(vm: PlayerViewModel) {
  * read, then walks slowly sideways and comes back round, the way the title does in Apple's player.
  * A line that fits is left alone - the modifier only animates while the text overflows.
  *
- * On the full player it runs for as long as you are looking at it, and only then: the player stays
- * composed behind the rest of the app (see LocalPlayerShown), and a title quietly walking about down
- * there would hold a frame clock awake for nothing. The now playing bar passes a small [iterations]
- * instead, because that bar is on screen for as long as the app is - see MiniPlayer.
+ * It reads itself out [iterations] times when the song comes on or the player comes into view, then
+ * settles at its start with the soft edge. A walking line is a new frame of the whole screen every
+ * vsync - the blurred sleeve and wash behind it included - and one left walking for as long as the
+ * player was open held a 120 Hz phone at fifty frames a second and two thirds of a core. Only while
+ * the player is on screen: it stays composed behind the rest of the app (see LocalPlayerShown). 0
+ * holds the line still, soft edge and all, so a row can stop walking without changing how it looks.
  */
 @Composable
-internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
+internal fun Modifier.readable(iterations: Int = READ_OUT): Modifier {
     if (!LocalPlayerShown.current) return this
     // What the line needs and what it has. The first size is this element's own - the width the row
     // gives the title - and the second is the text's, measured inside the marquee, which lays it out
@@ -1780,6 +1795,9 @@ internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
         )
         .onSizeChanged { needs = it.width }
 }
+
+/** How many times a line too long for its width reads itself out before it settles; see [readable]. */
+internal const val READ_OUT = 2
 
 @Composable
 private fun PanelButton(
@@ -2025,16 +2043,16 @@ private fun Queue(vm: PlayerViewModel) {
     // away (the list opens at the playing row, which used to hide them).
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Caption(remember { dev.nori.music.ffi.wordsUpNext() }, Modifier.padding(top = 4.dp, bottom = 8.dp))
+            Caption(remember { dev.nori.music.ffi.words.wordsUpNext() }, Modifier.padding(top = 4.dp, bottom = 8.dp))
             Row(Modifier, Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
                 val shuffleOn = state.shuffle
                 val repeatOn = state.repeat != Repeat.OFF
                 IconButton(vm::toggleShuffle, Modifier.size(44.dp)) {
-                    LookIcon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp)) { look.color(if (shuffleOn) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
+                    LookIcon(Icons.Filled.Shuffle, say.shuffle, Modifier.size(22.dp)) { look.color(if (shuffleOn) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
                 }
                 IconButton(vm::cycleRepeat, Modifier.size(44.dp)) {
                     LookIcon(
-                        if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat",
+                        if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, say.repeat,
                         Modifier.size(22.dp),
                     ) { look.color(if (repeatOn) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
                 }
@@ -2042,9 +2060,9 @@ private fun Queue(vm: PlayerViewModel) {
         }
     // In the order the songs will play, which under shuffle is not the order of the list itself. A drag
     // moves a song within the list, so reordering is offered only when the two are the same.
-    // Which order, and whether a drag may reorder it, are the core's (`queue_rows`).
+    // Which order, and whether a drag may reorder it, are the core's (`queue_rows`, over the order it keeps).
     val rows = remember(state.order, state.queue.size, state.shuffle) {
-        dev.nori.music.ffi.queueRows(state.order.map { it.toUInt() }, state.queue.size.toUInt(), state.shuffle)
+        dev.nori.music.ffi.queueRows(state.queue.size.toUInt(), state.shuffle)
     }
     val order = remember(rows) { rows.order.map { it.toInt() } }
     val reorderable = rows.reorderable
@@ -2101,19 +2119,19 @@ private fun Queue(vm: PlayerViewModel) {
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // Added by hand: plays before the rest of the queue carries on.
-                        if (i in state.queued) LookIcon(Icons.AutoMirrored.Filled.QueueMusic, "Added by you", Modifier.padding(end = 4.dp).size(14.dp), accent)
+                        if (i in state.queued) LookIcon(Icons.AutoMirrored.Filled.QueueMusic, say.addedByYou, Modifier.padding(end = 4.dp).size(14.dp), accent)
                         LookText(s.artist, quiet, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 IconButton({ vm.remove(i) }, Modifier.size(38.dp)) {
-                    LookIcon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), quiet)
+                    LookIcon(Icons.Filled.Close, say.remove, Modifier.size(19.dp), quiet)
                 }
                 androidx.compose.animation.AnimatedVisibility(
                     reorderable,
                     enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
                     exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
                 ) { LookIcon(
-                    Icons.Filled.DragHandle, "Reorder",
+                    Icons.Filled.DragHandle, say.reorder,
                     tint = if (held) accent else quiet,
                     modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
                         detectDragGestures(

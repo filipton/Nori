@@ -4,9 +4,9 @@ import android.net.Uri
 import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
-import dev.nori.music.ffi.Hand
-import dev.nori.music.ffi.RadioStation
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.queue.Hand
+import dev.nori.music.ffi.model.RadioStation
+import dev.nori.music.ffi.model.Song
 
 /**
  * The artwork size asked for on the lock screen and in the notification. The same number the
@@ -43,7 +43,7 @@ fun Song.toMediaItem(coverUrl: String?): MediaItem = MediaItem.Builder()
 
 /** Songs about to be queued: handed to the core in one call, and made into the player's items. */
 fun List<Song>.toMediaItems(coverUrl: (Song) -> String?): List<MediaItem> {
-    if (isNotEmpty()) dev.nori.music.ffi.queueRegister(this)
+    if (isNotEmpty()) dev.nori.music.ffi.queue.queueRegister(this)
     return heldMediaItems(coverUrl)
 }
 
@@ -60,7 +60,7 @@ fun RadioStation.toMediaItem(): MediaItem = MediaItem.Builder()
     .setUri(streamUrl)
     .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(streamUrl)).build())
     .setMediaMetadata(
-        MediaMetadata.Builder().setTitle(name).setArtist(dev.nori.music.ffi.wordsRadioArtist()).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+        MediaMetadata.Builder().setTitle(name).setArtist(dev.nori.music.ffi.words.wordsRadioArtist()).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
             .setIsPlayable(true).setIsBrowsable(false).build()
     )
     .build()

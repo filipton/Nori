@@ -1,0 +1,24 @@
+[package]
+name = "nori-lyrics"
+version.workspace = true
+edition.workspace = true
+
+# Lyrics: the server's and LRCLIB's read into one shape with every word timed, and the lyrics page's clock.
+[lib]
+name = "nori_lyrics"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-net/ffi", "nori-settings/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+nori-model = { path = "../model" }
+nori-net = { path = "../net" }
+# LRCLIB is asked only as the settings allow.
+nori-settings = { path = "../settings" }
+nori-look = { path = "../look" }

@@ -6,11 +6,12 @@
 //! What only the platform has comes from Kotlin through a few calls into `RustBridge`, each made rarely:
 //! - the AudioTrack, opened by Kotlin (`openTrack`: the attributes, the DAC's preferred device and
 //!   mixer attributes, the route listener), then written and driven from Rust;
-//! - a song's bytes (`open`, then `read` per 64 KB): through media3's data sources on the app's one
-//!   OkHttp client, so the TLS settings, client certificates and headers of the profile apply, and the
-//!   downloads and the stream cache are the ones the ExoPlayer path uses - a song downloaded or cached
-//!   by either plays from the disk on both, and the precacher fills them for both;
-//! - the cache key a song resolves to (`key`), for the container it names;
+//! - a song's bytes (`open`, then `read` per 64 KB), at the URL and under the cache key the core resolves
+//!   (`nori_core::stream::resolve_now`, over the network state Kotlin tells the core): through media3's
+//!   data sources on the app's one OkHttp client, so the TLS settings, client certificates and headers
+//!   of the profile apply, and the downloads and the stream cache are the ones the ExoPlayer path uses -
+//!   a song downloaded or cached by either plays from the disk on both, and the precacher fills them for
+//!   both;
 //! - a wake for the events (`signal`): one call per batch of engine events, however many there are,
 //!   and Kotlin takes them from here on its own thread.
 //!
@@ -19,20 +20,20 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use jni::objects::{GlobalRef, JByteArray, JClass, JFieldID, JMethodID, JStaticMethodID, JString, JValue};
 use jni::signature::{Primitive, ReturnType};
-use jni::sys::{jboolean, jint, jlong, jstring};
+use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use nori_engine::core::{key_format, settings, CoreApp, CoreQueue};
 use nori_engine::{Body, ByteSource, Config, Device, Engine, Event, Library, Located, OutputFormat, Source, State};
 use nori_player::transitions::WindowSong;
 use parking_lot::Mutex;
 
-use crate::track::{mono_ns, Opened, Opener, Shared, Sink, TrackOutput, CHUNK_BYTES};
+use crate::track::{mono_ns, HeadCount, Opened, Opener, Shared, Sink, TrackOutput, CHUNK_BYTES};
 use crate::{java_string, native, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
@@ -41,15 +42,20 @@ pub(crate) static CLASS: Class = Class {
         native!(c"create", c"(IZI)J", create),
         native!(c"destroy", c"(J)V", destroy),
         native!(c"playAt", c"(JIJ)V", play_at),
+        native!(c"goTo", c"(JIJ)V", go_to),
+        native!(c"pauseAtEnd", c"(JZ)V", pause_at_end),
         native!(c"play", c"(J)V", play),
         native!(c"pause", c"(J)V", pause),
         native!(c"queueChanged", c"(J)V", queue_changed),
         native!(c"setRepeat", c"(JI)V", set_repeat),
         native!(c"replan", c"(J)V", replan),
         native!(c"gainChanged", c"(J)V", gain_changed),
+        native!(c"setTuning", c"(JZ)V", set_tuning),
         native!(c"applySettings", c"(J)V", apply_settings),
         native!(c"positionMs", c"(J)J", position_ms),
         native!(c"mixing", c"(J)Z", mixing),
+        native!(c"chainIn", c"(J)Z", chain_in),
+        native!(c"gainReductionDb", c"(J)F", gain_reduction_db),
         native!(c"bytesWritten", c"(J)J", bytes_written),
         native!(c"event", c"(J)J", event),
         native!(c"eventText", c"(J)Ljava/lang/String;", event_text),
@@ -57,17 +63,12 @@ pub(crate) static CLASS: Class = Class {
     ],
 };
 
-/// A song's bytes are asked for by this address; Kotlin's data source resolves it when it opens, so the
-/// quality follows the network the phone is on right then, as on the ExoPlayer path.
-const SONG_URL: &str = "nori://song/";
-
 /// The Java side, looked up once.
 struct Java {
     vm: JavaVM,
     bridge: GlobalRef,
     open_track: JStaticMethodID,
     open: JStaticMethodID,
-    key: JStaticMethodID,
     signal: JStaticMethodID,
     body_read: JMethodID,
     body_close: JMethodID,
@@ -105,9 +106,8 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
     Ok(Java {
         vm: env.get_java_vm()?,
         open_track: env.get_static_method_id(&bridge, "openTrack", "(IIZI)Landroid/media/AudioTrack;")?,
-        open: env.get_static_method_id(&bridge, "open", "(Ljava/lang/String;J)Ldev/nori/music/playback/RustBody;")?,
-        key: env.get_static_method_id(&bridge, "key", "(Ljava/lang/String;)Ljava/lang/String;")?,
-        signal: env.get_static_method_id(&bridge, "signal", "()V")?,
+        open: env.get_static_method_id(&bridge, "open", "(Ljava/lang/String;Ljava/lang/String;J)Ldev/nori/music/playback/RustBody;")?,
+        signal: env.get_static_method_id(&bridge, "signal", "()Z")?,
         bridge: env.new_global_ref(&bridge)?,
         body_read: env.get_method_id(&body, "read", "(I)I")?,
         body_close: env.get_method_id(&body, "close", "()V")?,
@@ -133,10 +133,10 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
     })
 }
 
-/// This thread's JNIEnv, attached for the rest of its life (it is detached when it ends).
+/// This thread's JNIEnv, attached under its own name for the rest of its life (it is detached when it ends).
 fn env() -> Option<(&'static Java, JNIEnv<'static>)> {
     let java = JAVA.get()?;
-    let env = java.vm.attach_current_thread_permanently().ok()?;
+    let env = crate::attached(&java.vm)?;
     Some((java, env))
 }
 
@@ -166,8 +166,22 @@ struct JavaTrack {
     buffer: GlobalRef,
     staging: Vec<f32>,
     timestamp: GlobalRef,
-    /// The error the last write returned, so that a track that keeps refusing is logged once.
-    failing: i32,
+    /// The play head, unwrapped: the platform's is 32 bits.
+    head: HeadCount,
+    /// When the track was last flushed or started: a timestamp from before then is the old music's.
+    since_ns: i64,
+    /// Released already: dropping it does not release it again.
+    released: bool,
+}
+
+/// A track dropped without being released - its writer thread would not start, or panicked - is released
+/// here: the platform's AudioTrack holds a mixer slot until it is.
+impl Drop for JavaTrack {
+    fn drop(&mut self) {
+        if !self.released {
+            self.release();
+        }
+    }
 }
 
 impl JavaTrack {
@@ -184,9 +198,9 @@ impl Sink for JavaTrack {
         &mut self.staging
     }
 
-    fn write(&mut self, from: usize, len: usize) -> usize {
-        let Some((java, mut env)) = env() else { return 0 };
-        let (Ok(from), Ok(len)) = (i32::try_from(from), i32::try_from(len)) else { return 0 };
+    fn write(&mut self, from: usize, len: usize) -> Result<usize, i32> {
+        let Some((java, mut env)) = env() else { return Ok(0) };
+        let (Ok(from), Ok(len)) = (i32::try_from(from), i32::try_from(len)) else { return Ok(0) };
         // SAFETY: Buffer.position(int) and AudioTrack.write(ByteBuffer, int, int), looked up with these
         // signatures; the buffer is the direct one over `staging`, whose range the writer keeps inside it.
         let taken = unsafe {
@@ -199,18 +213,18 @@ impl Sink for JavaTrack {
             env.call_method_unchecked(&self.track, java.track.write, ReturnType::Primitive(Primitive::Int), &args).and_then(|v| v.i())
         };
         cleared(&mut env);
-        let taken = taken.unwrap_or(ERROR_DEAD_OBJECT);
-        if taken < 0 && taken != self.failing {
-            log(&format!("the AudioTrack refused a write: {taken}"));
-        } else if taken >= 0 && self.failing < 0 {
-            log("the AudioTrack takes writes again");
+        // A write that threw is a dead track, as one answering ERROR_DEAD_OBJECT is. Every error is the
+        // writer's to act on: counted as nothing taken, it read as a full track and was asked again at
+        // once, for ever, in silence.
+        match taken.unwrap_or(ERROR_DEAD_OBJECT) {
+            n if n >= 0 => Ok(n as usize),
+            code => Err(code),
         }
-        self.failing = taken.min(0);
-        taken.max(0) as usize
     }
 
     fn play(&mut self) {
         self.void(|t| t.play);
+        self.since_ns = mono_ns();
     }
 
     fn pause(&mut self) {
@@ -219,6 +233,8 @@ impl Sink for JavaTrack {
 
     fn flush(&mut self) {
         self.void(|t| t.flush);
+        self.head = HeadCount::default();
+        self.since_ns = mono_ns();
     }
 
     fn stop(&mut self) {
@@ -247,21 +263,24 @@ impl Sink for JavaTrack {
             cleared(&mut env);
             if stamped {
                 let long = |env: &mut JNIEnv, f| env.get_field_unchecked(&self.timestamp, f, ReturnType::Primitive(Primitive::Long)).and_then(|v| v.j());
-                if let (Ok(frames), Ok(ns)) = (long(&mut env, java.frame_position), long(&mut env, java.nano_time)) {
-                    return Some((frames.max(0) as u64, ns));
+                match (long(&mut env, java.frame_position), long(&mut env, java.nano_time)) {
+                    // One taken before the last flush or start is the old music's: the head says instead.
+                    (Ok(frames), Ok(ns)) if ns >= self.since_ns => return Some((frames.max(0) as u64, ns)),
+                    (Ok(_), Ok(_)) => {}
+                    _ => cleared(&mut env),
                 }
-                cleared(&mut env);
             }
         }
         // SAFETY: AudioTrack.getPlaybackHeadPosition(), looked up with this signature.
         let head = unsafe { env.call_method_unchecked(&self.track, java.track.head, ReturnType::Primitive(Primitive::Int), &[]).and_then(|v| v.i()) };
         cleared(&mut env);
         // An unsigned count that wraps, as the platform documents it.
-        head.ok().map(|h| (h as u32 as u64, mono_ns()))
+        head.ok().map(|h| (self.head.read(h as u32), mono_ns()))
     }
 
     fn release(&mut self) {
         self.void(|t| t.release);
+        self.released = true;
     }
 }
 
@@ -310,7 +329,9 @@ impl Opener for JavaOpener {
                 buffer: env.new_global_ref(&buffer)?,
                 staging,
                 timestamp: env.new_global_ref(&timestamp)?,
-                failing: 0,
+                head: HeadCount::default(),
+                since_ns: mono_ns(),
+                released: false,
             };
             Ok(Ok(Opened { sink: Box::new(sink), frames, starts_full: self.sdk < 31 }))
         });
@@ -321,16 +342,19 @@ impl Opener for JavaOpener {
 
 // ---- the songs' bytes ----
 
-/// A song's bytes through Kotlin's data sources.
-struct JavaBytes;
+/// A song's bytes through Kotlin's data sources, under the cache key the core resolved with its URL.
+struct JavaBytes {
+    key: String,
+}
 
 impl ByteSource for JavaBytes {
     fn open(&self, url: &str, from: u64) -> Result<Body, String> {
         let (java, mut env) = env().ok_or("no JVM")?;
-        let body = env.with_local_frame(4, |env| -> jni::errors::Result<Option<(GlobalRef, i64)>> {
-            let url = env.new_string(url)?;
-            // SAFETY: RustBridge.open(String, long), looked up with this signature.
-            let body = unsafe { env.call_static_method_unchecked(bridge(java), java.open, ReturnType::Object, &[JValue::Object(&url).as_jni(), JValue::Long(from as i64).as_jni()]) }?.l()?;
+        let body = env.with_local_frame(6, |env| -> jni::errors::Result<Option<(GlobalRef, i64)>> {
+            let (url, key) = (env.new_string(url)?, env.new_string(&self.key)?);
+            // SAFETY: RustBridge.open(String, String, long), looked up with this signature.
+            let args = [JValue::Object(&url).as_jni(), JValue::Object(&key).as_jni(), JValue::Long(from as i64).as_jni()];
+            let body = unsafe { env.call_static_method_unchecked(bridge(java), java.open, ReturnType::Object, &args) }?.l()?;
             if body.is_null() {
                 return Ok(None);
             }
@@ -340,7 +364,7 @@ impl ByteSource for JavaBytes {
         cleared(&mut env);
         match body {
             Ok(Some((body, length))) => {
-                log(&format!("{url} from byte {from}: {} bytes come", if length >= 0 { length.to_string() } else { "unknown".into() }));
+                log(&format!("{} from byte {from}: {} bytes come", self.key, if length >= 0 { length.to_string() } else { "unknown".into() }));
                 Ok(Body { start: from, len: (length >= 0).then(|| from + length as u64), reader: Box::new(JavaBody { body, open: true }) })
             }
             _ => Err("the song's bytes would not come".into()),
@@ -394,11 +418,10 @@ impl Drop for JavaBody {
 
 // ---- where songs are ----
 
-/// Every song is streamed through [`JavaBytes`] by its `nori://song/` address; the data source behind
-/// it reads a download or the stream cache first. Radio streams stay on the ExoPlayer path.
-struct AndroidLibrary {
-    bytes: Arc<dyn ByteSource>,
-}
+/// Every song is opened where the core resolves it - its URL and cache key - through [`JavaBytes`]; the
+/// data source behind it reads a download or the stream cache first. Radio streams stay on the ExoPlayer
+/// path.
+struct AndroidLibrary;
 
 impl Library for AndroidLibrary {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
@@ -410,13 +433,14 @@ impl Library for AndroidLibrary {
         // The container the resolved copy is in: a transcoded stream says it in its cache key. A download
         // may have been transcoded too, and its key (`dl:<id>`) says nothing: the file says what it is,
         // as on the desktop.
-        let key = cache_key(id);
-        let hint = match key.as_deref() {
-            Some(k) if k == nori_core::stream::download_key(id.to_string()) => None,
-            k => k.and_then(key_format).or_else(|| song.map(|s| s.suffix)).filter(|s| !s.is_empty()),
+        let target = nori_core::stream::resolve_now(id).ok_or("no server to play from")?;
+        let hint = if target.key == nori_core::stream::download_key(id.to_string()) {
+            None
+        } else {
+            key_format(&target.key).or_else(|| song.map(|s| s.suffix)).filter(|s| !s.is_empty())
         };
-        log(&format!("{id} opens from {} as {}", key.as_deref().unwrap_or("nowhere"), hint.as_deref().unwrap_or("whatever it is")));
-        Ok(Located { source: Source::Url { url: format!("{SONG_URL}{id}"), bytes: self.bytes.clone() }, hint, duration_ms })
+        log(&format!("{id} opens from {} as {}", target.key, hint.as_deref().unwrap_or("whatever it is")));
+        Ok(Located { source: Source::Url { url: target.url, bytes: Arc::new(JavaBytes { key: target.key }) }, hint, duration_ms })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -428,23 +452,6 @@ impl Library for AndroidLibrary {
     }
 }
 
-/// The cache key the song resolves to now (a download's, or the stream's at this network's quality).
-fn cache_key(id: &str) -> Option<String> {
-    let (java, mut env) = env()?;
-    let key = env.with_local_frame(4, |env| -> jni::errors::Result<Option<String>> {
-        let id = env.new_string(id)?;
-        // SAFETY: RustBridge.key(String), looked up with this signature.
-        let key = unsafe { env.call_static_method_unchecked(bridge(java), java.key, ReturnType::Object, &[JValue::Object(&id).as_jni()]) }?.l()?;
-        if key.is_null() {
-            return Ok(None);
-        }
-        let key = JString::from(key);
-        let s: String = env.get_string(&key)?.into();
-        Ok(Some(s))
-    });
-    cleared(&mut env);
-    key.ok().flatten()
-}
 
 // ---- the player ----
 
@@ -460,6 +467,8 @@ const EVENT_STATE: i32 = 0;
 const EVENT_SONG: i32 = 1;
 const EVENT_ERROR: i32 = 2;
 const EVENT_OUTPUT: i32 = 3;
+const EVENT_STOPPED: i32 = 4;
+const EVENT_BUFFERING: i32 = 5;
 
 impl Events {
     fn push(&self, e: Event) {
@@ -467,6 +476,8 @@ impl Events {
             Event::State(s) => log(&format!("{s:?}")),
             Event::Song { index, id } => log(&format!("song {index} ({id}) is heard")),
             Event::Output { name } => log(&format!("playing to {name}")),
+            Event::Stopped => log("stopped by itself"),
+            Event::Buffering(on) => log(if *on { "waits for the song's bytes" } else { "the song's bytes came" }),
             _ => {}
         }
         let e = match e {
@@ -474,6 +485,8 @@ impl Events {
             Event::Song { index, id } => (EVENT_SONG, index as i32, id),
             Event::Error { id, message } => (EVENT_ERROR, -1, if id.is_empty() { message } else { format!("{id}: {message}") }),
             Event::Output { name } => (EVENT_OUTPUT, -1, name),
+            Event::Stopped => (EVENT_STOPPED, -1, String::new()),
+            Event::Buffering(on) => (EVENT_BUFFERING, on as i32, String::new()),
             Event::Position { .. } => return,
         };
         let first = {
@@ -482,10 +495,17 @@ impl Events {
             !self.signalled.swap(true, Ordering::AcqRel)
         };
         if first {
-            if let Some((java, mut env)) = env() {
+            // Whether a player took the wake. None did (the engine's first events come before Kotlin has
+            // registered it): the next event signals again rather than waiting for a drain that never
+            // comes, and the player drains once as it registers.
+            let taken = env().is_some_and(|(java, mut env)| {
                 // SAFETY: RustBridge.signal(), looked up with this signature.
-                let _ = unsafe { env.call_static_method_unchecked(bridge(java), java.signal, ReturnType::Primitive(Primitive::Void), &[]) };
+                let taken = unsafe { env.call_static_method_unchecked(bridge(java), java.signal, ReturnType::Primitive(Primitive::Boolean), &[]) }.and_then(|v| v.z()).unwrap_or(false);
                 cleared(&mut env);
+                taken
+            });
+            if !taken {
+                self.signalled.store(false, Ordering::Release);
             }
         }
     }
@@ -510,10 +530,17 @@ struct Player {
     jumped: Mutex<Option<(i64, Instant)>>,
 }
 
-fn player<'a>(h: jlong) -> Option<&'a Player> {
-    // SAFETY: a non-zero `h` is a pointer `create` made with `Box::into_raw`, and Kotlin never passes
-    // one on after `destroy`.
-    (h != 0).then(|| unsafe { &*(h as *const Player) })
+/// The players alive, by the handle Kotlin holds. A handle is a number, never a pointer: a door called
+/// with one that was destroyed (a routing callback or a test's read still on its way) finds nothing,
+/// and a door that found one keeps it alive until it returns.
+static PLAYERS: Mutex<Vec<(jlong, Arc<Player>)>> = Mutex::new(Vec::new());
+static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
+
+fn player(h: jlong) -> Option<Arc<Player>> {
+    if h == 0 {
+        return None;
+    }
+    PLAYERS.lock().iter().find(|(k, _)| *k == h).map(|(_, p)| p.clone())
 }
 
 /// Starts the engine over the core's queue and settings. `sdk` is Android's API level; `float` the high
@@ -534,21 +561,30 @@ extern "system" fn create(mut env: JNIEnv, _: JClass, sdk: jint, float: jboolean
     }
     let shared = Arc::new(Shared::default());
     let output = TrackOutput::new(Box::new(JavaOpener { sdk }), float != 0, shared.clone());
-    let library = AndroidLibrary { bytes: Arc::new(JavaBytes) };
+    let library = AndroidLibrary;
     let sound = nori_core::settings_store::settings_current().map(|p| settings(&p)).unwrap_or_default();
     let config = Config { memory_mb: memory_mb.max(16) as u32, settings: sound, ..Config::default() };
     let events = Arc::new(Events::default());
     let tell = events.clone();
     log(&format!("the engine starts: API {sdk}, {} output, {} MB of memory", if float != 0 { "float" } else { "16-bit" }, config.memory_mb));
     let engine = Engine::start(library, CoreApp::new(), CoreQueue, Box::new(output), config, move |e| tell.push(e));
-    Box::into_raw(Box::new(Player { engine, shared, events, jumped: Mutex::new(None) })) as jlong
+    let h = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    PLAYERS.lock().push((h, Arc::new(Player { engine, shared, events, jumped: Mutex::new(None) })));
+    h
 }
 
-/// Stops the engine: its thread ends and the AudioTrack is released.
+/// Stops the engine: its thread ends and the AudioTrack is released. The handle names nothing from here
+/// on; a door still running with the player lets it go when it returns. Stopping joins the engine's
+/// threads, which can take a burst's decode: that is done on a thread of its own, not on the caller's
+/// (media3 releases the player on the main thread).
 extern "system" fn destroy(_: JNIEnv, _: JClass, h: jlong) {
-    if h != 0 {
-        // SAFETY: `h` came from `create` and Kotlin destroys it once.
-        drop(unsafe { Box::from_raw(h as *mut Player) });
+    let gone = {
+        let mut players = PLAYERS.lock();
+        players.iter().position(|(k, _)| *k == h).map(|i| players.remove(i).1)
+    };
+    if let Some(p) = gone {
+        // A thread that will not start hands the player back, and it is let go here after all.
+        let _ = std::thread::Builder::new().name("nori-release".into()).spawn(move || drop(p));
     }
 }
 
@@ -557,6 +593,23 @@ extern "system" fn play_at(h: jlong, index: jint, ms: jlong) {
         log(&format!("to song {i} at {} ms", ms.max(0)));
         *p.jumped.lock() = Some((ms.max(0), Instant::now()));
         p.engine.play_at(i, ms.max(0));
+    }
+}
+
+/// A seek, a skip or a tap on a song: made at once while music plays, held until play while paused
+/// (nori-engine's rule, `Engine::go_to`).
+extern "system" fn go_to(h: jlong, index: jint, ms: jlong) {
+    if let (Some(p), Ok(i)) = (player(h), usize::try_from(index)) {
+        log(&format!("to song {i} at {} ms, playing or not as it was", ms.max(0)));
+        *p.jumped.lock() = Some((ms.max(0), Instant::now()));
+        p.engine.go_to(i, ms.max(0));
+    }
+}
+
+/// The sleep timer's "end of this song": the engine pauses there, on the next song.
+extern "system" fn pause_at_end(h: jlong, on: jboolean) {
+    if let Some(p) = player(h) {
+        p.engine.pause_at_end(on != 0);
     }
 }
 
@@ -596,6 +649,13 @@ extern "system" fn gain_changed(h: jlong) {
     }
 }
 
+/// The equalizer's screen opened or closed: the shallow buffer while it is open.
+extern "system" fn set_tuning(h: jlong, on: jboolean) {
+    if let Some(p) = player(h) {
+        p.engine.set_tuning(on != 0);
+    }
+}
+
 /// The sound and the controls' fades as the core's settings are now.
 extern "system" fn apply_settings(h: jlong) {
     if let (Some(p), Some(prefs)) = (player(h), nori_core::settings_store::settings_current()) {
@@ -608,15 +668,28 @@ extern "system" fn apply_settings(h: jlong) {
 /// still dipping before it).
 extern "system" fn position_ms(h: jlong) -> jlong {
     let Some(p) = player(h) else { return 0 };
-    let status = p.engine.status();
-    match *p.jumped.lock() {
-        Some((ms, at)) if status.at < at || status.switching => ms,
-        _ => status.position_now().max(0),
+    // Read in place: this is asked every frame the seek bar draws, and a copy of the status is a copy of
+    // the song's id.
+    let (at, switching, now) = p.engine.status_with(|s| (s.at, s.switching, s.position_now()));
+    let jumped = *p.jumped.lock();
+    match jumped {
+        Some((ms, when)) if at < when || switching => ms,
+        _ => now.max(0),
     }
 }
 
 extern "system" fn mixing(h: jlong) -> jboolean {
-    player(h).is_some_and(|p| p.engine.status().mixing) as jboolean
+    player(h).is_some_and(|p| p.engine.status_with(|s| s.mixing)) as jboolean
+}
+
+/// Whether the sound chain is in the samples' path: what ExoPlayer's `Equalizer.active` says there.
+extern "system" fn chain_in(h: jlong) -> jboolean {
+    player(h).is_some_and(|p| p.engine.status_with(|s| s.chain)) as jboolean
+}
+
+/// The limiter's meter: what it took off the last buffer through the chain, dB.
+extern "system" fn gain_reduction_db(h: jlong) -> jfloat {
+    player(h).map_or(0.0, |p| p.engine.status_with(|s| s.gain_reduction_db))
 }
 
 extern "system" fn bytes_written(h: jlong) -> jlong {
@@ -640,7 +713,8 @@ extern "system" fn event(h: jlong) -> jlong {
     }
 }
 
-/// The words of the event [`event`] last gave: the song's id, the error, the output's name.
+/// The words of the event [`event`] last gave: the song's id, the error, the output's name. `@FastNative`:
+/// only the main thread takes this lock (here and in [`event`]), and nothing Java is called.
 extern "system" fn event_text(env: JNIEnv, _: JClass, h: jlong) -> jstring {
     let Some(p) = player(h) else { return std::ptr::null_mut() };
     let text = std::mem::take(&mut *p.events.text.lock());
@@ -651,7 +725,8 @@ extern "system" fn event_text(env: JNIEnv, _: JClass, h: jlong) -> jstring {
 extern "system" fn device(mut env: JNIEnv, _: JClass, h: jlong, kind: jint, name: JString) {
     let Some(p) = player(h) else { return };
     let name = with_str(&mut env, &name, str::to_string).unwrap_or_default();
-    if let Some(watch) = &*p.shared.watch.lock() {
+    let watch = p.shared.watch.lock();
+    if let Some(watch) = &*watch {
         watch(Device { kind: nori_core::outputs::kind(kind), name });
     }
 }

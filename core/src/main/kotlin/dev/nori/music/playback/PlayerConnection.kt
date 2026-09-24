@@ -17,10 +17,10 @@ import com.google.common.util.concurrent.MoreExecutors
 import dalvik.annotation.optimization.CriticalNative
 import dalvik.annotation.optimization.FastNative
 import dev.nori.music.Nori
-import dev.nori.music.ffi.Hand
-import dev.nori.music.ffi.NextAction
-import dev.nori.music.ffi.RadioStation
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.queue.Hand
+import dev.nori.music.ffi.queue.NextAction
+import dev.nori.music.ffi.model.RadioStation
+import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -171,12 +171,23 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            _state.value = _state.value.copy(error = error.cause?.message ?: error.errorCodeName)
+            // The platform only sorts its error into the core's kinds (media3's audio output codes are the
+            // 5000s); what the player says about it is the core's (words.rs words_playback_error). It
+            // used to show the exception's own text, or a constant's name when the controller had none.
+            val kind = when {
+                error.errorCode in 5000 until 6000 -> dev.nori.music.ffi.model.PlaybackError.OUTPUT
+                error.isNetworkish() -> dev.nori.music.ffi.model.PlaybackError.NETWORK
+                else -> dev.nori.music.ffi.model.PlaybackError.OTHER
+            }
+            _state.value = _state.value.copy(error = dev.nori.music.ffi.words.wordsPlaybackError(kind))
         }
     }
 
     /** The core queue's revision the page's queue was read at; -1 when it was not read from the core. */
     private var viewRev = -1L
+
+    /** The core list's revision the page's songs were read at (0: none held), so they are not sent again. */
+    private var heldList = 0uL
 
     /** The last radio title worked out, and what it was worked out from: asked again only when those change. */
     private var radioAnnounced: String? = null
@@ -193,9 +204,13 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         // timeline change is not always a queue change (a song's source opening is one too), so the
         // core's revision is asked first and a queue the page already holds is not copied over again.
         val same = look && old.connected && viewRev >= 0 && PlaylistJni.rev() == viewRev && old.queue.size == p.mediaItemCount
-        val view = if (look && !same) dev.nori.music.ffi.playlistView().takeIf { it.songs.size == p.mediaItemCount } else null
+        // The songs themselves only when the list changed since they were read: a shuffle or a song marked
+        // as added by hand moves the order alone.
+        val view = if (look && !same) dev.nori.music.ffi.queue.playlistView(heldList).takeIf { it.len.toInt() == p.mediaItemCount } else null
         if (look && !same) viewRev = view?.rev?.toLong() ?: -1L
-        val queue = view?.songs ?: if (fresh && !same) dev.nori.music.ffi.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
+        val listed = view?.let { v -> if (v.listRev == heldList && old.queue.size == p.mediaItemCount) old.queue else v.songs.takeIf { it.size == p.mediaItemCount } }
+        if (look && !same) heldList = if (listed != null && view != null) view.listRev else 0uL
+        val queue = listed ?: if (fresh && !same) dev.nori.music.ffi.queue.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
         val order = view?.order?.map { it.toInt() } ?: if (look && !same) playOrder(p) else old.order
         val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: if (fresh && !same) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
         // The song on the page is the one being heard. Into a transition the player has moved on to
@@ -236,7 +251,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         if (radioShown == null || announced != radioAnnounced || station != radioStation) {
             radioAnnounced = announced
             radioStation = station
-            radioShown = dev.nori.music.ffi.radioTitle(announced, station)
+            radioShown = dev.nori.music.ffi.words.radioTitle(announced, station)
         }
         return radioShown
     }
@@ -260,7 +275,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         // control does not stay on after the row's Play starts some other queue. Pause and resume on
         // the page's own queue do not come through here, and leave the light as it was. Said to the
         // core at once, so the page does not flicker while the queue's own change is on its way.
-        dev.nori.music.ffi.playlistShowShuffle(shuffle)
+        dev.nori.music.ffi.queue.playlistShowShuffle(shuffle)
         c.shuffleModeEnabled = shuffle
         c.setMediaItems(items(songs), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)
         c.prepare()
@@ -268,14 +283,15 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     }
 
     /**
-     * Play [songs] in the given order while keeping the Shuffle control lit. Used for weighted
-     * artist-spread shuffles: media3's own shuffle would undo the spread.
+     * Play [songs] in [order] (positions in it, the core's weighted shuffle) while keeping the Shuffle
+     * control lit. Used for weighted artist-spread shuffles: media3's own shuffle would undo the spread.
      */
-    fun playShuffledOrder(songs: List<Song>) = with { c ->
-        if (songs.isEmpty()) return@with
-        dev.nori.music.ffi.playlistShowShuffle(true)
+    fun playShuffledOrder(songs: List<Song>, order: List<UInt>) = with { c ->
+        if (songs.isEmpty() || order.isEmpty()) return@with
+        dev.nori.music.ffi.queue.playlistShowShuffle(true)
         // Marked as already in order: the service takes it as it is and turns the player's own shuffle off.
-        val items = items(songs)
+        val made = items(songs)
+        val items = order.map { made[it.toInt()] }
         c.setMediaItems(listOf(items.first().ordered()) + items.drop(1), 0, 0)
         c.prepare()
         c.play()
@@ -313,7 +329,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         forget()
         // With nothing after, the service refills the queue and takes the skip when songs land
         // (nori_player::transport::next_action).
-        when (dev.nori.music.ffi.nextAction(c.hasNextMediaItem())) {
+        when (dev.nori.music.ffi.queue.nextAction(c.hasNextMediaItem())) {
             NextAction.SKIP -> c.seekToNextMediaItem()
             NextAction.FILL_THEN_SKIP -> c.sendCustomCommand(SessionCommand(PlaybackService.CMD_FILL_NEXT, Bundle.EMPTY), Bundle.EMPTY)
         }
@@ -327,7 +343,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      */
     fun previous() = with { c ->
         // Restart here, or let the player's own previous decide: nori_player::queue::previous_restarts.
-        if (dev.nori.music.ffi.queuePreviousRestarts(c.currentPosition, c.hasPreviousMediaItem())) { seekTo(0); if (!c.playWhenReady) c.play() }
+        if (dev.nori.music.ffi.queue.queuePreviousRestarts(c.currentPosition, c.hasPreviousMediaItem())) { seekTo(0); if (!c.playWhenReady) c.play() }
         else { forget(); c.seekToPrevious() }
     }
     /** The song before, even well into this one - a swipe is a request for the other record, not a restart. */
@@ -374,7 +390,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     /** The seek being made to stick, in Rust (crates/player/src/seek.rs), and the song it was asked in. */
     private val seeks = SeekJni.create()
     /** How often the watch looks (nori_player::seek::LOOK_EVERY_MS), read once. */
-    private val seekLookMs by lazy { dev.nori.music.ffi.playbackTimings().seekLookMs }
+    private val seekLookMs by lazy { dev.nori.music.ffi.queue.playbackTimings().seekLookMs }
     private var wantedId: String? = null
     /**
      * Where a seek asked to go, while the watch is still making sure it sticks. The seek bar
@@ -413,13 +429,13 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     }
 
     fun setShuffle(on: Boolean) = with {
-        dev.nori.music.ffi.playlistShowShuffle(on)
+        dev.nori.music.ffi.queue.playlistShowShuffle(on)
         it.shuffleModeEnabled = on
         _state.value = _state.value.copy(shuffle = on || it.shuffleModeEnabled)
     }
 
     fun cycleRepeat() = with {
-        it.repeatMode = dev.nori.music.ffi.queueNextRepeat(it.repeatMode.toUByte()).toInt()
+        it.repeatMode = dev.nori.music.ffi.queue.queueNextRepeat(it.repeatMode.toUByte()).toInt()
     }
 
     /** While true the service trades its deep audio buffer for immediate response; for the equalizer screen. */
@@ -446,7 +462,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         c.sendCustomCommand(SessionCommand(PlaybackService.CMD_SLEEP, Bundle.EMPTY), Bundle().apply {
             putInt(PlaybackService.ARG_MINUTES, minutes); putBoolean(PlaybackService.ARG_END_OF_TRACK, endOfTrack); putInt(PlaybackService.ARG_SONGS, songs)
         })
-        val shown = dev.nori.music.ffi.sleepShown(minutes.coerceAtLeast(0).toUInt(), endOfTrack, songs.coerceAtLeast(0).toUInt(), SystemClock.elapsedRealtime())
+        val shown = dev.nori.music.ffi.queue.sleepShown(minutes.coerceAtLeast(0).toUInt(), endOfTrack, songs.coerceAtLeast(0).toUInt(), SystemClock.elapsedRealtime())
         _state.value = _state.value.copy(sleepAt = shown.atMs, sleepAtEndOfTrack = shown.atEndOfTrack)
     }
 }

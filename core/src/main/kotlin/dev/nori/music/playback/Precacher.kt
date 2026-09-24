@@ -1,7 +1,6 @@
 package dev.nori.music.playback
 
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.CacheWriter
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -13,23 +12,33 @@ import java.util.concurrent.Future
  * octo-fiesta are never fetched ahead: asking for one makes the server download it.
  */
 @UnstableApi
-class Precacher(private val sources: MediaSources) {
+class Precacher(
+    private val sources: MediaSources,
+    /** A song has just been fetched whole: what waits for a song to be on the device (measuring) can look again. */
+    private val onFetched: () -> Unit = {},
+) {
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "nori-precache").apply { priority = Thread.MIN_PRIORITY } }
     private var running: Future<*>? = null
     @Volatile private var writer: CacheWriter? = null
 
-    fun update(upcoming: List<String>, skip: (String) -> Boolean = { false }) {
+    /**
+     * [songs] are the core's (`Client::precache_targets`): which ones, in order, and where each comes from.
+     * None the download queue is fetching or has fetched: a download arrives permanently, and pulling it
+     * into the rolling cache too keeps it twice.
+     */
+    fun update(songs: List<dev.nori.music.ffi.net.Fetch>) {
         cancel()
-        // A song the download queue is already fetching arrives permanently; pulling it into the
-        // rolling cache too keeps it twice.
-        val ids = dev.nori.music.ffi.queueFetchable(upcoming).filterNot(skip)
-        if (ids.isEmpty()) return
+        if (songs.isEmpty()) return
         running = worker.submit {
-            for (id in ids) {
+            for (song in songs) {
                 if (Thread.currentThread().isInterrupted) return@submit
-                if (sources.isDownloaded(id)) continue
-                runCatching { CacheWriter(sources.streamCached.createDataSource(), sources.resolve(DataSpec(songUri(id))), null, null).also { writer = it }.cache() }
+                // A download may have finished while the songs before it were fetched.
+                if (sources.isDownloaded(song.id)) continue
+                var fetched = false
+                val listener = CacheWriter.ProgressListener { _, _, new -> if (new > 0) fetched = true }
+                val whole = runCatching { CacheWriter(sources.precaching.createDataSource(), sources.spec(song), null, listener).also { writer = it }.cache() }.isSuccess
                 writer = null
+                if (whole && fetched) onFetched()
             }
         }
     }

@@ -70,11 +70,19 @@ fn handle<'a>(h: jlong) -> Option<&'a Handle> {
     (h != 0).then(|| unsafe { &*(h as *const Handle) })
 }
 
-/// The two callbacks made for every buffer and every position query, looked up once: a lookup by name
-/// costs more than the call itself, and they are made many times a second while music plays.
+/// Every method the engine calls in Java, looked up once: a lookup by name costs more than the call
+/// itself, and the output's are made many times a second while music plays.
 struct Methods {
     handle_buffer: JMethodID,
     position: JMethodID,
+    configure: JMethodID,
+    discontinuity: JMethodID,
+    heard_changed: JMethodID,
+    /// `Buffer.position(int)` and `ByteBuffer.order(ByteOrder)`, and the platform's byte order itself, for
+    /// the wrappers made over the engine's chunks.
+    buffer_position: JMethodID,
+    buffer_order: JMethodID,
+    native_order: GlobalRef,
 }
 
 static METHODS: OnceLock<Methods> = OnceLock::new();
@@ -84,10 +92,22 @@ fn methods(env: &mut JNIEnv, sink: &JObject) -> Option<&'static Methods> {
         return Some(m);
     }
     let class = env.get_object_class(sink).ok()?;
+    let buffer = env.find_class("java/nio/Buffer").ok()?;
+    let byte_buffer = env.find_class("java/nio/ByteBuffer").ok()?;
+    let native = env.call_static_method("java/nio/ByteOrder", "nativeOrder", "()Ljava/nio/ByteOrder;", &[]).ok()?.l().ok()?;
     let m = Methods {
         handle_buffer: env.get_method_id(&class, "downHandleBuffer", "(Ljava/nio/ByteBuffer;J)J").ok()?,
         position: env.get_method_id(&class, "downPosition", "(Z)J").ok()?,
+        configure: env.get_method_id(&class, "downConfigure", "(I)V").ok()?,
+        discontinuity: env.get_method_id(&class, "downDiscontinuity", "()V").ok()?,
+        heard_changed: env.get_method_id(&class, "hostHeardChanged", "()V").ok()?,
+        buffer_position: env.get_method_id(&buffer, "position", "(I)Ljava/nio/Buffer;").ok()?,
+        buffer_order: env.get_method_id(&byte_buffer, "order", "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;").ok()?,
+        native_order: env.new_global_ref(&native).ok()?,
     };
+    for local in [class.into(), buffer.into(), byte_buffer.into(), native] {
+        let _ = env.delete_local_ref::<JObject>(local);
+    }
     Some(METHODS.get_or_init(|| m))
 }
 
@@ -138,7 +158,9 @@ impl Downstream for Down<'_, '_> {
         if self.failed {
             return;
         }
-        let _ = self.env.call_method(self.sink, "downConfigure", "(I)V", &[JValue::Int(*token)]);
+        let args = [JValue::Int(*token).as_jni()];
+        // SAFETY: looked up on the sink's own class with this signature: an int in, nothing out.
+        let _ = unsafe { self.env.call_method_unchecked(self.sink, self.methods.configure, ReturnType::Primitive(Primitive::Void), &args) };
         self.failed_now();
     }
 
@@ -147,6 +169,7 @@ impl Downstream for Down<'_, '_> {
             return (false, 0);
         }
         let key = (data.as_ptr() as usize, data.len());
+        let m = self.methods;
         let r = match self.input {
             // The decoder's own buffer, from where the engine was given it: its Java position is there already.
             Some((buf, addr, len)) if from == 0 && key == (addr, len) => self.down_handle_buffer(buf, pts_us),
@@ -156,7 +179,9 @@ impl Downstream for Down<'_, '_> {
                         // A wrapper over this very memory: moved back to where this chunk starts.
                         Some(i) => {
                             let (_, _, g) = self.wrappers.swap_remove(i);
-                            self.env.call_method(g.as_obj(), "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)]).and_then(|v| v.l()).map(|moved| {
+                            let at = [JValue::Int(from as jint).as_jni()];
+                            // SAFETY: `Buffer.position(int)`, looked up with this signature, on a ByteBuffer.
+                            unsafe { self.env.call_method_unchecked(g.as_obj(), m.buffer_position, ReturnType::Object, &at) }.and_then(|v| v.l()).map(|moved| {
                                 let _ = self.env.delete_local_ref(moved);
                                 g
                             })
@@ -169,11 +194,14 @@ impl Downstream for Down<'_, '_> {
                             // little-endian (native) and throws otherwise.
                             // Every local reference made here is let go before returning: a mix can drain many
                             // chunks in one call, and they would pile up until it returned.
-                            let native = self.env.call_static_method("java/nio/ByteOrder", "nativeOrder", "()Ljava/nio/ByteOrder;", &[])?.l()?;
-                            let same = self.env.call_method(&b, "order", "(Ljava/nio/ByteOrder;)Ljava/nio/ByteBuffer;", &[JValue::Object(&native)])?.l()?;
-                            let moved = self.env.call_method(&b, "position", "(I)Ljava/nio/Buffer;", &[JValue::Int(from as jint)])?.l()?;
+                            let order = [JValue::Object(m.native_order.as_obj()).as_jni()];
+                            let at = [JValue::Int(from as jint).as_jni()];
+                            // SAFETY: `ByteBuffer.order(ByteOrder)` and `Buffer.position(int)`, looked up with
+                            // these signatures, on the ByteBuffer just made.
+                            let same = unsafe { self.env.call_method_unchecked(&b, m.buffer_order, ReturnType::Object, &order) }?.l()?;
+                            let moved = unsafe { self.env.call_method_unchecked(&b, m.buffer_position, ReturnType::Object, &at) }?.l()?;
                             let g = self.env.new_global_ref(&b);
-                            for local in [native, same, moved, b.into()] {
+                            for local in [same, moved, b.into()] {
                                 let _ = self.env.delete_local_ref(local);
                             }
                             g
@@ -214,7 +242,8 @@ impl Downstream for Down<'_, '_> {
         if self.failed {
             return;
         }
-        let _ = self.env.call_method(self.sink, "downDiscontinuity", "()V", &[]);
+        // SAFETY: looked up on the sink's own class with this signature: nothing in or out.
+        let _ = unsafe { self.env.call_method_unchecked(self.sink, self.methods.discontinuity, ReturnType::Primitive(Primitive::Void), &[]) };
         self.failed_now();
     }
 
@@ -263,7 +292,8 @@ fn with<'e, R>(
         if app_env.exception_check().unwrap_or(true) {
             return;
         }
-        let _ = app_env.call_method(sink, "hostHeardChanged", "()V", &[]);
+        // SAFETY: looked up on the sink's own class with this signature: nothing in or out.
+        let _ = unsafe { app_env.call_method_unchecked(sink, methods.heard_changed, ReturnType::Primitive(Primitive::Void), &[]) };
     };
     let mut app = CoreHost { now_ms, heard_changed: &mut heard_changed as &mut dyn FnMut() };
     let mut burst = h.burst.lock();
@@ -292,14 +322,6 @@ extern "system" fn holding() -> jboolean {
 fn stream(id: Option<String>, rate: jint, channels: jint, encoding: jint) -> StreamFormat {
     let format = Encoding::from_media3(encoding).map(|e| Format { rate: rate.max(1) as u32, channels: channels.clamp(1, 8) as usize, encoding: e });
     StreamFormat { id, format }
-}
-
-fn opt_string(env: &mut JNIEnv, s: &JString) -> Option<String> {
-    if s.is_null() {
-        None
-    } else {
-        env.get_string(s).ok().map(Into::into)
-    }
 }
 
 extern "system" fn create() -> jlong {
@@ -345,7 +367,7 @@ extern "system" fn set_offset(h: jlong, offset_us: jlong) {
 extern "system" fn configure<'e>(
     mut env: JNIEnv<'e>, _: JClass, h: jlong, sink: JObject<'e>, now_ms: jlong, id: JString<'e>, rate: jint, channels: jint, encoding: jint, token: jint,
 ) {
-    let id = opt_string(&mut env, &id);
+    let id = crate::string(&env, &id);
     with(&mut env, h, &sink, now_ms, None, None, |e, d, a| e.configure(d, a, stream(id, rate, channels, encoding), token));
 }
 

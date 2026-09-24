@@ -3,19 +3,19 @@ package dev.nori.music.net
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
-import dev.nori.music.ffi.CoreException
-import dev.nori.music.ffi.FailureKind
-import dev.nori.music.ffi.getFailed
-import dev.nori.music.ffi.NetException
-import dev.nori.music.ffi.RequestPolicy
-import dev.nori.music.ffi.Transport
-import dev.nori.music.ffi.TransportException
-import dev.nori.music.ffi.TransportResponse
-import dev.nori.music.ffi.Trouble
-import dev.nori.music.ffi.describeError
-import dev.nori.music.ffi.netPolicy
-import dev.nori.music.ffi.netServer
-import dev.nori.music.ffi.requestPolicy
+import dev.nori.music.ffi.model.CoreException
+import dev.nori.music.ffi.net.FailureKind
+import dev.nori.music.ffi.net.getFailed
+import dev.nori.music.ffi.net.NetException
+import dev.nori.music.ffi.net.RequestPolicy
+import dev.nori.music.ffi.net.Transport
+import dev.nori.music.ffi.net.TransportException
+import dev.nori.music.ffi.net.TransportResponse
+import dev.nori.music.ffi.net.Trouble
+import dev.nori.music.ffi.net.describeError
+import dev.nori.music.ffi.net.netPolicy
+import dev.nori.music.ffi.net.netServer
+import dev.nori.music.ffi.net.requestPolicy
 import dev.nori.music.settings.ServerProfile
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -178,7 +178,7 @@ class Http(private val context: Context) {
      */
     suspend fun get(url: String, timeoutMs: Long = 0): ByteArray {
         val r = exchange(url, timeoutMs)
-        if (getFailed(r.status, r.body.isEmpty())) throw IOException("HTTP ${r.status}")
+        if (getFailed(r.status, r.body.isEmpty())) throw IOException(dev.nori.music.ffi.words.wordsHttpStatus(r.status))
         return r.body
     }
 

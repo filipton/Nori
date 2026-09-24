@@ -1,11 +1,11 @@
 package dev.nori.music.playback
 
-import dev.nori.music.ffi.AutoEqEntry
-import dev.nori.music.ffi.ChoiceKind
+import dev.nori.music.ffi.model.AutoEqEntry
+import dev.nori.music.ffi.devices.ChoiceKind
 import dev.nori.music.ffi.Core
-import dev.nori.music.ffi.CurveStep
-import dev.nori.music.ffi.DeviceEffect
-import dev.nori.music.ffi.SoundProfile
+import dev.nori.music.ffi.model.CurveStep
+import dev.nori.music.ffi.devices.DeviceEffect
+import dev.nori.music.ffi.model.SoundProfile
 import dev.nori.music.net.Http
 import dev.nori.music.net.said
 import dev.nori.music.settings.Settings
@@ -156,6 +156,6 @@ class DeviceSound(private val settings: Settings, private val core: () -> Core, 
 
     companion object {
         /** The profile nori_player::device::FLAT names, read once. */
-        val FLAT: String by lazy { dev.nori.music.ffi.deviceFlat() }
+        val FLAT: String by lazy { dev.nori.music.ffi.devices.deviceFlat() }
     }
 }

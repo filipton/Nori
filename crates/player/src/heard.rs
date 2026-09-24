@@ -2,9 +2,10 @@
 //! transition the player runs ahead of the ear (the held ending counts as played the moment it is
 //! decoded, so the next song arrives in time to be mixed in), and the engine's [`Heard`] says what the
 //! ear really has. This turns that reading, taken seconds apart with a deep buffer, into a place that
-//! moves at one times between readings, follows the ear into the next song the moment the mix is
-//! audible (as Spotify does), and does not fall back to the old song in the gap between the engine
-//! letting go and the player moving on.
+//! moves at one times between readings, follows the ear into the next song the moment it is the louder
+//! of the two in the mix (the engine's `until_us`: a fade that starts with the next song silent is
+//! still the last song to anyone listening), and does not fall back to the old song in the gap between
+//! the engine letting go and the player moving on.
 
 use crate::engine::Heard;
 

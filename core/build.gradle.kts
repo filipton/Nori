@@ -18,7 +18,11 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
-val rustTargets = (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",")
+// Which ABIs the Rust core is built for. Asked explicitly with -PrustTargets; otherwise a debug build is for the
+// emulator (x86_64) and a perf or release build for phones (arm64-v8a): building both every time doubled
+// each build for a chip nobody was going to run it on.
+val shipping = gradle.startParameter.taskNames.any { t -> listOf("release", "perf", "bundle").any { t.contains(it, ignoreCase = true) } }
+val rustTargets = (project.findProperty("rustTargets") as String? ?: if (shipping) "arm64-v8a" else "x86_64").split(",")
 val rustProfile = project.findProperty("rustProfile") as String? ?: "release"
 val cargoRoot = rootProject.projectDir
 val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")

@@ -22,8 +22,10 @@ import java.util.concurrent.Future
  *
  * Nothing here touches the network. A track is only measured once its bytes are already on the device -
  * downloaded, or fetched ahead into the stream cache by [Precacher] - so this costs radio time never and
- * CPU only on a thread that yields to everything else. A track that is not there yet is simply left for
- * the next time the queue moves, by which point the precacher has usually brought it in.
+ * CPU only on a thread that yields to everything else. A track that is not there yet is measured when the
+ * precacher has brought it in (PlaybackService asks again then): left for the next time the queue moved,
+ * the song after the first one streamed was never measured before its boundary, and the first mix of a
+ * session was always a blind fade.
  *
  * Decoding is the core's own decoder where it takes the codec: each packet the extractor splits off
  * goes in through a direct buffer and is decoded and analysed in one call, so the samples never cross
@@ -40,47 +42,71 @@ class AutoMixPrefetch(
 ) {
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "nori-analyse-ahead").apply { priority = Thread.MIN_PRIORITY } }
     private var running: Future<*>? = null
+    /** A second pass over the same songs, waiting behind [running]. */
+    private var again: Future<*>? = null
+    private var runningIds: List<String> = emptyList()
 
     /**
      * [ids] are the songs coming up, the one playing first, as the core picks them (queue_measure: only
      * songs that can be measured, none while AutoMix is off). Whatever was being measured for an older
-     * queue is abandoned: the point of this is the next boundary, not completeness.
+     * queue is abandoned: the point of this is the next boundary, not completeness. The same songs
+     * again - one of them has just arrived on the device - queue one more pass behind the one under
+     * way instead: restarting would throw away a song half measured.
      */
     fun update(ids: List<String>) {
+        if (ids.isNotEmpty() && ids == runningIds && running?.isDone == false) {
+            if (again?.isDone != false) again = worker.submit { pass(ids) }
+            return
+        }
         cancel()
+        runningIds = ids
         if (ids.isEmpty()) return
-        running = worker.submit {
-            val missing = runCatching { coreOf().analysisMissing(ids) }.getOrDefault(emptyList())
-            val waiting = missing.count { !onDevice(it) }
-            // One line per queue move, and only while AutoMix is on: which of the tracks coming up have
-            // never been measured, and how many of those are not on the device yet to measure.
-            android.util.Log.i("nori", "measuring ahead: ${missing.size} of ${ids.size} unmeasured, $waiting not on the device yet")
-            for (id in missing) {
-                if (Thread.currentThread().isInterrupted) return@submit
-                if (!onDevice(id)) continue
-                runCatching { measure(id); onMeasured() }.onFailure { android.util.Log.i("nori", "analysing $id ahead failed: $it") }
-            }
+        running = worker.submit { pass(ids) }
+    }
+
+    private fun pass(ids: List<String>) {
+        val missing = runCatching { coreOf().analysisMissing(ids) }.getOrDefault(emptyList())
+        val waiting = missing.count { onDevice(it) < 0 }
+        // One line per queue move, and only while AutoMix is on: which of the tracks coming up have
+        // never been measured, and how many of those are not on the device yet to measure.
+        android.util.Log.i("nori", "measuring ahead: ${missing.size} of ${ids.size} unmeasured, $waiting not on the device yet")
+        for (id in missing) {
+            if (Thread.currentThread().isInterrupted) return
+            val size = onDevice(id)
+            if (size < 0) continue
+            runCatching { measure(id, size); onMeasured() }.onFailure { android.util.Log.i("nori", "analysing $id ahead failed: $it") }
         }
     }
 
     fun cancel() {
+        again?.cancel(true)
         running?.cancel(true)
+        again = null
         running = null
+        runningIds = emptyList()
     }
 
     fun release() { cancel(); worker.shutdownNow() }
 
-    /** Whether the whole file is already on the device, as a download or as a complete cache entry. */
-    private fun onDevice(id: String): Boolean {
-        if (sources.isDownloaded(id)) return true
-        val key = runCatching { sources.streamKey(id) }.getOrNull() ?: return false
+    /**
+     * How much of the song can be read without the network: [Long.MAX_VALUE] for a download, the bytes
+     * cached from its start for a song in the stream cache that is whole but for a short tail, -1 for
+     * anything else. The tail is there because the player stops reading an MP3 where its frames end:
+     * the ID3v1 tag after them (128 bytes) is never fetched, so a song streamed through the player was
+     * never whole in the cache and never measured ahead.
+     */
+    private fun onDevice(id: String): Long {
+        if (sources.isDownloaded(id)) return Long.MAX_VALUE
+        val key = runCatching { sources.streamKey(id) }.getOrNull() ?: return -1
         val length = ContentMetadata.getContentLength(sources.streamCache.getContentMetadata(key))
-        return length > 0 && sources.streamCache.getCachedBytes(key, 0, length) >= length
+        if (length <= 0) return -1
+        val cached = sources.streamCache.getCachedLength(key, 0, length)
+        return if (cached >= length - TAIL) cached else -1
     }
 
-    /** Decodes the whole track into the streaming analyser and stores what comes out. */
-    private fun measure(id: String) {
-        val source = CachedTrack(sources.factory.createDataSource(), id)
+    /** Decodes the whole track, its first [size] bytes, into the streaming analyser and stores what comes out. */
+    private fun measure(id: String, size: Long) {
+        val source = CachedTrack(sources.factory.createDataSource(), id, size)
         val extractor = MediaExtractor()
         var analyser = 0L
         try {
@@ -113,7 +139,7 @@ class AutoMixPrefetch(
                 return
             }
             val a = coreOf().analysisFinishWhole(id, analyser, expectedMs)
-            android.util.Log.i("nori", "analysed $id ahead: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s".format(it.bpm, it.bpmConfidence, it.stability, dev.nori.music.ffi.automixKeyName(it.key)) } ?: "not stored: not the whole song, or too short"}")
+            android.util.Log.i("nori", "analysed $id ahead: ${a?.let { "%.2f bpm (conf %.2f, stab %.2f), key %s".format(it.bpm, it.bpmConfidence, it.stability, dev.nori.music.ffi.automix.automixKeyName(it.key)) } ?: "not stored: not the whole song, or too short"}")
         } finally {
             if (analyser != 0L) AutoMixAnalyzer.destroy(analyser)
             extractor.release()
@@ -214,9 +240,9 @@ class AutoMixPrefetch(
      * One song's bytes as [MediaExtractor] wants them: random access, by position. The media3 chain
      * underneath is sequential, so a jump backwards (which an extractor only does while reading a
      * header) reopens it at the new position; a read that carries on where the last one stopped costs
-     * nothing extra.
+     * nothing extra. The file ends at [size] (see onDevice), so nothing past what is cached is asked for.
      */
-    private class CachedTrack(private val source: DataSource, private val id: String) : MediaDataSource() {
+    private class CachedTrack(private val source: DataSource, private val id: String, private val size: Long) : MediaDataSource() {
         private var open = false
         private var at = -1L
         private var length = -1L
@@ -227,13 +253,14 @@ class AutoMixPrefetch(
             val left = source.open(spec)
             open = true
             at = position
-            if (left != androidx.media3.common.C.LENGTH_UNSET.toLong() && length < 0) length = position + left
+            if (left != androidx.media3.common.C.LENGTH_UNSET.toLong() && length < 0) length = minOf(position + left, size)
         }
 
         override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
             if (size == 0) return 0
+            if (position >= this.size) return -1
             if (!open || position != at) openAt(position)
-            val n = source.read(buffer, offset, size)
+            val n = source.read(buffer, offset, minOf(size.toLong(), this.size - position).toInt())
             if (n > 0) at += n
             return n
         }
@@ -257,6 +284,8 @@ class AutoMixPrefetch(
         /** A packet buffer for when the extractor does not say how large they get, and the least one made. */
         const val DEFAULT_INPUT = 64 * 1024
         const val MIN_INPUT = 8 * 1024
+        /** How much may be missing at the end of a cached song for it to be measured: tags after the audio. */
+        const val TAIL = 16 * 1024L
 
         /** The codec's setup as the extractor hands it over (csd-0, csd-1, ...), joined in order. */
         fun setupData(format: MediaFormat): ByteArray? {

@@ -1,24 +1,14 @@
 package dev.nori.music.app
 
 import android.app.Application
-import coil3.ImageLoader
-import coil3.PlatformContext
-import coil3.SingletonImageLoader
-import coil3.disk.DiskCache
-import coil3.disk.directory
-import coil3.memory.MemoryCache
-import coil3.network.okhttp.OkHttpNetworkFetcherFactory
-import coil3.request.crossfade
-import coil3.request.allowRgb565
 import dev.nori.music.Nori
-import okio.Path.Companion.toOkioPath
 
-class NoriApp : Application(), SingletonImageLoader.Factory {
+class NoriApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
         val nori = Nori.get(this)
-        Thread { numberStyle(); nori.warmUp() }.start()
+        Thread { numberStyle(); nori.warmUp(); forgetCoil() }.start()
     }
 
     /** A new locale changes how the core writes fractions ("12,4 MB"), so it is told again. */
@@ -34,23 +24,16 @@ class NoriApp : Application(), SingletonImageLoader.Factory {
      */
     private fun numberStyle() {
         val symbols = java.text.DecimalFormatSymbols.getInstance()
-        dev.nori.music.ffi.fmtSetLocale(symbols.decimalSeparator.toString(), symbols.groupingSeparator.toString())
+        dev.nori.music.ffi.words.fmtSetLocale(symbols.decimalSeparator.toString(), symbols.groupingSeparator.toString())
     }
 
     /**
-     * Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom
-     * keys. How much it keeps is the core's (`cover_rules`). Covers are decoded by the core's decoder,
-     * ahead of Coil's own, unless "Decode covers in the core" is off ([RustCoverDecoder]).
+     * Covers were kept by Coil, in its own format, before the core fetched and kept them
+     * (dev.nori.music.data.CoverLoader, in a directory of its own): nothing reads that directory now, so
+     * it goes, once.
      */
-    override fun newImageLoader(context: PlatformContext): ImageLoader = ImageLoader.Builder(context)
-        .components {
-            add(OkHttpNetworkFetcherFactory(callFactory = { Nori.get(this@NoriApp).http.callFactory }))
-            add(RustCoverDecoder.Factory { Nori.get(this@NoriApp).settings.value.coreCovers })
-        }
-        .memoryCache { MemoryCache.Builder().maxSizePercent(context, dev.nori.music.data.Covers.rules.memoryShare).build() }
-        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers").toOkioPath()).maxSizeBytes(dev.nori.music.data.Covers.rules.diskBytes.toLong()).build() }
-        .crossfade(false)
-        // Covers have no alpha: 16-bit bitmaps halve decode memory, so twice as many stay in the memory cache.
-        .allowRgb565(true)
-        .build()
+    private fun forgetCoil() {
+        val old = cacheDir.resolve("covers")
+        if (old.exists()) old.deleteRecursively()
+    }
 }

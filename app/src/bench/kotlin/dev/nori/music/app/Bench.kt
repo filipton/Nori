@@ -2,15 +2,12 @@ package dev.nori.music.app
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Debug
-import coil3.request.allowHardware
-import coil3.request.allowRgb565
+import dev.nori.music.data.CoverLoader
+import dev.nori.music.data.Covers
 import dev.nori.music.look.CoverPixels
 import java.io.File
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /**
  * The benchmarks the debug build's TestBridge runs over adb and the perf build's Performance page runs
@@ -25,7 +22,7 @@ object Bench {
         run(out, "empty loop", 200_000) { i -> sink += i }
         run(out, "kotlin seekStep", 200_000) { i -> sink += kotlinSeekStep(0.3f + i * 1e-7f, 0.31f, 0.016f, 900f, 0.003f) }
         run(out, "jni seekStep", 200_000) { i -> sink += dev.nori.music.look.CoverLook.seekStep(0.3f + i * 1e-7f, 0.31f, 0.016f, 900f, 0.003f) }
-        run(out, "uniffi swipeTurn", 20_000) { i -> sink += dev.nori.music.ffi.swipeTurn(-20f - i % 7, -950f, 1000f, true, true, true) }
+        run(out, "uniffi motionReduced", 20_000) { i -> if (dev.nori.music.ffi.motionReduced(false, i % 3 == 0, i % 2 == 0)) sink++ }
         val a = IntArray(dev.nori.music.look.CoverLook.LEN) { 0xFF102030.toInt() + it * 997 }
         val b = IntArray(dev.nori.music.look.CoverLook.LEN) { 0xFFF0E0D0.toInt() - it * 991 }
         val o = IntArray(a.size)
@@ -36,7 +33,7 @@ object Bench {
             sink += o[3]
         }
         run(out, "jni duration string", 50_000) { i -> sink += dev.nori.music.look.CoverLook.duration((i % 7000).toLong(), false).length }
-        run(out, "uniffi duration string", 20_000) { i -> sink += dev.nori.music.ffi.duration((i % 7000).toLong()).length }
+        run(out, "uniffi duration string", 20_000) { i -> sink += dev.nori.music.ffi.words.duration((i % 7000).toLong()).length }
         return out.append("sink $sink").toString()
     }
 
@@ -52,110 +49,68 @@ object Bench {
     }
 
     /**
-     * The covers in Coil's disk cache (at most [limit] of them) decoded to 300x300 and
-     * 1080x1080 by BitmapFactory as Coil decodes them (bounds first, the largest power-of-two
-     * `inSampleSize` that still fills the size, the rest by density scaling; ARGB_8888, and RGB_565 as
-     * the app's Coil asks for opaque covers) and by the Rust door (crates/covers) into one reused Bitmap,
-     * with the IDCT shrinking big JPEGs and without, and into a reused RGB_565 Bitmap (what packing adds).
-     * Then the first five decoded both ways, compared
-     * pixel by pixel. Takes seconds: call it off the main thread.
+     * What the core's covers cost on this phone. First the decode alone: the covers kept on disk (at most
+     * [limit], the same ones each time) decoded to 300 and 1080 px into one reused Bitmap, ARGB_8888 with
+     * the IDCT shrinking big JPEGs and without, and RGB_565 (what packing adds). Then the whole way a
+     * screen gets them: covers the app has shown (the addresses kept in memory) loaded from the disk
+     * through a loader of the bench's own at 300 px, into software Bitmaps and into hardware ones (decoded
+     * in software and copied to the GPU), each call back counted. For each: ms per cover, Java heap bytes
+     * allocated per cover, GCs, and the Java and native heaps before and after. Takes seconds: call it off
+     * the main thread.
      */
     fun covers(context: Context, limit: Int = 40): String {
         val files = coverFiles(context, limit)
-        if (files.isEmpty()) return "coverbench: no covers in ${context.cacheDir}/covers"
-        val out = StringBuilder("coverbench ${files.size} covers (")
-        files.groupingBy { f -> BitmapFactory.Options().also { it.inJustDecodeBounds = true; BitmapFactory.decodeFile(f.path, it) }.let { "${it.outWidth}x${it.outHeight}" } }
-            .eachCount().entries.sortedByDescending { it.value }.joinTo(out) { "${it.key}:${it.value}" }
-        out.append(')')
+        if (files.isEmpty()) return "coverbench: no covers in ${context.cacheDir}/${CoverLoader.DIR}"
+        val out = StringBuilder("coverbench ${files.size} covers")
         for (side in intArrayOf(300, 1080)) {
             val reused = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888)
             val reused565 = Bitmap.createBitmap(side, side, Bitmap.Config.RGB_565)
-            val paths = listOf<Pair<String, (File) -> Bitmap?>>(
-                "bitmapfactory-8888" to { f -> bitmapFactory(f, side, Bitmap.Config.ARGB_8888) },
-                "bitmapfactory-565" to { f -> bitmapFactory(f, side, Bitmap.Config.RGB_565) },
-                "rust-idct" to { f -> reused.takeIf { CoverPixels.decodeFile(f.path, it, true) == CoverPixels.OK } },
-                "rust-whole" to { f -> reused.takeIf { CoverPixels.decodeFile(f.path, it, false) == CoverPixels.OK } },
-                // What packing into RGB_565 adds to rust-whole.
-                "rust-565" to { f -> reused565.takeIf { CoverPixels.decodeFile(f.path, it, false) == CoverPixels.OK } },
+            val paths = listOf<Pair<String, (File) -> Boolean>>(
+                "decode-idct" to { f -> CoverPixels.decodeFile(f.path, reused, true) == CoverPixels.OK },
+                "decode-whole" to { f -> CoverPixels.decodeFile(f.path, reused, false) == CoverPixels.OK },
+                "decode-565" to { f -> CoverPixels.decodeFile(f.path, reused565, false) == CoverPixels.OK },
             )
-            for ((name, decode) in paths) out.append(" | ").append(side).append(' ').append(measure(name, files, decode))
-            out.append(" | ").append(side).append(" vs bitmapfactory-8888, mean abs diff a/r/g/b: ").append(quality(files.take(5), side, reused))
+            for ((name, decode) in paths) out.append(" | ").append(side).append(' ').append(measure(name, files.size) { files.count { !decode(it) } })
             reused.recycle()
             reused565.recycle()
+        }
+        val urls = CoverLoader.get(context).keptAddresses().take(limit)
+        if (urls.isEmpty()) return out.append(" | loader: no covers shown yet").toString()
+        for (hardware in listOf(false, true)) {
+            val loader = CoverPixels.open(File(context.cacheDir, CoverLoader.DIR).path, Covers.rules.diskBytes.toLong(), hardware, true)
+            try {
+                // Once through first, to warm the JIT, the page cache and the loader's threads.
+                load(loader, urls.take(5))
+                val name = "loader-${if (hardware) "hardware" else "software"}"
+                out.append(" | 300 ").append(measure(name, urls.size) { load(loader, urls) })
+            } finally {
+                CoverPixels.close(loader)
+            }
         }
         return out.toString()
     }
 
-    /** At most [limit] covers from Coil's disk cache, the same ones each time. */
-    private fun coverFiles(context: Context, limit: Int): List<File> =
-        File(context.cacheDir, "covers").walkTopDown().filter { it.isFile && isPicture(it) }.sortedBy { it.name }.take(limit).toList()
-
-    /**
-     * The covers in Coil's disk cache (at most [limit]) loaded through Coil the way the app loads them,
-     * once with the app's [RustCoverDecoder] ahead of Coil's decoders and once with Coil's alone: to
-     * 300 px and 1080 px, as a hardware Bitmap (what the screens get), software ARGB_8888 (what the
-     * cover colours read) and RGB_565 (allowed, for a JPEG, when hardware is not), each from the file
-     * (Coil's disk cache hands over files) and from bytes in memory. For each: ms per cover both ways,
-     * and how many covers the Rust decoder drew, handed on to Coil's own, or failed. Then the cover
-     * colours (`CoverLook.derive`) of the first five, worked out from either decoder's Bitmap: how many
-     * came out identical, and the largest difference in a colour channel. Takes seconds: off the main thread.
-     */
-    fun coverDecode(context: Context, limit: Int = 40): String {
-        val files = coverFiles(context, limit)
-        if (files.isEmpty()) return "coverdecode: no covers in ${context.cacheDir}/covers"
-        val bytes = files.map { it.readBytes() }
-        val counts = RustCounts()
-        val rust = coil3.ImageLoader.Builder(context).components { add(RustCoverDecoder.Factory { true }) }
-            .eventListener(counts).memoryCache(null).diskCache(null).build()
-        val coil = coil3.ImageLoader.Builder(context).memoryCache(null).diskCache(null).build()
-        fun request(data: Any, side: Int, kind: String) = coil3.request.ImageRequest.Builder(context).data(data).size(side)
-            .allowHardware(kind == "hardware").allowRgb565(kind == "565")
-            .memoryCachePolicy(coil3.request.CachePolicy.DISABLED).diskCachePolicy(coil3.request.CachePolicy.DISABLED).build()
-        fun load(loader: coil3.ImageLoader, data: Any, side: Int, kind: String): Bitmap? =
-            (kotlinx.coroutines.runBlocking { loader.execute(request(data, side, kind)) } as? coil3.request.SuccessResult)
-                ?.let { (it.image as? coil3.BitmapImage)?.bitmap }
-        val out = StringBuilder("coverdecode ${files.size} covers")
-        for (side in intArrayOf(300, 1080)) for (kind in listOf("hardware", "8888", "565")) for ((from, data) in listOf("file" to files, "bytes" to bytes)) {
-            fun time(loader: coil3.ImageLoader): Double {
-                // A few first, to warm the JIT and the page cache; each Bitmap goes as soon as it is made.
-                data.take(3).forEach { load(loader, it, side, kind)?.recycle() }
-                counts.reset()
-                val t0 = System.nanoTime()
-                for (d in data) load(loader, d, side, kind)?.recycle() ?: counts.failed.incrementAndGet()
-                return (System.nanoTime() - t0) / 1e6 / data.size
-            }
-            val coilMs = time(coil)
-            val rustMs = time(rust)
-            out.append(String.format(Locale.ROOT, " | %d %s %s: rust %.2f ms/cover (%d drawn, %d to coil, %d failed), coil %.2f ms/cover",
-                side, kind, from, rustMs, counts.drawn.get(), counts.handedOn.get(), counts.failed.get(), coilMs))
-        }
-        var same = 0; var largest = 0
-        for (f in files.take(5)) {
-            val a = load(rust, f, 320, "8888"); val b = load(coil, f, 320, "8888")
-            val la = a?.let { dev.nori.music.look.CoverLook.derive(it, true, false) }?.look
-            val lb = b?.let { dev.nori.music.look.CoverLook.derive(it, true, false) }?.look
-            a?.recycle(); b?.recycle()
-            if (la == null || lb == null) continue
-            if (la.contentEquals(lb)) same++
-            for (i in la.indices) for (s in 0..24 step 8) largest = maxOf(largest, abs(((la[i] ushr s) and 0xFF) - ((lb[i] ushr s) and 0xFF)))
-        }
-        return out.append(" | colours: $same of ${minOf(5, files.size)} identical, largest channel difference $largest").toString()
-    }
-
-    /** Which of the Rust decoder's covers it drew and which it handed on to Coil's own decoders. */
-    private class RustCounts : coil3.EventListener() {
-        val drawn = java.util.concurrent.atomic.AtomicInteger()
-        val handedOn = java.util.concurrent.atomic.AtomicInteger()
+    /** Every cover at [urls] through [loader] at 300 px, all asked for at once, as a screenful is; how many failed. */
+    private fun load(loader: Long, urls: List<String>): Int {
+        val left = java.util.concurrent.CountDownLatch(urls.size)
         val failed = java.util.concurrent.atomic.AtomicInteger()
-
-        fun reset() { drawn.set(0); handedOn.set(0); failed.set(0) }
-
-        override fun decodeEnd(request: coil3.request.ImageRequest, decoder: coil3.decode.Decoder, options: coil3.request.Options, result: coil3.decode.DecodeResult?) {
-            if (decoder is RustCoverDecoder) (if (result != null) drawn else handedOn).incrementAndGet()
+        val waiter = object : CoverPixels.Waiter {
+            override fun done(bitmap: Bitmap?, status: Int) {
+                if (bitmap == null) failed.incrementAndGet() else bitmap.recycle()
+                left.countDown()
+            }
         }
+        val tickets = urls.map { CoverPixels.request(loader, it, 300, 300, waiter) }
+        left.await(60, java.util.concurrent.TimeUnit.SECONDS)
+        tickets.forEach(CoverPixels::cancel)
+        return failed.get() + left.count.toInt()
     }
 
-    /** Whether the file starts as a JPEG, PNG or WebP does (Coil's journal and metadata do not). */
+    /** At most [limit] covers from the disk cache, the same ones each time. */
+    private fun coverFiles(context: Context, limit: Int): List<File> =
+        File(context.cacheDir, CoverLoader.DIR).walkTopDown().filter { it.isFile && isPicture(it) }.sortedBy { it.name }.take(limit).toList()
+
+    /** Whether the file starts as a JPEG, PNG, WebP or GIF does. */
     private fun isPicture(f: File): Boolean {
         val head = ByteArray(12)
         val n = runCatching { f.inputStream().use { it.read(head) } }.getOrDefault(0)
@@ -163,80 +118,27 @@ object Bench {
         fun at(i: Int) = head[i].toInt() and 0xFF
         return (at(0) == 0xFF && at(1) == 0xD8 && at(2) == 0xFF) ||
             (at(0) == 0x89 && at(1) == 'P'.code && at(2) == 'N'.code && at(3) == 'G'.code) ||
-            (String(head, 0, 4, Charsets.US_ASCII) == "RIFF" && String(head, 8, 4, Charsets.US_ASCII) == "WEBP")
-    }
-
-    /** BitmapFactory as Coil 3's BitmapFactoryDecoder drives it for a `side`-pixel square filled (Scale.FILL). */
-    private fun bitmapFactory(f: File, side: Int, config: Bitmap.Config): Bitmap? {
-        val o = BitmapFactory.Options()
-        o.inJustDecodeBounds = true
-        BitmapFactory.decodeFile(f.path, o)
-        val (w, h) = o.outWidth to o.outHeight
-        if (w <= 0 || h <= 0) return null
-        o.inJustDecodeBounds = false
-        o.inSampleSize = minOf(Integer.highestOneBit(w / side), Integer.highestOneBit(h / side)).coerceAtLeast(1)
-        val scale = maxOf(side / (w / o.inSampleSize.toDouble()), side / (h / o.inSampleSize.toDouble()))
-        o.inScaled = scale != 1.0
-        if (o.inScaled) {
-            if (scale > 1) {
-                o.inDensity = (Int.MAX_VALUE / scale).roundToInt()
-                o.inTargetDensity = Int.MAX_VALUE
-            } else {
-                o.inDensity = Int.MAX_VALUE
-                o.inTargetDensity = (Int.MAX_VALUE * scale).roundToInt()
-            }
-        }
-        o.inPreferredConfig = config
-        return BitmapFactory.decodeFile(f.path, o)
+            (String(head, 0, 4, Charsets.US_ASCII) == "RIFF" && String(head, 8, 4, Charsets.US_ASCII) == "WEBP") ||
+            String(head, 0, 3, Charsets.US_ASCII) == "GIF"
     }
 
     private fun gcCount() = Debug.getRuntimeStat("art.gc.gc-count")?.toLongOrNull() ?: 0L
 
     private fun javaHeap() = Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() }
 
-    /** Every cover decoded once by [decode], after a few to warm the JIT and the page cache. */
-    private fun measure(name: String, files: List<File>, decode: (File) -> Bitmap?): String {
-        files.take(5).forEach { decode(it) }
+    /** [n] covers through [run], which answers how many failed, with what they cost. */
+    private fun measure(name: String, n: Int, run: () -> Int): String {
         System.gc(); System.runFinalization(); System.gc()
         val java0 = javaHeap(); val native0 = Debug.getNativeHeapAllocatedSize()
         val a0 = allocated(); val gc0 = gcCount()
-        var failed = 0
         val t0 = System.nanoTime()
-        for (f in files) if (decode(f) == null) failed++
+        val failed = run()
         val ms = (System.nanoTime() - t0) / 1e6
-        val bytes = (allocated() - a0).toDouble() / files.size; val gcs = gcCount() - gc0
+        val bytes = (allocated() - a0).toDouble() / n; val gcs = gcCount() - gc0
         val java1 = javaHeap(); val native1 = Debug.getNativeHeapAllocatedSize()
         val mb = 1024.0 * 1024.0
         return String.format(Locale.ROOT, "%s: %.0f ms, %.2f ms/cover, %.0f B/cover allocated, %d GCs, java %.1f->%.1f MB, native %.1f->%.1f MB%s",
-            name, ms, ms / files.size, bytes, gcs, java0 / mb, java1 / mb, native0 / mb, native1 / mb, if (failed > 0) ", $failed failed" else "")
-    }
-
-    /**
-     * How far the Rust door's pixels are from BitmapFactory's ARGB_8888 ones, as a mean absolute
-     * difference per channel over [files], with the IDCT and without: the middle `side` square of
-     * BitmapFactory's (it scales to fill, and the view crops), against the Rust door's, which fills and crops.
-     */
-    private fun quality(files: List<File>, side: Int, reused: Bitmap): String {
-        val sums = LongArray(8)
-        val counted = LongArray(2)
-        val a = IntArray(side * side); val b = IntArray(side * side)
-        for (f in files) {
-            val bf = bitmapFactory(f, side, Bitmap.Config.ARGB_8888) ?: continue
-            val cw = minOf(bf.width, side); val ch = minOf(bf.height, side)
-            bf.getPixels(a, 0, cw, (bf.width - cw) / 2, (bf.height - ch) / 2, cw, ch)
-            bf.recycle()
-            for ((k, idct) in listOf(0 to true, 1 to false)) {
-                if (CoverPixels.decodeFile(f.path, reused, idct) != CoverPixels.OK) continue
-                reused.getPixels(b, 0, cw, (side - cw) / 2, (side - ch) / 2, cw, ch)
-                for (i in 0 until cw * ch) for (c in 0..3) {
-                    val shift = 24 - 8 * c
-                    sums[4 * k + c] += abs(((a[i] ushr shift) and 0xFF) - ((b[i] ushr shift) and 0xFF)).toLong()
-                }
-                counted[k] += (cw * ch).toLong()
-            }
-        }
-        fun mad(k: Int) = (0..3).joinToString("/") { c -> String.format(Locale.ROOT, "%.2f", sums[4 * k + c].toDouble() / counted[k].coerceAtLeast(1)) }
-        return "rust-idct ${mad(0)}, rust-whole ${mad(1)}"
+            name, ms, ms / n, bytes, gcs, java0 / mb, java1 / mb, native0 / mb, native1 / mb, if (failed > 0) ", $failed failed" else "")
     }
 
     /** nori_look::motion::seek_step, written out in Kotlin for the comparison. */

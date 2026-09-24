@@ -1,7 +1,7 @@
 package dev.nori.music.data
 
-import dev.nori.music.ffi.Lyrics
-import dev.nori.music.ffi.LyricsOrigin
+import dev.nori.music.ffi.model.Lyrics
+import dev.nori.music.ffi.words.LyricsOrigin
 
 /**
  * Lyrics from outside the server (LRCLIB) are looked up, matched, ranked and cached by the core's client

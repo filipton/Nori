@@ -15,7 +15,6 @@ import android.util.Log
  *   adb shell am broadcast -a dev.nori.music.TEST --es cmd set --es arg limiter --es value true
  *   adb shell am broadcast -a dev.nori.music.TEST --es cmd play --es arg "search:noise 1"
  *   adb shell am broadcast -a dev.nori.music.TEST --es cmd coverbench --es arg 40
- *   adb shell am broadcast -a dev.nori.music.TEST --es cmd coverdecode --es arg 40
  *
  * Answers go to logcat under the tag `noritest`, one line, so a script can read them back.
  */
@@ -24,11 +23,11 @@ class TestBridge : BroadcastReceiver() {
     private fun serviceState(context: Context): String {
         val nori = dev.nori.music.Nori.get(context)
         val st = nori.player.state.value
-        return """{"route":"background","playing":${st.playing},"title":"${st.current?.title.orEmpty()}",""" +
-            """"artist":"${st.current?.artist.orEmpty()}","positionMs":${nori.player.positionMs},""" +
+        return """{"route":"background","playing":${st.playing},"title":"${st.current?.title.orEmpty().replace("\"", "'")}",""" +
+            """"artist":"${st.current?.artist.orEmpty().replace("\"", "'")}","positionMs":${nori.player.positionMs},""" +
             """"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},"error":"${st.error.orEmpty()}",""" +
-            """"dspActive":${dev.nori.music.playback.Equalizer.active != null},""" +
-            """"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
+            """"dspActive":${dev.nori.music.playback.Equalizer.inChain},""" +
+            """"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
             """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten}}"""
     }
 
@@ -56,18 +55,11 @@ class TestBridge : BroadcastReceiver() {
         val cmd = intent.getStringExtra("cmd") ?: return
         val arg = intent.getStringExtra("arg").orEmpty()
         val value = intent.getStringExtra("value").orEmpty()
-        // What decoding covers costs, Coil's way against the Rust door's: seconds of work, so on a thread
-        // of its own, answering with one line when done.
+        // What the core's covers cost: seconds of work, so on a thread of its own, answering with one line
+        // when done.
         if (cmd == "coverbench") {
             val app = context.applicationContext
             Thread({ Log.i("noritest", runCatching { Bench.covers(app, arg.toIntOrNull() ?: 40) }.getOrElse { "coverbench failed: $it" }) }, "coverbench").start()
-            return
-        }
-        // The same covers through Coil with the app's Rust decoder and without: what it drew, what it
-        // handed on to Coil's own decoders, and what each took.
-        if (cmd == "coverdecode") {
-            val app = context.applicationContext
-            Thread({ Log.i("noritest", runCatching { Bench.coverDecode(app, arg.toIntOrNull() ?: 40) }.getOrElse { "coverdecode failed: $it" }) }, "coverdecode").start()
             return
         }
         Handler(Looper.getMainLooper()).post {

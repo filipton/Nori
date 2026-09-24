@@ -179,14 +179,14 @@ class PagePalette(val look: IntArray, val wash: androidx.compose.ui.graphics.Ima
 val LocalPalette = staticCompositionLocalOf<PagePalette?> { null }
 
 /** Star changes made this session, per kind (see Library.starMarks). */
-val LocalStarMarks = staticCompositionLocalOf { dev.nori.music.ffi.StarMarks(emptyMap(), emptyMap(), emptyMap()) }
+val LocalStarMarks = staticCompositionLocalOf { dev.nori.music.ffi.library.StarMarks(emptyMap(), emptyMap(), emptyMap()) }
 
 /**
  * Star state as the screen should show it: this session's change wins over the snapshot the list was
  * painted with. Every toggle must also act on this, not on the snapshot, or the second tap undoes
  * the first one's server call instead of flipping what is on screen.
  */
-fun dev.nori.music.ffi.StarMarks.effectiveStar(kind: dev.nori.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
+fun dev.nori.music.ffi.library.StarMarks.effectiveStar(kind: dev.nori.music.data.StarKind, id: String, snapshot: Boolean): Boolean =
     of(kind, id) ?: snapshot
 
 /**
@@ -250,10 +250,16 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
 }
 
 /**
- * How the app lays out and times its pages - the sleeve's geometry, every gradient's stops, the waits and
- * fades - as nori-core says (`stage.rs`, `nori_look::sleeve`). Read once, the first time a page draws.
+ * How the app draws and times its pages - every gradient's stops, the waits, the fades and the meter's
+ * pace - as nori-core says (`stage.rs`, `nori_look::sleeve`). Read once, the first time a page draws.
  */
 val stage: dev.nori.music.ffi.Stage by lazy { dev.nori.music.ffi.stage() }
+
+/**
+ * Every fixed word the screens say, as nori-core words it (`words::words_ui`), so another front end says
+ * the same. Read once, the first time a page draws; a word with a number or a name in it is a call of its own.
+ */
+val say: dev.nori.music.ffi.words.UiWords by lazy { dev.nori.music.ffi.words.wordsUi() }
 
 /**
  * How much of the sleeve's height goes soft at the bottom: the same share the colour of those rows is
@@ -465,7 +471,7 @@ fun SearchField(
                 )
             }
             if (value.isNotEmpty()) androidx.compose.material3.IconButton({ onValue("") }, Modifier.size(28.dp)) {
-                Icon(Icons.Filled.Clear, "Clear", Modifier.size(17.dp), tint = scheme.onSurfaceVariant)
+                Icon(Icons.Filled.Clear, say.clear, Modifier.size(17.dp), tint = scheme.onSurfaceVariant)
             }
         }
     }
@@ -696,7 +702,7 @@ fun FavoriteHeart(
     IconButton(onClick, modifier) {
         Icon(
             if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-            if (starred) "Remove from favourites" else "Add to favourites",
+            if (starred) say.removeFromFavourites else say.addToFavourites,
             Modifier.size(size).graphicsLayer { scaleX = scale.value; scaleY = scale.value },
             tint = if (starred) tint else muted,
         )
@@ -721,7 +727,7 @@ fun FavoriteCircle(starred: Boolean, modifier: Modifier = Modifier, onClick: () 
     // around the heart bulged with it; only the glyph moves now, and the plate holds its place.
     CircleButton(
         if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-        if (starred) "Remove from favourites" else "Favourite",
+        if (starred) say.removeFromFavourites else say.favourite,
         modifier, selected = starred,
         iconModifier = Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value },
         onClick = onClick,
@@ -733,7 +739,7 @@ fun FavoriteCircle(starred: Boolean, modifier: Modifier = Modifier, onClick: () 
 fun MoreCircle(items: List<Pair<String, () -> Unit>>, modifier: Modifier = Modifier) {
     val open = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     Box(modifier) {
-        CircleButton(Icons.Filled.MoreHoriz, "More") { open.value = true }
+        CircleButton(Icons.Filled.MoreHoriz, say.more) { open.value = true }
         androidx.compose.material3.DropdownMenu(open.value, { open.value = false }) {
             items.forEach { (label, action) ->
                 androidx.compose.material3.DropdownMenuItem({ Text(label) }, { action(); open.value = false })
@@ -950,10 +956,10 @@ fun PlayPauseGlyph(
         Box(Modifier.size(size), Alignment.Center) {
             when (g) {
                 dev.nori.music.ffi.TransportGlyph.SPINNER -> androidx.compose.material3.CircularProgressIndicator(Modifier.size(spinner), color = tint?.invoke() ?: androidx.compose.material3.LocalContentColor.current, strokeWidth = 2.dp)
-                dev.nori.music.ffi.TransportGlyph.PAUSE -> if (tint != null) LookIcon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize(), tint)
-                    else androidx.compose.material3.Icon(Icons.Filled.Pause, "Pause", Modifier.fillMaxSize())
-                else -> if (tint != null) LookIcon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize(), tint)
-                    else androidx.compose.material3.Icon(Icons.Filled.PlayArrow, "Play", Modifier.fillMaxSize())
+                dev.nori.music.ffi.TransportGlyph.PAUSE -> if (tint != null) LookIcon(Icons.Filled.Pause, say.pause, Modifier.fillMaxSize(), tint)
+                    else androidx.compose.material3.Icon(Icons.Filled.Pause, say.pause, Modifier.fillMaxSize())
+                else -> if (tint != null) LookIcon(Icons.Filled.PlayArrow, say.play, Modifier.fillMaxSize(), tint)
+                    else androidx.compose.material3.Icon(Icons.Filled.PlayArrow, say.play, Modifier.fillMaxSize())
             }
         }
     }

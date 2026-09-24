@@ -1,135 +1,14 @@
-//! Which sound each output device gets, as whole steps: a device arriving, a curve adopted for it, an
-//! undo, a choice from the device list. The decision is nori-player's (`nori_player::device`); this
-//! reads the settings, looks up the profiles, saves and binds them, keeps the two small things the
-//! steps need between them (the sound from before a device took over, and the devices never to be
-//! offered a curve), and says what the platform should do next as one `DeviceEffect`: which sound to
-//! load, whether to read the profiles again, whether to run the device's arrival again. The platform
-//! fetches an AutoEQ preset when asked (that is transport) and applies the effect.
+//! The sound profiles as the core's calls, over the profiles kept in its database: a device arriving, a
+//! curve adopted, an undo, a choice from the device list. The steps themselves are nori-devices'.
 
-use nori_player::device::{self, keep_loose, FLAT};
+use nori_player::device::{self, FLAT};
 use nori_player::outputs::SPEAKER;
-
-// Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
-pub use nori_player::device::{ChoiceKind, DeviceRow, NoticeText};
 use rusqlite::OptionalExtension;
 
-use crate::settings::{self, sound_from, sound_json, SoundError, SoundSettings, StoredPrefs};
+use crate::settings::{self, sound_from, sound_json, SoundError, SoundSettings};
 use crate::{alog, autoeq, Arrival, AutoEqEntry, Core, CoreError, CurveStep, SoundProfile};
 
-/// The sound playing now, kept from before a bound device took over (`app_kv`).
-const LOOSE: &str = "looseSound";
-/// The devices the user said should never be offered a curve, as a JSON list (`app_kv`).
-const QUIET: &str = "quietOutputs";
-
-#[cfg(feature = "ffi")]
-#[uniffi::remote(Enum)]
-pub enum ChoiceKind {
-    Automatic,
-    Quiet,
-    Flat,
-    Profile,
-}
-
-#[cfg(feature = "ffi")]
-#[uniffi::remote(Record)]
-pub struct DeviceRow {
-    pub output: String,
-    pub name: String,
-    pub kind: Option<String>,
-    pub current: bool,
-    pub sound: String,
-    pub choice: ChoiceKind,
-    pub profile: Option<String>,
-}
-
-#[cfg(feature = "ffi")]
-#[uniffi::remote(Record)]
-pub struct NoticeText {
-    pub message: String,
-    pub action: String,
-}
-
-/// What happens to the sound kept from before a device took over (see `nori_player::device::keep_loose`).
-#[derive(Debug, Clone, PartialEq)]
-enum LooseChange {
-    Keep,
-    /// Keep this sound: it is what plays now, and nobody bound it to a device.
-    Store { json: String },
-    /// It has been used, or is no longer wanted.
-    Clear,
-}
-
-/// What a step decided, before the core settles its own part of it (the quiet mark and the kept sound).
-#[derive(Debug, Clone, PartialEq)]
-struct Step {
-    quiet: Option<bool>,
-    loose: LooseChange,
-    effect: DeviceEffect,
-}
-
-impl Step {
-    fn none() -> Self {
-        Step { quiet: None, loose: LooseChange::Keep, effect: DeviceEffect::none() }
-    }
-}
-
-/// What the platform does after a step, in this order: read the profiles (and the quiet devices) again,
-/// load the sound, and run the device's arrival again.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct DeviceEffect {
-    pub refresh: bool,
-    pub apply: Option<SoundSettings>,
-    pub arrive: bool,
-    /// The step made a new profile (an AutoEQ curve not saved before): undo deletes it again.
-    pub created: bool,
-}
-
-impl DeviceEffect {
-    fn none() -> Self {
-        DeviceEffect { refresh: false, apply: None, arrive: false, created: false }
-    }
-}
-
-/// What the settings say about device sound right now.
-struct Now {
-    sound: SoundSettings,
-    per_output: bool,
-    auto_apply: bool,
-}
-
-impl Now {
-    fn of(p: &StoredPrefs) -> Self {
-        Now { sound: p.sound(), per_output: p.profile_per_output, auto_apply: p.auto_eq_auto }
-    }
-
-    fn read() -> Self {
-        crate::settings_store::with_prefs(Now::of).unwrap_or_else(|| Now::of(&StoredPrefs::default()))
-    }
-}
-
-/// A device arriving: the effect of its bound profile or of the sound from before, and whether a curve
-/// is offered or applied (`entry`, with the url of its preset, when one matches).
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct DeviceArrival {
-    pub effect: DeviceEffect,
-    pub curve: CurveStep,
-    pub entry: Option<AutoEqEntry>,
-    pub preset_url: Option<String>,
-}
-
-/// Loads a device's own sound, keeping the sound playing now when it is the first one replaced.
-fn loaded(sound: SoundSettings, current: &SoundSettings, per_output: bool, loose_kept: bool) -> (Option<SoundSettings>, LooseChange) {
-    let loose = if keep_loose(per_output, loose_kept) { LooseChange::Store { json: sound_json(current) } } else { LooseChange::Keep };
-    (Some(sound), loose)
-}
-
-/// What an output's own name says about the headphones behind it: "Bluetooth: LE_WH-1000XM5" is
-/// "LE_WH-1000XM5". Empty for the speaker and anything else without a name of its own.
-fn device_name(output: &str) -> &str {
-    output.split_once(": ").map_or("", |(_, n)| n)
-}
+pub use nori_devices::profiles::*;
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
@@ -343,154 +222,9 @@ impl Core {
     }
 }
 
-/// Every output seen, the one playing now included, each with the sound it gets.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_rows(known: Vec<String>, current: String, profiles: Vec<SoundProfile>, quiet: Vec<String>) -> Vec<DeviceRow> {
-    let bound: Vec<(&str, &[String])> = profiles.iter().map(|p| (p.name.as_str(), p.outputs.as_slice())).collect();
-    device::rows(&known, &current, &bound, &quiet)
-}
-
-/// The snackbar line about the device that just connected; see `nori_player::device::notice`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_notice(offer: bool, name: String, output: String, current: String) -> Option<NoticeText> {
-    device::notice(offer, &name, &output, &current)
-}
-
-/// What the test bridge asks a device to get.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum SpecKind {
-    Automatic,
-    Quiet,
-    Flat,
-    Profile,
-    /// The first AutoEQ curve found for `arg`.
-    Curve,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct DeviceSpec {
-    pub output: String,
-    pub kind: SpecKind,
-    pub arg: String,
-}
-
-/// The test bridge's `set deviceSound "<output>=flat|auto|quiet|profile:<name>|curve:<search>"`; anything
-/// else after the last '=' is automatic.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_spec(value: String) -> DeviceSpec {
-    let (output, spec) = value.rsplit_once('=').unwrap_or((&value, &value));
-    let (kind, arg) = if spec == "flat" {
-        (SpecKind::Flat, "")
-    } else if spec == "quiet" {
-        (SpecKind::Quiet, "")
-    } else if let Some(name) = spec.strip_prefix("profile:") {
-        (SpecKind::Profile, name)
-    } else if let Some(search) = spec.strip_prefix("curve:") {
-        (SpecKind::Curve, search)
-    } else {
-        (SpecKind::Automatic, "")
-    };
-    DeviceSpec { output: output.to_string(), kind, arg: arg.to_string() }
-}
-
-// ---- the device list and the AutoEQ browser, worded ----
-
-/// Fewer than two characters (UTF-16 units, as the platform counts them) is not searched.
-pub fn autoeq_too_short(query: &str) -> bool {
-    query.trim().encode_utf16().count() < 2
-}
-
-/// One AutoEQ curve with the lines under it: `caption` in the browser (who measured it, the form and
-/// the target, whichever are known), `short` in a device's sheet (who measured it and the form).
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AutoEqHit {
-    pub entry: AutoEqEntry,
-    pub caption: String,
-    pub short: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AutoEqFound {
-    pub too_short: bool,
-    pub hits: Vec<AutoEqHit>,
-}
-
-fn hit(entry: AutoEqEntry) -> AutoEqHit {
-    let caption = [&entry.source, &entry.form, &entry.target].iter().filter(|s| !s.is_empty()).map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
-    let short = format!("{} · {}", entry.source, entry.form);
-    AutoEqHit { entry, caption, short }
-}
-
-/// The curves with their lines.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn autoeq_hits(entries: Vec<AutoEqEntry>) -> Vec<AutoEqHit> {
-    entries.into_iter().map(hit).collect()
-}
-
-/// The size of the downloaded AutoEQ list: "8123 headphones", and the search field's "Search 8123 headphones".
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AutoEqCount {
-    pub count: String,
-    pub search: String,
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn autoeq_count_words(count: u32) -> AutoEqCount {
-    AutoEqCount { count: format!("{count} headphones"), search: format!("Search {count} headphones") }
-}
-
-/// What a device's sheet says and offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct DeviceSheet {
-    /// The words under its name.
-    pub intro: String,
-    /// The line under "Automatic": whether a known curve is used or offered.
-    pub automatic: String,
-    /// The saved profiles it can be given; "Flat" is its own row, so it is not among them.
-    pub profiles: Vec<String>,
-    /// Neither the one playing now nor the phone's speaker, which are always there.
-    pub can_forget: bool,
-}
-
-pub fn sheet(output: &str, kind: Option<&str>, current: bool, auto_eq_auto: bool, profiles: &[String]) -> DeviceSheet {
-    let this = match kind {
-        None => "this".to_string(),
-        Some(k) => format!("this {k} device"),
-    };
-    DeviceSheet {
-        intro: format!("What music played through {this} sounds like. It switches by itself whenever the device connects."),
-        automatic: (if auto_eq_auto { "Uses a matching AutoEQ curve when one is known" } else { "Offers a matching AutoEQ curve when one is known" }).into(),
-        profiles: profiles.iter().filter(|p| *p != FLAT).cloned().collect(),
-        can_forget: !current && output != SPEAKER,
-    }
-}
-
-/// The sheet of the device `output` (plugged in as `kind`, the one playing now or not), given the
-/// saved profiles' names.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_sheet(output: String, kind: Option<String>, current: bool, auto_eq_auto: bool, profiles: Vec<String>) -> DeviceSheet {
-    sheet(&output, kind.as_deref(), current, auto_eq_auto, &profiles)
-}
-
-/// The mark on the device playing now, after its kind when it has one: " · Playing now", "Playing now".
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_playing_now(after_kind: bool) -> String {
-    (if after_kind { " · Playing now" } else { "Playing now" }).into()
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-
-    fn core() -> std::sync::Arc<Core> {
-        Core::new(String::new(), "t".into()).unwrap()
-    }
 
     fn sound() -> SoundSettings {
         sound_from("{}").unwrap()
@@ -500,33 +234,12 @@ mod tests {
         Now { sound, per_output: true, auto_apply: false }
     }
 
-    #[test]
-    fn the_device_sheet_and_the_curves_are_worded() {
-        let names = vec![FLAT.to_string(), "Warm".to_string()];
-        let s = sheet("USB: K3", Some("USB"), false, false, &names);
-        assert_eq!(s.intro, "What music played through this USB device sounds like. It switches by itself whenever the device connects.");
-        assert_eq!(s.automatic, "Offers a matching AutoEQ curve when one is known");
-        assert_eq!(s.profiles, ["Warm"]);
-        assert!(s.can_forget);
-        let s = sheet("x", None, true, true, &[]);
-        assert_eq!(s.intro, "What music played through this sounds like. It switches by itself whenever the device connects.");
-        assert_eq!(s.automatic, "Uses a matching AutoEQ curve when one is known");
-        assert!(!s.can_forget, "not the one playing");
-        assert!(!sheet(SPEAKER, None, false, false, &[]).can_forget, "not the speaker");
-        assert_eq!((device_playing_now(true), device_playing_now(false)), (" · Playing now".into(), "Playing now".into()));
-        let e = |target: &str| AutoEqEntry { name: "HD 600".into(), source: "oratory1990".into(), form: "over-ear".into(), target: target.into(), path: "p".into() };
-        let h = autoeq_hits(vec![e("Harman"), e("")]);
-        assert_eq!(h[0].caption, "oratory1990 · over-ear · Harman");
-        assert_eq!(h[1].caption, "oratory1990 · over-ear");
-        assert_eq!(h[0].short, "oratory1990 · over-ear");
-        assert!(autoeq_too_short("a") && autoeq_too_short("") && !autoeq_too_short("hd"));
-        assert_eq!(autoeq_count_words(8123), AutoEqCount { count: "8123 headphones".into(), search: "Search 8123 headphones".into() });
-        let c = core();
-        assert!(c.autoeq_browse("h".into()).too_short);
-        assert!(!c.autoeq_browse("hd".into()).too_short);
-    }
-
     const PRESET: &str = "Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n";
+
+
+    fn core() -> std::sync::Arc<Core> {
+        Core::new(String::new(), "t".into()).unwrap()
+    }
 
     #[test]
     fn a_bound_device_loads_its_sound_and_keeps_the_one_before() {
@@ -544,24 +257,6 @@ mod tests {
         // With per-device sound off nothing is loaded.
         let off = Now { per_output: false, ..now(playing) };
         assert_eq!(c.arrive_as("USB: K3".into(), &off).effect.apply, None);
-    }
-
-    #[test]
-    fn an_unbound_device_gets_the_sound_from_before_back() {
-        let c = core();
-        let kept = SoundSettings { mono: true, ..sound() };
-        c.set_loose(LooseChange::Store { json: sound_json(&kept) });
-        let a = c.arrive_as(SPEAKER.into(), &now(sound()));
-        assert_eq!(a.effect.apply, Some(kept));
-        assert_eq!(c.loose(), None, "used, so no longer kept");
-        assert_eq!(a.curve, CurveStep::None);
-        c.set_loose(LooseChange::Store { json: "garbage".into() });
-        let a = c.arrive_as(SPEAKER.into(), &now(sound()));
-        assert_eq!((a.effect.apply, c.loose()), (None, None), "a kept sound that does not read is dropped");
-        let a = c.arrive_as("Bluetooth: Buds".into(), &now(sound()));
-        assert_eq!(a.curve, CurveStep::Offer);
-        assert_eq!(a.entry, None, "no index, nothing to offer");
-        assert_eq!(a.effect, DeviceEffect::none());
     }
 
     #[test]
@@ -603,21 +298,21 @@ mod tests {
     }
 
     #[test]
-    fn undo_puts_everything_back() {
+    fn an_unbound_device_gets_the_sound_from_before_back() {
         let c = core();
-        let step = c.adopt_as("Bluetooth: X", "Sony", PRESET, true, &now(sound())).unwrap();
-        c.settle("Bluetooth: X", step);
-        let before = SoundSettings { mono: true, ..sound() };
-        let e = c.device_undo("Bluetooth: X".into(), "Sony".into(), true, before.clone());
-        assert_eq!(e, DeviceEffect { refresh: true, apply: Some(before), arrive: false, created: false });
-        assert!(c.profiles().unwrap().is_empty(), "the profile it made is gone");
-        assert_eq!(c.device_quiet(), ["Bluetooth: X"], "and the device is not offered one again");
-        assert_eq!(c.loose(), None);
-        // A profile that was there before stays.
-        let step = c.adopt_as("Bluetooth: X", "Sony", PRESET, true, &now(sound())).unwrap();
-        c.settle("Bluetooth: X", step);
-        c.device_undo("Bluetooth: X".into(), "Sony".into(), false, sound());
-        assert_eq!(c.profiles().unwrap().len(), 1);
+        let kept = SoundSettings { mono: true, ..sound() };
+        c.set_loose(LooseChange::Store { json: sound_json(&kept) });
+        let a = c.arrive_as(SPEAKER.into(), &now(sound()));
+        assert_eq!(a.effect.apply, Some(kept));
+        assert_eq!(c.loose(), None, "used, so no longer kept");
+        assert_eq!(a.curve, CurveStep::None);
+        c.set_loose(LooseChange::Store { json: "garbage".into() });
+        let a = c.arrive_as(SPEAKER.into(), &now(sound()));
+        assert_eq!((a.effect.apply, c.loose()), (None, None), "a kept sound that does not read is dropped");
+        let a = c.arrive_as("Bluetooth: Buds".into(), &now(sound()));
+        assert_eq!(a.curve, CurveStep::Offer);
+        assert_eq!(a.entry, None, "no index, nothing to offer");
+        assert_eq!(a.effect, DeviceEffect::none());
     }
 
     #[test]
@@ -663,16 +358,46 @@ mod tests {
     }
 
     #[test]
-    fn test_bridge_specs() {
-        let s = |v: &str| {
-            let d = device_spec(v.into());
-            (d.output, d.kind, d.arg)
-        };
-        assert_eq!(s("USB: K3=flat"), ("USB: K3".into(), SpecKind::Flat, String::new()));
-        assert_eq!(s("a=b=quiet"), ("a=b".into(), SpecKind::Quiet, String::new()));
-        assert_eq!(s("USB: K3=profile:Warm"), ("USB: K3".into(), SpecKind::Profile, "Warm".into()));
-        assert_eq!(s("x=curve:HD 600"), ("x".into(), SpecKind::Curve, "HD 600".into()));
-        assert_eq!(s("x=auto"), ("x".into(), SpecKind::Automatic, String::new()));
-        assert_eq!(s("flat"), ("flat".into(), SpecKind::Flat, String::new()));
+    fn the_device_sheet_and_the_curves_are_worded() {
+        let names = vec![FLAT.to_string(), "Warm".to_string()];
+        let s = sheet("USB: K3", Some("USB"), false, false, &names);
+        assert_eq!(s.intro, "What music played through this USB device sounds like. It switches by itself whenever the device connects.");
+        assert_eq!(s.automatic, "Offers a matching AutoEQ curve when one is known");
+        assert_eq!(s.profiles, ["Warm"]);
+        assert!(s.can_forget);
+        let s = sheet("x", None, true, true, &[]);
+        assert_eq!(s.intro, "What music played through this sounds like. It switches by itself whenever the device connects.");
+        assert_eq!(s.automatic, "Uses a matching AutoEQ curve when one is known");
+        assert!(!s.can_forget, "not the one playing");
+        assert!(!sheet(SPEAKER, None, false, false, &[]).can_forget, "not the speaker");
+        assert_eq!((device_playing_now(true), device_playing_now(false)), (" · Playing now".into(), "Playing now".into()));
+        let e = |target: &str| AutoEqEntry { name: "HD 600".into(), source: "oratory1990".into(), form: "over-ear".into(), target: target.into(), path: "p".into() };
+        let h = autoeq_hits(vec![e("Harman"), e("")]);
+        assert_eq!(h[0].caption, "oratory1990 · over-ear · Harman");
+        assert_eq!(h[1].caption, "oratory1990 · over-ear");
+        assert_eq!(h[0].short, "oratory1990 · over-ear");
+        assert!(autoeq_too_short("a") && autoeq_too_short("") && !autoeq_too_short("hd"));
+        assert_eq!(autoeq_count_words(8123), AutoEqCount { count: "8123 headphones".into(), search: "Search 8123 headphones".into() });
+        let c = core();
+        assert!(c.autoeq_browse("h".into()).too_short);
+        assert!(!c.autoeq_browse("hd".into()).too_short);
+    }
+
+    #[test]
+    fn undo_puts_everything_back() {
+        let c = core();
+        let step = c.adopt_as("Bluetooth: X", "Sony", PRESET, true, &now(sound())).unwrap();
+        c.settle("Bluetooth: X", step);
+        let before = SoundSettings { mono: true, ..sound() };
+        let e = c.device_undo("Bluetooth: X".into(), "Sony".into(), true, before.clone());
+        assert_eq!(e, DeviceEffect { refresh: true, apply: Some(before), arrive: false, created: false });
+        assert!(c.profiles().unwrap().is_empty(), "the profile it made is gone");
+        assert_eq!(c.device_quiet(), ["Bluetooth: X"], "and the device is not offered one again");
+        assert_eq!(c.loose(), None);
+        // A profile that was there before stays.
+        let step = c.adopt_as("Bluetooth: X", "Sony", PRESET, true, &now(sound())).unwrap();
+        c.settle("Bluetooth: X", step);
+        c.device_undo("Bluetooth: X".into(), "Sony".into(), false, sound());
+        assert_eq!(c.profiles().unwrap().len(), 1);
     }
 }

@@ -2,19 +2,22 @@ package dev.nori.music.settings
 
 import android.content.Context
 import kotlinx.coroutines.flow.MutableStateFlow
-import dev.nori.music.ffi.EqLevel
-import dev.nori.music.ffi.SavedQuality
-import dev.nori.music.ffi.SavedServer
-import dev.nori.music.ffi.ServerList
-import dev.nori.music.ffi.SoundBand
-import dev.nori.music.ffi.SoundSettings
-import dev.nori.music.ffi.StoredPrefs
-import dev.nori.music.ffi.eqGraphic
-import dev.nori.music.ffi.serverLabel
-import dev.nori.music.ffi.dbFileName
-import dev.nori.music.ffi.settingsOpen
-import dev.nori.music.ffi.settingsPut
-import dev.nori.music.ffi.settingLabels
+import dev.nori.music.ffi.settings.EqLevel
+import dev.nori.music.ffi.settings.SavedQuality
+import dev.nori.music.ffi.settings.SavedServer
+import dev.nori.music.ffi.settings.SettingChange
+import dev.nori.music.ffi.settings.SoundTool
+import dev.nori.music.ffi.settings.ServerList
+import dev.nori.music.ffi.settings.SoundBand
+import dev.nori.music.ffi.settings.SoundSettings
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.settings.eqGraphic
+import dev.nori.music.ffi.settings.serverLabel
+import dev.nori.music.ffi.db.dbFileName
+import dev.nori.music.ffi.settings.settingsOpen
+import dev.nori.music.ffi.settings.settingsPut
+import dev.nori.music.ffi.settings.settingsSoundTool
+import dev.nori.music.ffi.settings.settingLabels
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
@@ -261,11 +264,6 @@ data class Prefs(
      * ([dev.nori.music.playback.EnginePlayer]). Read when the playback service starts.
      */
     val playbackEngine: Int,
-    /**
-     * Covers are decoded by the core's decoder (crates/covers, through the app's `RustCoverDecoder`) rather
-     * than Android's; Coil still fetches, caches and draws them. Read per cover, so it takes effect at once.
-     */
-    val coreCovers: Boolean,
     /** Home shelves, in order; a row that is not listed is hidden. */
     val homeRows: List<HomeRow>,
     val pinnedPlaylists: List<String>,
@@ -348,7 +346,7 @@ fun Prefs.stored() = StoredPrefs(
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = theme.ordinal, amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = tapAction.ordinal, swipeRight = swipeRight.ordinal,
-    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, playbackEngine = playbackEngine, coreCovers = coreCovers, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 
@@ -369,7 +367,7 @@ fun StoredPrefs.prefs() = Prefs(
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = ThemeMode.entries[theme], amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = TapAction.entries[tapAction], swipeRight = SwipeAction.entries[swipeRight],
-    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, playbackEngine = playbackEngine, coreCovers = coreCovers, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 
@@ -385,7 +383,7 @@ class Settings(private val context: Context) {
 
     /**
      * What each change asks of the player, as the core says (settings_store.rs: APPLY_AUDIO 1,
-     * APPLY_GAIN 2, REPLAN 4); nothing for a change only screens care about.
+     * APPLY_GAIN 2, REPLAN 4, SOUND 8); nothing for a change only screens care about.
      */
     private val _effects = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 16)
     val effects: kotlinx.coroutines.flow.SharedFlow<Int> = _effects
@@ -428,13 +426,34 @@ class Settings(private val context: Context) {
                 EqLevel.BALANCE -> p.copy(balance = kept)
                 EqLevel.LIMITER -> p.copy(limiterThresholdDb = kept)
                 EqLevel.CROSSFEED -> p.copy(crossfeedDb = kept)
+                EqLevel.REPLAY_GAIN_PREAMP -> p.copy(preampDb = kept)
             }
         }
         val effect = r.toInt()
         if (effect != 0) _effects.tryEmit(effect)
     }
 
-    /** Settings the core already worked out (a change by name, `settings::set_by_name`), kept as they are. */
+    /**
+     * A change by name the core has already kept (`setting_set`): taken in here, and nothing sent back.
+     * A settings row's every step used to send the whole record back to be compared and kept again.
+     */
+    fun took(change: SettingChange) {
+        state.value = change.prefs.prefs()
+        if (change.effect != 0u) _effects.tryEmit(change.effect.toInt())
+    }
+
+    /**
+     * One of the equalizer screen's tools, used where the core keeps the settings; only the sound part
+     * comes back. Returns how many bands there are now. Throws, saying why, for an import with no filters.
+     */
+    fun soundTool(tool: SoundTool): Int {
+        val c = settingsSoundTool(tool) ?: return state.value.eqBands.size
+        state.update { it.withSound(c.sound) }
+        if (c.effect != 0u) _effects.tryEmit(c.effect.toInt())
+        return c.sound.eqBands.size
+    }
+
+    /** Settings the core already worked out (a device's sound, a server's list), kept as they are. */
     fun put(stored: StoredPrefs) {
         val next = stored.prefs()
         if (next != state.value) put(stored, next)

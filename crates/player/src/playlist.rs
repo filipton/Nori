@@ -57,11 +57,14 @@ pub struct Playlist {
     repeat: u8,
     /// Bumped on every change to the list or its order, so a reader knows to look again.
     rev: u64,
+    /// Bumped only when the songs listed change (not their play order or the current one), so a reader
+    /// that holds the songs already need not copy them again.
+    list_rev: u64,
 }
 
 impl Playlist {
     pub const fn new() -> Self {
-        Playlist { ids: Vec::new(), hand: Vec::new(), order: Vec::new(), shuffling: false, lit: false, cur: None, parked: None, repeat: REPEAT_OFF, rev: 0 }
+        Playlist { ids: Vec::new(), hand: Vec::new(), order: Vec::new(), shuffling: false, lit: false, cur: None, parked: None, repeat: REPEAT_OFF, rev: 0, list_rev: 0 }
     }
 
     pub fn ids(&self) -> &[String] {
@@ -90,6 +93,9 @@ impl Playlist {
     }
     pub fn rev(&self) -> u64 {
         self.rev
+    }
+    pub fn list_rev(&self) -> u64 {
+        self.list_rev
     }
     pub fn hand(&self, i: usize) -> Hand {
         self.hand.get(i).copied().unwrap_or_default()
@@ -181,6 +187,7 @@ impl Playlist {
     pub fn set(&mut self, ids: Vec<String>, start: Option<usize>, shuffling: bool, seed: u64) -> Option<usize> {
         let n = ids.len();
         self.ids = ids;
+        self.list_rev += 1;
         self.hand = vec![Hand::No; n];
         self.parked = None;
         self.shuffling = shuffling && n > 0;
@@ -270,6 +277,7 @@ impl Playlist {
     fn splice(&mut self, at: usize, ids: Vec<String>, hand: Hand) {
         let count = ids.len();
         self.ids.splice(at..at, ids);
+        self.list_rev += 1;
         self.hand.splice(at..at, std::iter::repeat_n(hand, count));
         for i in [self.cur.as_mut(), self.parked.as_mut()].into_iter().flatten() {
             if *i >= at {
@@ -299,6 +307,7 @@ impl Playlist {
         }
         self.parked = self.parked.filter(|&h| !gone(h)).map(shift);
         self.ids.drain(from..to);
+        self.list_rev += 1;
         self.hand.drain(from..to);
         self.order.retain(|&o| !gone(o));
         for o in self.order.iter_mut() {
@@ -338,6 +347,7 @@ impl Playlist {
             self.ids.push(id);
             self.hand.push(h);
         }
+        self.list_rev += 1;
         self.cur = self.cur.map(|c| map[c]);
         self.parked = self.parked.map(|h| map[h]);
         for o in self.order.iter_mut() {
@@ -372,6 +382,9 @@ impl Playlist {
     pub fn adopt(&mut self, ids: Vec<String>, current: Option<usize>, order: Option<Vec<usize>>) {
         let hand = ids.iter().enumerate().map(|(i, id)| if self.ids.get(i) == Some(id) { self.hand(i) } else { Hand::No }).collect();
         let n = ids.len();
+        if self.ids != ids {
+            self.list_rev += 1;
+        }
         self.ids = ids;
         self.hand = hand;
         self.parked = None;

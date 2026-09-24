@@ -1,6 +1,7 @@
 package dev.nori.music.downloads
 
 import android.app.Notification
+import dalvik.annotation.optimization.FastNative
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -25,9 +26,9 @@ import androidx.media3.exoplayer.scheduler.Scheduler
 import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.Nori
 import dev.nori.music.ffi.Core
-import dev.nori.music.ffi.DownloadKnown
-import dev.nori.music.ffi.DownloadQueued
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.transfers.DownloadKnown
+import dev.nori.music.ffi.transfers.DownloadQueued
+import dev.nori.music.ffi.model.Song
 import dev.nori.music.playback.MediaSources
 import dev.nori.music.settings.Settings
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,6 +47,7 @@ class DownloadState internal constructor(
     val pendingCount: Int = 0,
     private val version: Long = 0,
     private val songs: (Boolean) -> List<Song> = { emptyList() },
+    private val ids: (Boolean) -> List<String> = { emptyList() },
 ) {
     val doneIds: Set<String> = Membership(DownloadsJni.DONE, doneCount)
     val pendingIds: Set<String> = Membership(DownloadsJni.PENDING, pendingCount)
@@ -64,7 +66,7 @@ class DownloadState internal constructor(
      */
     private inner class Membership(private val kind: Int, override val size: Int) : AbstractSet<String>() {
         override fun contains(element: String) = size > 0 && DownloadsJni.held(element) == kind
-        override fun iterator() = songs(kind == DownloadsJni.DONE).map { it.id }.iterator()
+        override fun iterator() = ids(kind == DownloadsJni.DONE).iterator()
         override fun equals(other: Any?) = this === other
         override fun hashCode() = System.identityHashCode(this)
     }
@@ -154,10 +156,11 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     /** The table's counts, from the core's memory of it: nothing is read or copied, however many songs it holds. */
     private fun publish() {
         val n = core.downloadCounts()
-        _state.value = DownloadState(n.done.toInt(), n.pending.toInt(), n.version.toLong(), ::songs)
+        _state.value = DownloadState(n.done.toInt(), n.pending.toInt(), n.version.toLong(), ::songs, ::ids)
     }
 
     private fun songs(done: Boolean): List<Song> = runCatching { core.downloads(done) }.getOrDefault(emptyList())
+    private fun ids(done: Boolean): List<String> = runCatching { core.downloadIds(done) }.getOrDefault(emptyList())
 
     /** Downloads that finished (true) or left the queue (false) and are not written down yet, in order. */
     private val settledIds = ArrayList<String>()
@@ -252,7 +255,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * loses its progress. Runs on the main thread, the only one that applies them.
      */
     private fun refreshMarks() {
-        val m = dev.nori.music.ffi.downloadMarksChanged()
+        val m = dev.nori.music.ffi.transfers.downloadMarksChanged()
         if (m.ids.isEmpty()) return
         val next = HashMap(_marks.value)
         for (i in m.ids.indices) {
@@ -368,10 +371,12 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 .setShowWhen(false)
                 .build().also { complete = it }
         }
+        val words = DownloadsJni.noticeWords()
+        val cut = words.indexOf('\n')
         return NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(DownloadsJni.noticeTitle())
-            .setContentText(DownloadsJni.noticeText().ifEmpty { null })
+            .setContentTitle(words.substring(0, cut))
+            .setContentText(words.substring(cut + 1).ifEmpty { null })
             .setProgress(1000, DownloadsJni.noticePermille(), false)
             .setContentIntent(openDownloads(context))
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, noticeWords.cancel, cancelIntent(context))
@@ -385,7 +390,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
 
     private var lastProgress: Notification? = null
     /** The notification's fixed words, the core's (`words_download_notice`). */
-    private val noticeWords by lazy { dev.nori.music.ffi.wordsDownloadNotice() }
+    private val noticeWords by lazy { dev.nori.music.ffi.words.wordsDownloadNotice() }
     private var complete: Notification? = null
 
     /**
@@ -456,7 +461,7 @@ internal object DownloadsJni {
     const val DONE = 2
 
     /** Whether a song is in the downloads table: 0 no, [PENDING] queued or failed, [DONE] downloaded. */
-    @JvmStatic external fun held(id: String): Int
+    @JvmStatic @FastNative external fun held(id: String): Int
     @JvmStatic external fun followed(id: String, state: Int, now: Long): Int
     @JvmStatic external fun removed(id: String): Int
     @JvmStatic external fun unmark(id: String): Int
@@ -466,11 +471,11 @@ internal object DownloadsJni {
     @JvmStatic @CriticalNative external fun note(slot: Int, length: Long, bytes: Long, now: Long): Float
     /** 0 unchanged, 1 changed, 2 the batch is over. */
     @JvmStatic @CriticalNative external fun notice(listed: Int, waiting: Int, now: Long): Int
-    @JvmStatic external fun noticeTitle(): String
-    @JvmStatic external fun noticeText(): String
+    /** The notification's title and text, "title\ntext": one crossing for both. */
+    @JvmStatic @FastNative external fun noticeWords(): String
     @JvmStatic @CriticalNative external fun noticePermille(): Int
     /** "title\ntext", or empty when there is nothing to say. */
-    @JvmStatic external fun summary(): String
+    @JvmStatic @FastNative external fun summary(): String
     @JvmStatic @CriticalNative external fun summaryFailed(): Int
 }
 
@@ -482,10 +487,10 @@ internal object DownloadsJni {
 object DownloadLines {
     init { System.loadLibrary("norimusic") }
 
-    /** A running song's second line: [artist], then "45% · 2.1 MB/s · 1:20 left". */
-    @JvmStatic external fun row(id: String, artist: String): String
+    /** A running song's second line: its artist, then "45% · 2.1 MB/s · 1:20 left". */
+    @JvmStatic @FastNative external fun row(id: String): String
     /** "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading". */
-    @JvmStatic external fun summary(active: Int, queued: Int, failed: Int): String
+    @JvmStatic @FastNative external fun summary(active: Int, queued: Int, failed: Int): String
 }
 
 /** Asks the app to open on its downloads screen. The activity answers it; the core only names it. */

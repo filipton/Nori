@@ -1,3 +1,9 @@
+# Every compile goes through sccache, one compiler cache for this checkout and every agent worktree beside
+# it: a fresh worktree reuses the dependencies (symphonia, SQLite, rustls, ...) instead of building them
+# again. Install it once with `cargo install --locked sccache`.
+[build]
+rustc-wrapper = "sccache"
+
 # Signalsmith Stretch (AutoMix time-stretch) is C++. Link its runtime statically on Android so the APK does not
 # have to ship libc++_shared.so; crates/core/build.rs adds the matching libc++abi.
 [env]

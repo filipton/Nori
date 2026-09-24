@@ -799,6 +799,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "weezl",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1155,13 +1164,25 @@ dependencies = [
 name = "nori-android"
 version = "0.3.3"
 dependencies = [
+ "async-trait",
  "jni 0.21.1",
  "libc",
+ "nori-automix",
+ "nori-core",
  "nori-covers",
+ "nori-db",
+ "nori-devices",
  "nori-engine",
+ "nori-library",
  "nori-look",
+ "nori-lyrics",
+ "nori-model",
+ "nori-net",
  "nori-player",
- "norimusic-core",
+ "nori-queue",
+ "nori-settings",
+ "nori-transfers",
+ "nori-words",
  "parking_lot",
  "uniffi",
  "uniffi-bindgen-kotlin-jni",
@@ -1169,14 +1190,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "nori-automix"
+version = "0.3.3"
+dependencies = [
+ "nori-db",
+ "nori-model",
+ "nori-player",
+ "parking_lot",
+ "rusqlite",
+ "uniffi",
+]
+
+[[package]]
 name = "nori-cli"
 version = "0.3.3"
 dependencies = [
+ "nori-core",
  "nori-engine",
  "nori-http",
  "nori-mpris",
  "nori-output-cpal",
- "norimusic-core",
+]
+
+[[package]]
+name = "nori-core"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "libc",
+ "md-5",
+ "nori-automix",
+ "nori-db",
+ "nori-devices",
+ "nori-library",
+ "nori-look",
+ "nori-lyrics",
+ "nori-model",
+ "nori-net",
+ "nori-player",
+ "nori-queue",
+ "nori-settings",
+ "nori-text",
+ "nori-transfers",
+ "nori-words",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uniffi",
 ]
 
 [[package]]
@@ -1184,14 +1246,41 @@ name = "nori-covers"
 version = "0.3.3"
 dependencies = [
  "async-trait",
+ "gif",
  "image-webp",
  "jpeg-decoder",
  "md-5",
- "norimusic-core",
+ "nori-core",
  "parking_lot",
  "png",
  "zune-core",
  "zune-jpeg",
+]
+
+[[package]]
+name = "nori-db"
+version = "0.3.3"
+dependencies = [
+ "nori-model",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uniffi",
+]
+
+[[package]]
+name = "nori-devices"
+version = "0.3.3"
+dependencies = [
+ "nori-db",
+ "nori-model",
+ "nori-net",
+ "nori-player",
+ "nori-settings",
+ "rusqlite",
+ "serde_json",
+ "uniffi",
 ]
 
 [[package]]
@@ -1200,8 +1289,8 @@ version = "0.3.3"
 dependencies = [
  "async-trait",
  "libc",
+ "nori-core",
  "nori-player",
- "norimusic-core",
  "parking_lot",
  "symphonia",
 ]
@@ -1211,9 +1300,26 @@ name = "nori-http"
 version = "0.3.3"
 dependencies = [
  "async-trait",
+ "nori-core",
  "nori-engine",
- "norimusic-core",
  "ureq",
+]
+
+[[package]]
+name = "nori-library"
+version = "0.3.3"
+dependencies = [
+ "libc",
+ "nori-db",
+ "nori-look",
+ "nori-model",
+ "nori-net",
+ "nori-words",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uniffi",
 ]
 
 [[package]]
@@ -1221,11 +1327,49 @@ name = "nori-look"
 version = "0.3.3"
 
 [[package]]
+name = "nori-lyrics"
+version = "0.3.3"
+dependencies = [
+ "nori-look",
+ "nori-model",
+ "nori-net",
+ "nori-settings",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "uniffi",
+]
+
+[[package]]
+name = "nori-model"
+version = "0.3.3"
+dependencies = [
+ "nori-player",
+ "nori-text",
+ "rusqlite",
+ "serde",
+ "thiserror 2.0.20",
+ "uniffi",
+]
+
+[[package]]
 name = "nori-mpris"
 version = "0.3.3"
 dependencies = [
  "dbus",
  "dbus-crossroads",
+]
+
+[[package]]
+name = "nori-net"
+version = "0.3.3"
+dependencies = [
+ "async-trait",
+ "md-5",
+ "nori-model",
+ "parking_lot",
+ "rusqlite",
+ "uniffi",
 ]
 
 [[package]]
@@ -1251,24 +1395,71 @@ dependencies = [
 ]
 
 [[package]]
-name = "nori-text"
-version = "0.3.3"
-
-[[package]]
-name = "norimusic-core"
+name = "nori-queue"
 version = "0.3.3"
 dependencies = [
- "async-trait",
- "libc",
- "md-5",
- "nori-look",
+ "nori-automix",
+ "nori-db",
+ "nori-library",
+ "nori-model",
+ "nori-net",
  "nori-player",
- "nori-text",
+ "nori-settings",
+ "nori-words",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "uniffi",
+]
+
+[[package]]
+name = "nori-settings"
+version = "0.3.3"
+dependencies = [
+ "nori-automix",
+ "nori-db",
+ "nori-library",
+ "nori-look",
+ "nori-model",
+ "nori-player",
+ "nori-words",
  "parking_lot",
  "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "uniffi",
+]
+
+[[package]]
+name = "nori-text"
+version = "0.3.3"
+
+[[package]]
+name = "nori-transfers"
+version = "0.3.3"
+dependencies = [
+ "nori-db",
+ "nori-model",
+ "nori-net",
+ "nori-settings",
+ "nori-text",
+ "nori-words",
+ "parking_lot",
+ "rusqlite",
+ "serde_json",
+ "uniffi",
+]
+
+[[package]]
+name = "nori-words"
+version = "0.3.3"
+dependencies = [
+ "nori-model",
+ "nori-player",
+ "nori-text",
+ "serde_json",
  "uniffi",
 ]
 
@@ -2600,6 +2791,12 @@ source = "git+https://github.com/mozilla/uniffi-rs?rev=aea52cbe269183afba665372c
 dependencies = [
  "nom",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "winapi-util"

@@ -13,7 +13,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import coil3.request.crossfade
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.runtime.LaunchedEffect
@@ -68,9 +67,8 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -80,24 +78,20 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.AsyncImage
-import coil3.request.CachePolicy
-import coil3.request.ImageRequest
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.Load
-import dev.nori.music.ffi.Album
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.model.Song
 import dev.nori.music.look.CoverLook
 import androidx.compose.ui.draw.drawWithCache
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * A cover of an octo-fiesta provider item (external song, album, artist or playlist). Which ids those
- * are, and how a cover's address names its id, are nori-core's (`cover_rules`); this is only the string
- * test, made where a cover is first composed, without a crossing.
+ * A cover of an octo-fiesta provider item (external song, album, artist or playlist), which is never
+ * kept (`Covers.isProvider`).
  */
-fun isProviderCover(url: String): Boolean = CoverSize.providerMarks.any { url.contains(it) }
+fun isProviderCover(url: String): Boolean = dev.nori.music.data.Covers.isProvider(url)
 
 /**
  * The sizes covers are drawn at, nori-core's (`cover_rules`): two, not four, because a Subsonic server
@@ -109,36 +103,33 @@ object CoverSize {
     val ROW: Int = rules.row.toInt()
     val CARD: Int = rules.card.toInt()
     val FULL: Int = rules.full.toInt()
-    /** "&id=ext-", "&id=pl-": what a provider's cover address carries. */
-    internal val providerMarks: List<String> = rules.providerPrefixes.map { rules.idParam + it }
 }
 
 /**
- * Artwork with the app's corner radius. The request is remembered and sized up front, so scrolling
- * neither rebuilds it nor waits for layout to size it; the rounded clip is a plain render-node clip,
- * which the GPU does for free and which a grid of covers needs to not look like a spreadsheet.
- * Pass `radius = 0.dp` for the full-bleed artwork at the top of a page.
+ * Artwork with the app's corner radius. The picture is asked for at the view's own size, decoded by the
+ * core straight into a Bitmap that size (rememberCover), and let go if the view leaves first; the
+ * rounded clip is a plain render-node clip, which the GPU does for free and which a grid of covers needs
+ * to not look like a spreadsheet. Pass `radius = 0.dp` for the full-bleed artwork at the top of a page;
+ * `size = 0.dp` sizes it by its layout, and it asks once it has been measured.
  *
  * Nothing about it appears in one frame. A picture that has to be fetched fades in over its plate
- * (one from the memory cache is simply there - fading those in made every scroll shimmer); one that
- * takes a while shows a soft sheen crossing the plate, so a slow server reads as loading rather than
- * as a missing cover; and one that never comes settles into the plate's note glyph, faded in too.
+ * (one kept in memory is simply there - fading those in made every scroll shimmer); one that takes a
+ * while shows a soft sheen crossing the plate, so a slow server reads as loading rather than as a
+ * missing cover; and one that never comes settles into the plate's note glyph, faded in too.
  *
  * [plate] false draws nothing of its own - no plate, sheen or note - so the picture fades in over
  * whatever is behind it (a mix tile's colour), and a missing one simply leaves that showing.
  */
 @Composable
 fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Radius.cover, plate: Boolean = true) {
-    val context = LocalContext.current
     val px = with(LocalDensity.current) { size.roundToPx() }
-    val request = remember(url, px) {
-        ImageRequest.Builder(context).data(url).apply {
-            if (px > 0) size(px)
-            if (!AppMotion.reduce) crossfade(260)
-            // octo-fiesta draws a "not downloaded" badge on provider covers and replaces the picture once the
-            // track is in the library, under the same id. Never store those, or the badge sticks forever.
-            if (url != null && isProviderCover(url)) { diskCachePolicy(CachePolicy.DISABLED); memoryCachePolicy(CachePolicy.READ_ONLY) }
-        }.build()
+    val cover = rememberCover(url, px, px)
+    // Sized by its layout: asked for from layout, where the size is known, rather than through a state
+    // that would compose every such cover a second time. The last size is kept for the next address.
+    val measured = remember { IntArray(2) }
+    if (px == 0) androidx.compose.runtime.DisposableEffect(cover) {
+        if (measured[0] > 0 && measured[1] > 0) cover.want(measured[0], measured[1])
+        onDispose {}
     }
     val shape = remember(radius) { androidx.compose.foundation.shape.RoundedCornerShape(radius) }
     // A flat grey square is what makes a library of half-loaded covers look broken. Underneath every
@@ -146,16 +137,35 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     // and what stays when a track simply has no artwork. One gradient in the page's look, drawn - and
     // read while drawing, so the player's page changing colour under a cover only redraws it.
     val look = LocalLook.current
-    var loading by remember(request) { mutableStateOf(url != null) }
-    var missing by remember(request) { mutableStateOf(url == null) }
+    val loading = cover.state == CoverImage.LOADING
+    val missing = cover.state == CoverImage.MISSING
     // The sheen outlives the load by the length of the picture's fade, so it goes away underneath a
     // picture that is already covering it instead of vanishing from on top of the plate.
-    var sheen by remember(request) { mutableStateOf(loading) }
+    var sheen by remember(cover) { mutableStateOf(loading) }
     androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
-    Box((if (px > 0) modifier.size(size) else modifier).then(if (radius > 0.dp) Modifier.clip(shape) else Modifier).then(if (plate) Modifier.drawWithCache {
-        val brush = Brush.linearGradient(listOf(look.color(CoverLook.VEIL_13), look.color(CoverLook.VEIL_6)))
-        onDrawBehind { drawRect(brush) }
-    } else Modifier)) {
+    // Read while drawing, so the fade redraws the picture and recomposes nothing.
+    val fade = remember(cover) { androidx.compose.animation.core.Animatable(if (cover.image != null) 1f else 0f) }
+    val here = cover.image != null
+    androidx.compose.runtime.LaunchedEffect(cover, here) {
+        if (!here || fade.value == 1f) return@LaunchedEffect
+        if (AppMotion.reduce) fade.snapTo(1f) else fade.animateTo(1f, tween(260, easing = androidx.compose.animation.core.LinearEasing))
+    }
+    Box(
+        // Without a size it fills what it is given, as the picture it used to hold did.
+        (if (px > 0) modifier.size(size) else modifier.fillMaxSize().onSizeChanged {
+            measured[0] = it.width; measured[1] = it.height
+            if (it.width > 0 && it.height > 0) cover.want(it.width, it.height)
+        })
+            .then(if (radius > 0.dp) Modifier.clip(shape) else Modifier)
+            .drawWithCache {
+                val brush = if (plate) Brush.linearGradient(listOf(look.color(CoverLook.VEIL_13), look.color(CoverLook.VEIL_6))) else null
+                onDrawWithContent {
+                    brush?.let { drawRect(it) }
+                    drawContent()
+                    cover.image?.let { drawCover(it, fade.value) }
+                }
+            },
+    ) {
         if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true))
         androidx.compose.animation.AnimatedVisibility(
             missing && plate, Modifier.align(Alignment.Center),
@@ -166,14 +176,6 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
                 Modifier.size(if (size > 0.dp) size * 0.34f else 40.dp),
             ) { look.color(CoverLook.ON_22) }
         }
-        AsyncImage(
-            model = request, contentDescription = null, contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low,
-            modifier = Modifier.fillMaxSize(),
-            onState = {
-                loading = it is coil3.compose.AsyncImagePainter.State.Loading
-                missing = url == null || it is coil3.compose.AsyncImagePainter.State.Error
-            },
-        )
     }
 }
 
@@ -183,14 +185,14 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
  * every list row for its song's length, so after the first time through they cost a lookup.
  */
 fun duration(seconds: Long): String {
-    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.duration(seconds)
+    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.words.duration(seconds)
     val i = seconds.toInt()
     return Durations.made[i] ?: dev.nori.music.look.CoverLook.duration(seconds, false).also { Durations.made[i] = it }
 }
 
 /** The time left, "-3:07" (nori-core's `fmt::duration_left`): kept the same way. */
 fun durationLeft(seconds: Long): String {
-    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.durationLeft(seconds)
+    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.words.durationLeft(seconds)
     val i = seconds.toInt()
     return Durations.left[i] ?: dev.nori.music.look.CoverLook.duration(seconds, true).also { Durations.left[i] = it }
 }
@@ -216,7 +218,7 @@ class SwipeState {
 }
 
 /** How far across the row a drag has to go before letting go acts: the share that turns a record. */
-private val SWIPE_ARM: Float get() = stage.turn
+private const val SWIPE_ARM = TURN
 
 /**
  * Sideways drag on a row. Only a direction with an action moves at all. Past [SWIPE_ARM] of the width
@@ -370,7 +372,7 @@ fun SongRow(
             }
             val tint = scheme.onSurfaceVariant
             if (song.isExternal) {
-                Icon(Icons.Filled.CloudDownload, "Not in library yet", Modifier.size(15.dp), tint)
+                Icon(Icons.Filled.CloudDownload, say.notInLibraryYet, Modifier.size(15.dp), tint)
                 song.provider?.let { Text(it, Modifier.padding(start = 3.dp), style = MaterialTheme.typography.labelSmall, color = tint) }
             }
             // Every row's marks sit in columns of their own, the same width on every row: the heart, then
@@ -380,7 +382,7 @@ fun SongRow(
             // else. The time is last before the menu and in a box of one fixed width, its digits held to
             // the right edge, so it sits against the ⋯ rather than with an empty download slot between.
             Box(Modifier.padding(start = 4.dp).width(15.dp), Alignment.Center) {
-                if (LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, "Favourite", Modifier.size(15.dp), tint)
+                if (LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)) Icon(Icons.Filled.Favorite, say.favourite, Modifier.size(15.dp), tint)
             }
             Box(Modifier.width(MARK_SLOT), Alignment.Center) { DownloadSlot(song.id, downloaded, tint) }
             Text(
@@ -388,7 +390,7 @@ fun SongRow(
                 Modifier.widthIn(min = TIME_SLOT), textAlign = TextAlign.End,
                 style = MaterialTheme.typography.bodySmall, color = tint, maxLines = 1, softWrap = false,
             )
-            IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, "More", Modifier.size(20.dp), tint) }
+            IconButton(onMenu, Modifier.size(40.dp)) { Icon(Icons.Filled.MoreHoriz, say.more, Modifier.size(20.dp), tint) }
         }
       }
         if (divider) Hairline(startIndent = if (number != null) Space.gutter + 40.dp else Space.gutter + 58.dp)
@@ -480,10 +482,10 @@ internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel
     // What it says and does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once.
     val words = SwipeWords.of(action.ordinal, starred) ?: return null
     return when (val act = words.act) {
-        dev.nori.music.ffi.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, words.label) { actions.enqueue(listOf(song)) }
-        dev.nori.music.ffi.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, words.label) { actions.playNext(listOf(song)) }
-        dev.nori.music.ffi.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, words.label) { actions.download(listOf(song)) }
-        is dev.nori.music.ffi.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, words.label) { actions.star(song, act.on) }
+        dev.nori.music.ffi.library.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, words.label) { actions.enqueue(listOf(song)) }
+        dev.nori.music.ffi.library.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, words.label) { actions.playNext(listOf(song)) }
+        dev.nori.music.ffi.library.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, words.label) { actions.download(listOf(song)) }
+        is dev.nori.music.ffi.library.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, words.label) { actions.star(song, act.on) }
     }
 }
 
@@ -491,11 +493,11 @@ internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel
 private object SwipeWords {
     private val made = arrayOfNulls<Any>(16)
     private val NONE = Any()
-    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.RowSwipe? {
+    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.library.RowSwipe? {
         val i = setting * 2 + if (starred) 1 else 0
         if (i !in made.indices) return null
-        val got = made[i] ?: (dev.nori.music.ffi.rowSwipe(setting.toUInt(), starred) ?: NONE).also { made[i] = it }
-        return got as? dev.nori.music.ffi.RowSwipe
+        val got = made[i] ?: (dev.nori.music.ffi.library.rowSwipe(setting.toUInt(), starred) ?: NONE).also { made[i] = it }
+        return got as? dev.nori.music.ffi.library.RowSwipe
     }
 }
 
@@ -600,7 +602,7 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
             is Load.Ready -> content(state.data)
             is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { LoadingDots() }
             is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
-                Text(remember { dev.nori.music.ffi.wordsNote(dev.nori.music.ffi.Note.COULD_NOT_LOAD) }, style = MaterialTheme.typography.titleLarge)
+                Text(remember { dev.nori.music.ffi.words.wordsNote(dev.nori.music.ffi.words.Note.COULD_NOT_LOAD) }, style = MaterialTheme.typography.titleLarge)
                 Text(state.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
@@ -610,11 +612,11 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
 
 /** One of nori-core's notes (`words_note`), asked once where it is shown. */
 @Composable
-fun noteText(note: dev.nori.music.ffi.Note): String = remember(note) { dev.nori.music.ffi.wordsNote(note) }
+fun noteText(note: dev.nori.music.ffi.words.Note): String = remember(note) { dev.nori.music.ffi.words.wordsNote(note) }
 
 /** Big, quiet type for an empty list, in the core's words. */
 @Composable
-fun EmptyNote(note: dev.nori.music.ffi.Note, modifier: Modifier = Modifier) = EmptyNote(noteText(note), modifier)
+fun EmptyNote(note: dev.nori.music.ffi.words.Note, modifier: Modifier = Modifier) = EmptyNote(noteText(note), modifier)
 
 /** Big, quiet type for an empty list: "Nothing here yet". */
 @Composable
@@ -626,8 +628,9 @@ fun EmptyNote(text: String, modifier: Modifier = Modifier) = Text(
 /**
  * Warms artwork that is about to be needed. A server renders each thumbnail the first time it is
  * asked for, which on a real library is the better part of a second per cover; asking for the next
- * screenful while the current one is being read turns that wait into something already done. Requests
- * go through the same loader and cache, so a prefetched cover is simply a cache hit when it appears.
+ * screenful while the current one is being read turns that wait into something already done. They go
+ * through the same loader, decoded at the rendition's own size into memory, so a prefetched cover is
+ * simply there when its view appears, whatever size that is.
  */
 @Composable
 fun PrefetchCovers(urls: List<String?>) {
@@ -635,12 +638,10 @@ fun PrefetchCovers(urls: List<String?>) {
     androidx.compose.runtime.LaunchedEffect(urls) { prefetchCovers(context, urls) }
 }
 
-/** [PrefetchCovers] for a caller that works out [urls] outside composition, from a scroll observer. */
+/** [PrefetchCovers] for a caller that works out [urls] outside composition, from a scroll observer. Main thread. */
 fun prefetchCovers(context: android.content.Context, urls: List<String?>) {
-    val loader = coil3.SingletonImageLoader.get(context)
-    urls.filterNotNull().filterNot(::isProviderCover).forEach { url ->
-        loader.enqueue(ImageRequest.Builder(context).data(url).size(CoverSize.CARD).build())
-    }
+    val loader = dev.nori.music.data.CoverLoader.get(context)
+    urls.forEach { url -> if (url != null) loader.prefetch(url) }
 }
 
 /**

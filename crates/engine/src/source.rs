@@ -2,7 +2,9 @@
 //! open a URL from a byte offset and read. A loader thread per song fills a window ahead of where the
 //! demuxer reads - up to the core's `load_control` high mark in one go - then closes the connection and
 //! sleeps until the demuxer has come within the low mark of the end of what is there. A song that fits
-//! the memory cap (most do) is fetched whole in its first burst, so the radio wakes once per song.
+//! the memory cap (most do) is fetched whole in its first burst, so the radio wakes once per song. The
+//! cap is one budget for the songs kept: a song fetched ahead holds what the one playing leaves of it
+//! (`Loader::limit`), and the rest in a burst of its own once it plays.
 //! Given a stream cache entry to fill, the loader writes each burst into it as it comes; a song heard
 //! again then plays from the disk and the network is not asked at all.
 
@@ -87,9 +89,21 @@ struct State {
     /// Times the network was opened: one per burst.
     bursts: u32,
     window: Option<Window>,
+    /// At most this many bytes held, below the window's own cap: a song fetched ahead gets what the
+    /// one playing leaves of the cap (`Loader::limit`).
+    budget: Option<u64>,
 }
 
 impl State {
+    /// The window for the song, as its length and bitrate size it, within the budget.
+    fn window(&self, load: [i64; 5], duration_ms: Option<i64>) -> Window {
+        let w = self.window.unwrap_or_else(|| Window::for_song(load, duration_ms, self.len));
+        match self.budget {
+            Some(b) if b < w.cap => Window { low: w.low.min(b / 2), high: w.high.min(b), cap: b },
+            _ => w,
+        }
+    }
+
     fn end(&self) -> u64 {
         self.base + self.data.len() as u64
     }
@@ -121,7 +135,12 @@ impl Loader {
     /// Starts loading `url` through `source` on a thread of its own, sized by `load` and the song's
     /// tagged length, writing what it fetches into `keep` when given one.
     pub fn start(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Writer>) -> Arc<Loader> {
-        let loaded = Arc::new(Loaded { state: Mutex::new(State::default()), cv: Condvar::new() });
+        Loader::start_within(source, url, load, duration_ms, keep, None)
+    }
+
+    /// [`Loader::start`], holding no more than `budget` bytes from its first burst on (`Loader::limit`).
+    pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Writer>, budget: Option<u64>) -> Arc<Loader> {
+        let loaded = Arc::new(Loaded { state: Mutex::new(State { budget, ..State::default() }), cv: Condvar::new() });
         let l = loaded.clone();
         std::thread::Builder::new()
             .name("nori-load".into())
@@ -138,6 +157,25 @@ impl Loader {
     /// Bytes held in memory.
     pub fn held(&self) -> usize {
         self.0.state.lock().data.len()
+    }
+
+    /// Bytes it will hold once its burst is in: the rest of the song from where it keeps it, or what is
+    /// here while the length is not known yet; never more than its window's cap.
+    pub fn holding(&self) -> u64 {
+        let s = self.0.state.lock();
+        let cap = s.window.map_or(u64::MAX, |w| w.cap).min(s.budget.unwrap_or(u64::MAX));
+        s.len.map_or(s.data.len() as u64, |l| l.saturating_sub(s.base)).min(cap)
+    }
+
+    /// Holds at most `bytes` from now on, or as much as its window lets it with none. A song fetched
+    /// ahead is limited to what the one playing leaves of the cap, as one player's buffer would be; it
+    /// is let have all of it once it is opened to be played, and fetches the rest in its next burst.
+    pub fn limit(&self, bytes: Option<u64>) {
+        let mut s = self.0.state.lock();
+        if s.budget != bytes {
+            s.budget = bytes;
+            self.0.cv.notify_all();
+        }
     }
 
     /// The whole song is in memory: nothing read from it can wait.
@@ -215,7 +253,7 @@ impl Loaded {
                         // A jump past what was loaded leaves a gap the cache entry cannot have.
                         keep = None;
                     }
-                    let w = s.window.unwrap_or_else(|| Window::for_song(load, duration_ms, s.len));
+                    let w = s.window(load, duration_ms);
                     if s.at_end() {
                         // The whole song is here: the connection goes, the network sleeps, and the cache
                         // has it for next time.
@@ -237,7 +275,7 @@ impl Loaded {
                     self.cv.wait(&mut s);
                 }
                 // What the reader has left behind goes, once more than the cap is held.
-                let w = s.window.unwrap_or_else(|| Window::for_song(load, duration_ms, s.len));
+                let w = s.window(load, duration_ms);
                 let keep_from = s.reader_at.saturating_sub(FAR);
                 if s.data.len() as u64 > w.cap && keep_from > s.base {
                     let drop = (keep_from - s.base) as usize;
@@ -258,6 +296,13 @@ impl Loaded {
                         s.len = s.len.or(b.len);
                         s.window = Some(Window::for_song(load, duration_ms, s.len));
                         s.bursts += 1;
+                        // The burst's bytes in one piece, made once: grown by doubling, a song's memory
+                        // was copied at every step and held up to twice its size.
+                        if let Some(len) = s.len {
+                            let want = len.saturating_sub(s.base).min(s.window(load, duration_ms).high) as usize;
+                            let more = want.saturating_sub(s.data.len());
+                            s.data.reserve_exact(more);
+                        }
                         body = Some(reader);
                     }
                     Err(e) => {
@@ -484,6 +529,30 @@ mod tests {
         let all = read(&mut r, 300_000);
         assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8));
         assert_eq!(*s.opens.lock(), vec![0]);
+    }
+
+    #[test]
+    fn a_song_fetched_ahead_holds_its_budget_and_the_rest_once_it_plays() {
+        let s = server(600_000);
+        let l = Loader::start_within(s.clone(), "song".into(), LOAD, Some(6_000), None, Some(200_000));
+        let ahead = settled(&s);
+        assert!(ahead <= 200_000 + CHUNK as u64, "no more than its budget while it waits: {ahead}");
+        assert!(l.held() >= 100_000, "but its start is at hand: {}", l.held());
+        assert_eq!(l.holding(), 200_000);
+        // Played now: the whole cap. The rest comes when the reader nears the end of what is there.
+        l.limit(None);
+        let mut r = l.reader();
+        let all = read(&mut r, 600_000);
+        assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8), "every byte, in order");
+        assert_eq!(*s.opens.lock(), vec![0, ahead], "one more request, from where the budget stopped it");
+    }
+
+    #[test]
+    fn a_song_s_bytes_are_held_in_one_piece_the_size_of_the_song() {
+        let s = server(300_000);
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000), None);
+        settled(&s);
+        assert_eq!(l.0.state.lock().data.capacity(), 300_000, "made once, not grown by doubling");
     }
 
     #[test]

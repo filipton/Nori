@@ -6,14 +6,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use nori_covers::{Alpha, Config, Error, Image, Key, Loader};
-use norimusic::transport::{FailureKind, Transport, TransportError, TransportResponse};
+use nori_covers::{header, Alpha, Config, DecodeError, Decoder, Error, Image, Key, Loader, Paint};
+use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse};
 use parking_lot::{Condvar, Mutex};
 
 const PHOTO: &str = "http://s/rest/getCoverArt.view?u=a&t=b&s=c&id=al-1&size=320";
 
 struct Server {
     calls: AtomicUsize,
+    /// What was asked for, in order.
+    asked: Mutex<Vec<String>>,
     open: Mutex<bool>,
     opened: Condvar,
     status: u16,
@@ -23,7 +25,7 @@ struct Server {
 impl Server {
     fn new(status: u16) -> Arc<Server> {
         let body = std::fs::read(format!("{}/testdata/photo.jpg", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        Arc::new(Server { calls: AtomicUsize::new(0), open: Mutex::new(true), opened: Condvar::new(), status, body })
+        Arc::new(Server { calls: AtomicUsize::new(0), asked: Mutex::new(Vec::new()), open: Mutex::new(true), opened: Condvar::new(), status, body })
     }
 
     fn hold(&self) {
@@ -42,7 +44,8 @@ impl Server {
 
 #[async_trait::async_trait]
 impl Transport for Server {
-    async fn get(&self, _url: String, _timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+    async fn get(&self, url: String, _timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+        self.asked.lock().push(url);
         self.calls.fetch_add(1, Ordering::SeqCst);
         let mut open = self.open.lock();
         while !*open {
@@ -76,7 +79,7 @@ fn answers(rx: &mpsc::Receiver<Result<Arc<Image>, Error>>, n: usize) -> Vec<Resu
 fn views_asking_for_one_cover_share_one_fetch_and_one_decode() {
     let server = Server::new(200);
     server.hold();
-    let loader = Loader::new(config(None, 3), server.clone()).unwrap();
+    let loader = Loader::new(config(None, 3), server.clone());
     let (tx, rx) = mpsc::channel();
     let tickets: Vec<_> = (0..5)
         .map(|_| {
@@ -103,7 +106,7 @@ fn views_asking_for_one_cover_share_one_fetch_and_one_decode() {
 fn a_cancelled_request_is_never_fetched_and_never_answered() {
     let server = Server::new(200);
     server.hold();
-    let loader = Loader::new(config(None, 1), server.clone()).unwrap();
+    let loader = Loader::new(config(None, 1), server.clone());
     let (tx, rx) = mpsc::channel();
     let tx2 = tx.clone();
     // The one worker is held on the first cover; the second waits behind it and is let go.
@@ -126,7 +129,7 @@ fn a_cancelled_request_is_never_fetched_and_never_answered() {
 fn one_view_letting_go_leaves_the_cover_to_the_others() {
     let server = Server::new(200);
     server.hold();
-    let loader = Loader::new(config(None, 1), server.clone()).unwrap();
+    let loader = Loader::new(config(None, 1), server.clone());
     let (tx, rx) = mpsc::channel();
     let busy = loader.request("http://s/busy", 8, 8, |_| {});
     while server.calls() == 0 {
@@ -147,7 +150,7 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
     let d = dir("disk");
     let provider = "http://s/rest/getCoverArt.view?u=a&id=ext-deezer-1&size=320";
     {
-        let loader = Loader::new(config(Some(d.clone()), 2), Server::new(200)).unwrap();
+        let loader = Loader::new(config(Some(d.clone()), 2), Server::new(200));
         loader.load(PHOTO, 8, 8).unwrap();
         loader.load(provider, 8, 8).unwrap();
         let disk = loader.disk().unwrap();
@@ -156,7 +159,7 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
     }
     // A server that is not there: the kept cover still comes, the provider's does not.
     let down = Server::new(0);
-    let loader = Loader::new(config(Some(d.clone()), 2), down.clone()).unwrap();
+    let loader = Loader::new(config(Some(d.clone()), 2), down.clone());
     assert_eq!(loader.load(PHOTO, 8, 8).unwrap().width, 8);
     assert_eq!(down.calls(), 0);
     assert!(matches!(loader.load(provider, 8, 8), Err(Error::Transport { kind: FailureKind::Connect, .. })));
@@ -168,7 +171,7 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
 fn an_error_answer_is_an_error_and_is_not_kept() {
     let d = dir("error");
     let server = Server::new(404);
-    let loader = Loader::new(config(Some(d.clone()), 1), server.clone()).unwrap();
+    let loader = Loader::new(config(Some(d.clone()), 1), server.clone());
     assert_eq!(loader.load(PHOTO, 8, 8), Err(Error::Status(404)));
     assert_eq!(loader.disk().unwrap().bytes(), 0);
     // Not remembered as a failure either: the next ask asks again.
@@ -182,7 +185,7 @@ fn an_error_answer_is_an_error_and_is_not_kept() {
 fn dropping_the_loader_answers_whoever_still_waits() {
     let server = Server::new(200);
     server.hold();
-    let loader = Loader::new(config(None, 1), server.clone()).unwrap();
+    let loader = Loader::new(config(None, 1), server.clone());
     let (tx, rx) = mpsc::channel();
     let _held = loader.request("http://s/a", 8, 8, |_| {});
     while server.calls() == 0 {
@@ -192,4 +195,156 @@ fn dropping_the_loader_answers_whoever_still_waits() {
     drop(loader);
     assert_eq!(answers(&rx, 1)[0], Err(Error::Closed));
     server.release();
+}
+
+/// A client's own picture: what was asked for and what came out, and how many decodes there were.
+struct Counted(Arc<AtomicUsize>);
+
+#[derive(Debug, Clone, PartialEq)]
+struct Picture {
+    asked: (u32, u32),
+    got: (usize, usize),
+}
+
+impl Paint for Counted {
+    type Picture = Arc<Picture>;
+
+    fn paint(&self, _: &mut Decoder, bytes: &[u8], width: u32, height: u32) -> Result<Arc<Picture>, DecodeError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let h = header(bytes)?;
+        Ok(Arc::new(Picture { asked: (width, height), got: h.fill(width as usize, height as usize) }))
+    }
+
+    fn bytes(_: &Arc<Picture>) -> usize {
+        100
+    }
+}
+
+#[test]
+fn a_clients_painter_decodes_once_and_every_waiter_is_called_back_with_the_one_picture() {
+    let server = Server::new(200);
+    server.hold();
+    let painted = Arc::new(AtomicUsize::new(0));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(None, 2) }, server.clone(), Counted(painted.clone()));
+    let (tx, rx) = mpsc::channel();
+    let tickets: Vec<_> = (0..3)
+        .map(|i| {
+            let tx = tx.clone();
+            loader.request(PHOTO, 30, 30, move |r| tx.send((i, r, std::thread::current().name().map(String::from))).unwrap())
+        })
+        .collect();
+    server.release();
+    let mut got: Vec<_> = (0..3).map(|_| rx.recv_timeout(Duration::from_secs(10)).expect("a callback")).collect();
+    got.sort_by_key(|(i, ..)| *i);
+    assert_eq!(got.iter().map(|(i, ..)| *i).collect::<Vec<_>>(), [0, 1, 2], "one call back each");
+    let first = got[0].1.as_ref().unwrap();
+    assert!(got.iter().all(|(_, r, _)| Arc::ptr_eq(r.as_ref().unwrap(), first)));
+    // Called on a worker, never on the thread that asked.
+    assert!(got.iter().all(|(.., thread)| thread.as_deref() == Some("nori-covers")));
+    // photo.jpg is 40x30: a 30x30 view is filled at 30x30.
+    assert_eq!(**first, Picture { asked: (30, 30), got: (30, 30) });
+    assert_eq!(painted.load(Ordering::SeqCst), 1);
+    // Nothing kept in memory when the client keeps its own: asked again, it is decoded again.
+    assert!(loader.cached(PHOTO, 30, 30).is_none());
+    loader.load(PHOTO, 30, 30).unwrap();
+    assert_eq!(painted.load(Ordering::SeqCst), 2);
+    // A view bigger than the picture gets it at the picture's size, and 0 x 0 is its own size.
+    assert_eq!(loader.load(PHOTO, 300, 300).unwrap().got, (30, 30));
+    assert_eq!(loader.load(PHOTO, 0, 0).unwrap().got, (40, 30));
+    drop(tickets);
+}
+
+#[test]
+fn a_view_that_leaves_while_its_cover_is_fetched_is_never_called_back_nor_decoded_for() {
+    let server = Server::new(200);
+    server.hold();
+    let painted = Arc::new(AtomicUsize::new(0));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(None, 1) }, server.clone(), Counted(painted.clone()));
+    let (tx, rx) = mpsc::channel::<()>();
+    let ticket = loader.request(PHOTO, 8, 8, move |_| tx.send(()).unwrap());
+    while server.calls() == 0 {
+        std::thread::yield_now();
+    }
+    // The bytes are on their way; the view goes.
+    drop(ticket);
+    server.release();
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "no call back");
+    // The worker is free again, and it never decoded the cover nobody wanted.
+    loader.load("http://s/next", 8, 8).unwrap();
+    assert_eq!(painted.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_warm_up_fetches_onto_the_disk_once_and_decodes_nothing() {
+    let d = dir("warm");
+    let server = Server::new(200);
+    let painted = Arc::new(AtomicUsize::new(0));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.clone()), 1) }, server.clone(), Counted(painted.clone()));
+    server.hold();
+    // The one worker is busy with a view; a warm-up and another view queue behind it.
+    let busy = loader.request("http://s/busy", 8, 8, |_| {});
+    while server.calls() == 0 {
+        std::thread::yield_now();
+    }
+    loader.warm(PHOTO);
+    loader.warm("http://s/rest/getCoverArt.view?u=a&id=ext-deezer-1&size=320");
+    let late = loader.request("http://s/late", 8, 8, |_| {});
+    server.release();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !loader.disk().unwrap().contains(Key::of(PHOTO)) {
+        assert!(std::time::Instant::now() < deadline, "warmed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The view asked for after the warm-up went first, the provider's cover was not fetched, and the
+    // warmed one was not decoded.
+    assert_eq!(*server.asked.lock(), ["http://s/busy", "http://s/late", PHOTO]);
+    assert_eq!(painted.load(Ordering::SeqCst), 2);
+    // Already on the disk: warmed again, it is not fetched again.
+    loader.warm(PHOTO);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(server.calls(), 3);
+    // Read back as bytes, as a page's colours are worked out from them.
+    let mut bytes = Vec::new();
+    loader.read(PHOTO, &mut bytes).unwrap();
+    assert_eq!(bytes, server.body);
+    assert_eq!(server.calls(), 3);
+    drop((busy, late));
+    drop(loader);
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A painter that panics on one size, as a decoder might on one hostile file.
+struct Fragile;
+
+impl Paint for Fragile {
+    type Picture = (usize, usize);
+
+    fn paint(&self, _: &mut Decoder, bytes: &[u8], width: u32, height: u32) -> Result<(usize, usize), DecodeError> {
+        assert!(width != 13, "a decoder bug");
+        Ok(header(bytes)?.fill(width as usize, height as usize))
+    }
+
+    fn bytes(_: &(usize, usize)) -> usize {
+        100
+    }
+}
+
+#[test]
+fn a_cover_that_panics_is_its_own_error_and_every_cover_after_it_still_comes() {
+    let d = dir("panic");
+    let server = Server::new(200);
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.clone()), 1) }, server.clone(), Fragile);
+    for _ in 0..3 {
+        assert!(matches!(loader.load(PHOTO, 13, 13), Err(Error::Panicked(why)) if why == "a decoder bug"));
+        // Not kept: the file may be what broke it.
+        assert!(!loader.disk().unwrap().contains(Key::of(PHOTO)));
+        assert_eq!(loader.load(PHOTO, 8, 8), Ok((8, 8)));
+    }
+    // A call back that panics costs its own cover, not the worker.
+    let t = loader.request(PHOTO, 9, 9, |_| panic!("a client bug"));
+    std::thread::sleep(Duration::from_millis(100));
+    drop(t);
+    assert_eq!(loader.load(PHOTO, 10, 10), Ok((10, 10)));
+    drop(loader);
+    std::fs::remove_dir_all(&d).unwrap();
 }

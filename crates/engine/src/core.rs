@@ -17,12 +17,12 @@ use nori_player::pipeline::{App, Queue, Sound};
 use nori_player::playlist::Playlist;
 use nori_player::queue::{OnError, PlaybackError};
 use nori_player::transitions::WindowSong;
-use norimusic::automix::host::CoreHost;
-use norimusic::client::Client;
-use norimusic::settings::StoredPrefs;
+use nori_core::automix::host::CoreHost;
+use nori_core::client::Client;
+use nori_core::settings::StoredPrefs;
 
-use norimusic::transfers;
-use norimusic::Core;
+use nori_core::transfers;
+use nori_core::Core;
 use parking_lot::Mutex;
 
 use crate::engine::Settings;
@@ -30,27 +30,27 @@ use crate::library::{Library, Located, Source};
 use crate::source::ByteSource;
 use crate::store::{Order, Store};
 
-/// The core's queue (`norimusic::playlist`). Edit it through the core's `playlist_*` calls, then tell
+/// The core's queue (`nori_core::playlist`). Edit it through the core's `playlist_*` calls, then tell
 /// the engine ([`crate::Engine::queue_changed`]).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CoreQueue;
 
 impl Queue for CoreQueue {
     fn read<R>(&self, f: impl FnOnce(&Playlist) -> R) -> R {
-        norimusic::playlist::playlist_read(f)
+        nori_core::playlist::playlist_read(f)
     }
 
     fn moved_to(&mut self, index: usize) {
-        norimusic::playlist::playlist_moved_to(index as i32);
+        nori_core::playlist::playlist_moved_to(index as i32);
     }
 
     fn set_repeat(&mut self, mode: u8) {
-        norimusic::playlist::playlist_repeat(mode);
+        nori_core::playlist::playlist_repeat(mode);
     }
 
     /// An explicit song with the user's "skip explicit songs" on, as `playlist_transition` decides.
     fn skips(&self, index: usize) -> bool {
-        norimusic::playlist::playlist_skips(index)
+        nori_core::playlist::playlist_skips(index)
     }
 }
 
@@ -122,14 +122,14 @@ impl App for CoreApp {
     /// Songs are measured as they play (the engine's analysis tap), and with a measurer the ones coming
     /// up too, when AutoMix is on (the core's `queue_measure` names none otherwise).
     fn auto_mix(&self) -> bool {
-        self.measurer.is_some() && !norimusic::rules::queue_measure().is_empty()
+        self.measurer.is_some() && !nori_core::rules::queue_measure().is_empty()
     }
 
     /// The core picks the songs (`queue_measure`: the next few, never a provider's or a radio stream);
     /// the measurer takes those on the disk, on a thread of its own.
     fn measure_ahead<S: nori_player::pipeline::Songs>(&mut self, _songs: &mut S, _ids: &[String]) {
         if let Some(m) = &self.measurer {
-            m.update(norimusic::rules::queue_measure(), std::thread::current());
+            m.update(nori_core::rules::queue_measure(), std::thread::current());
         }
     }
 
@@ -151,8 +151,8 @@ impl App for CoreApp {
         // A step may ask for the arrival to be made again once it is done (a sound kept first).
         for _ in 0..2 {
             if let Some(s) = effect.apply.take() {
-                let prefs = norimusic::settings_store::settings_current()?.with_sound(s);
-                norimusic::settings_store::settings_put(prefs.clone());
+                let prefs = nori_core::settings_store::settings_current()?.with_sound(s);
+                nori_core::settings_store::settings_put(prefs.clone());
                 sound = Some(settings(&prefs).sound);
             }
             if !effect.arrive {
@@ -169,48 +169,48 @@ impl App for CoreApp {
 
     /// The core keeps the window itself, from its own queue and what it knows of each song.
     fn window(&mut self, _window: Vec<WindowSong>, _shuffling: bool) {
-        norimusic::playlist::playlist_window();
+        nori_core::playlist::playlist_window();
     }
 
     /// The core counts the run of songs that would not play, and reads "skip on error" itself.
     fn on_error(&mut self, kind: PlaybackError, _has_next: bool) -> Option<OnError> {
-        Some(norimusic::rules::queue_error(kind, false, false))
+        Some(nori_core::rules::queue_error(kind, false, false))
     }
 
     fn playing(&mut self) {
-        norimusic::rules::queue_playing();
+        nori_core::rules::queue_playing();
     }
 
     fn transitions_off(&mut self, off: bool) {
-        norimusic::automix::planner::transition_setup(off);
+        nori_core::automix::planner::transition_setup(off);
     }
 
     /// The core's ReplayGain over its own queue and the settings: track, album or automatic, the
     /// pre-amp, and the level for untagged songs.
     fn gain(&mut self, index: usize, _id: &str) -> f32 {
-        norimusic::playlist::playlist_gain_of(index, false)
+        nori_core::playlist::playlist_gain_of(index, false)
     }
 }
 
-/// The stream cache's order is the core's (`norimusic::stream_cache`): what this run never used goes
+/// The stream cache's order is the core's (`nori_core::stream_cache`): what this run never used goes
 /// first, then the least recently used.
 pub struct CoreOrder;
 
 impl Order for CoreOrder {
     fn touch(&self, key: &str) {
-        norimusic::stream_cache::touch(key);
+        nori_core::stream_cache::touch(key);
     }
 
     fn seed(&self, held: &[String]) {
-        norimusic::stream_cache::seed(held.iter().map(String::as_str));
+        nori_core::stream_cache::seed(held.iter().map(String::as_str));
     }
 
     fn next(&self) -> Option<String> {
-        norimusic::stream_cache::next()
+        nori_core::stream_cache::next()
     }
 
     fn clear(&self) {
-        norimusic::stream_cache::clear();
+        nori_core::stream_cache::clear();
     }
 }
 
@@ -233,7 +233,7 @@ pub fn key_format(key: &str) -> Option<String> {
 
 impl Library for CoreLibrary {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
-        let song = norimusic::queue::queue_song(id.to_string());
+        let song = nori_core::queue::queue_song(id.to_string());
         let duration_ms = song.as_ref().map(|s| s.duration as i64 * 1000).filter(|&d| d > 0);
         // A download may have been transcoded: the file says what it is.
         let kept = self.store.as_ref().filter(|_| transfers::held(id) == 2).and_then(|s| s.downloaded(id));
@@ -263,7 +263,7 @@ impl Library for CoreLibrary {
 /// What the transition planner and the seek bar know of `id`, from the core's queue: for a client
 /// that writes its own [`Library`] around the core's.
 pub fn about(id: &str) -> WindowSong {
-    match norimusic::queue::queue_song(id.to_string()) {
+    match nori_core::queue::queue_song(id.to_string()) {
         Some(s) => WindowSong {
             id: s.id,
             title: s.title,
@@ -280,7 +280,7 @@ pub fn about(id: &str) -> WindowSong {
 
 /// Whether `id` may be fetched before anyone asked to hear it: never a provider's song.
 pub fn fetch_ahead(id: &str) -> bool {
-    !norimusic::queue::queue_fetchable(vec![id.to_string()]).is_empty()
+    !nori_core::queue::queue_fetchable(vec![id.to_string()]).is_empty()
 }
 
 /// Downloads, as the core keeps them (`Core::download_queue` and the downloads table): the songs still
@@ -320,7 +320,7 @@ impl Downloader {
         w.threads.retain(|t| !t.is_finished());
         let pending = self.pending();
         for id in &pending {
-            transfers::followed(id, transfers::QUEUED, norimusic::db::now_ms());
+            transfers::followed(id, transfers::QUEUED, nori_core::db::now_ms());
         }
         let want = slots.max(1).min(pending.len());
         while w.running < want {
@@ -364,7 +364,7 @@ impl Downloader {
     fn run(&self) {
         while let Some(id) = self.take() {
             let ok = self.fetch(&id);
-            let now = norimusic::db::now_ms();
+            let now = nori_core::db::now_ms();
             let mut w = self.work.lock();
             w.busy.remove(&id);
             if ok {
@@ -372,7 +372,7 @@ impl Downloader {
                 transfers::followed(&id, transfers::COMPLETED, now);
                 let _ = self.core.download_settle(vec![id.clone()], vec![true]);
                 // The streamed copy is the same bytes twice now.
-                self.store.drop_cached(&norimusic::stream_cache::copies(&id));
+                self.store.drop_cached(&nori_core::stream_cache::copies(&id));
             } else {
                 w.failed.insert(id.clone());
                 drop(w);
@@ -383,7 +383,7 @@ impl Downloader {
 
     /// Fetches `id` whole into the store, taking up a download left half way where it stopped.
     fn fetch(&self, id: &str) -> bool {
-        let now = norimusic::db::now_ms();
+        let now = nori_core::db::now_ms();
         transfers::followed(id, transfers::DOWNLOADING, now);
         let slot = transfers::open(id, now);
         let url = self.client.resolve(id.to_string(), true, false).url;
@@ -416,7 +416,7 @@ impl Downloader {
                             return false;
                         }
                         at += n as u64;
-                        transfers::note(slot, body.len.unwrap_or(0) as i64, at as i64, norimusic::db::now_ms());
+                        transfers::note(slot, body.len.unwrap_or(0) as i64, at as i64, nori_core::db::now_ms());
                     }
                     Err(_) => break true,
                 }
@@ -494,7 +494,7 @@ impl Measurer {
             };
             let missing = self.core.analysis_missing(ids.clone()).unwrap_or_default();
             let waiting = missing.iter().filter(|id| self.on_disk(id).is_none()).count();
-            norimusic::alog::info(&format!("measuring ahead: {} of {} unmeasured, {waiting} not on the device yet", missing.len(), ids.len()));
+            nori_core::alog::info(&format!("measuring ahead: {} of {} unmeasured, {waiting} not on the device yet", missing.len(), ids.len()));
             for id in missing {
                 if self.want.lock().1 != generation {
                     break;
@@ -512,24 +512,24 @@ impl Measurer {
 
     /// Decodes `id` whole into the streaming analyser and stores what comes out; whether it was stored.
     fn measure(&self, id: &str, path: &std::path::Path) -> bool {
-        let song = norimusic::queue::queue_song(id.to_string());
+        let song = nori_core::queue::queue_song(id.to_string());
         let expected_ms = song.as_ref().map_or(0, |s| s.duration as i64 * 1000);
         let hint = song.map(|s| s.suffix).filter(|s| !s.is_empty());
         let mut stream = None;
         let whole = crate::demux::decode_whole(path, hint.as_deref(), |rate, channels, samples| {
-            stream.get_or_insert_with(|| norimusic::automix::store::AnalysisStream::new(rate, channels, expected_ms.max(0) as u64)).feed_f32(samples);
+            stream.get_or_insert_with(|| nori_core::automix::store::AnalysisStream::new(rate, channels, expected_ms.max(0) as u64)).feed_f32(samples);
         });
         let Some(stream) = stream else { return false };
         if !matches!(whole, Ok(true)) {
-            norimusic::alog::info(&format!("measuring {id} ahead stopped before its end: not stored"));
+            nori_core::alog::info(&format!("measuring {id} ahead stopped before its end: not stored"));
             return false;
         }
         let handle = stream.into_handle();
         let stored = self.core.analysis_finish_whole(id.to_string(), handle, expected_ms);
         // SAFETY: the handle was made just above and is handed to nobody else.
-        unsafe { norimusic::automix::store::AnalysisStream::free_handle(handle) };
+        unsafe { nori_core::automix::store::AnalysisStream::free_handle(handle) };
         let a = stored.ok().flatten();
-        norimusic::alog::info(&match &a {
+        nori_core::alog::info(&match &a {
             Some(t) => format!("analysed {id} ahead: {:.2} bpm (conf {:.2}, stab {:.2})", t.bpm, t.bpm_confidence, t.stability),
             None => format!("analysed {id} ahead: not stored: not the whole song, or too short"),
         });
@@ -552,7 +552,7 @@ pub fn settings(s: &StoredPrefs) -> Settings {
     let bands = if s.eq_enabled { s.eq_bands.iter().map(|b| Band { kind: b.kind, freq: b.freq as f64, gain_db: b.gain_db as f64, q: b.q as f64, channel: b.channel }).collect() } else { Vec::new() };
     let sound = Sound {
         bands,
-        preamp_db: norimusic::dsp::effective_preamp_db(s) as f64,
+        preamp_db: nori_core::dsp::effective_preamp_db(s) as f64,
         crossfeed_db: s.crossfeed_db as f64,
         balance: s.balance as f64,
         mono: s.mono,

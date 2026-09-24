@@ -6,9 +6,9 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
-import dev.nori.music.ffi.outputsForget
-import dev.nori.music.ffi.outputsKnown
-import dev.nori.music.ffi.outputsRefresh
+import dev.nori.music.ffi.devices.outputsForget
+import dev.nori.music.ffi.devices.outputsKnown
+import dev.nori.music.ffi.devices.outputsRefresh
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -81,5 +81,5 @@ class Outputs(context: Context) {
     }
 
     /** The name nori_player::outputs::SPEAKER gives the phone's own speaker, read once. */
-    companion object { val SPEAKER: String by lazy { dev.nori.music.ffi.outputsSpeaker() } }
+    companion object { val SPEAKER: String by lazy { dev.nori.music.ffi.devices.outputsSpeaker() } }
 }

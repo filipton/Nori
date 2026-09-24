@@ -40,11 +40,11 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
     val downloads by actions.downloads.collectAsState()
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
-    val scopes = remember { dev.nori.music.ffi.searchScopes() }
+    val scopes = remember { dev.nori.music.ffi.library.searchScopes() }
     Column {
-        LargeTitle("Search")
+        LargeTitle(say.search)
         SearchField(
-            ui.query, vm::setQuery, "Songs, albums, artists",
+            ui.query, vm::setQuery, say.searchHint,
             Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), testTag = "search", autofocus = true,
             focusKey = searchFocusKey(),
         )
@@ -59,8 +59,8 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 if (ui.history.isNotEmpty()) item {
                     Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text("Recent searches", Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.titleLarge)
-                        TextButton(vm::clearHistory) { Text("Clear") }
+                        Text(say.recentSearches, Modifier.weight(1f).padding(start = 4.dp), style = MaterialTheme.typography.titleLarge)
+                        TextButton(vm::clearHistory) { Text(say.clear) }
                     }
                 }
                 items(ui.history, key = { it }) { q -> Text(q, Modifier.fillMaxWidth().clickable { vm.setQuery(q) }.padding(horizontal = Space.gutter, vertical = 13.dp), style = MaterialTheme.typography.bodyLarge) }
@@ -69,7 +69,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
         }
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             if (r.artists.isNotEmpty()) item(key = "artists") {
-                SectionTitle("Artists")
+                SectionTitle(say.artists)
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(r.artists, key = { it.id }) { a ->
                         ArtistCard(a.name, "", vm.cover(a.coverArt, CoverSize.ROW), 96.dp, onClick = { vm.remember(); nav.artist(a.id, a) })
@@ -77,12 +77,12 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                 }
             }
             if (r.albums.isNotEmpty()) item(key = "albums") {
-                SectionTitle("Albums")
+                SectionTitle(say.albums)
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(r.albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { vm.remember(); nav.album(a.id, a) }) }
                 }
             }
-            if (r.songs.isNotEmpty()) item(key = "songs") { SectionTitle("Songs") }
+            if (r.songs.isNotEmpty()) item(key = "songs") { SectionTitle(say.songs) }
             itemsIndexed(r.songs, key = { _, s -> s.id }, contentType = { _, _ -> "song" }) { _, s ->
                 // One tap plays one song: a search result list is not an album, and with octo-fiesta
                 // queueing the rest would make the server download every provider track in it.
@@ -95,7 +95,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                     swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
                 )
             }
-            if (ui.nothingFound) item { EmptyNote(dev.nori.music.ffi.Note.NOTHING_FOUND) }
+            if (ui.nothingFound) item { EmptyNote(dev.nori.music.ffi.words.Note.NOTHING_FOUND) }
         }
     }
 }

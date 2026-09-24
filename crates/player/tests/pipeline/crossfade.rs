@@ -3,6 +3,7 @@
 //! sample, equal power through the overlap, and the player and the seek bar following the ear.
 
 use nori_player::automix::mixer::{self, Mixer};
+use nori_player::playlist::Hand;
 use nori_player::sim::{prefs_off, Player};
 
 use crate::common::*;
@@ -100,6 +101,20 @@ fn switched_on_mid_song_it_is_planned_for_the_song_already_playing() {
 }
 
 #[test]
+fn a_song_put_next_is_planned_into_at_once() {
+    // "Play next" on a song already under way: the plan out of it was made for the song that followed
+    // before, and it is made again for the new one without waiting for anything else to change.
+    let (mut p, ..) = player(4);
+    p.play_from(0);
+    assert!(p.run_until(10_000, |p| p.app.logged("transition a -> b")), "{:?}", p.app.log);
+    p.tracks.push(track("x", &music(SONG_S, 9)));
+    p.queue.add(vec!["x".into()], Hand::Next);
+    p.queue_changed();
+    assert!(p.run_until(12_000, |p| p.app.logged("transition a -> x")), "{:?}", p.app.log);
+    assert!(p.run_until(60_000, |p| p.current_id().as_deref() == Some("x")), "x plays next: {:?}", p.app.log);
+}
+
+#[test]
 fn the_bar_walks_steadily_through_the_held_ending() {
     let (mut p, ..) = player(12);
     p.play_from(0);
@@ -117,11 +132,26 @@ fn the_bar_walks_steadily_through_the_held_ending() {
     // The player counts the held ending as played the moment it is decoded; the bar must not.
     assert!(seen.windows(2).all(|w| w[1] >= w[0] && w[1] - w[0] <= 1_100), "steady, one second a second: {seen:?}");
     assert!(*seen.last().unwrap() > SONG_MS - 22_000 + 5_000, "{seen:?}");
-    // Up to the mix it stays on a; the moment the mix is audible the bar is on b, at the start of it.
+    // Up to the mix it stays on a, and on into the fade while a is the louder of the two: an
+    // equal-power fade hands over in its middle, six seconds into twelve. There the bar is on b, six
+    // seconds into it, never on b while b could not be heard yet.
     assert!(p.run_until(20_000, |p| p.mixing()));
+    let mut last = shown(&mut p).1;
+    let mut on_a = 0;
+    while shown(&mut p).0 == 0 {
+        p.run_for(100);
+        let ms = shown(&mut p).1;
+        if shown(&mut p).0 == 0 {
+            assert!(ms >= last && ms - last <= 200, "a walks on through the first half of the fade: {last} -> {ms}");
+            last = ms;
+        }
+        on_a += 100;
+        assert!(on_a <= 7_000, "a handed over by the middle of the fade");
+    }
+    assert!((5_800..=6_200).contains(&on_a), "a is shown until the fade's middle, not its start: {on_a} ms");
     let (song, ms) = shown(&mut p);
-    assert_eq!(song, 1, "the bar follows the ear into b as soon as the mix is heard");
-    assert!((0..200).contains(&ms), "at b's beginning: {ms}");
+    assert_eq!(song, 1, "the bar follows the ear into b once b is the louder");
+    assert!((5_800..6_300).contains(&ms), "six seconds into b: {ms}");
     let mut last = ms;
     for _ in 0..20 {
         p.run_for(500);

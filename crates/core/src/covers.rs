@@ -107,17 +107,72 @@ pub fn cover_neighbours(index: i32, previous: i32, next: i32, ahead: i32, len: u
     out
 }
 
+/// What to fetch and colour ahead around the song playing, from the core's own queue.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct CoversAround {
+    /// The playing song's cover, then the covers a skip either way lands on: their colours are worked out
+    /// before they are reached. Provider artwork included (the caller draws those, and only stores none).
+    pub near: Vec<String>,
+    /// The covers to fetch ahead ([`cover_neighbours`] `ahead` steps each way), each at both sizes, as
+    /// [`cover_wants`] gives them.
+    pub wants: Vec<CoverWant>,
+}
+
+/// [`cover_neighbours`] and [`cover_wants`] over the queue the core keeps, in one call: the page passes
+/// where it is and the skips' targets (queue positions, -1 for none), not the songs. A skip used to cost
+/// three calls, one of them carrying every cover id ahead.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn covers_around(index: i32, previous: i32, next: i32, ahead: i32) -> CoversAround {
+    let ids: Vec<String> = crate::playlist::with(|p| p.ids().to_vec());
+    let arts = crate::queue::cover_arts(&ids);
+    around(&arts, index, previous, next, ahead)
+}
+
+fn around(arts: &[Option<String>], index: i32, previous: i32, next: i32, ahead: i32) -> CoversAround {
+    let len = arts.len() as u32;
+    let at = |i: u32| arts.get(i as usize).cloned().flatten();
+    let current = u32::try_from(index).ok().and_then(at);
+    let near = current.into_iter().chain(cover_neighbours(index, previous, next, 1, len).into_iter().filter_map(at)).collect();
+    let wants = cover_wants(cover_neighbours(index, previous, next, ahead, len).into_iter().filter_map(at).collect(), u32::MAX);
+    CoversAround { near, wants }
+}
+
 /// Whether the cover address `url` is an octo-fiesta provider item's (see [`CoverRules::provider_prefixes`]):
 /// such a cover is never stored, since the provider redraws it under the same id once the item is in the
 /// library. Asked for every cover a list draws, so it only looks, and allocates nothing.
 ///
-/// Twin of `isProviderCover` (app/.../ui/Components.kt), which Android keeps: a string test where the
+/// Twin of `Covers.isProvider` (core/.../data/Library.kt), which Android keeps: a string test where the
 /// cover is composed costs less than a crossing into the core would.
 pub fn is_provider_cover(url: &str) -> bool {
     url.match_indices("&id=").any(|(at, mark)| {
         let id = &url[at + mark.len()..];
         PROVIDER_PREFIXES.iter().any(|p| id.starts_with(p))
     })
+}
+
+/// The platform's GET, for a cover loader that runs beside the core's client rather than inside it
+/// (nori-covers, which Android's covers go through): the same transport, so covers ride the API's
+/// connection. Covers are fetched at addresses the client has already signed, so the loader needs no
+/// client of its own, and one transport serves every server profile.
+static COVER_TRANSPORT: std::sync::Mutex<Option<std::sync::Arc<dyn crate::transport::Transport>>> = std::sync::Mutex::new(None);
+static COVER_TRANSPORT_SET: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Hands the core the transport its cover loader fetches through. Android does it where it builds the
+/// transport for the client, on the thread that warms the app up.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn set_cover_transport(transport: std::sync::Arc<dyn crate::transport::Transport>) {
+    *COVER_TRANSPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(transport);
+    COVER_TRANSPORT_SET.notify_all();
+}
+
+/// The transport [`set_cover_transport`] handed in, waiting up to `wait` for it: a cover asked for as
+/// the app starts may reach the network before the transport is built, and waits for it rather than
+/// fail.
+pub fn cover_transport(wait: std::time::Duration) -> Option<std::sync::Arc<dyn crate::transport::Transport>> {
+    let set = COVER_TRANSPORT.lock().unwrap_or_else(|e| e.into_inner());
+    let (set, _) = COVER_TRANSPORT_SET.wait_timeout_while(set, wait, |t| t.is_none()).unwrap_or_else(|e| e.into_inner());
+    set.clone()
 }
 
 /// Writes the address of cover `id` at `size` into `out` (cleared first): the signed `getCoverArt`
@@ -188,5 +243,15 @@ mod tests {
         // At the ends: nothing before the first song or after the last, and no repeats.
         assert_eq!(cover_neighbours(0, -1, 1, 3, 3), [1, 2]);
         assert_eq!(cover_neighbours(1, 0, 0, 2, 2), [0]);
+    }
+
+    #[test]
+    fn around_the_song_playing_from_the_queue_itself() {
+        let arts: Vec<Option<String>> = ["a", "b", "c", "ext-d", "b"].iter().map(|s| Some(s.to_string())).chain([None]).collect();
+        let r = around(&arts, 1, 0, 2, 3);
+        assert_eq!(r.near, ["b", "a", "c"], "the playing song's cover first, then the skips' targets");
+        // Ahead: 0, 2, 3, then 4 (a second copy of b) and 5 (no cover): each cover once, providers left out.
+        assert_eq!(r.wants.iter().map(|w| (w.id.as_str(), w.size)).collect::<Vec<_>>(), [("a", 320), ("a", 800), ("c", 320), ("c", 800), ("b", 320), ("b", 800)]);
+        assert_eq!(around(&[], -1, -1, -1, 2), CoversAround { near: vec![], wants: vec![] }, "an empty queue");
     }
 }

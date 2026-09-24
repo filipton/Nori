@@ -59,23 +59,6 @@ pub fn is_dark(theme: i32, system_dark: bool) -> bool {
     }
 }
 
-/// Every size in the app was measured as a share of the width of a phone this many dp wide.
-pub const REFERENCE_WIDTH_DP: f32 = 411.0;
-
-/// How big the interface is drawn. A setting above 0 is a fixed factor. 0 is automatic: laid out as if
-/// the screen were at least [`REFERENCE_WIDTH_DP`] wide, so a phone set to a large display size (one
-/// measured at 358 dp draws everything a seventh larger) keeps the proportions; it only ever shrinks,
-/// never below three quarters, and never enlarges past what the system asked for.
-pub fn ui_scale(setting: f32, width_dp: i32) -> f32 {
-    if setting > 0.0 {
-        setting
-    } else if width_dp <= 0 {
-        1.0
-    } else {
-        (width_dp as f32 / REFERENCE_WIDTH_DP).clamp(0.75, 1.0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,15 +78,6 @@ mod tests {
         assert!(is_dark(THEME_SYSTEM, true) && !is_dark(THEME_SYSTEM, false));
         assert!(is_dark(THEME_DARK, false) && !is_dark(THEME_LIGHT, true));
         assert!(is_dark(9, true), "an unknown setting follows the system");
-    }
-
-    #[test]
-    fn automatic_size_only_shrinks_and_not_below_three_quarters() {
-        assert_eq!(ui_scale(1.1, 300), 1.1);
-        assert_eq!(ui_scale(0.0, 0), 1.0);
-        assert_eq!(ui_scale(0.0, 600), 1.0);
-        assert_eq!(ui_scale(0.0, 358), 358.0 / 411.0);
-        assert_eq!(ui_scale(0.0, 200), 0.75);
     }
 
     #[test]

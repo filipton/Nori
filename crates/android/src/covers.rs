@@ -1,71 +1,266 @@
-//! Covers decoded by `nori_covers` straight into an Android Bitmap: a file (Coil's disk cache holds the
-//! server's bytes as they came), bytes or a direct buffer, decoded to the Bitmap's own size and written
-//! into its locked pixels, so nothing is copied into a Java array. The app's Coil decodes its covers
-//! through `header` and `decodeBuffer` (the app's `RustCoverDecoder`); the debug build's `coverbench`
-//! measures the file door against BitmapFactory.
+//! The app's covers: nori-covers' loader over the core's transport (the app's OkHttp, so covers ride the
+//! API's connection), keeping the server's files on disk and decoding each straight into a Bitmap made at
+//! the size its view draws it at. Kotlin asks with a request per view and gets one call back per cover
+//! (`CoverPixels.Waiter.done`, on a loader thread; Kotlin posts it to the main thread), and cancels by
+//! handing the request's handle back, which drops its ticket. Kotlin keeps the Bitmaps it has been given:
+//! a Bitmap is a Java object, so its memory cache has to be there, and this loader keeps none.
+//!
+//! A Bitmap is software ARGB_8888, or RGB_565 for a JPEG where the app allows it (what Coil made for
+//! the app before). With `hardware`, the picture is decoded into a software Bitmap kept for the next
+//! cover and copied to the GPU, which is what the screens draw: the upload happens here, on a loader
+//! thread, not on the first frame that draws it.
 // Bitmaps are only there on Android; elsewhere the doors build and refuse every Bitmap.
 #![cfg_attr(not(target_os = "android"), allow(dead_code, unused_variables))]
 
 use std::cell::RefCell;
 use std::io::Read;
-use std::sync::Mutex;
+use std::panic::{self, AssertUnwindSafe};
+use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
-use jni::objects::{JByteArray, JByteBuffer, JClass, JObject, JString};
+use jni::objects::{GlobalRef, JClass, JIntArray, JMethodID, JObject, JStaticMethodID, JString, JValue};
+use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jboolean, jint, jlong};
-use jni::JNIEnv;
-use nori_covers::Decoder;
+use jni::{JNIEnv, JavaVM};
+use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse};
+use nori_covers::{Alpha, Config, DecodeError, Decoder, Loader, Paint, Target, Ticket};
+use parking_lot::Mutex;
 
-use crate::{native, Class};
+use crate::{native, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/look/CoverPixels",
     methods: &[
+        native!(c"open", c"(Ljava/lang/String;JZZ)J", open),
+        native!(c"close", c"(J)V", close),
+        native!(c"request", c"(JLjava/lang/String;IILdev/nori/music/look/CoverPixels$Waiter;)J", request),
+        native!(c"cancel", c"(J)V", cancel),
+        native!(c"warm", c"(JLjava/lang/String;)V", warm),
+        native!(c"clear", c"(J)V", clear),
+        native!(c"colours", c"(JLjava/lang/String;IZ[ILandroid/graphics/Bitmap;[I)I", colours),
         native!(c"decodeFile", c"(Ljava/lang/String;Landroid/graphics/Bitmap;Z)I", decode_file),
-        native!(c"decodeBytes", c"([BILandroid/graphics/Bitmap;Z)I", decode_bytes),
-        native!(c"header", c"(Ljava/nio/ByteBuffer;I)J", header),
-        native!(c"decodeBuffer", c"(Ljava/nio/ByteBuffer;ILandroid/graphics/Bitmap;Z)I", decode_buffer),
     ],
 };
 
-/// What a door answers: 0 for a cover drawn, or what stopped it.
+/// What a cover's call back says, or a door answers: 0 for a cover drawn, or what stopped it.
 const OK: jint = 0;
-/// Not a mutable software ARGB_8888 or RGB_565 Bitmap.
+/// Not a mutable software ARGB_8888 or RGB_565 Bitmap, or no Bitmap could be made.
 const BAD_BITMAP: jint = 1;
-/// The file could not be read, or the byte range is not in the array.
+/// The file could not be read or fetched.
 const UNREADABLE: jint = 2;
-/// Not a JPEG, PNG or WebP picture.
+/// Not a JPEG, PNG, WebP or GIF picture (a HEIF one, say).
 const UNKNOWN: jint = 3;
 /// A picture the decoder refused: broken, or larger than any cover.
 const BROKEN: jint = 4;
-/// The file's EXIF turns or mirrors the picture, which this decoder does not do and Coil's own does.
-const ORIENTED: jint = 5;
 
-/// A decoder, and the RGBA rows an RGB_565 Bitmap's picture is decoded into before it is packed.
+/// The Java side, looked up once, when the first loader is opened.
+struct Java {
+    vm: JavaVM,
+    bitmap: GlobalRef,
+    create: JStaticMethodID,
+    copy: JMethodID,
+    set_has_alpha: JMethodID,
+    reconfigure: JMethodID,
+    allocation: JMethodID,
+    recycle: JMethodID,
+    argb: GlobalRef,
+    rgb565: GlobalRef,
+    hardware: GlobalRef,
+    done: JMethodID,
+}
+
+static JAVA: OnceLock<Java> = OnceLock::new();
+
+fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
+    let bitmap = env.find_class("android/graphics/Bitmap")?;
+    let config = env.find_class("android/graphics/Bitmap$Config")?;
+    let waiter = env.find_class("dev/nori/music/look/CoverPixels$Waiter")?;
+    let mut value = |name: &str| -> jni::errors::Result<GlobalRef> {
+        let v = env.get_static_field(&config, name, "Landroid/graphics/Bitmap$Config;")?.l()?;
+        env.new_global_ref(v)
+    };
+    let (argb, rgb565, hardware) = (value("ARGB_8888")?, value("RGB_565")?, value("HARDWARE")?);
+    Ok(Java {
+        vm: env.get_java_vm()?,
+        create: env.get_static_method_id(&bitmap, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;")?,
+        copy: env.get_method_id(&bitmap, "copy", "(Landroid/graphics/Bitmap$Config;Z)Landroid/graphics/Bitmap;")?,
+        set_has_alpha: env.get_method_id(&bitmap, "setHasAlpha", "(Z)V")?,
+        reconfigure: env.get_method_id(&bitmap, "reconfigure", "(IILandroid/graphics/Bitmap$Config;)V")?,
+        allocation: env.get_method_id(&bitmap, "getAllocationByteCount", "()I")?,
+        recycle: env.get_method_id(&bitmap, "recycle", "()V")?,
+        done: env.get_method_id(&waiter, "done", "(Landroid/graphics/Bitmap;I)V")?,
+        bitmap: env.new_global_ref(&bitmap)?,
+        argb,
+        rgb565,
+        hardware,
+    })
+}
+
+/// Whatever Java threw is written to the log and cleared: a loader thread has nobody to throw it to.
+fn cleared(env: &mut JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+}
+
+/// A decoded cover as Kotlin gets it: the Bitmap, and how many bytes it holds.
+#[derive(Clone)]
+struct Drawn {
+    bitmap: GlobalRef,
+    bytes: usize,
+}
+
+/// RGBA above this many bytes (a 512 x 512 cover) is given back after its picture is packed, and a kept
+/// software Bitmap larger than this is not kept: the player's cover should not hold its memory until
+/// the next one, and every list and grid cover fits.
+const KEEP_BYTES: usize = 512 * 512 * 4;
+
+/// What one decode borrows: the RGBA rows an RGB_565 picture is decoded into before it is packed, and
+/// the software Bitmap a hardware one is decoded into before it is copied to the GPU. Lent per cover
+/// being decoded, so there are only as many as the loader has threads.
 #[derive(Default)]
-struct Drawer {
-    decoder: Decoder,
+struct Scratch {
     rgba: Vec<u8>,
+    drawn: Option<GlobalRef>,
 }
 
-/// RGBA above this many bytes (a 512 x 512 cover) is given back after its picture is packed: the player's
-/// cover should not hold its memory until the next one.
-const KEEP_RGBA: usize = 512 * 512 * 4;
-
-/// What a thread that decodes keeps between covers: the decoder's buffers and the file's bytes. Covers
-/// are decoded on the caller's thread, so each thread has its own.
-struct Kept {
-    drawer: Drawer,
-    bytes: Vec<u8>,
+/// The loader's painter: covers into Bitmaps.
+struct Bitmaps {
+    hardware: bool,
+    rgb565: bool,
+    idle: Mutex<Vec<Scratch>>,
 }
 
-thread_local! {
-    static KEPT: RefCell<Kept> = RefCell::new(Kept { drawer: Drawer::default(), bytes: Vec::new() });
+/// Why a Bitmap was not drawn: Java said no (it has thrown, or made nothing), or the decoder did.
+enum Fail {
+    Java,
+    Decode(DecodeError),
 }
 
-/// Decoders lent to `decode_buffer`, one per cover being decoded at that moment. Coil decodes on whichever
-/// of its I/O threads is free, so a decoder per thread would leave its buffers on every thread that ever
-/// decoded a cover; lent per cover, there are only as many as decode at once (the app lets four).
-static IDLE: Mutex<Vec<Drawer>> = Mutex::new(Vec::new());
+impl From<jni::errors::Error> for Fail {
+    fn from(_: jni::errors::Error) -> Fail {
+        Fail::Java
+    }
+}
+
+impl Paint for Bitmaps {
+    type Picture = Drawn;
+
+    fn paint(&self, decoder: &mut Decoder, bytes: &[u8], width: u32, height: u32) -> Result<Drawn, DecodeError> {
+        let head = nori_covers::header(bytes)?;
+        let (w, h) = head.fill(width as usize, height as usize);
+        let java = JAVA.get().ok_or(DecodeError::Target)?;
+        let mut env = crate::attached(&java.vm).ok_or(DecodeError::Target)?;
+        let opaque = head.opaque();
+        let small = opaque && self.rgb565;
+        let (config, pixel) = if small { (&java.rgb565, 2) } else { (&java.argb, 4) };
+        let mut scratch = self.idle.lock().pop().unwrap_or_default();
+        let drawn = env.with_local_frame(4, |env| -> Result<GlobalRef, Fail> {
+            let (w, h) = (w as jint, h as jint);
+            if !self.hardware {
+                let b = create(env, java, w, h, config)?;
+                draw(env, decoder, &mut scratch.rgba, bytes, &b, false)?;
+                has_alpha(env, java, &b, !opaque)?;
+                return Ok(env.new_global_ref(b)?);
+            }
+            let b = scratch.bitmap(env, java, w, h, config, pixel)?;
+            draw(env, decoder, &mut scratch.rgba, bytes, b.as_obj(), false)?;
+            has_alpha(env, java, b.as_obj(), !opaque)?;
+            let args = [JValue::Object(java.hardware.as_obj()).as_jni(), JValue::Bool(0).as_jni()];
+            // SAFETY: `copy` is Bitmap's `(Bitmap.Config, boolean) -> Bitmap`, called on a Bitmap with those arguments.
+            let gpu = unsafe { env.call_method_unchecked(b.as_obj(), java.copy, ReturnType::Object, &args) }.and_then(|v| v.l());
+            match gpu {
+                Ok(gpu) if !gpu.is_null() => Ok(env.new_global_ref(gpu)?),
+                // No GPU copy (out of graphics memory, say): the software picture is drawn instead, and it
+                // is the view's now, so the next cover gets a Bitmap of its own.
+                _ => {
+                    cleared(env);
+                    scratch.drawn = None;
+                    Ok(b)
+                }
+            }
+        });
+        cleared(&mut env);
+        scratch.let_go(&mut env, java);
+        self.idle.lock().push(scratch);
+        let bytes = w * h * pixel;
+        match drawn {
+            Ok(bitmap) => Ok(Drawn { bitmap, bytes }),
+            Err(Fail::Decode(e)) => Err(e),
+            Err(Fail::Java) => Err(DecodeError::Target),
+        }
+    }
+
+    fn bytes(picture: &Drawn) -> usize {
+        picture.bytes
+    }
+}
+
+/// A new mutable software Bitmap.
+fn create<'l>(env: &mut JNIEnv<'l>, java: &Java, w: jint, h: jint, config: &GlobalRef) -> Result<JObject<'l>, Fail> {
+    let args = [JValue::Int(w).as_jni(), JValue::Int(h).as_jni(), JValue::Object(config.as_obj()).as_jni()];
+    // SAFETY: `createBitmap` is the static `(int, int, Bitmap.Config) -> Bitmap`, called on Bitmap's class with those.
+    let b = unsafe { env.call_static_method_unchecked(<&JClass>::from(java.bitmap.as_obj()), java.create, ReturnType::Object, &args) }?.l()?;
+    if b.is_null() {
+        return Err(Fail::Java);
+    }
+    Ok(b)
+}
+
+/// Says whether the picture has alpha. Saying a JPEG has none (as Android's own decoders do) lets drawing
+/// skip blending it, and the GPU copy takes it along.
+fn has_alpha(env: &mut JNIEnv, java: &Java, b: &JObject, alpha: bool) -> Result<(), Fail> {
+    // SAFETY: `setHasAlpha` is Bitmap's `(boolean) -> void`.
+    unsafe { env.call_method_unchecked(b, java.set_has_alpha, ReturnType::Primitive(Primitive::Void), &[JValue::Bool(alpha.into()).as_jni()]) }?;
+    Ok(())
+}
+
+impl Scratch {
+    /// The kept software Bitmap made `w` x `h` in `config`, in the memory it already has when that is
+    /// enough; otherwise a new one.
+    fn bitmap(&mut self, env: &mut JNIEnv, java: &Java, w: jint, h: jint, config: &GlobalRef, pixel: usize) -> Result<GlobalRef, Fail> {
+        let need = w as usize * h as usize * pixel;
+        if let Some(b) = &self.drawn {
+            // SAFETY: `getAllocationByteCount` is Bitmap's `() -> int`.
+            let has = unsafe { env.call_method_unchecked(b.as_obj(), java.allocation, ReturnType::Primitive(Primitive::Int), &[]) }?.i()?;
+            if has as usize >= need {
+                let args = [JValue::Int(w).as_jni(), JValue::Int(h).as_jni(), JValue::Object(config.as_obj()).as_jni()];
+                // SAFETY: `reconfigure` is Bitmap's `(int, int, Bitmap.Config) -> void`, on a mutable Bitmap large enough.
+                unsafe { env.call_method_unchecked(b.as_obj(), java.reconfigure, ReturnType::Primitive(Primitive::Void), &args) }?;
+                return Ok(b.clone());
+            }
+        }
+        self.recycle(env, java);
+        let b = create(env, java, w, h, config)?;
+        let b = env.new_global_ref(b)?;
+        self.drawn = Some(b.clone());
+        Ok(b)
+    }
+
+    /// A player-sized Bitmap or buffer is not kept: that many bytes idle for the next list cover is a
+    /// poor trade.
+    fn let_go(&mut self, env: &mut JNIEnv, java: &Java) {
+        if self.rgba.capacity() > KEEP_BYTES {
+            self.rgba = Vec::new();
+        }
+        let Some(b) = &self.drawn else { return };
+        // SAFETY: as in `bitmap`.
+        let has = unsafe { env.call_method_unchecked(b.as_obj(), java.allocation, ReturnType::Primitive(Primitive::Int), &[]) }.and_then(|v| v.i());
+        if has.map_or(true, |n| n as usize > KEEP_BYTES) {
+            self.recycle(env, java);
+        }
+        cleared(env);
+    }
+
+    fn recycle(&mut self, env: &mut JNIEnv, java: &Java) {
+        if let Some(b) = self.drawn.take() {
+            // SAFETY: `recycle` is Bitmap's `() -> void`; nothing else holds this Bitmap.
+            let _ = unsafe { env.call_method_unchecked(b.as_obj(), java.recycle, ReturnType::Primitive(Primitive::Void), &[]) };
+        }
+    }
+}
 
 /// RGBA rows (`width` x `height`, tight) packed into RGB_565 rows `stride` bytes apart, each channel's
 /// top bits, as Android's own conversion keeps them. Alpha is dropped: only an opaque cover is asked for
@@ -82,96 +277,250 @@ fn pack_565(rgba: &[u8], width: usize, height: usize, out: &mut [u8], stride: us
 }
 
 /// Decodes `bytes` into `bitmap`, filling it; the IDCT shrinks big JPEGs when `idct` (see
-/// `Decoder::set_idct_scaling`). An RGB_565 Bitmap's picture is decoded to RGBA first and packed into it.
-fn draw(env: &JNIEnv, drawer: &mut Drawer, bytes: &[u8], bitmap: &JObject, idct: bool) -> jint {
+/// `Decoder::set_idct_scaling`). An RGB_565 Bitmap's picture is decoded into `rgba` first and packed.
+fn draw(env: &JNIEnv, decoder: &mut Decoder, rgba: &mut Vec<u8>, bytes: &[u8], bitmap: &JObject, idct: bool) -> Result<(), Fail> {
     #[cfg(target_os = "android")]
     {
-        let Some(mut b) = crate::look::bitmap::Locked::new_or_565(env, bitmap) else { return BAD_BITMAP };
+        let Some(mut b) = crate::look::bitmap::Locked::new_or_565(env, bitmap) else { return Err(Fail::Decode(DecodeError::Target)) };
         let (width, height, stride) = (b.width, b.height, b.stride);
-        drawer.decoder.set_idct_scaling(idct);
-        let decoded = if b.rgb565 {
-            drawer.rgba.resize(width * height * 4, 0);
-            let target = nori_covers::Target { px: &mut drawer.rgba, width, height, stride: width * 4 };
-            let r = drawer.decoder.decode_into(bytes, target, nori_covers::Alpha::Premultiplied);
-            if r.is_ok() {
-                pack_565(&drawer.rgba, width, height, b.pixels_mut(), stride);
-            }
-            if drawer.rgba.capacity() > KEEP_RGBA {
-                drawer.rgba = Vec::new();
-            }
-            r
+        decoder.set_idct_scaling(idct);
+        if b.rgb565 {
+            rgba.resize(width * height * 4, 0);
+            decoder.decode_into(bytes, Target { px: rgba, width, height, stride: width * 4 }, Alpha::Premultiplied).map_err(Fail::Decode)?;
+            pack_565(rgba, width, height, b.pixels_mut(), stride);
+            Ok(())
         } else {
-            let target = nori_covers::Target { px: b.pixels_mut(), width, height, stride };
-            drawer.decoder.decode_into(bytes, target, nori_covers::Alpha::Premultiplied)
-        };
-        match decoded {
-            Ok(()) => OK,
-            Err(nori_covers::DecodeError::Unknown) => UNKNOWN,
-            Err(nori_covers::DecodeError::Target) => BAD_BITMAP,
-            Err(_) => BROKEN,
+            decoder.decode_into(bytes, Target { px: b.pixels_mut(), width, height, stride }, Alpha::Premultiplied).map_err(Fail::Decode)
         }
     }
     #[cfg(not(target_os = "android"))]
-    BAD_BITMAP
+    Err(Fail::Decode(DecodeError::Target))
 }
 
-/// The picture in the file at `path`, into `bitmap`. Long work (a read and a decode), so a plain JNI
-/// call: never on the UI thread.
+fn code(e: &nori_covers::Error) -> jint {
+    match e {
+        nori_covers::Error::Decode(DecodeError::Unknown) => UNKNOWN,
+        nori_covers::Error::Decode(DecodeError::Target) => BAD_BITMAP,
+        nori_covers::Error::Decode(_) | nori_covers::Error::Panicked(_) => BROKEN,
+        _ => UNREADABLE,
+    }
+}
+
+/// Hands a finished cover to its Kotlin waiter, on the loader thread that finished it.
+fn deliver(waiter: &GlobalRef, r: Result<Drawn, nori_covers::Error>) {
+    let Some(java) = JAVA.get() else { return };
+    let Some(mut env) = crate::attached(&java.vm) else { return };
+    let null = JObject::null();
+    let (bitmap, status) = match &r {
+        Ok(d) => (d.bitmap.as_obj(), OK),
+        Err(e) => (&null, code(e)),
+    };
+    let args = [JValue::Object(bitmap).as_jni(), JValue::Int(status).as_jni()];
+    // SAFETY: `done` is `CoverPixels.Waiter`'s `(Bitmap, int) -> void`, and `waiter` implements it.
+    let _ = unsafe { env.call_method_unchecked(waiter.as_obj(), java.done, ReturnType::Primitive(Primitive::Void), &args) };
+    cleared(&mut env);
+}
+
+/// The transport the app hands the core (`set_cover_transport`), found when a cover first reaches for the
+/// network: the loader is opened from the main thread, which must not wait for the app's HTTP client to be
+/// built, and is built on the thread that warms the app up.
+struct Platform;
+
+#[async_trait::async_trait]
+impl Transport for Platform {
+    async fn get(&self, url: String, timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+        let Some(t) = nori_core::covers::cover_transport(Duration::from_secs(30)) else {
+            return Err(TransportError::Failed { kind: FailureKind::Other, detail: Some("no transport for covers".into()) });
+        };
+        t.get(url, timeout_ms).await
+    }
+
+    fn address_changed(&self) {}
+}
+
+type Covers = Loader<Bitmaps>;
+
+fn loader<'a>(h: jlong) -> Option<&'a Covers> {
+    // SAFETY: a non-zero `h` is a pointer `open` made with `Box::into_raw`, and Kotlin never passes one
+    // on after `close`.
+    (h != 0).then(|| unsafe { &*(h as *const Covers) })
+}
+
+/// A loader keeping covers in `dir`, at most `disk_bytes` of them, fetching through the transport the
+/// app hands the core (`set_cover_transport`). Cheap: nothing is read until the first cover is asked
+/// for, on a loader thread. 0 when the Java side is missing.
+extern "system" fn open(mut env: JNIEnv, _: JClass, dir: JString, disk_bytes: jlong, hardware: jboolean, rgb565: jboolean) -> jlong {
+    if JAVA.get().is_none() {
+        match look_up(&mut env) {
+            Ok(j) => {
+                let _ = JAVA.set(j);
+            }
+            Err(e) => {
+                cleared(&mut env);
+                nori_core::alog::info(&format!("covers: the Java side is missing: {e}"));
+                return 0;
+            }
+        }
+    }
+    let Some(dir) = with_str(&mut env, &dir, |d| PathBuf::from(d)) else { return 0 };
+    let config = Config { disk_bytes: disk_bytes.max(0) as u64, memory_bytes: 0, ..Config::new(dir) };
+    let paint = Bitmaps { hardware: hardware != 0, rgb565: rgb565 != 0, idle: Mutex::new(Vec::new()) };
+    Box::into_raw(Box::new(Loader::with_paint(config, Arc::new(Platform), paint))) as jlong
+}
+
+/// Stops the loader's threads once they finish what they are on; whoever waits is called back with
+/// nothing.
+extern "system" fn close(_: JNIEnv, _: JClass, h: jlong) {
+    if h != 0 {
+        // SAFETY: `h` came from `open` and Kotlin closes it once.
+        drop(unsafe { Box::from_raw(h as *mut Covers) });
+    }
+}
+
+/// Asks for the cover at `url` to fill `width` x `height` (0 x 0: at its own size, at most 2048 a side),
+/// for `waiter`, whose
+/// `done` is called once with it, or with null and why not. The handle is the request's: [`cancel`]
+/// takes it back, once, whether the cover came or not. 0 when there is no loader.
+extern "system" fn request(mut env: JNIEnv, _: JClass, h: jlong, url: JString, width: jint, height: jint, waiter: JObject) -> jlong {
+    let Some(loader) = loader(h) else { return 0 };
+    let Ok(waiter) = env.new_global_ref(&waiter) else { return 0 };
+    let (w, h) = (width.max(0) as u32, height.max(0) as u32);
+    let ticket = with_str(&mut env, &url, |url| loader.request(url, w, h, move |r| deliver(&waiter, r)));
+    ticket.map_or(0, |t| Box::into_raw(Box::new(t)) as jlong)
+}
+
+/// Lets a request go: the view no longer wants its cover, or has it. Its waiter is not called for a cover
+/// finished after this; one finished as it runs may still be on its way, and Kotlin drops it
+/// (`CoverLoader.Request`). Waiting here for that call back would be a `@FastNative` door waiting on
+/// Java. A lock and a few frees, so `@FastNative`.
+extern "system" fn cancel(_: JNIEnv, _: JClass, ticket: jlong) {
+    if ticket != 0 {
+        // SAFETY: `ticket` came from `request` and Kotlin hands each back once.
+        drop(unsafe { Box::from_raw(ticket as *mut Ticket) });
+    }
+}
+
+/// Fetches the cover at `url` onto the disk without decoding it (a download's covers).
+extern "system" fn warm(mut env: JNIEnv, _: JClass, h: jlong, url: JString) {
+    if let Some(loader) = loader(h) {
+        with_str(&mut env, &url, |url| loader.warm(url));
+    }
+}
+
+/// Deletes every cover on the disk. Disk work: off the main thread.
+extern "system" fn clear(_: JNIEnv, _: JClass, h: jlong) {
+    if let Some(d) = loader(h).and_then(Loader::disk) {
+        d.clear();
+    }
+}
+
+/// What a thread working out a page's colours keeps between covers.
+#[derive(Default)]
+struct Colours {
+    decoder: Decoder,
+    bytes: Vec<u8>,
+    rgba: Vec<u8>,
+    argb: Vec<u32>,
+}
+
+/// Lent per page being worked out, as the decoders in `Bitmaps` are.
+static COLOURS: Mutex<Vec<Colours>> = Mutex::new(Vec::new());
+
+/// What `colours` answers, one bit for each thing it wrote.
+const PLAIN: jint = 1;
+const WASH: jint = 2;
+const BLACK: jint = 4;
+
+/// The pages for the cover at `url` (`look::page`), worked out in Rust from the cover's file: read from
+/// the disk or fetched, decoded whole to fit `side` x `side`, straight colours, with no Bitmap in
+/// between. Into `out` and `wash` the page in the plain theme and into `black` the one on AMOLED black,
+/// each when it is not null: a screen that shows both (the bar black, the player in the record's
+/// colours) gets them from one decode. Answers `PLAIN`, `WASH` and `BLACK` for what it wrote, 0 for no
+/// cover. Waits for the network when the cover is not on the disk: off the main thread.
+#[allow(clippy::too_many_arguments)]
+extern "system" fn colours(mut env: JNIEnv, _: JClass, h: jlong, url: JString, side: jint, dark: jboolean, out: JIntArray, wash: JObject, black: JIntArray) -> jint {
+    let Some(loader) = loader(h) else { return 0 };
+    let mut c = COLOURS.lock().pop().unwrap_or_default();
+    // A panic unwinding out of a JNI door aborts the app: a cover that breaks the decoder is a page
+    // without colours instead.
+    let answer = panic::catch_unwind(AssertUnwindSafe(|| {
+        let read = with_str(&mut env, &url, |url| loader.read(url, &mut c.bytes).is_ok());
+        if read != Some(true) {
+            return 0;
+        }
+        let Ok(head) = nori_covers::header(&c.bytes) else { return 0 };
+        // The whole picture, shrunk to fit: a page takes its colours from the cover's own bottom rows.
+        let k = (side.max(1) as f64 / head.width.max(head.height) as f64).min(1.0);
+        let (w, h) = (((head.width as f64 * k).round() as usize).max(1), ((head.height as f64 * k).round() as usize).max(1));
+        c.rgba.resize(w * h * 4, 0);
+        if c.decoder.decode_into(&c.bytes, Target { px: &mut c.rgba, width: w, height: h, stride: w * 4 }, Alpha::Straight).is_err() {
+            return 0;
+        }
+        c.argb.clear();
+        c.argb.extend(c.rgba.chunks_exact(4).map(|p| u32::from(p[3]) << 24 | u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])));
+        let mut answer = 0;
+        if !out.is_null() {
+            answer |= match crate::look::page(&env, &c.argb, w, h, dark != 0, false, &out, &wash) {
+                0 => 0,
+                1 => PLAIN,
+                _ => PLAIN | WASH,
+            };
+        }
+        if !black.is_null() && crate::look::page(&env, &c.argb, w, h, dark != 0, true, &black, &JObject::null()) != 0 {
+            answer |= BLACK;
+        }
+        answer
+    }))
+    .unwrap_or_else(|_| {
+        // Its buffers may be anywhere mid-picture.
+        c = Colours::default();
+        0
+    });
+    if c.bytes.capacity() > KEEP_BYTES {
+        c.bytes = Vec::new();
+    }
+    COLOURS.lock().push(c);
+    answer
+}
+
+/// What the benchmark's thread keeps between covers: a decoder and the file's bytes.
+struct Kept {
+    decoder: Decoder,
+    rgba: Vec<u8>,
+    bytes: Vec<u8>,
+}
+
+thread_local! {
+    static KEPT: RefCell<Kept> = RefCell::new(Kept { decoder: Decoder::new(), rgba: Vec::new(), bytes: Vec::new() });
+}
+
+/// The picture in the file at `path`, into `bitmap` (a mutable software ARGB_8888 or RGB_565 one), at
+/// its size: the decode alone, for the debug build's `coverbench`. A read and a decode, so a plain JNI
+/// call, never on the main thread.
 extern "system" fn decode_file(mut env: JNIEnv, _: JClass, path: JString, bitmap: JObject, idct: jboolean) -> jint {
+    // As in `colours`: a panic is this file's failure, not the app's end.
+    panic::catch_unwind(AssertUnwindSafe(|| decode_kept(&mut env, &path, &bitmap, idct))).unwrap_or_else(|_| {
+        KEPT.replace(Kept { decoder: Decoder::new(), rgba: Vec::new(), bytes: Vec::new() });
+        BROKEN
+    })
+}
+
+fn decode_kept(env: &mut JNIEnv, path: &JString, bitmap: &JObject, idct: jboolean) -> jint {
     KEPT.with_borrow_mut(|kept| {
-        let read = crate::with_str(&mut env, &path, |p| {
+        let read = with_str(env, path, |p| {
             kept.bytes.clear();
             std::fs::File::open(p).and_then(|mut f| f.read_to_end(&mut kept.bytes)).is_ok()
         });
         if read != Some(true) {
             return UNREADABLE;
         }
-        draw(&env, &mut kept.drawer, &kept.bytes, &bitmap, idct != 0)
-    })
-}
-
-/// The picture in the first `len` bytes of `bytes`, into `bitmap`. The compressed bytes are copied once,
-/// into a buffer this thread keeps.
-extern "system" fn decode_bytes(env: JNIEnv, _: JClass, bytes: JByteArray, len: jint, bitmap: JObject, idct: jboolean) -> jint {
-    KEPT.with_borrow_mut(|kept| {
-        let Ok(have) = env.get_array_length(&bytes) else { return UNREADABLE };
-        let Ok(len) = usize::try_from(len) else { return UNREADABLE };
-        if len > have as usize {
-            return UNREADABLE;
+        match draw(env, &mut kept.decoder, &mut kept.rgba, &kept.bytes, bitmap, idct != 0) {
+            Ok(()) => OK,
+            Err(Fail::Decode(DecodeError::Unknown)) => UNKNOWN,
+            Err(Fail::Decode(DecodeError::Target)) | Err(Fail::Java) => BAD_BITMAP,
+            Err(Fail::Decode(_)) => BROKEN,
         }
-        kept.bytes.resize(len, 0);
-        // SAFETY: i8 and u8 have one size and alignment, and `kept.bytes` holds `len` initialised bytes.
-        let into = unsafe { std::slice::from_raw_parts_mut(kept.bytes.as_mut_ptr().cast::<i8>(), len) };
-        if env.get_byte_array_region(&bytes, 0, into).is_err() {
-            return UNREADABLE;
-        }
-        draw(&env, &mut kept.drawer, &kept.bytes, &bitmap, idct != 0)
     })
-}
-
-/// The picture in the first `len` bytes of the direct buffer `buf`, from its headers alone: its width in
-/// the high 32 bits and its height in the low, or minus what stops it being decoded here (`UNREADABLE`,
-/// `UNKNOWN`, `BROKEN`, `ORIENTED`). Microseconds of work, so `@FastNative`.
-extern "system" fn header(env: JNIEnv, _: JClass, buf: JByteBuffer, len: jint) -> jlong {
-    let Some(bytes) = crate::region(&env, &buf, 0, len) else { return -jlong::from(UNREADABLE) };
-    match nori_covers::header(bytes) {
-        Ok(h) if h.oriented => -jlong::from(ORIENTED),
-        Ok(h) => (h.width as jlong) << 32 | h.height as jlong,
-        Err(nori_covers::DecodeError::Unknown) => -jlong::from(UNKNOWN),
-        Err(_) => -jlong::from(BROKEN),
-    }
-}
-
-/// The picture in the first `len` bytes of the direct buffer `buf`, into `bitmap`: read where it lies,
-/// with no copy. A decode's work, so a plain JNI call, never on the UI thread.
-extern "system" fn decode_buffer(env: JNIEnv, _: JClass, buf: JByteBuffer, len: jint, bitmap: JObject, idct: jboolean) -> jint {
-    let Some(bytes) = crate::region(&env, &buf, 0, len) else { return UNREADABLE };
-    let mut drawer = IDLE.lock().ok().and_then(|mut idle| idle.pop()).unwrap_or_default();
-    let r = draw(&env, &mut drawer, bytes, &bitmap, idct != 0);
-    if let Ok(mut idle) = IDLE.lock() {
-        idle.push(drawer);
-    }
-    r
 }
 
 #[cfg(test)]
@@ -189,5 +538,13 @@ mod tests {
         assert_eq!(px(6), 0b11111_000001_00001, "red's top five, green's top six, blue's top five");
         assert_eq!(px(8), 0b00000_111111_11110);
         assert_eq!(px(10), 0xAAAA);
+    }
+
+    #[test]
+    fn a_failure_is_told_to_kotlin_as_what_stopped_it() {
+        assert_eq!(code(&nori_covers::Error::Decode(DecodeError::Unknown)), UNKNOWN);
+        assert_eq!(code(&nori_covers::Error::Decode(DecodeError::Corrupt("x".into()))), BROKEN);
+        assert_eq!(code(&nori_covers::Error::Status(404)), UNREADABLE);
+        assert_eq!(code(&nori_covers::Error::Closed), UNREADABLE);
     }
 }

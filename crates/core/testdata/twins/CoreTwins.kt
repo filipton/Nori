@@ -1,4 +1,4 @@
-// The Kotlin originals of norimusic-core's twins, run on the host JVM by tools/twins.sh to write
+// The Kotlin originals of nori-core's twins, run on the host JVM by tools/twins.sh to write
 // core_twins.tsv, which crates/core/tests/twins.rs holds the Rust to. Each function is the app's own code,
 // copied as it is; where it leans on an Android or media3 class, the class's part in it is written out
 // here (Uri.encode from AOSP's android/net/Uri.java, MutableTransitionState as its two booleans, media3's
@@ -16,7 +16,7 @@ fun list(xs: List<Any?>): String = if (xs.isEmpty()) "_" else xs.joinToString(",
 
 fun row(vararg f: Any?) = println(f.joinToString("\t"))
 
-// ---- app/.../ui/Components.kt: isProviderCover, over the core's cover_rules ----
+// ---- core/.../data/Library.kt: Covers.isProvider (ui's isProviderCover), over the core's cover_rules ----
 
 val providerMarks: List<String> = listOf("ext-", "pl-").map { "&id=$it" }
 fun isProviderCover(url: String): Boolean = providerMarks.any { url.contains(it) }

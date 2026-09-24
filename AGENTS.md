@@ -27,13 +27,13 @@ crates/player/  Rust, platform-free: how music is played and heard. Decoding com
 crates/look/    Rust, platform-free: how a page looks and moves. The colours a page takes from its cover
                 (cover.rs, with a line-for-line port of AndroidX Palette in palette.rs), a theme's tones
                 from one colour and the accents (theme.rs), a page's whole dressed look and its cross-fade
-                (dress.rs, over Compose's own colour maths in compose.rs), the player's sleeve geometry and
-                gradients (sleeve.rs), the seek bar's pacing (motion.rs) and lyric timing, sweep and redraw
-                pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
+                (dress.rs, over Compose's own colour maths in compose.rs), the gradients that dissolve a
+                picture into its page (sleeve.rs), the seek bar's pacing (motion.rs) and lyric timing, sweep
+                and redraw pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
 crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
                 decimal separator is handed in once), with Java's rounding.
 crates/core/    Rust, platform-free: the app's state, an rlib a desktop or terminal client links as it is
-                (package norimusic-core, lib `norimusic`). The Subsonic client and network policy (client.rs,
+                (package nori-core, lib `nori_core`). The Subsonic client and network policy (client.rs,
                 transport.rs, cache_policy.rs, stream.rs, library.rs), one SQLite/FTS5 database for the
                 whole app with every server's rows keyed by its id (db.rs), settings (settings.rs codec and
                 rules, settings_store.rs the live copy, settings_schema.rs every settings page, profiles.rs),
@@ -46,7 +46,7 @@ crates/core/    Rust, platform-free: the app's state, an rlib a desktop or termi
                 (automix/host.rs), the sound chain that follows the settings (dsp.rs), the ear's clock
                 (heard.rs), the streaming analyser (automix/store.rs). Plain Rust types in and out, no
                 JNI. Its uniffi exports sit behind the default `ffi` feature; `cargo build -p
-                norimusic-core --no-default-features` builds it without uniffi. Kotlin asks and draws;
+                nori-core --no-default-features` builds it without uniffi. Kotlin asks and draws;
                 the core decides, and reacts to its own state (a settings change reaches the planner
                 and the sound chain by itself).
 crates/engine/  Rust, platform-free: the whole player for a platform without one (package nori-engine):
@@ -64,15 +64,17 @@ crates/engine/  Rust, platform-free: the whole player for a platform without one
                 tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
 crates/mpris/   Rust, Linux: the desktop's media controls (MPRIS over libdbus), for nori-cli --mpris.
-crates/covers/  Rust, platform-free: cover art for a client without an image loader (package nori-covers).
-                Fetched through the core's Transport at the core's addresses, kept on disk under a size
-                limit, least recently used out first (disk.rs, the index rebuilt from the directory) and
-                decoded in memory under a byte limit (memory.rs); JPEG, PNG and WebP decoded in pure Rust
-                straight into the caller's RGBA rows at the size drawn (decode.rs, scaled by scale.rs: an
-                exact area average down, bilinear up); requests shared per cover and size, cancelled by
-                dropping their ticket, on a few worker threads (loader.rs). Android keeps Coil and
-                decodes inside it with this decoder (app `RustCoverDecoder`, through crates/android
-                covers.rs), behind the "Decode covers in the core" setting.
+crates/covers/  Rust, platform-free: all cover art, Android's included (package nori-covers; the app has no
+                image library). Fetched through the core's Transport at the core's addresses, kept on disk
+                under a size limit, least recently used out first (disk.rs, the index rebuilt from the
+                directory) and decoded in memory under a byte limit (memory.rs, 0 on Android); JPEG, PNG,
+                WebP and a GIF's first frame decoded in pure Rust straight into the caller's pixels at the
+                size drawn and turned as their EXIF says (decode.rs, scaled by scale.rs: an exact area
+                average down, bilinear up; HEIF and AVIF are not decoded, see decode.rs); requests shared
+                per cover and size, cancelled by dropping their ticket, on a few worker threads, each
+                cover painted by the client's `Paint` - RGBA rows, or an Android Bitmap (loader.rs,
+                crates/android covers.rs). Kotlin keeps only the Bitmaps (`CoverLoader`) and draws them
+                (ui `Cover`).
 crates/http/    Rust, desktop: the core's Transport and the engine's ByteSource over one ureq agent.
 crates/cli/     Rust, desktop: nori-cli, the terminal client that proves the split - log in, search,
                 queue and play through the core, the engine and output-cpal, or `--wav` to a file;
@@ -83,8 +85,9 @@ crates/android/ Rust, Android only: the library the app loads (package nori-andr
                 with uniffi-bindgen-kotlin-jni from the core's exports (the Kotlin in package
                 dev.nori.music.ffi and uniffi comes from crates/uniffi-bindgen), and JNI_OnLoad hands it
                 the JavaVM and the app's class loader. The doors are one module per group (decoder.rs, dsp.rs,
-                stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps read and written in
-                place - covers.rs, playlist.rs, settings.rs, transfers.rs, stream_cache.rs, player.rs). Doors
+                stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps written in
+                place - covers.rs - the cover loader, decoding into Bitmaps and calling Kotlin back -
+                playlist.rs, settings.rs, transfers.rs, stream_cache.rs, player.rs). Doors
                 only convert; anything they decide belongs in the core. track.rs is nori-engine's output on
                 Android (the engine's ring poured into an AudioTrack in bursts, from a thread of its own,
                 tested on a simulated track), and player.rs the Rust playback path around it: the engine
@@ -100,9 +103,9 @@ crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.
                 changes marked NORI: a class looked up from a thread the core started is found through the
                 app's class loader, and a thread the runtime attached to the JVM is detached when it ends
                 (Android aborts otherwise). Take upstream's again when the revision moves, and keep both.
-core/           Android library, no UI: net/, data/ (Library = the repository), playback/
-                (media3 service, DAC, scrobbling; RustAudio.kt puts the core's decoder ahead of
-                MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
+core/           Android library, no UI: net/, data/ (Library = the repository; CoverLoader, the covers'
+                Bitmaps), playback/ (media3 service, DAC, scrobbling; RustAudio.kt puts the core's
+                decoder ahead of MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
                 speed/pitch and silence skipping; RustPlayer.kt is the second path, nori-engine as a
                 media3 player, chosen by the "Playback engine" setting at service start - ExoPlayer
                 stays the default until the Rust one measures at least as well),
@@ -118,14 +121,17 @@ decodes, outputs, and asks.
 
 The boundary that matters: `ui/` may be thrown away and rewritten. It reads ViewModel state and
 calls ViewModel functions, and may call the core's pure functions (words, numbers, looks) directly;
-it never touches `Nori`, media3, OkHttp or the core's state. `core/` must never know a UI exists.
+it never touches `Nori`, media3, OkHttp or the core's state. Covers it draws with `Cover` (or
+`rememberCover`), over `CoverLoader` (core/.../data), which is to it what an image library would be.
+`core/` must never know a UI exists.
 Everything a second client (a desktop app) would need to behave the same - every decision, rule,
 word, colour and piece of state - lives in the crates; the Kotlin is a front end.
 
 ## Build and test
 
 ```sh
-./gradlew :app:assembleDebug -PrustTargets=x86_64   # fast build for an emulator
+./gradlew :app:assembleDebug                        # a debug build is x86_64 (the emulator) unless -PrustTargets says otherwise
+./gradlew :app:assemblePerf                         # perf and release builds default to arm64-v8a (phones)
 cargo test                                          # the Rust tests
 cargo test -p nori-player --test pipeline           # the player end to end on a virtual clock (sim.rs)
 cargo test -p nori-engine                           # the desktop player on real threads, against sim.rs
@@ -136,6 +142,11 @@ tools/twins.sh                                      # the Kotlin originals of th
 ```
 
 Run `cargo test` and a build before committing.
+
+Every compile goes through `sccache` (`.cargo/config.toml`), a compiler cache shared by this checkout and every
+worktree beside it, so an agent's fresh worktree reuses the built dependencies. Install it once with
+`cargo install --locked sccache`; `sccache --show-stats` says how much it saved. During development build for
+the emulator only; build arm64-v8a only for an APK that goes to a phone.
 
 ## Building an APK
 

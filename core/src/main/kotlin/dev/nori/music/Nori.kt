@@ -7,7 +7,7 @@ import dev.nori.music.data.Library
 import dev.nori.music.downloads.Downloads
 import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.Core
-import dev.nori.music.ffi.NetProfile
+import dev.nori.music.ffi.net.NetProfile
 import dev.nori.music.ffi.ServerConfig
 import dev.nori.music.net.Http
 import dev.nori.music.net.lifted
@@ -46,8 +46,11 @@ class Nori private constructor(private val context: Context) {
     private val lazyHttp = lazy { Http(context).also { it.configure(settings.value.server) } }
     private val lazySources = lazy { MediaSources(context, ::client, http, settings) }
 
-    /** The core's one door to the network; built with [http]. */
-    private val transport by lazy { http.transport { library.onServerChanged() } }
+    /**
+     * The core's one door to the network; built with [http]. The core's cover loader fetches through it
+     * too ([dev.nori.music.data.CoverLoader]), so covers ride the API's connection.
+     */
+    private val transport by lazy { http.transport { library.onServerChanged() }.also { dev.nori.music.ffi.setCoverTransport(it) } }
 
     private fun active(): Opened {
         // Compared as the settings hold it, so the core is only asked whose rows those are on a switch.
@@ -55,7 +58,7 @@ class Nori private constructor(private val context: Context) {
         opened?.takeIf { it.key == key }?.let { return it }
         return synchronized(lock) {
             opened?.takeIf { it.key == key } ?: settings.value.server.let { p ->
-                val id = dev.nori.music.ffi.serverDb(key)
+                val id = dev.nori.music.ffi.settings.serverDb(key)
                 val core = open(id, p)
                 Opened(key, id, core, Client(core, transport).also { c -> p?.let { c.setProfile(it.net()) } })
             }.also { opened = it }
@@ -91,7 +94,7 @@ class Nori private constructor(private val context: Context) {
     val onSecondAddress: Boolean get() = opened?.client?.onSecondAddress() ?: false
 
     private fun open(id: String, profile: ServerProfile?): Core =
-        Core(File(context.filesDir, dev.nori.music.ffi.dbFileName()).path, id).also { c -> profile?.let { c.configure(it.config()) } }
+        Core(File(context.filesDir, dev.nori.music.ffi.db.dbFileName()).path, id).also { c -> profile?.let { c.configure(it.config()) } }
 
     private fun ServerProfile.config() = ServerConfig(url, user, password, apiKey.ifEmpty { null }, legacyAuth)
     private fun ServerProfile.net() = NetProfile(url, altUrl, musicFolderId, altMaxBitRate.coerceAtLeast(0).toUInt())
@@ -142,14 +145,14 @@ class Nori private constructor(private val context: Context) {
         player.clear()
         // The old core is dropped, not closed: a request may still be using it, and the cleaner frees it.
         synchronized(lock) { opened = null }
-        settings.update { p -> p.withServers(dev.nori.music.ffi.serversActivated(p.serverList(), profile.stored())) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversActivated(p.serverList(), profile.stored())) }
         http.configure(profile)
         library.onServerChanged()
     }
 
     /** Settings that do not need the server asked again: headers, Wi-Fi only, music folder, name. */
     fun updateServer(profile: ServerProfile) {
-        settings.update { p -> p.withServers(dev.nori.music.ffi.serversUpdated(p.serverList(), profile.stored())) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversUpdated(p.serverList(), profile.stored())) }
         if (profile.id == settings.value.activeServerId) {
             http.configure(profile)
             opened?.takeIf { it.key == profile.id }?.client?.setProfile(profile.net())
@@ -161,10 +164,10 @@ class Nori private constructor(private val context: Context) {
         val wasActive = settings.value.activeServerId == id
         if (wasActive) { player.clear(); synchronized(lock) { opened = null } }
         // Which one takes over when the one in use goes is the core's (`settings::servers_remove`).
-        settings.update { p -> p.withServers(dev.nori.music.ffi.serversRemoved(p.serverList(), id)) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversRemoved(p.serverList(), id)) }
         // Its rows in the app's database; a whole library is a lot of rows, so not on this thread.
-        val db = File(context.filesDir, dev.nori.music.ffi.dbFileName()).path
-        Thread({ runCatching { dev.nori.music.ffi.dbForgetServer(db, id) } }, "nori-forget").start()
+        val db = File(context.filesDir, dev.nori.music.ffi.db.dbFileName()).path
+        Thread({ runCatching { dev.nori.music.ffi.db.dbForgetServer(db, id) } }, "nori-forget").start()
         if (wasActive) { http.configure(settings.value.server); library.onServerChanged() }
     }
 

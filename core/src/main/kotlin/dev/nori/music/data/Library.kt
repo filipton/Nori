@@ -1,33 +1,33 @@
 package dev.nori.music.data
 
-import dev.nori.music.ffi.Album
-import dev.nori.music.ffi.AlbumDetail
-import dev.nori.music.ffi.Artist
-import dev.nori.music.ffi.ArtistDetail
-import dev.nori.music.ffi.ArtistInfo
+import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.library.AlbumDetail
+import dev.nori.music.ffi.model.Artist
+import dev.nori.music.ffi.library.ArtistDetail
+import dev.nori.music.ffi.model.ArtistInfo
 import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.Core
-import dev.nori.music.ffi.Genre
-import dev.nori.music.ffi.IngestStats
-import dev.nori.music.ffi.Lyrics
-import dev.nori.music.ffi.LyricsOrigin
+import dev.nori.music.ffi.model.Genre
+import dev.nori.music.ffi.model.IngestStats
+import dev.nori.music.ffi.model.Lyrics
+import dev.nori.music.ffi.words.LyricsOrigin
 import dev.nori.music.ffi.Page
-import dev.nori.music.ffi.Playlist
-import dev.nori.music.ffi.PlaylistDetail
-import dev.nori.music.ffi.RadioStation
+import dev.nori.music.ffi.model.Playlist
+import dev.nori.music.ffi.library.PlaylistDetail
+import dev.nori.music.ffi.model.RadioStation
 import dev.nori.music.ffi.Read
-import dev.nori.music.ffi.SearchResult
-import dev.nori.music.ffi.ServerInfo
-import dev.nori.music.ffi.Song
-import dev.nori.music.ffi.Starrable
-import dev.nori.music.ffi.Starred
-import dev.nori.music.ffi.StarMarks
-import dev.nori.music.ffi.AlbumSort
-import dev.nori.music.ffi.albumSortApi
-import dev.nori.music.ffi.librarySizes
-import dev.nori.music.ffi.starMarks
-import dev.nori.music.ffi.Write
-import dev.nori.music.ffi.starMark
+import dev.nori.music.ffi.model.SearchResult
+import dev.nori.music.ffi.model.ServerInfo
+import dev.nori.music.ffi.model.Song
+import dev.nori.music.ffi.net.Starrable
+import dev.nori.music.ffi.library.Starred
+import dev.nori.music.ffi.library.StarMarks
+import dev.nori.music.ffi.library.AlbumSort
+import dev.nori.music.ffi.library.albumSortApi
+import dev.nori.music.ffi.library.librarySizes
+import dev.nori.music.ffi.library.starMarks
+import dev.nori.music.ffi.net.Write
+import dev.nori.music.ffi.library.starMark
 import dev.nori.music.net.lifted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -55,6 +55,17 @@ fun StarMarks.of(kind: StarKind, id: String): Boolean? = when (kind) {
 /** How the app sizes, names and keeps artwork (the core's `cover_rules`), read once. */
 object Covers {
     val rules: dev.nori.music.ffi.CoverRules by lazy { dev.nori.music.ffi.coverRules() }
+
+    /** "&id=ext-", "&id=pl-": what a provider's cover address carries. */
+    private val providerMarks: List<String> by lazy { rules.providerPrefixes.map { rules.idParam + it } }
+
+    /**
+     * A cover of an octo-fiesta provider item (external song, album, artist or playlist), which is never
+     * kept: octo-fiesta draws a "not downloaded" badge on it and replaces the picture under the same id
+     * once the item is in the library. Which ids those are is nori-core's (`cover_rules`); this is only
+     * the string test, made where a cover is asked for, without a crossing.
+     */
+    fun isProvider(url: String): Boolean = providerMarks.any { url.contains(it) }
 }
 
 /**
@@ -112,7 +123,7 @@ class Library(
 
     // ---- session ----
 
-    suspend fun musicFolders(): List<dev.nori.music.ffi.MusicFolder> = call(Read.MusicFolders) { (it as Page.Folders).v }
+    suspend fun musicFolders(): List<dev.nori.music.ffi.model.MusicFolder> = call(Read.MusicFolders) { (it as Page.Folders).v }
 
 
     // ---- search ----
@@ -128,7 +139,7 @@ class Library(
      * The server's answer to [query], taken into [session] by the core (`SearchSession::ask`) without
      * coming out here; null when the field has moved on.
      */
-    suspend fun searchInto(session: dev.nori.music.ffi.SearchSession, query: String): dev.nori.music.ffi.SearchView? =
+    suspend fun searchInto(session: dev.nori.music.ffi.SearchSession, query: String): dev.nori.music.ffi.library.SearchView? =
         withContext(Dispatchers.IO) { lifted { session.ask(client, query) } }
 
     suspend fun searchHistory(): List<String> = withContext(Dispatchers.IO) { core.searchHistory() }
@@ -179,7 +190,7 @@ class Library(
         lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) emit(FoundLyrics(it, LyricsOrigin.SERVER)) }
         val server = fromServer
         val hasLines = server != null && server.lines.isNotEmpty()
-        lifted { client.lyricsAfterServer(song, hasLines, server?.synced == true) }
+        lifted { client.lyricsAfterServer(song.id, hasLines, server?.synced == true) }
             ?.let { emit(FoundLyrics(it.lyrics, if (it.lrclib) LyricsOrigin.LRCLIB else LyricsOrigin.SERVER)) }
     }.flowOn(Dispatchers.IO)
 
@@ -192,10 +203,10 @@ class Library(
     // ---- what to play: each list is made in the core (actions.rs), requests included ----
 
     /** A radio from one song: it, then what the server finds similar, or random songs of its genre. */
-    suspend fun radio(song: Song): List<Song> = withContext(Dispatchers.IO) { lifted { client.radio(song) } }
+    suspend fun radio(song: Song): List<Song> = withContext(Dispatchers.IO) { lifted { client.radio(song.id) } }
 
     /** An instant mix from the index, or the radio when the index has nothing near the song. */
-    suspend fun instantMix(song: Song): List<Song> = withContext(Dispatchers.IO) { lifted { client.instantMix(song) } }
+    suspend fun instantMix(song: Song): List<Song> = withContext(Dispatchers.IO) { lifted { client.instantMix(song.id) } }
 
     /** Every album of an artist (a provider's left out), in order, as one list of songs. */
     suspend fun artistSongs(artistId: String): List<Song> = withContext(Dispatchers.IO) { lifted { client.artistSongsOf(artistId) } }
@@ -203,24 +214,24 @@ class Library(
     suspend fun shuffleAll(): List<Song> = withContext(Dispatchers.IO) { lifted { client.shuffleAll() } }
 
     suspend fun smartPlaylists() = withContext(Dispatchers.IO) { core.smartList() }
-    fun smartDefaults() = dev.nori.music.ffi.smartDefaults()
+    fun smartDefaults() = dev.nori.music.ffi.library.smartDefaults()
     suspend fun smartSave(id: String, name: String, json: String): String = withContext(Dispatchers.IO) { core.smartSave(id, name, json) }
     suspend fun smartDelete(id: String) = withContext(Dispatchers.IO) { core.smartDelete(id) }
-    suspend fun smartPage(json: String): dev.nori.music.ffi.SmartPage =
+    suspend fun smartPage(json: String): dev.nori.music.ffi.library.SmartPage =
         withContext(Dispatchers.IO) { core.smartPage(json, sizes.smartSongs) }
 
-    fun m3uExport(name: String, songs: List<Song>): String = dev.nori.music.ffi.m3uExport(name, songs)
+    fun m3uExport(name: String, songs: List<Song>): String = dev.nori.music.ffi.library.m3uExport(name, songs)
 
     /** The server's folder tree, for libraries organised by directory rather than by tags. */
     fun folders(): Flow<List<Artist>> = cached(Read.FolderIndex) { (it as Page.Artists).v }
-    fun folder(id: String): Flow<dev.nori.music.ffi.Directory> = cached(Read.FolderById(id)) { (it as Page.DirectoryPage).v }
+    fun folder(id: String): Flow<dev.nori.music.ffi.model.Directory> = cached(Read.FolderById(id)) { (it as Page.DirectoryPage).v }
 
     /** Sorted pages of the offline index: the "all songs" and "by decade" lists. */
     suspend fun browseSongs(sort: String, descending: Boolean, starredOnly: Boolean, years: IntRange?, offset: Int, limit: Int): List<Song> = withContext(Dispatchers.IO) {
         core.browseSongs(sort, descending, starredOnly, (years?.first ?: 0).toUInt(), (years?.last ?: 0).toUInt(), offset.toUInt(), limit.toUInt())
     }
 
-    suspend fun decades(): List<dev.nori.music.ffi.Decade> = withContext(Dispatchers.IO) { core.browseDecades() }
+    suspend fun decades(): List<dev.nori.music.ffi.library.Decade> = withContext(Dispatchers.IO) { core.browseDecades() }
 
 
     suspend fun randomSongs(): List<Song> = call(Read.RandomSongs(sizes.randomSongs, null)) { (it as Page.Songs).v }
@@ -241,7 +252,7 @@ class Library(
     suspend fun mixWarm(): Boolean = withContext(Dispatchers.IO) { client.mixWarmAll() }
 
     /** What picking the server's saved queue back up plays (the core's `resume_from_server`). */
-    suspend fun resumeFromServer(): dev.nori.music.ffi.ResumePlan = withContext(Dispatchers.IO) { lifted { client.resumeFromServer() } }
+    suspend fun resumeFromServer(): dev.nori.music.ffi.library.ResumePlan = withContext(Dispatchers.IO) { lifted { client.resumeFromServer() } }
 
     suspend fun song(id: String): Song? = call(Read.SongById(id)) { (it as Page.OneSong).v }
     suspend fun albumSongs(id: String): List<Song> = call(Read.AlbumSongs(id)) { (it as Page.Songs).v }
@@ -296,7 +307,8 @@ class Library(
 
     // ---- queue hand-off between devices ----
 
-    suspend fun pushQueue(ids: List<String>, current: String?, positionMs: Long) = write(Write.SaveQueue(ids, current, positionMs))
+    /** The core's queue handed to the server (`Client::playlist_push`); nothing when there is nothing to hand. */
+    suspend fun pushQueue(current: String?, positionMs: Long) = withContext(Dispatchers.IO) { lifted { client.playlistPush(current, positionMs) } }
 
 
     // ---- offline index ----

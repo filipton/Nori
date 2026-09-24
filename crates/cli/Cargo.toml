@@ -10,7 +10,7 @@ name = "nori-cli"
 path = "src/main.rs"
 
 [dependencies]
-norimusic-core = { path = "../core", default-features = false }
+nori-core = { path = "../core", default-features = false }
 nori-engine = { path = "../engine", features = ["core"] }
 nori-output-cpal = { path = "../output-cpal" }
 nori-http = { path = "../http" }

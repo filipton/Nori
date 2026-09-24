@@ -1,0 +1,22 @@
+[package]
+name = "nori-db"
+version.workspace = true
+edition.workspace = true
+
+# The app's one SQLite database: its schema, opening it for a server's rows, the library index with its
+# full-text search, and the thread that writes it in the background.
+[lib]
+name = "nori_db"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+parking_lot = "0.12"
+nori-model = { path = "../model" }

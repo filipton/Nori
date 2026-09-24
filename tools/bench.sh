@@ -17,7 +17,7 @@ sample() {
       v=\$(grep -s voluntary_ctxt \$d/status | head -1 | tr -dc 0-9); echo \${d##*/} \$t \${v:-0}; done; done" | tr -d '\r' | sort
 }
 threads() {
-  adb shell "for p in $(pids); do for d in /proc/\$p/task/*; do set -- \$(cat \$d/stat 2>/dev/null | sed 's/.*) //'); echo \$(cat \$d/comm | tr ' ' '_'):\${d##*/} \$((\${12:-0} + \${13:-0})); done; done" | tr -d '\r' | sort
+  adb shell "for p in $(pids); do for d in /proc/\$p/task/*; do set -- \$(cat \$d/stat 2>/dev/null | sed 's/.*) //'); v=\$(grep -s voluntary_ctxt \$d/status | head -1 | tr -dc 0-9); echo \$(cat \$d/comm | tr ' ' '_'):\${d##*/} \$((\${12:-0} + \${13:-0})) \${v:-0}; done; done" | tr -d '\r' | sort
 }
 
 state=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_0-9]+" | head -1 | tr -d "{" | sed -E "s/=3$/=PLAYING/; s/=2$/=PAUSED/" || true)
@@ -38,7 +38,9 @@ echo "memory:   $(adb shell dumpsys meminfo $pkg | grep -E 'TOTAL PSS' | awk '{p
 uid=$(adb shell dumpsys package $pkg | grep -m1 -oE 'userId=[0-9]+' | cut -d= -f2 | tr -d '\r')
 echo "wakelocks: $(adb shell dumpsys power | grep -E '^ +[A-Z_]+_WAKE_LOCK' | grep "uid=$uid" | awk '{print $2}' | tr '\n' ' ' || true)"
 echo "busiest threads (ms):"
-join /tmp/bench-a.$$ /tmp/bench-b.$$ 2>/dev/null | awk '$3-$2>0 {sub(/:[0-9]+$/,"",$1); print "  " ($3-$2)*10, $1}' | sort -rn | head -8
+join /tmp/bench-a.$$ /tmp/bench-b.$$ 2>/dev/null | awk '$4-$2>0 {sub(/:[0-9]+$/,"",$1); print "  " ($4-$2)*10, $1}' | sort -rn | head -8
+echo "busiest threads (wakeups/s):"
+join /tmp/bench-a.$$ /tmp/bench-b.$$ 2>/dev/null | awk -v s=$secs '$5-$3>0 {sub(/:[0-9]+$/,"",$1); printf "  %.1f %s\n", ($5-$3)/s, $1}' | sort -rn | head -8
 rm -f /tmp/bench-a.$$ /tmp/bench-b.$$ /tmp/bench-sa.$$ /tmp/bench-sb.$$
 after=$(adb shell dumpsys media_session | grep -A8 "package=$pkg" | grep -oE "\{state=[A-Z_0-9]+" | head -1 | tr -d "{" | sed -E "s/=3$/=PLAYING/; s/=2$/=PAUSED/" || true)
 echo "session after: ${after:-none}"

@@ -24,14 +24,10 @@ object Dsp {
     @JvmStatic @CriticalNative external fun delayFrames(handle: Long): Int
     @JvmStatic @CriticalNative external fun reset(handle: Long)
     @JvmStatic @FastNative external fun process(handle: Long, input: ByteBuffer, inPos: Int, output: ByteBuffer, outPos: Int, bytes: Int, encoding: Int): Boolean
-    /** The automatic pre-amp for these bands (kinds as BandKind ordinals); see nori_player::dsp::auto_preamp_db. */
-    @JvmStatic @FastNative external fun autoPreampDb(kinds: IntArray, gains: FloatArray): Float
     /** The pre-amp in effect (the core's `SoundSettings::effective_preamp_db`); [preampDb] is ignored when [automatic]. */
     @JvmStatic @FastNative external fun effectivePreampDb(eqEnabled: Boolean, preampDb: Float, automatic: Boolean, kinds: IntArray, gains: FloatArray): Float
     /** Whether anything in the sound chain is switched on; see nori_player::sound::sound_on. */
     @JvmStatic @CriticalNative external fun soundOn(eqEnabled: Boolean, crossfeedDb: Float, balance: Float, mono: Boolean, limiter: Boolean): Boolean
-    /** Where a volume fade from [from] to [to] stands at [t] (0..1); see nori_player::policy::fade. */
-    @JvmStatic @CriticalNative external fun fadeVolume(from: Float, to: Float, t: Float): Float
 }
 
 /**
@@ -53,6 +49,15 @@ class Equalizer : BaseAudioProcessor() {
          * reaching into the service. Null whenever nothing is playing through a processor.
          */
         @Volatile var active: Equalizer? = null
+
+        /**
+         * Whether a sound chain is in the samples' path now, whichever player plays: this processor in
+         * ExoPlayer's sink, or the Rust engine's own chain (which [active] knows nothing of).
+         */
+        val inChain: Boolean get() = PlaybackService.rustPlayer?.chainIn ?: (active != null)
+
+        /** The limiter's meter, whichever player plays: what it takes off right now, dB. */
+        val meterDb: Float get() = PlaybackService.rustPlayer?.gainReductionDb ?: active?.gainReductionDb ?: 0f
     }
 
     /** What the limiter is doing right now, for a meter. 0 when it is off or idle. */

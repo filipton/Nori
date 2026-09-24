@@ -27,7 +27,7 @@ use nori_player::pcm::Encoding;
 use nori_player::pipeline::{App, Player, Queue, Sound};
 use nori_player::policy::{audio_policy, AudioPrefs, OutputState};
 use nori_player::queue::previous_restarts;
-use nori_player::transport::{load_control, pause_fade, play_fade, switch_dip, Switch, IDLE_RELEASE_MS};
+use nori_player::transport::{load_control, pause_fade, play_fade, skip_plays, switch_dip, Switch, IDLE_RELEASE_MS};
 use parking_lot::Mutex;
 
 use crate::library::{Library, Sources};
@@ -86,6 +86,14 @@ pub enum Event {
     Error { id: String, message: String },
     /// The music goes to another output device now, by the name the core keeps devices under.
     Output { name: String },
+    /// The music ran out while a song's bytes are on their way (a slow network): `true` when the ear
+    /// starts hearing nothing for it, `false` when the music goes on. Nothing is said while the output
+    /// still holds music to play through the wait.
+    Buffering(bool),
+    /// Playback stopped by itself rather than because it was asked to (the queue's rules after a run
+    /// of songs that would not play): the `Paused` state that follows is the engine's, and a client that
+    /// keeps its own "wants to play" lets it go. A pause that was asked for comes without this.
+    Stopped,
 }
 
 /// The engine as it last looked, for a screen to read at any time without waking it.
@@ -106,6 +114,9 @@ pub struct Status {
     pub releases: u64,
     /// A jump, skip or seek is waiting out its dip: the place is still the one before it.
     pub switching: bool,
+    /// The sound chain is in the samples' path, and what its limiter took off the last buffer, dB.
+    pub chain: bool,
+    pub gain_reduction_db: f32,
 }
 
 impl Status {
@@ -138,6 +149,8 @@ impl Default for Config {
 
 enum Command {
     PlayAt(usize, i64),
+    GoTo(usize, i64),
+    PauseAtEnd(bool),
     Play,
     Pause,
     Toggle,
@@ -149,6 +162,7 @@ enum Command {
     QueueChanged,
     Repeat(u8),
     Gain,
+    Tuning(bool),
     Positions(Option<Duration>),
     Device(Device),
     Stop,
@@ -194,6 +208,8 @@ impl Engine {
             underruns: 0,
             releases: 0,
             switching: false,
+            chain: false,
+            gain_reduction_db: 0.0,
         }));
         let shared = status.clone();
         let devices = tx.clone();
@@ -228,6 +244,18 @@ impl Engine {
         self.send(Command::PlayAt(index, ms));
     }
 
+    /// Goes to queue (list) index `index` at `ms` and leaves playing or paused as it was: paused, the
+    /// place is held and nothing is fetched for it until play, as a skip, a previous or a seek is.
+    pub fn go_to(&self, index: usize, ms: i64) {
+        self.send(Command::GoTo(index, ms));
+    }
+
+    /// Pauses when the song playing ends (the sleep timer's "end of this song"), on the next one, from
+    /// its start: nothing after this song is read or mixed into. `false` takes it back.
+    pub fn pause_at_end(&self, on: bool) {
+        self.send(Command::PauseAtEnd(on));
+    }
+
     pub fn play(&self) {
         self.send(Command::Play);
     }
@@ -240,11 +268,14 @@ impl Engine {
         self.send(Command::Toggle);
     }
 
+    /// The next song, as the button does it: paused, a skip starts the music
+    /// (`nori_player::transport::skip_plays`).
     pub fn next(&self) {
         self.send(Command::Next);
     }
 
-    /// Previous, as the button does it: back to the start of the song a few seconds in.
+    /// Previous, as the button does it: back to the start of the song a few seconds in; paused, it
+    /// starts the music, as the next button does.
     pub fn previous(&self) {
         self.send(Command::Previous);
     }
@@ -279,6 +310,13 @@ impl Engine {
         self.send(Command::Gain);
     }
 
+    /// The equalizer's screen is open (`true`) or closed: a band moved is heard at once while it is,
+    /// the sink trading its deep buffer for a shallow one (`nori_player::transport::Chain::tuning`),
+    /// and the deep buffer is back at the next boundary after.
+    pub fn set_tuning(&self, on: bool) {
+        self.send(Command::Tuning(on));
+    }
+
     /// Position events this often while music plays, or none (the default: an idle screen is not woken).
     pub fn position_updates(&self, every: Option<Duration>) {
         self.send(Command::Positions(every));
@@ -286,6 +324,12 @@ impl Engine {
 
     pub fn status(&self) -> Status {
         self.status.lock().clone()
+    }
+
+    /// Reads the status in place, without copying it (and the song's id with it): for a question asked
+    /// every frame.
+    pub fn status_with<R>(&self, f: impl FnOnce(&Status) -> R) -> R {
+        f(&self.status.lock())
     }
 
     /// Stops the thread and lets the output go.
@@ -330,7 +374,16 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event)> {
     idle_at: Option<i64>,
     released: Option<(usize, i64)>,
     releases: u64,
+    /// The music ran out waiting for a song's bytes, as last said.
+    stalled: bool,
+    /// Where a jump, a skip or a seek made while paused goes (the queue index, the place, the song's
+    /// id): held until play, so nothing is fetched for a place that may move again before anyone
+    /// listens. The screen is told it at once.
+    held: Option<(usize, i64, String)>,
 }
+
+/// Less than this left to play while a song's bytes are on their way is a stall a screen shows.
+const STALL_US: i64 = 200_000;
 
 impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     fn new(p: Player<Sources<L>, RingTrack, A, Q>, rx: Receiver<Command>, events: E, status: Arc<Mutex<Status>>, settings: Settings, idle_release_ms: i64) -> Self {
@@ -355,6 +408,8 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             idle_at: None,
             released: None,
             releases: 0,
+            stalled: false,
+            held: None,
         };
         w.apply(settings);
         w
@@ -438,7 +493,12 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     fn command(&mut self, c: Command) {
         let now = self.now();
         match c {
-            Command::PlayAt(i, ms) => self.switch(Switched::To(i, ms), Switch::ToSong, now),
+            Command::PlayAt(i, ms) => {
+                self.held = None;
+                self.switch(Switched::To(i, ms), Switch::ToSong, now)
+            }
+            Command::GoTo(i, ms) => self.go(Switched::To(i, ms), Switch::ToSong, now),
+            Command::PauseAtEnd(on) => self.p.pause_at_end(on),
             Command::Play => self.play(),
             Command::Pause => self.pause(now),
             Command::Toggle => {
@@ -448,14 +508,19 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
                     self.play()
                 }
             }
-            Command::Next => self.switch(Switched::Next, Switch::Skip, now),
-            Command::Previous => self.switch(Switched::Previous, Switch::Skip, now),
-            Command::Seek(ms) => self.switch(Switched::Seek(ms), Switch::Seek, now),
+            // The skip buttons: paused, a skip is a request for music (nori_player::transport::skip_plays).
+            Command::Next => self.skip(Switched::Next, now),
+            Command::Previous => self.skip(Switched::Previous, now),
+            Command::Seek(ms) => self.go(Switched::Seek(ms), Switch::Seek, now),
             Command::Settings(s) => self.apply(s),
             Command::Replan => self.p.engine.replan(),
-            Command::QueueChanged => self.p.queue_changed(),
+            Command::QueueChanged => {
+                self.p.queue_changed();
+                self.follow_held();
+            }
             Command::Repeat(m) => self.p.set_repeat(m),
             Command::Gain => self.gain_changed = true,
+            Command::Tuning(on) => self.p.set_tuning(on),
             Command::Positions(every) => {
                 self.positions = every.map(|d| d.as_millis().max(1) as i64);
                 self.next_position = now;
@@ -520,6 +585,13 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         if self.p.playing() && self.state == State::Playing {
             return;
         }
+        if let Some((i, ms, _)) = self.held.take() {
+            // The place a skip or a seek left while paused: fetched now that the music is wanted.
+            self.released = None;
+            self.p.jump(i, ms);
+            self.resume();
+            return;
+        }
         self.reopen();
         if let Some(i) = self.p.stopped_at() {
             // Stopped at a song that would not play, nothing is being read: resuming would run the
@@ -551,6 +623,67 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         self.set_state(State::Paused);
     }
 
+    /// A skip button: made from the place held, if one is, and a request for music when paused.
+    fn skip(&mut self, s: Switched, now: i64) {
+        if !(self.p.playing() && self.pause_at.is_none()) {
+            self.hold(s);
+            if skip_plays(false) {
+                self.play();
+            }
+            return;
+        }
+        self.switch(s, Switch::Skip, now);
+    }
+
+    /// A jump or a seek that leaves playing or paused as it was: while music plays it is made (with its
+    /// dip), paused it is held until play.
+    fn go(&mut self, s: Switched, kind: Switch, now: i64) {
+        if self.p.playing() && self.pause_at.is_none() {
+            self.switch(s, kind, now);
+        } else {
+            self.hold(s);
+        }
+    }
+
+    /// Works out where `s` goes from the place held or the player's, and holds it there.
+    fn hold(&mut self, s: Switched) {
+        let len = self.p.queue.read(|q| q.len());
+        if len == 0 {
+            return;
+        }
+        let (at, ms) = match &self.held {
+            Some((i, ms, _)) => (*i, *ms),
+            None => (self.p.current().or(self.p.queue.read(|q| q.current())).unwrap_or(0), self.p.position_ms()),
+        };
+        let (i, ms) = match s {
+            Switched::To(i, ms) => (i.min(len - 1), ms.max(0)),
+            Switched::Seek(ms) => (at, ms.max(0)),
+            Switched::Next => match self.p.queue.read(|q| q.next_of(at, q.repeat())) {
+                Some(n) => (n, 0),
+                None => return,
+            },
+            Switched::Previous => {
+                let before = self.p.queue.read(|q| q.previous_of(at, q.repeat()));
+                if previous_restarts(ms, before.is_some(), false) {
+                    (at, 0)
+                } else {
+                    (before.unwrap_or(at), 0)
+                }
+            }
+        };
+        self.held = Some((i, ms, self.p.id_at(i)));
+    }
+
+    /// The queue was edited: a held place stays on its song, wherever that is now.
+    fn follow_held(&mut self) {
+        let Some((i, _, id)) = self.held.as_mut() else { return };
+        let found = self.p.queue.read(|q| q.ids().iter().enumerate().filter(|(_, s)| **s == *id).map(|(k, _)| k).min_by_key(|k| k.abs_diff(*i)));
+        match found {
+            Some(k) => *i = k,
+            None => self.held = None,
+        }
+    }
+
     fn switch(&mut self, s: Switched, kind: Switch, now: i64) {
         let playing = self.p.playing() && self.pause_at.is_none();
         match switch_dip(self.settings.fade_ms, kind, playing) {
@@ -575,6 +708,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             self.reopen();
         }
         while let Some(s) = self.switches.pop_front() {
+            // Only a play_at comes through here paused (a skip or a go_to is held instead): music is wanted.
             let wants_music = !matches!(s, Switched::Seek(_));
             match s {
                 Switched::To(i, ms) => {
@@ -638,10 +772,16 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
     }
 
     fn check(&mut self) {
-        if let Some(why) = self.p.sink.track.failed.take() {
-            (self.events)(Event::Error { id: String::new(), message: format!("the output would not open: {why}") });
+        if let Some(message) = self.p.sink.track.take_failure() {
+            (self.events)(Event::Error { id: String::new(), message });
             self.p.pause();
             self.set_state(State::Idle);
+            // The device is let go as a long pause lets it go: the next play opens a new one where the
+            // music was, rather than resuming into one that takes nothing.
+            if self.released.is_none() {
+                self.released = self.p.release();
+                self.p.sink.track.release();
+            }
         }
         for (id, message) in std::mem::take(&mut self.p.failures) {
             (self.events)(Event::Error { id, message });
@@ -650,16 +790,48 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         if self.p.source_ended() {
             self.p.sink.track.set_ended(true);
         }
-        if self.p.playing() && self.p.ended() {
+        if self.p.playing() && self.p.ended() && self.p.stopping_after().is_some() {
+            // Heard to the end of the song the sleep timer stops at: paused on the next one, from its
+            // start, which is fetched when play is pressed.
+            let i = self.p.stopping_after().expect("checked");
+            self.p.pause_at_end(false);
+            self.p.pause();
+            let next = self.p.queue.read(|q| q.next_of(i, q.repeat()));
+            if let Some(n) = next {
+                self.held = Some((n, 0, self.p.id_at(n)));
+            }
+            (self.events)(Event::Stopped);
+            self.set_state(if next.is_some() { State::Paused } else { State::Ended });
+        } else if self.p.playing() && self.p.ended() {
             self.p.pause();
             self.set_state(State::Ended);
         } else if !self.p.playing() && self.state == State::Playing && self.pause_at.is_none() && self.switch_at.is_none() {
             // The queue's rules stopped playback (a run of songs that would not play).
+            (self.events)(Event::Stopped);
             self.set_state(State::Paused);
         }
     }
 
     fn report(&mut self, now: i64) {
+        if let Some((i, ms)) = self.held.as_ref().map(|h| (h.0, h.1)) {
+            // A place held while paused is where the player is, to the screen. Its id is copied only
+            // when it changes.
+            let id = || self.held.as_ref().map(|h| h.2.clone()).unwrap_or_default();
+            if self.heard != Some(i) {
+                self.heard = Some(i);
+                (self.events)(Event::Song { index: i, id: id() });
+            }
+            let mut s = self.status.lock();
+            s.state = self.state;
+            if s.index != Some(i) {
+                s.index = Some(i);
+                s.id = Some(id());
+            }
+            s.position_ms = ms;
+            s.at = Instant::now();
+            s.switching = false;
+            return;
+        }
         if self.released.is_some() {
             // Let go: the place last reported stands.
             self.status.lock().releases = self.releases;
@@ -668,14 +840,20 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
         if self.p.current().is_none() {
             return;
         }
+        let track = &self.p.sink.track;
+        let stalled = self.state == State::Playing && self.p.starved() && track.filled_us() < STALL_US && track.latency_us() < STALL_US;
+        if stalled != self.stalled {
+            self.stalled = stalled;
+            (self.events)(Event::Buffering(stalled));
+        }
         let seen = self.p.bar();
         let index = seen.index.or(self.p.current());
         let ms = if seen.index.is_some() { seen.ms } else { self.p.position_ms() };
-        let id = index.map(|i| self.p.id_at(i));
+        // The song's id is copied only when the song changes: this runs on every wake.
         if index != self.heard {
             self.heard = index;
-            if let (Some(i), Some(id)) = (index, id.clone()) {
-                (self.events)(Event::Song { index: i, id });
+            if let Some(i) = index {
+                (self.events)(Event::Song { index: i, id: self.p.id_at(i) });
             }
         }
         {
@@ -683,7 +861,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             s.state = self.state;
             if s.index != index {
                 s.index = index;
-                s.id = id;
+                s.id = index.map(|i| self.p.id_at(i));
             }
             s.position_ms = ms;
             s.at = Instant::now();
@@ -692,6 +870,8 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event)> Worker<L, A, Q, E> {
             s.underruns = self.p.sink.track.underruns();
             s.releases = self.releases;
             s.switching = self.switch_at.is_some();
+            s.chain = self.p.sink.chain_in();
+            s.gain_reduction_db = self.p.sink.meter_db;
         }
         if let (Some(every), Some(i), State::Playing) = (self.positions, index, self.state) {
             if now >= self.next_position {

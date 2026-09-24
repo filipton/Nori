@@ -98,7 +98,7 @@ fn pictures_are_written_into_padded_rows_as_a_bitmap_has_them() {
 #[test]
 fn one_decoder_serves_picture_after_picture() {
     let mut d = Decoder::new();
-    for name in ["photo.jpg", "alpha.png", "photo.webp", "grey.jpg", "palette.png", "photo.jpg"] {
+    for name in ["photo.jpg", "alpha.png", "photo.webp", "grey.jpg", "palette.png", "photo.gif", "turned-6.jpg", "photo.jpg"] {
         for side in [7, 12, 30, 64] {
             let px = d.decode(&file(name), side, side, Alpha::Premultiplied).unwrap();
             assert_eq!(px.len(), side * side * 4);
@@ -109,7 +109,7 @@ fn one_decoder_serves_picture_after_picture() {
 #[test]
 fn a_broken_file_is_an_error_not_a_panic() {
     let mut d = Decoder::new();
-    for name in ["photo.jpg", "photo.png", "photo.webp", "alpha.webp"] {
+    for name in ["photo.jpg", "photo.png", "photo.webp", "alpha.webp", "photo.gif", "turned-6.jpg", "turned-6.webp"] {
         let f = file(name);
         for cut in [4, 20, f.len() / 2, f.len() - 3] {
             let _ = d.decode(&f[..cut], 16, 16, Alpha::Straight);
@@ -134,8 +134,121 @@ fn every_format_says_its_size_from_its_headers() {
         ("palette.png", Format::Png),
         ("photo.webp", Format::WebP),
         ("alpha.webp", Format::WebP),
+        ("photo.gif", Format::Gif),
+        ("part.gif", Format::Gif),
+        ("turned-3.jpg", Format::Jpeg),
+        ("turned-2.jpg", Format::Jpeg),
     ] {
         let h = header(&file(name)).unwrap();
-        assert_eq!((h.format, h.width, h.height, h.oriented), (format, 40, 30, false), "{name}");
+        assert_eq!((h.format, h.width, h.height), (format, 40, 30), "{name}");
     }
+    // A quarter turn is a picture the other way up: its size as it is shown.
+    for name in ["turned-6.jpg", "turned-8.jpg", "turned-5.jpg", "turned-7.jpg", "turned-6.png", "turned-6.webp"] {
+        let h = header(&file(name)).unwrap();
+        assert_eq!((h.width, h.height), (30, 40), "{name}");
+    }
+    assert_eq!(header(&file("turned-7.jpg")).unwrap().orientation, 7);
+    assert_eq!(header(&file("photo.jpg")).unwrap().orientation, 1);
+}
+
+#[test]
+fn a_gif_is_its_first_frame() {
+    close("gif", &decode("photo.gif", 40, 30, Alpha::Straight), &file("photo.gif.rgba"), 0.0, 0);
+}
+
+#[test]
+fn a_gif_frame_smaller_than_its_screen_leaves_the_rest_transparent() {
+    let px = decode("part.gif", 40, 30, Alpha::Premultiplied);
+    for y in 0..30 {
+        for x in 0..40 {
+            let p = &px[(y * 40 + x) * 4..][..4];
+            let inside = (8..28).contains(&x) && (6..16).contains(&y);
+            assert_eq!(p, if inside { [250, 40, 60, 255] } else { [0, 0, 0, 0] }, "({x}, {y})");
+        }
+    }
+}
+
+/// A GIF with a `sw` x `sh` screen and one frame `fw` x `fh` at `left`, `top`, whose pixels are one
+/// black pixel's worth of LZW (a frame claiming more is cut short, which is not what these tests reach).
+fn gif(sw: u16, sh: u16, left: u16, top: u16, fw: u16, fh: u16) -> Vec<u8> {
+    let mut g = b"GIF89a".to_vec();
+    g.extend([sw, sh].iter().flat_map(|v| v.to_le_bytes()));
+    // A global table of two colours, black and white.
+    g.extend([0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+    g.push(0x2C);
+    g.extend([left, top, fw, fh].iter().flat_map(|v| v.to_le_bytes()));
+    // No local table; LZW with 2-bit codes: clear, 0, end.
+    g.extend([0, 2, 2, 0x44, 0x01, 0, 0x3B]);
+    g
+}
+
+#[test]
+fn a_gif_frame_is_decoded_only_where_it_lies_on_its_screen_and_within_the_limits() {
+    let one = Decoder::new().decode(&gif(1, 1, 0, 0, 1, 1), 1, 1, Alpha::Straight).unwrap();
+    assert_eq!(one, [0, 0, 0, 255], "the builder's GIF is a black pixel");
+    // A 1x1 screen carrying a 65535x65535 frame: 17 GB of RGBA, refused before any of it is made.
+    assert!(Decoder::new().decode(&gif(1, 1, 0, 0, 65535, 65535), 1, 1, Alpha::Straight).is_err());
+    // Frames that stick out past the screen's right or bottom edge, or start beyond it.
+    for (left, top, fw, fh) in [(200, 9, 1, 1), (9, 200, 1, 1), (5, 0, 8, 1), (0, 5, 1, 8), (65535, 65535, 1, 1)] {
+        let r = Decoder::new().decode(&gif(10, 10, left, top, fw, fh), 10, 10, Alpha::Straight);
+        assert!(r.is_err(), "a frame {fw}x{fh} at {left},{top} on a 10x10 screen");
+    }
+}
+
+/// `px`, `w` x `h` RGBA rows, as EXIF orientation `turn` shows them, written out plainly: the reference
+/// for the decoder's turns.
+fn turn(px: &[u8], w: usize, h: usize, turn: u8) -> Vec<u8> {
+    let quarter = turn >= 5;
+    let (ow, oh) = if quarter { (h, w) } else { (w, h) };
+    let mut out = Vec::with_capacity(px.len());
+    for y in 0..oh {
+        for x in 0..ow {
+            // Where this pixel is in the stored picture: mirrored first (2, 4, 5, 7), then turned.
+            let (sx, sy) = match turn {
+                2 => (w - 1 - x, y),
+                3 => (w - 1 - x, h - 1 - y),
+                4 => (x, h - 1 - y),
+                5 => (y, x),
+                6 => (y, h - 1 - x),
+                7 => (w - 1 - y, h - 1 - x),
+                8 => (w - 1 - y, x),
+                _ => (x, y),
+            };
+            out.extend_from_slice(&px[(sy * w + sx) * 4..][..4]);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_picture_is_turned_and_mirrored_the_way_its_exif_says() {
+    // The same pixels as photo.jpg, stored with each orientation: decoded, each is photo.jpg turned.
+    let plain = decode("photo.jpg", 40, 30, Alpha::Straight);
+    for o in [2u8, 3, 5, 6, 7, 8] {
+        let (w, h) = if o >= 5 { (30, 40) } else { (40, 30) };
+        close(&format!("turned-{o}"), &decode(&format!("turned-{o}.jpg"), w, h, Alpha::Straight), &turn(&plain, 40, 30, o), 0.0, 0);
+    }
+    // And each is what Pillow shows for the file (exif_transpose over libjpeg-turbo's decode).
+    for o in [2u8, 3, 5, 6, 7, 8] {
+        let (w, h) = if o >= 5 { (30, 40) } else { (40, 30) };
+        let name = format!("turned-{o}.jpg");
+        close(&name, &decode(&name, w, h, Alpha::Straight), &file(&format!("{name}.rgba")), 1.0, 12);
+    }
+    // A quarter turn clockwise puts the stored picture's bottom left corner at the top left.
+    let turned = decode("turned-6.jpg", 30, 40, Alpha::Straight);
+    assert_eq!(&turned[..4], &plain[29 * 40 * 4..][..4]);
+    // PNG keeps its EXIF in an eXIf chunk and WebP in an EXIF chunk.
+    close("png", &decode("turned-6.png", 30, 40, Alpha::Straight), &turn(&decode("photo.png", 40, 30, Alpha::Straight), 40, 30, 6), 0.0, 0);
+    let webp = decode("photo.webp", 40, 30, Alpha::Straight);
+    close("webp", &decode("turned-6.webp", 30, 40, Alpha::Straight), &turn(&webp, 40, 30, 6), 0.0, 0);
+}
+
+#[test]
+fn a_turned_picture_is_cut_and_scaled_as_it_is_shown() {
+    // Filling a square: the middle of the turned picture, which is the middle of the stored one turned.
+    let plain = decode("photo.jpg", 30, 30, Alpha::Straight);
+    close("square", &decode("turned-8.jpg", 30, 30, Alpha::Straight), &turn(&plain, 30, 30, 8), 0.0, 0);
+    let mut d = Decoder::new();
+    let small = d.decode(&file("turned-6.jpg"), 12, 16, Alpha::Straight).unwrap();
+    close("scaled", &small, &turn(&d.decode(&file("photo.jpg"), 16, 12, Alpha::Straight).unwrap(), 16, 12, 6), 0.0, 0);
 }

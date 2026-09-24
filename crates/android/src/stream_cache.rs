@@ -20,8 +20,8 @@ pub(crate) static CLASS: Class = Class {
 
 /// A cache span was read or written. Called from the cache's own callbacks, a few times a song; a key
 /// already known is found without allocating.
-extern "system" fn touch(mut env: JNIEnv, _: JClass, key: JString) {
-    with_str(&mut env, &key, stream_cache::touch);
+extern "system" fn touch(env: JNIEnv, _: JClass, key: JString) {
+    with_str(&env, &key, stream_cache::touch);
 }
 
 /// The keys the cache held when this process first looked. Called once.
@@ -31,8 +31,8 @@ extern "system" fn seed(mut env: JNIEnv, _: JClass, keys: JObjectArray) {
     for i in 0..n {
         let Ok(o) = env.get_object_array_element(&keys, i) else { return };
         let s = JString::from(o);
-        let Ok(v) = env.get_string(&s) else { return };
-        held.push(String::from(v));
+        let Some(v) = crate::string(&env, &s) else { return };
+        held.push(v);
         // One local reference a key, and a cache can hold thousands: each is let go as it is read.
         let _ = env.delete_local_ref(s);
     }
@@ -46,7 +46,7 @@ extern "system" fn next(env: JNIEnv, _: JClass) -> jstring {
 
 /// `id`'s streamed copies, to drop.
 extern "system" fn copies(mut env: JNIEnv, _: JClass, id: JString) -> jobjectArray {
-    let keys = with_str(&mut env, &id, stream_cache::copies).unwrap_or_default();
+    let keys = with_str(&env, &id, stream_cache::copies).unwrap_or_default();
     let Ok(out) = env.new_object_array(keys.len() as i32, "java/lang/String", JObject::null()) else { return std::ptr::null_mut() };
     for (i, k) in keys.iter().enumerate() {
         let Ok(s) = env.new_string(k) else { return std::ptr::null_mut() };

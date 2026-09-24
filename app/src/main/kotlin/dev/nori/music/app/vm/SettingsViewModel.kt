@@ -2,7 +2,7 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.IngestStats
+import dev.nori.music.ffi.model.IngestStats
 import dev.nori.music.net.said
 import dev.nori.music.playback.DacState
 import dev.nori.music.playback.DeviceSound
@@ -10,41 +10,36 @@ import dev.nori.music.playback.Outputs
 import dev.nori.music.settings.Prefs
 import dev.nori.music.settings.ServerProfile
 import dev.nori.music.net.describeConnectionError
-import dev.nori.music.ffi.MusicFolder
+import dev.nori.music.ffi.model.MusicFolder
 import dev.nori.music.settings.Band
 import dev.nori.music.settings.HomeRow
-import dev.nori.music.ffi.ChoiceKind
-import dev.nori.music.ffi.SpecKind
-import dev.nori.music.ffi.deviceNotice
-import dev.nori.music.ffi.deviceRows
-import dev.nori.music.ffi.deviceSpec
-import dev.nori.music.ffi.eqAddBand
-import dev.nori.music.ffi.eqApplyPreset
-import dev.nori.music.ffi.eqImport
-import dev.nori.music.ffi.eqPresets
-import dev.nori.music.ffi.eqRemoveBand
-import dev.nori.music.ffi.eqResetBands
-import dev.nori.music.ffi.AutoEqHit
-import dev.nori.music.ffi.DacFacts
-import dev.nori.music.ffi.EqLevel
-import dev.nori.music.ffi.SettingChange
-import dev.nori.music.ffi.SettingsFacts
-import dev.nori.music.ffi.SettingsGroup
-import dev.nori.music.ffi.SettingsHit
-import dev.nori.music.ffi.SettingsPage
-import dev.nori.music.ffi.StorageFacts
-import dev.nori.music.ffi.SyncFacts
-import dev.nori.music.ffi.autoeqCountWords
-import dev.nori.music.ffi.autoeqHits
-import dev.nori.music.ffi.eqSetAutoPreamp
-import dev.nori.music.ffi.serverNewId
-import dev.nori.music.ffi.settingSet
-import dev.nori.music.ffi.soundFromJson
-import dev.nori.music.ffi.storageIndexFiles
-import dev.nori.music.ffi.NamedPreset
-import dev.nori.music.ffi.AutoEqEntry
-import dev.nori.music.ffi.SoundException
-import dev.nori.music.ffi.SoundProfile
+import dev.nori.music.ffi.devices.ChoiceKind
+import dev.nori.music.ffi.devices.SpecKind
+import dev.nori.music.ffi.devices.deviceNotice
+import dev.nori.music.ffi.devices.deviceRows
+import dev.nori.music.ffi.devices.deviceSpec
+import dev.nori.music.ffi.settings.eqPresets
+import dev.nori.music.ffi.settings.SoundTool
+import dev.nori.music.ffi.devices.AutoEqHit
+import dev.nori.music.ffi.settings.DacFacts
+import dev.nori.music.ffi.settings.EqLevel
+import dev.nori.music.ffi.settings.SettingChange
+import dev.nori.music.ffi.settings.SettingsFacts
+import dev.nori.music.ffi.settings.SettingsGroup
+import dev.nori.music.ffi.settings.SettingsHit
+import dev.nori.music.ffi.settings.SettingsPage
+import dev.nori.music.ffi.settings.StorageFacts
+import dev.nori.music.ffi.settings.SyncFacts
+import dev.nori.music.ffi.devices.autoeqCountWords
+import dev.nori.music.ffi.devices.autoeqHits
+import dev.nori.music.ffi.settings.serverNewId
+import dev.nori.music.ffi.settings.settingSet
+import dev.nori.music.ffi.settings.soundFromJson
+import dev.nori.music.ffi.settings.storageIndexFiles
+import dev.nori.music.ffi.model.NamedPreset
+import dev.nori.music.ffi.model.AutoEqEntry
+import dev.nori.music.ffi.settings.SoundException
+import dev.nori.music.ffi.model.SoundProfile
 import dev.nori.music.settings.prefs
 import dev.nori.music.settings.sound
 import dev.nori.music.settings.stored
@@ -114,12 +109,12 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     // ---- the settings screen, laid out by the core (settings_schema.rs) ----
 
     /** The groups the root of Settings lists. */
-    val settingsGroups: List<SettingsGroup> by lazy { dev.nori.music.ffi.settingsGroups() }
+    val settingsGroups: List<SettingsGroup> by lazy { dev.nori.music.ffi.settings.settingsGroups() }
 
-    fun searchSettings(query: String): List<SettingsHit> = dev.nori.music.ffi.settingsSearch(query)
+    fun searchSettings(query: String): List<SettingsHit> = dev.nori.music.ffi.settings.settingsSearch(query)
 
     /** One group's page for the settings as they are now; asked only when they or [settingsFacts] change. */
-    fun settingsPage(id: String, facts: SettingsFacts): SettingsPage? = dev.nori.music.ffi.settingsPage(id, facts)
+    fun settingsPage(id: String, facts: SettingsFacts): SettingsPage? = dev.nori.music.ffi.settings.settingsPage(id, facts)
 
     /** What a settings page depends on besides the settings, from this platform. */
     val settingsFacts: StateFlow<SettingsFacts> by lazy {
@@ -149,7 +144,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
             change.prefs.prefs().server?.let(nori::updateServer)
             return
         }
-        nori.settings.put(change.prefs)
+        nori.settings.took(change)
         if (change.applyCacheLimit) applyCacheLimit()
     }
 
@@ -180,7 +175,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         val index = storageIndexFiles(files.map { it.name })
         _storage.value = StorageUi(
             streamBytes = nori.sources.streamBytes(),
-            coverBytes = dirBytes(java.io.File(app.cacheDir, "covers")),
+            coverBytes = dirBytes(java.io.File(app.cacheDir, dev.nori.music.data.CoverLoader.DIR)),
             downloadBytes = nori.sources.downloadBytes(),
             downloadSongs = nori.downloads.state.value.done.size,
             indexBytes = index.sumOf { dirBytes(files[it.toInt()]) },
@@ -197,7 +192,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     /** Empties the cover cache; pictures are fetched again as they are shown. */
     fun clearCovers() = viewModelScope.launch(Dispatchers.IO) {
         _storage.update { it.copy(busy = true) }
-        runCatching { coil3.SingletonImageLoader.get(getApplication()).diskCache?.clear() }
+        dev.nori.music.data.CoverLoader.get(getApplication()).clearDisk()
         refreshStorage()
     }
 
@@ -245,7 +240,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     /** Moves one home shelf up or down the page (the core's `home_rows_moved`). */
     fun moveHomeRow(from: Int, to: Int) = update { p ->
-        p.copy(homeRows = dev.nori.music.ffi.homeRowsMoved(p.homeRows.map { it.name }, from.toUInt(), to.toUInt()).map { HomeRow.valueOf(it) })
+        p.copy(homeRows = dev.nori.music.ffi.library.homeRowsMoved(p.homeRows.map { it.name }, from.toUInt(), to.toUInt()).map { HomeRow.valueOf(it) })
     }
 
     /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
@@ -308,8 +303,9 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     val presets: List<NamedPreset> by lazy { eqPresets() }
 
     // The edits themselves (a preset's pre-amp of 0 meaning automatic, the new band's defaults, the
-    // graphic bands coming back when the last one goes) are the core's (settings.rs).
-    fun applyPreset(p: NamedPreset) = update { it.withSound(eqApplyPreset(it.sound(), p)) }
+    // graphic bands coming back when the last one goes) are the core's (settings.rs), made where it keeps
+    // the settings (settings_store::settings_sound_tool).
+    fun applyPreset(p: NamedPreset) { nori.settings.soundTool(SoundTool.Preset(p)) }
 
     /** One band changed, held in the equalizer's ranges by the core; on every step of a drag, so edited in place there. */
     fun setBand(index: Int, band: Band) = nori.settings.setBand(index, band)
@@ -318,20 +314,16 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     fun setLevel(level: EqLevel, value: Float) = nori.settings.setLevel(level, value)
 
     /** The automatic pre-amp on or off; off starts from the level it was at. */
-    fun setAutoPreamp(automatic: Boolean) = update { it.withSound(eqSetAutoPreamp(it.sound(), automatic)) }
-    fun addBand() = update { it.withSound(eqAddBand(it.sound())) }
-    fun removeBand(index: Int) = update { it.withSound(eqRemoveBand(it.sound(), index.toUInt())) }
-    fun resetBands() = update { it.withSound(eqResetBands(it.sound())) }
+    fun setAutoPreamp(automatic: Boolean) { nori.settings.soundTool(SoundTool.AutoPreamp(automatic)) }
+    fun addBand() { nori.settings.soundTool(SoundTool.AddBand) }
+    fun removeBand(index: Int) { nori.settings.soundTool(SoundTool.RemoveBand(index.toUInt())) }
+    fun resetBands() { nori.settings.soundTool(SoundTool.ResetBands) }
 
     /** AutoEQ "ParametricEQ.txt" / Equalizer APO text. Returns how many filters were found. */
     fun importPreset(text: String): Int = try { import(text) } catch (e: SoundException) { 0 }
 
     /** Switches the preset in [text] on; throws, saying why, when it has no filters in it. */
-    private fun import(text: String): Int {
-        var n = 0
-        update { p -> eqImport(p.sound(), text).also { n = it.eqBands.size }.let(p::withSound) }
-        return n
-    }
+    private fun import(text: String): Int = nori.settings.soundTool(SoundTool.Import(text))
 
     // ---- saved profiles and the AutoEQ database ----
 

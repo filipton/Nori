@@ -46,8 +46,10 @@ pub trait Library: Send + 'static {
     }
 }
 
-/// How many songs' bytes are kept at once: the one playing, the one after, and the one before.
-const KEPT: usize = 3;
+/// How many songs' bytes are kept at once: the one playing and the one after. The one before is not:
+/// its bytes are the stream cache's or a download's by then (a client without either fetches it again),
+/// and kept in memory it held as much again as the one playing, a whole song for a button seldom pressed.
+const KEPT: usize = 2;
 
 /// The engine's [`Songs`]: the library's songs opened, their loaders kept while they may be needed.
 pub struct Sources<L: Library> {
@@ -66,19 +68,20 @@ impl<L: Library> Sources<L> {
         Sources { library, encoding: Encoding::Pcm16, load, engine, loaders: Vec::new() }
     }
 
-    /// The loader of `id`, started if it is not running (writing into `keep`'s cache entry); the most
-    /// recently used is kept last.
-    fn loader(&mut self, id: &str, url: &str, bytes: &Arc<dyn ByteSource>, duration_ms: Option<i64>, keep: Option<(&Arc<Store>, &str)>) -> Arc<Loader> {
+    /// The loader of `id`, started if it is not running (writing into `keep`'s cache entry), holding at
+    /// most `budget` bytes (none: its window's cap); the most recently used is kept last.
+    fn loader(&mut self, id: &str, url: &str, bytes: &Arc<dyn ByteSource>, duration_ms: Option<i64>, keep: Option<(&Arc<Store>, &str)>, budget: Option<u64>) -> Arc<Loader> {
         // One that gave up is not asked again: the song is fetched anew, the network may be back.
         self.loaders.retain(|(i, l)| i != id || l.error().is_none());
         if let Some(k) = self.loaders.iter().position(|(i, _)| i == id) {
             let l = self.loaders.remove(k);
             let loader = l.1.clone();
             self.loaders.push(l);
+            loader.limit(budget);
             return loader;
         }
         let writer = keep.and_then(|(store, key)| store.writer(key));
-        let loader = Loader::start(bytes.clone(), url.to_string(), self.load, duration_ms, writer);
+        let loader = Loader::start_within(bytes.clone(), url.to_string(), self.load, duration_ms, writer, budget);
         self.loaders.push((id.to_string(), loader.clone()));
         if self.loaders.len() > KEPT {
             self.loaders.remove(0);
@@ -94,6 +97,15 @@ impl<L: Library> Sources<L> {
     /// The loader of `id`, if its bytes are being kept.
     pub fn loading(&self, id: &str) -> Option<&Arc<Loader>> {
         self.loaders.iter().find(|(i, _)| i == id).map(|(_, l)| l)
+    }
+
+    /// What the songs other than `id` leave of the memory cap, for `id` fetched ahead: the cap is one
+    /// budget for the songs kept, as it is for the ExoPlayer path's one buffer, not one per song. Never
+    /// less than a sixth of it, a minute or more of any song, so a mix into it has its start at hand.
+    fn left_for(&self, id: &str) -> u64 {
+        let cap = self.load[4].max(1) as u64;
+        let others: u64 = self.loaders.iter().filter(|(i, _)| i != id).map(|(_, l)| l.holding()).sum();
+        cap.saturating_sub(others).max(cap / 6)
     }
 }
 
@@ -113,12 +125,13 @@ impl<L: Library> Songs for Sources<L> {
                 let path = store.cached(key).expect("checked");
                 file(&path, self.encoding)
             }
+            // Opened to be played: whatever it was limited to while it waited, it has the whole cap now.
             Source::Url { url, bytes } => {
-                let loader = self.loader(id, url, bytes, at.duration_ms, None);
+                let loader = self.loader(id, url, bytes, at.duration_ms, None, None);
                 Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, self.encoding))
             }
             Source::Cached { url, bytes, store, key } => {
-                let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)));
+                let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)), None);
                 Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, self.encoding))
             }
         }
@@ -134,10 +147,12 @@ impl<L: Library> Songs for Sources<L> {
         }
         match self.library.locate(id) {
             Ok(Located { source: Source::Url { url, bytes }, duration_ms, .. }) => {
-                self.loader(id, &url, &bytes, duration_ms, None);
+                let budget = self.left_for(id);
+                self.loader(id, &url, &bytes, duration_ms, None, Some(budget));
             }
             Ok(Located { source: Source::Cached { url, bytes, store, key }, duration_ms, .. }) if store.cached(&key).is_none() => {
-                self.loader(id, &url, &bytes, duration_ms, Some((&store, &key)));
+                let budget = self.left_for(id);
+                self.loader(id, &url, &bytes, duration_ms, Some((&store, &key)), Some(budget));
             }
             _ => {}
         }

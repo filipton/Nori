@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use nori_engine::core::{CoreLibrary, CoreOrder, Downloader, Measurer};
 use nori_engine::{Body, ByteSource, Library, Source, Store};
-use norimusic::client::{Client, NetProfile};
-use norimusic::transport::{Transport, TransportError, TransportResponse};
-use norimusic::{Core, ServerConfig, Song};
+use nori_core::client::{Client, NetProfile};
+use nori_core::transport::{Transport, TransportError, TransportResponse};
+use nori_core::{Core, ServerConfig, Song};
 use parking_lot::Mutex;
 
 /// No API calls are made here; resolving a song's address needs none.
@@ -119,10 +119,10 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
     assert_eq!(std::fs::read(&path).unwrap(), bytes_of(&url), "the whole song, byte for byte");
     let asked: Vec<u64> = audio.requests.lock().iter().map(|r| r.1).collect();
     assert_eq!(asked, [0, LEN as u64 / 2], "taken up where the connection broke");
-    assert_eq!(norimusic::transfers::held("dl-1"), 2, "the core has it as finished");
-    assert_eq!(norimusic::transfers::download_phase("dl-1".into()), 3);
+    assert_eq!(nori_core::transfers::held("dl-1"), 2, "the core has it as finished");
+    assert_eq!(nori_core::transfers::download_phase("dl-1".into()), 3);
 
-    norimusic::queue::queue_register(vec![song]);
+    nori_core::queue::queue_register(vec![song]);
     let mut library = CoreLibrary { client: client.clone(), bytes: audio.clone(), metered: false, store: Some(store.clone()) };
     match library.locate("dl-1").unwrap().source {
         Source::File(p) => assert_eq!(p, path, "the download, not the network"),
@@ -134,17 +134,17 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
     }
 
     // AutoMix on: the songs coming up are measured, those on the disk only.
-    let mut prefs = norimusic::settings_store::settings_open(dir.join("app.db").to_string_lossy().into_owned()).unwrap();
+    let mut prefs = nori_core::settings_store::settings_open(dir.join("app.db").to_string_lossy().into_owned()).unwrap();
     prefs.auto_mix = true;
-    norimusic::settings_store::settings_put(prefs);
+    nori_core::settings_store::settings_put(prefs);
     let on_disk = Song { id: "m-1".into(), title: "Beat".into(), duration: 40, suffix: "wav".into(), ..Default::default() };
     let elsewhere = Song { id: "m-2".into(), title: "Not here".into(), duration: 40, suffix: "wav".into(), ..Default::default() };
     core.download_queue(vec![on_disk.clone()]).unwrap();
     core.download_settle(vec!["m-1".into()], vec![true]).unwrap();
     std::fs::write(store.download_path("m-1"), beat_wav()).unwrap();
-    norimusic::queue::queue_register(vec![on_disk, elsewhere]);
-    norimusic::playlist::playlist_set(vec!["m-1".into(), "m-2".into(), "ext-3".into()], 0, false);
-    let ahead = norimusic::rules::queue_measure();
+    nori_core::queue::queue_register(vec![on_disk, elsewhere]);
+    nori_core::playlist::playlist_set(vec!["m-1".into(), "m-2".into(), "ext-3".into()], 0, false);
+    let ahead = nori_core::rules::queue_measure();
     assert!(!ahead.contains(&"ext-3".to_string()), "a provider's song is never measured: {ahead:?}");
     let measurer = Measurer::new(core.clone(), client.clone(), store.clone());
     measurer.update(ahead, std::thread::current());

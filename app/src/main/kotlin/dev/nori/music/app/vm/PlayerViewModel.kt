@@ -2,9 +2,9 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import android.media.AudioManager
-import dev.nori.music.ffi.Lyrics
+import dev.nori.music.ffi.model.Lyrics
 import dev.nori.music.data.FoundLyrics
-import dev.nori.music.ffi.LyricsOrigin
+import dev.nori.music.ffi.words.LyricsOrigin
 import dev.nori.music.net.said
 import dev.nori.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -41,12 +41,16 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     @OptIn(ExperimentalCoroutinesApi::class)
     val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
         .flatMapLatest { song ->
-            val found = if (song == null) flowOf(FoundLyrics(dev.nori.music.ffi.lyricsNone(), LyricsOrigin.SERVER))
+            val found = if (song == null) flowOf(FoundLyrics(dev.nori.music.ffi.library.lyricsNone(), LyricsOrigin.SERVER))
             else nori.library.lyricsFor(song)
             found.map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) }
                 .onStart { emit(Load.Loading) }
                 .catch { emit(Load.Failed(it.said ?: it.javaClass.simpleName)) }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Load.Loading)
+
+    private val _coversNear = kotlinx.coroutines.flow.MutableStateFlow<List<String>>(emptyList())
+    /** The playing song's cover and those a skip either way lands on, for the bar to work their colours out ahead. */
+    val coversNear: StateFlow<List<String>> = _coversNear
 
     init {
         // The artwork either side of what is playing, fetched before it is asked for. A skip used to
@@ -54,27 +58,27 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
         // seconds. Same sizes and requests as the player and the rows, so a warmed cover is a cache hit.
         // How far ahead is the user's (Settings, "Covers fetched ahead"); already-cached ones cost a
         // memory lookup and nothing else.
-        // Which positions, in which order, is the core's (`cover_neighbours`); it is asked only when the
-        // queue, the playing song or a skip's target moves, not on every play/pause or buffering change.
+        // Which positions, in which order, is the core's (`covers_around`, over the queue it keeps, which
+        // also names the covers either side whose colours the bar works out ahead); it is asked once, only
+        // when the queue, the playing song or a skip's target moves, not on every play/pause or buffering change.
         viewModelScope.launch {
             kotlinx.coroutines.flow.combine(state, nori.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead -> s to ahead }
                 .distinctUntilChanged { (a, x), (b, y) ->
                     a.queue === b.queue && a.index == b.index && a.previousIndex == b.previousIndex && a.nextIndex == b.nextIndex && x == y
                 }
-                .map { (s, ahead) ->
-                    dev.nori.music.ffi.coverNeighbours(s.index, s.previousIndex, s.nextIndex, ahead, s.queue.size.toUInt())
-                        .mapNotNull { s.queue[it.toInt()].coverArt }
-                }.distinctUntilChanged()
-                .collect { arts ->
-                    val context = getApplication<Application>()
-                    val loader = coil3.SingletonImageLoader.get(context)
-                    for (want in dev.nori.music.ffi.coverWants(arts, UInt.MAX_VALUE)) {
-                        val size = want.size.toInt()
-                        loader.enqueue(coil3.request.ImageRequest.Builder(context).data(nori.library.coverUrl(want.id, size)).size(size).build())
+                .map { (s, ahead) -> dev.nori.music.ffi.coversAround(s.index, s.previousIndex, s.nextIndex, ahead) }
+                .distinctUntilChanged()
+                .collect { around ->
+                    _coversNear.value = around.near
+                    // Into memory, decoded: a skip lands on a picture that is already there.
+                    val loader = dev.nori.music.data.CoverLoader.get(getApplication<Application>())
+                    for (want in around.wants) {
+                        nori.library.coverUrl(want.id, want.size.toInt())?.let(loader::prefetch)
                     }
                 }
         }
     }
+
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs

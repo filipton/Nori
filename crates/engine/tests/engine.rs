@@ -200,6 +200,9 @@ struct Recorder {
     shut: Arc<AtomicU64>,
     /// Where the engine hears which device the music goes to.
     watch: Arc<Mutex<Option<DeviceWatch>>>,
+    /// Set by a test: the device dies at its next pull and will not open again, and says why here.
+    die: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl AudioOutput for Recorder {
@@ -216,6 +219,7 @@ impl AudioOutput for Recorder {
         self.closed = Arc::default();
         let (pace, heard, playing, closed, underruns) = (self.pace, self.heard.clone(), self.playing.clone(), self.closed.clone(), self.underruns.clone());
         let (float, heard_f) = (self.float, self.heard_f.clone());
+        let (die, failure) = (self.die.clone(), self.failure.clone());
         std::thread::spawn(move || {
             let f = feed.format();
             let mut block = vec![0i16; 512 * f.channels];
@@ -224,6 +228,11 @@ impl AudioOutput for Recorder {
             let mut started = false;
             while !closed.load(Ordering::Acquire) {
                 std::thread::sleep(period);
+                if die.swap(false, Ordering::AcqRel) {
+                    *failure.lock() = Some("the sound server died".into());
+                    feed.wake_engine();
+                    return;
+                }
                 if !playing.load(Ordering::Acquire) || (!started && feed.available() < 512) {
                     continue;
                 }
@@ -264,6 +273,10 @@ impl AudioOutput for Recorder {
         self.float
     }
 
+    fn failed(&mut self) -> Option<String> {
+        self.failure.lock().take()
+    }
+
     fn close(&mut self) {
         self.shut.fetch_add(1, Ordering::Relaxed);
         self.closed.store(true, Ordering::Release);
@@ -280,6 +293,7 @@ struct Rig {
     underruns: Arc<AtomicU64>,
     server: Arc<Server>,
     events: Arc<Mutex<Vec<Event>>>,
+    die: Arc<AtomicBool>,
 }
 
 impl Rig {
@@ -318,15 +332,17 @@ impl Rig {
             opened: Arc::default(),
             shut: Arc::default(),
             watch: Arc::default(),
+            die: Arc::default(),
+            failure: Arc::default(),
         };
-        let (opened, shut, watch) = (out.opened.clone(), out.shut.clone(), out.watch.clone());
+        let (opened, shut, watch, die) = (out.opened.clone(), out.shut.clone(), out.watch.clone(), out.die.clone());
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         let library = Songs { server: server.clone(), lengths, store };
         let mut config = Config { memory_mb: 256, settings, ..Config::default() };
         config.idle_release_ms = idle_release_ms.unwrap_or(config.idle_release_ms);
         let engine = Engine::start(library, app, queue, Box::new(out), config, move |e| seen.lock().push(e));
-        Rig { engine, opened, shut, watch, heard, heard_f, underruns, server, events }
+        Rig { engine, opened, shut, watch, heard, heard_f, underruns, server, events, die }
     }
 
     /// Times the recorder found too little to play (a gap on a real device), for the failure messages.
@@ -361,6 +377,85 @@ fn reference(songs: &[(&str, &[i16])], prefs: TransitionPrefs) -> Vec<i16> {
 
 fn crossfade(secs: i32) -> TransitionPrefs {
     TransitionPrefs { crossfade_s: secs, keep_albums: true, ..prefs_off() }
+}
+
+#[test]
+fn a_jump_or_a_seek_while_paused_stays_paused_and_fetches_nothing_until_play() {
+    let (a, b, c) = (music(20.0, 91), music(20.0, 92), music(20.0, 93));
+    let rig = Rig::new(&[("a", &a), ("b", &b), ("c", &c)], prefs_off(), Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
+    rig.engine.pause();
+    assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
+    let asked = rig.server.requests.lock().len();
+    rig.engine.go_to(1, 0);
+    rig.engine.seek(5_000);
+    assert!(rig.wait_for(5, |r| { let s = r.engine.status(); s.index == Some(1) && s.position_ms == 5_000 }), "the screen is told the place at once: {:?}", rig.engine.status());
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.engine.status().state, State::Paused, "still paused");
+    assert_eq!(rig.server.requests.lock().len(), asked, "nothing fetched for a place nobody listens to yet");
+    let heard = rig.heard.lock().len();
+    rig.engine.play();
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > heard + 2 * RATE as usize), "play goes there");
+    let played = rig.heard.lock()[heard..heard + 2 * RATE as usize].to_vec();
+    let from = 5 * RATE as usize * 2;
+    assert!(b[from..from + 2 * RATE as usize] == played[..], "b from five seconds in");
+    // The skip button is another matter: paused, it is a request for music.
+    rig.engine.pause();
+    assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
+    rig.engine.next();
+    assert!(rig.wait_for(5, |r| { let s = r.engine.status(); s.state == State::Playing && s.index == Some(2) }), "{:?}", rig.engine.status());
+}
+
+#[test]
+fn paused_at_the_end_of_a_song_it_waits_on_the_next_one() {
+    let (a, b) = (music(30.0, 95), music(4.0, 96));
+    let rig = Rig::new(&[("a", &a), ("b", &b)], crossfade(2), Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| !r.heard.lock().is_empty()));
+    rig.engine.pause_at_end(true);
+    assert!(rig.wait_for(10, |r| r.events.lock().contains(&Event::Stopped)), "{:?}", rig.events.lock());
+    assert!(rig.wait_for(5, |r| { let s = r.engine.status(); s.state == State::Paused && s.index == Some(1) && s.position_ms == 0 }), "{:?}", rig.engine.status());
+    let heard = rig.heard.lock().clone();
+    // The recorder may miss the last frame or so as the output pauses under it.
+    assert!(heard.len() <= a.len() && heard.len() + 8 >= a.len() && heard[..] == a[..heard.len()], "a to its end, nothing of b and no mix into it: {} of {} samples", heard.len(), a.len());
+    rig.engine.play();
+    assert!(rig.wait_for(10, Rig::ended), "play goes on with b");
+    assert!(rig.heard.lock()[heard.len()..] == b[..], "b from its start");
+}
+
+#[test]
+fn a_song_slow_to_come_is_said_to_be_buffering_until_it_plays() {
+    let a = music(10.0, 81);
+    let songs: [(&str, &[i16]); 1] = [("a", &a)];
+    let extra = Extra::default();
+    extra.server.slow.lock().push(("a".into(), Duration::from_millis(1_500)));
+    let rig = Rig::build(files(&songs), sim::App::new(), Settings::default(), extra);
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize), "the song plays in the end");
+    assert!(rig.wait_for(5, |r| r.events.lock().contains(&Event::Buffering(false))), "{:?}", rig.events.lock());
+    let events = rig.events.lock().clone();
+    let on = events.iter().position(|e| *e == Event::Buffering(true)).unwrap_or_else(|| panic!("said while it waits: {events:?}"));
+    let off = events.iter().position(|e| *e == Event::Buffering(false)).unwrap_or_else(|| panic!("and when it comes: {events:?}"));
+    assert!(on < off, "{events:?}");
+}
+
+#[test]
+fn a_device_that_dies_stops_the_engine_and_play_opens_another() {
+    let a = music(20.0, 71);
+    let rig = Rig::new(&[("a", &a)], prefs_off(), Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2), "music is heard");
+    rig.die.store(true, Ordering::Release);
+    let stopped = |r: &Rig| {
+        let e = r.events.lock();
+        e.iter().any(|e| matches!(e, Event::Error { message, .. } if message.contains("the output stopped: the sound server died"))) && e.last() == Some(&Event::State(State::Idle))
+    };
+    assert!(rig.wait_for(10, stopped), "the engine stops and says so: {:?}", rig.events.lock());
+    assert!(rig.wait_for(5, |r| r.shut.load(Ordering::Relaxed) >= 1), "and lets the dead device go");
+    let (opened, heard) = (rig.opened.load(Ordering::Relaxed), rig.heard.lock().len());
+    rig.engine.play();
+    assert!(rig.wait_for(10, |r| r.opened.load(Ordering::Relaxed) > opened && r.heard.lock().len() > heard + RATE as usize), "play opens another and the music goes on");
 }
 
 #[test]
@@ -430,6 +525,7 @@ fn pausing_stops_the_music_and_playing_takes_it_up_where_it_was() {
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 5));
     rig.engine.pause();
     assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
+    assert!(!rig.events.lock().contains(&Event::Stopped), "a pause asked for is not one the engine made by itself");
     std::thread::sleep(Duration::from_millis(100));
     let at = rig.heard.lock().len();
     std::thread::sleep(Duration::from_millis(300));
@@ -673,6 +769,7 @@ fn play_after_a_song_would_not_play_tries_it_again() {
     rig.engine.play_at(0, 0);
     assert!(rig.wait_for(30, |r| r.events.lock().iter().any(|e| matches!(e, Event::Error { id, .. } if id == "a"))), "{:?}", rig.events.lock());
     assert!(rig.wait_for(10, |r| r.engine.status().state == State::Paused), "stopped there: {:?}", rig.events.lock());
+    assert!(rig.events.lock().contains(&Event::Stopped), "and says it stopped by itself: {:?}", rig.events.lock());
     // The network is back.
     rig.server.cut.lock().clear();
     rig.engine.play();

@@ -77,23 +77,11 @@ object CoverLook {
      */
     @JvmStatic @FastNative external fun mix(from: IntArray, to: IntArray, t: Float, out: IntArray)
 
-    /** A page's look ([LEN] entries) and its wash, [WASH] x [WASH] pixels, or null on AMOLED black. */
-    class Colours(val look: IntArray, val wash: android.graphics.Bitmap?)
-
     /**
-     * The page for a cover [bitmap] (software ARGB_8888). The core reads the bitmap where it lies and
-     * draws the wash straight into a bitmap of its own: no copy of either picture on this side. Off the
-     * main thread.
+     * A page's look ([LEN] entries) and its wash, [WASH] x [WASH] pixels, or null on AMOLED black. The
+     * cover loader works them out from the cover's own pixels ([dev.nori.music.data.CoverLoader.colours]).
      */
-    fun derive(bitmap: android.graphics.Bitmap, dark: Boolean, amoled: Boolean): Colours? {
-        val out = IntArray(LEN)
-        val wash = if (amoled) null else android.graphics.Bitmap.createBitmap(WASH, WASH, android.graphics.Bitmap.Config.ARGB_8888)
-        return when (deriveBitmap(bitmap, dark, amoled, out, wash)) {
-            0 -> null
-            2 -> Colours(out, wash)
-            else -> Colours(out, null)
-        }
-    }
+    class Colours(val look: IntArray, val wash: android.graphics.Bitmap?)
 
     /**
      * The look of a page in the theme's own colours, from its roles: background, on surface, on surface
@@ -122,7 +110,7 @@ object CoverLook {
     @JvmStatic @CriticalNative external fun seekTimes(dragging: Boolean, drag: Float, heldMs: Long, positionMs: Long, durationMs: Long): Long
 
     /** A time under the seek bar, "3:07", or "-3:07" when [left] (`nori-core fmt::duration`): one Java string, no bridge objects. */
-    @JvmStatic external fun duration(seconds: Long, left: Boolean): String
+    @JvmStatic @FastNative external fun duration(seconds: Long, left: Boolean): String
 
     @JvmStatic @CriticalNative external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
 
@@ -137,9 +125,8 @@ object CoverLook {
     @JvmStatic @CriticalNative external fun heroButtons(here: Boolean, shuffle: Boolean, playing: Boolean, buffering: Boolean, canPlay: Boolean, canShuffle: Boolean): Int
 
     /** What Play says, "Pause" or "Play" (`nori-core pages::hero_play_label`). */
-    @JvmStatic external fun heroPlayLabel(pausing: Boolean): String
+    @JvmStatic @FastNative external fun heroPlayLabel(pausing: Boolean): String
 
-    @JvmStatic private external fun deriveBitmap(bitmap: android.graphics.Bitmap, dark: Boolean, amoled: Boolean, out: IntArray, wash: android.graphics.Bitmap?): Int
     @JvmStatic @FastNative private external fun plain(roles: IntArray, out: IntArray)
     @JvmStatic @FastNative private external fun tones(seed: Int, dark: Boolean, out: IntArray)
     @JvmStatic @FastNative private external fun amoled(out: IntArray)

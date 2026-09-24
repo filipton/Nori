@@ -25,7 +25,7 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val system = isSystemInDarkTheme()
     // Light, dark or the phone's: the core's rule (nori_look::theme::is_dark), the same for every screen.
-    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.themeIsDark(prefs.theme.ordinal, system) }
+    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.settings.themeIsDark(prefs.theme.ordinal, system) }
     val dynamic = prefs.dynamicColor && Build.VERSION.SDK_INT >= 31
     val scheme = remember(dark, dynamic, prefs.accent, prefs.amoled) {
         val base = when {
@@ -61,12 +61,21 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
     }
 }
 
+/** Every size in the app was measured as a share of the width of a phone this many dp wide. */
+private const val REFERENCE_WIDTH_DP = 411f
+
 /**
- * How big the interface is drawn: a fixed factor, or automatic - laid out as if the screen were at
- * least as wide as the phone every size was measured on, so a large display size does not zoom the
- * layout in. The rule is the core's (`nori_look::theme::ui_scale`).
+ * How big the interface is drawn. A setting above 0 is a fixed factor. 0 is automatic: laid out as if
+ * the screen were at least [REFERENCE_WIDTH_DP] wide, so a phone set to a large display size (one
+ * measured at 358 dp draws everything a seventh larger) keeps the proportions; it only ever shrinks,
+ * never below three quarters, and never enlarges past what the system asked for. A phone's rule, about
+ * Android's display size: a desktop window has no such setting to undo.
  */
-fun uiScale(setting: Float, screenWidthDp: Int): Float = dev.nori.music.ffi.uiScale(setting, screenWidthDp)
+fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
+    setting > 0f -> setting
+    screenWidthDp <= 0 -> 1f
+    else -> (screenWidthDp / REFERENCE_WIDTH_DP).coerceIn(0.75f, 1f)
+}
 
 /** A light or dark scheme from one colour: tones of the same hue, worked out in Rust (`nori_look::theme::seeded`). */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {

@@ -20,8 +20,7 @@ pub(crate) static DOWNLOADS: Class = Class {
         native!(c"open", c"(Ljava/lang/String;J)I", open),
         native!(c"note", c"(IJJJ)F", note),
         native!(c"notice", c"(IIJ)I", notice),
-        native!(c"noticeTitle", c"()Ljava/lang/String;", notice_title),
-        native!(c"noticeText", c"()Ljava/lang/String;", notice_text),
+        native!(c"noticeWords", c"()Ljava/lang/String;", notice_words),
         native!(c"noticePermille", c"()I", notice_permille),
         native!(c"summary", c"()Ljava/lang/String;", summary),
         native!(c"summaryFailed", c"()I", summary_failed),
@@ -31,35 +30,35 @@ pub(crate) static DOWNLOADS: Class = Class {
 pub(crate) static LINES: Class = Class {
     name: c"dev/nori/music/downloads/DownloadLines",
     methods: &[
-        native!(c"row", c"(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", row),
+        native!(c"row", c"(Ljava/lang/String;)Ljava/lang/String;", row),
         native!(c"summary", c"(III)Ljava/lang/String;", summary_line),
     ],
 };
 
 /// Whether `id` is downloaded: 0 no, 1 queued or failed, 2 finished. Asked by every row a list draws.
-extern "system" fn held(mut env: JNIEnv, _: JClass, id: JString) -> jint {
-    with_str(&mut env, &id, transfers::held).unwrap_or(0)
+extern "system" fn held(env: JNIEnv, _: JClass, id: JString) -> jint {
+    with_str(&env, &id, transfers::held).unwrap_or(0)
 }
 
 /// media3 reported `id` in `state`; returns `transfers::followed`'s flags.
-extern "system" fn followed(mut env: JNIEnv, _: JClass, id: JString, state: jint, now: jlong) -> jint {
-    with_str(&mut env, &id, |id| transfers::followed(id, state, now)).unwrap_or(0)
+extern "system" fn followed(env: JNIEnv, _: JClass, id: JString, state: jint, now: jlong) -> jint {
+    with_str(&env, &id, |id| transfers::followed(id, state, now)).unwrap_or(0)
 }
 
-extern "system" fn removed(mut env: JNIEnv, _: JClass, id: JString) -> jint {
-    with_str(&mut env, &id, transfers::removed).unwrap_or(0)
+extern "system" fn removed(env: JNIEnv, _: JClass, id: JString) -> jint {
+    with_str(&env, &id, transfers::removed).unwrap_or(0)
 }
 
-extern "system" fn unmark(mut env: JNIEnv, _: JClass, id: JString) -> jint {
-    with_str(&mut env, &id, transfers::unmark).unwrap_or(0)
+extern "system" fn unmark(env: JNIEnv, _: JClass, id: JString) -> jint {
+    with_str(&env, &id, transfers::unmark).unwrap_or(0)
 }
 
-extern "system" fn start_fraction(mut env: JNIEnv, _: JClass, id: JString) -> jfloat {
-    with_str(&mut env, &id, transfers::start_fraction).unwrap_or(-1.0)
+extern "system" fn start_fraction(env: JNIEnv, _: JClass, id: JString) -> jfloat {
+    with_str(&env, &id, transfers::start_fraction).unwrap_or(-1.0)
 }
 
-extern "system" fn open(mut env: JNIEnv, _: JClass, id: JString, now: jlong) -> jint {
-    with_str(&mut env, &id, |id| transfers::open(id, now)).unwrap_or(-1)
+extern "system" fn open(env: JNIEnv, _: JClass, id: JString, now: jlong) -> jint {
+    with_str(&env, &id, |id| transfers::open(id, now)).unwrap_or(-1)
 }
 
 /// A chunk arrived on `slot`; called per chunk, so primitives only.
@@ -71,12 +70,9 @@ extern "system" fn notice(listed: jint, waiting: jint, now: jlong) -> jint {
     transfers::notice(listed, waiting != 0, now)
 }
 
-extern "system" fn notice_title(env: JNIEnv, _: JClass) -> jstring {
-    transfers::notice_title(|s| java_string(&env, s))
-}
-
-extern "system" fn notice_text(env: JNIEnv, _: JClass) -> jstring {
-    transfers::notice_text(|s| java_string(&env, s))
+/// The notification's title and text in one string, "title\ntext".
+extern "system" fn notice_words(env: JNIEnv, _: JClass) -> jstring {
+    transfers::notice_words(|s| java_string(&env, s))
 }
 
 extern "system" fn notice_permille() -> jint {
@@ -92,10 +88,8 @@ extern "system" fn summary_failed() -> jint {
 }
 
 /// A running song's second line, asked whenever its ring moves.
-extern "system" fn row(mut env: JNIEnv, _: JClass, id: JString, artist: JString) -> jstring {
-    let (Ok(id), Ok(artist)) = (env.get_string(&id), env.get_string(&artist)) else { return std::ptr::null_mut() };
-    let (id, artist): (std::borrow::Cow<str>, std::borrow::Cow<str>) = ((&id).into(), (&artist).into());
-    transfers::row(&id, &artist, |s| java_string(&env, s))
+extern "system" fn row(env: JNIEnv, _: JClass, id: JString) -> jstring {
+    with_str(&env, &id, |id| transfers::row(id, |s| java_string(&env, s))).unwrap_or(std::ptr::null_mut())
 }
 
 extern "system" fn summary_line(env: JNIEnv, _: JClass, active: jint, queued: jint, failed: jint) -> jstring {

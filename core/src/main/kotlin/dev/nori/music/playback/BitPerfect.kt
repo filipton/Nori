@@ -11,10 +11,10 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import dev.nori.music.ffi.DacStep
-import dev.nori.music.ffi.dacDecide
-import dev.nori.music.ffi.dacMock
-import dev.nori.music.ffi.dacTrackLine
+import dev.nori.music.ffi.devices.DacStep
+import dev.nori.music.ffi.devices.dacDecide
+import dev.nori.music.ffi.devices.dacMock
+import dev.nori.music.ffi.devices.dacTrackLine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 

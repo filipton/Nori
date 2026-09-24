@@ -19,10 +19,8 @@ pub(crate) static CLASS: Class = Class {
         native!(c"delayFrames", c"(J)I", delay_frames),
         native!(c"reset", c"(J)V", reset),
         native!(c"process", c"(JLjava/nio/ByteBuffer;ILjava/nio/ByteBuffer;III)Z", process),
-        native!(c"autoPreampDb", c"([I[F)F", auto_preamp_db),
         native!(c"effectivePreampDb", c"(ZFZ[I[F)F", effective_preamp_db),
         native!(c"soundOn", c"(ZFFZZ)Z", sound_on),
-        native!(c"fadeVolume", c"(FFF)F", fade_volume),
     ],
 };
 
@@ -102,17 +100,6 @@ extern "system" fn process(
     1
 }
 
-/// The automatic pre-amp for bands given as parallel arrays of kinds and gains; see
-/// `nori_player::dsp::auto_preamp_db`.
-extern "system" fn auto_preamp_db(env: JNIEnv, _: JClass, kinds: JIntArray, gains: JFloatArray) -> jfloat {
-    let n = env.get_array_length(&kinds).unwrap_or(0).clamp(0, 64) as usize;
-    let (mut k, mut g) = ([0i32; 64], [0f32; 64]);
-    if env.get_int_array_region(&kinds, 0, &mut k[..n]).is_err() || env.get_float_array_region(&gains, 0, &mut g[..n]).is_err() {
-        return 0.0;
-    }
-    nori_player::dsp::auto_preamp_db(k[..n].iter().copied().zip(g[..n].iter().copied()))
-}
-
 /// The pre-amp in effect (`nori_core::settings::effective_preamp_db`), worked out once per settings but
 /// for each step of a band's drag on the equalizer screen: the bands' kinds and gains come in as two
 /// primitive arrays.
@@ -131,10 +118,4 @@ extern "system" fn effective_preamp_db(
 /// settings change, possibly while a screen is drawn, so primitives in and out.
 extern "system" fn sound_on(eq_enabled: jboolean, crossfeed_db: jfloat, balance: jfloat, mono: jboolean, limiter: jboolean) -> jboolean {
     nori_player::sound::sound_on(eq_enabled != 0, crossfeed_db, balance, mono != 0, limiter != 0) as jboolean
-}
-
-/// Where a volume fade from `from` to `to` stands at `t` (0..1) of its length. Asked on every tick of
-/// a fade, so primitives in and out, nothing boxed.
-extern "system" fn fade_volume(from: jfloat, to: jfloat, t: jfloat) -> jfloat {
-    nori_player::policy::fade(from, to, t)
 }

@@ -1,0 +1,24 @@
+[package]
+name = "nori-devices"
+version.workspace = true
+edition.workspace = true
+
+# Output devices: the platform's devices as the player's, per-device sound profiles and the AutoEQ index.
+[lib]
+name = "nori_devices"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi", "nori-settings/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+nori-model = { path = "../model" }
+nori-db = { path = "../db" }
+nori-net = { path = "../net" }
+# Which sound a device gets is read from the settings, and the known devices are kept beside them.
+nori-settings = { path = "../settings" }
+nori-player = { path = "../player" }

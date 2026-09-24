@@ -12,22 +12,22 @@ object EqWords {
     init { System.loadLibrary("norimusic") }
 
     /** "+3.5", "-1.0", "+0.0" (`fmt::signed_db`). */
-    @JvmStatic external fun signedDb(db: Float): String
+    @JvmStatic @FastNative external fun signedDb(db: Float): String
     /** "Pre-amp -3.5 dB (automatic)". */
-    @JvmStatic external fun preamp(db: Float, automatic: Boolean): String
+    @JvmStatic @FastNative external fun preamp(db: Float, automatic: Boolean): String
     /** "centre", "L 30%". */
-    @JvmStatic external fun balance(balance: Float): String
+    @JvmStatic @FastNative external fun balance(balance: Float): String
     /** "Ceiling -1.0 dB". */
-    @JvmStatic external fun ceiling(db: Float): String
+    @JvmStatic @FastNative external fun ceiling(db: Float): String
     /** What the limiter is pulling back: "−2.3 dB", "not clipping". */
-    @JvmStatic external fun reduction(db: Float): String
-    @JvmStatic external fun crossfeed(db: Float): String
-    /** A band's frequency as its label says it: "63", "1k". */
-    @JvmStatic external fun hz(freq: Float): String
+    @JvmStatic @FastNative external fun reduction(db: Float): String
+    @JvmStatic @FastNative external fun crossfeed(db: Float): String
+    /** The band dialog's title: "63 Hz", "1k Hz". */
+    @JvmStatic @FastNative external fun hzTitle(freq: Float): String
     /** "Slope 0.71" or "Q 1.41". */
-    @JvmStatic external fun shape(slope: Boolean, q: Float): String
+    @JvmStatic @FastNative external fun shape(slope: Boolean, q: Float): String
     /** A band's label, its frequency and a mark for its channel or kind (`settings::band_label`). */
-    @JvmStatic external fun bandName(kind: Int, freq: Float, channel: Int): String
+    @JvmStatic @FastNative external fun bandName(kind: Int, freq: Float, channel: Int): String
     /** The logarithmic frequency slider: 20 Hz at 0 to 20 kHz at 1. */
     @JvmStatic @CriticalNative external fun freqToSlider(freq: Float): Float
     @JvmStatic @CriticalNative external fun sliderToFreq(x: Float): Float

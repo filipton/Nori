@@ -7,23 +7,29 @@
 //! were asked for last, and the rows that flew by may be cancelled before a worker reaches them.
 //!
 //! Workers are started on the first requests, as many as are waited for up to the limit, and sleep on a
-//! condition variable when there is nothing to do: an idle loader never wakes.
+//! condition variable when there is nothing to do: an idle loader never wakes. Nothing touches the disk
+//! on the thread that asks, not even opening the cache (its directory is read by the first worker), so a
+//! GUI can ask from its own thread.
+//!
+//! What a cover is decoded into is the client's ([`Paint`]): RGBA rows ([`Rgba`]), or a platform's own
+//! picture made at the right size and decoded straight into (Android's Bitmaps, crates/android).
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
 
-use norimusic::covers::is_provider_cover;
-use norimusic::transport::{FailureKind, Transport, TransportError};
+use nori_core::covers::is_provider_cover;
+use nori_core::transport::{FailureKind, Transport, TransportError};
 use parking_lot::{Condvar, Mutex};
 
-use crate::decode::{self, Decoder};
+use crate::decode::{self, header, Decoder};
 use crate::disk::{DiskCache, Key};
 use crate::memory::{Image, MemoryCache, Sized};
 use crate::scale::Alpha;
@@ -32,10 +38,12 @@ pub struct Config {
     /// Where covers are kept on disk; None keeps none.
     pub dir: Option<PathBuf>,
     pub disk_bytes: u64,
-    /// Decoded covers kept in memory, in bytes.
+    /// Decoded covers kept in memory, in bytes. 0 for a client that keeps its own (Android keeps the
+    /// Bitmaps it draws, which only it can hold).
     pub memory_bytes: usize,
     /// At most this many covers fetched and decoded at once.
     pub workers: usize,
+    /// How [`Rgba`] writes a picture with transparency.
     pub alpha: Alpha,
     /// A fetch gives up after this long; 0 is the transport's own timeouts.
     pub timeout_ms: u32,
@@ -48,7 +56,7 @@ impl Config {
     pub fn new(dir: impl Into<PathBuf>) -> Config {
         Config {
             dir: Some(dir.into()),
-            disk_bytes: norimusic::covers::cover_rules().disk_bytes,
+            disk_bytes: nori_core::covers::cover_rules().disk_bytes,
             memory_bytes: 64 << 20,
             workers: thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4)),
             alpha: Alpha::Straight,
@@ -66,6 +74,8 @@ pub enum Error {
     Decode(decode::Error),
     /// The loader was dropped first.
     Closed,
+    /// Fetching, keeping or decoding this cover panicked; the loader goes on with the next.
+    Panicked(String),
 }
 
 impl fmt::Display for Error {
@@ -75,6 +85,7 @@ impl fmt::Display for Error {
             Error::Status(s) => write!(f, "HTTP {s}"),
             Error::Decode(e) => e.fmt(f),
             Error::Closed => f.write_str("closed"),
+            Error::Panicked(why) => write!(f, "panicked: {why}"),
         }
     }
 }
@@ -88,18 +99,56 @@ impl From<TransportError> for Error {
     }
 }
 
-pub type Done = Box<dyn FnOnce(Result<Arc<Image>, Error>) + Send>;
+/// What a loader makes of a cover's file, on the worker that fetched it.
+pub trait Paint: Send + Sync + 'static {
+    /// A decoded cover, handed to every view that waits for it (so cheap to clone: an `Arc`, a handle).
+    type Picture: Clone + Send + 'static;
 
-/// One cover at one size on its way, and who waits for it.
-struct Flight {
-    url: String,
-    started: bool,
-    waiters: Vec<(u64, Done)>,
+    /// The cover in `bytes`, decoded with `decoder` for a view `width` x `height` (0 x 0: at the file's
+    /// own size, at most `decode::WHOLE_SIDE` a side).
+    fn paint(&self, decoder: &mut Decoder, bytes: &[u8], width: u32, height: u32) -> Result<Self::Picture, decode::Error>;
+
+    /// How many bytes the picture holds, for the memory cache's limit.
+    fn bytes(picture: &Self::Picture) -> usize;
 }
 
-#[derive(Default)]
-struct Jobs {
-    flights: HashMap<Sized, Flight>,
+/// RGBA rows at exactly the size asked for, for a client that draws them itself.
+pub struct Rgba(pub Alpha);
+
+impl Paint for Rgba {
+    type Picture = Arc<Image>;
+
+    fn paint(&self, decoder: &mut Decoder, bytes: &[u8], width: u32, height: u32) -> Result<Arc<Image>, decode::Error> {
+        let (w, h) = if width == 0 || height == 0 {
+            header(bytes)?.fill(0, 0)
+        } else {
+            (width as usize, height as usize)
+        };
+        let pixels = decoder.decode(bytes, w, h, self.0)?;
+        Ok(Arc::new(Image { width: w as u32, height: h as u32, pixels: pixels.into_boxed_slice() }))
+    }
+
+    fn bytes(picture: &Arc<Image>) -> usize {
+        picture.pixels.len()
+    }
+}
+
+type Done<P> = Box<dyn FnOnce(Result<P, Error>) + Send>;
+
+/// The size a warm-up is filed under: no view is that big, so it never shares a flight with one.
+const WARM: u32 = u32::MAX;
+
+/// One cover at one size on its way, and who waits for it.
+struct Flight<P> {
+    url: String,
+    started: bool,
+    /// Fetched onto the disk whether or not anyone waits, and not decoded (`Loader::warm`).
+    warm: bool,
+    waiters: Vec<(u64, Done<P>)>,
+}
+
+struct Jobs<P> {
+    flights: HashMap<Sized, Flight<P>>,
     /// Flights not started yet, newest last. A cancelled one stays here until a worker skips it.
     queue: Vec<Sized>,
     workers: usize,
@@ -108,26 +157,55 @@ struct Jobs {
     closed: bool,
 }
 
-struct Inner {
+impl<P> Default for Jobs<P> {
+    fn default() -> Jobs<P> {
+        Jobs { flights: HashMap::new(), queue: Vec::new(), workers: 0, idle: 0, next_id: 0, closed: false }
+    }
+}
+
+struct Inner<P: Paint> {
     transport: Arc<dyn Transport>,
-    disk: Option<DiskCache>,
-    memory: MemoryCache,
-    jobs: Mutex<Jobs>,
+    dir: Option<PathBuf>,
+    disk_bytes: u64,
+    /// Opened by the first worker that needs it.
+    disk: OnceLock<Option<DiskCache>>,
+    memory: MemoryCache<P::Picture>,
+    jobs: Mutex<Jobs<P::Picture>>,
     work: Condvar,
     workers: usize,
-    alpha: Alpha,
+    paint: P,
     timeout_ms: u32,
 }
 
-pub struct Loader {
-    inner: Arc<Inner>,
+pub struct Loader<P: Paint = Rgba> {
+    inner: Arc<Inner<P>>,
+}
+
+/// What a ticket reaches back into when it is dropped: the loader, whatever it paints.
+trait Leave: Send + Sync {
+    fn leave(&self, key: &Sized, id: u64);
+}
+
+impl<P: Paint> Leave for Inner<P> {
+    fn leave(&self, key: &Sized, id: u64) {
+        let mut jobs = self.jobs.lock();
+        let Some(f) = jobs.flights.get_mut(key) else { return };
+        f.waiters.retain(|(i, _)| *i != id);
+        if f.waiters.is_empty() && !f.started && !f.warm {
+            jobs.flights.remove(key);
+        }
+    }
 }
 
 /// A request's claim on its cover. Dropping it (or [`Ticket::cancel`]) says the view no longer wants the
-/// cover, and its callback is not called; [`Ticket::detach`] lets the request run on unwatched.
+/// cover, and its callback is not called for a cover finished after that; [`Ticket::detach`] lets the
+/// request run on unwatched. A cover finished as the ticket is dropped may still be handed over, once:
+/// the callback runs outside the loader's lock, and holding a lock over it would make whoever drops a
+/// ticket wait on the client's own code (on Android, a `@FastNative` door waiting on Java, which can hold
+/// up the garbage collector). A client drops such a late cover on its own side.
 #[must_use = "dropping a ticket cancels its request"]
 pub struct Ticket {
-    inner: Option<Arc<Inner>>,
+    inner: Option<Arc<dyn Leave>>,
     key: Sized,
     id: u64,
 }
@@ -142,51 +220,53 @@ impl Ticket {
 
 impl Drop for Ticket {
     fn drop(&mut self) {
-        let Some(inner) = self.inner.take() else { return };
-        let mut jobs = inner.jobs.lock();
-        let Some(f) = jobs.flights.get_mut(&self.key) else { return };
-        f.waiters.retain(|(id, _)| *id != self.id);
-        if f.waiters.is_empty() && !f.started {
-            jobs.flights.remove(&self.key);
+        if let Some(inner) = self.inner.take() {
+            inner.leave(&self.key, self.id);
         }
     }
 }
 
 impl Loader {
-    /// A loader over the client's `transport` (on a desktop, `nori-http`'s). Opening the disk cache reads
-    /// its directory once.
-    pub fn new(config: Config, transport: Arc<dyn Transport>) -> std::io::Result<Loader> {
-        let disk = match &config.dir {
-            Some(dir) => Some(DiskCache::open(dir, config.disk_bytes)?),
-            None => None,
-        };
+    /// A loader of RGBA rows over the client's `transport` (on a desktop, `nori-http`'s).
+    pub fn new(config: Config, transport: Arc<dyn Transport>) -> Loader {
+        let alpha = config.alpha;
+        Loader::with_paint(config, transport, Rgba(alpha))
+    }
+}
+
+impl<P: Paint> Loader<P> {
+    /// A loader whose covers `paint` decodes.
+    pub fn with_paint(config: Config, transport: Arc<dyn Transport>, paint: P) -> Loader<P> {
         let inner = Inner {
             transport,
-            disk,
+            dir: config.dir,
+            disk_bytes: config.disk_bytes,
+            disk: OnceLock::new(),
             memory: MemoryCache::new(config.memory_bytes),
             jobs: Mutex::new(Jobs::default()),
             work: Condvar::new(),
             workers: config.workers.max(1),
-            alpha: config.alpha,
+            paint,
             timeout_ms: config.timeout_ms,
         };
-        Ok(Loader { inner: Arc::new(inner) })
+        Loader { inner: Arc::new(inner) }
     }
 
     /// The cover at `width` x `height` if it is decoded and kept: what a view draws right away, with no
     /// placeholder, before it asks.
-    pub fn cached(&self, url: &str, width: u32, height: u32) -> Option<Arc<Image>> {
+    pub fn cached(&self, url: &str, width: u32, height: u32) -> Option<P::Picture> {
         self.inner.memory.get(&Sized { key: Key::of(url), width, height })
     }
 
-    /// Asks for the cover at `url`, decoded to fill `width` x `height`. `done` gets it on a worker thread
-    /// (a GUI posts it to its own), or at once on this one when it is in memory; it is not called if the
-    /// ticket is dropped first.
-    pub fn request(&self, url: &str, width: u32, height: u32, done: impl FnOnce(Result<Arc<Image>, Error>) + Send + 'static) -> Ticket {
+    /// Asks for the cover at `url`, decoded to fill `width` x `height` (0 x 0: at its own size, at most
+    /// `decode::WHOLE_SIDE` a side). `done` gets it on a worker thread (a GUI posts it to its own), or at
+    /// once on this one when it is in memory; it is not called if the ticket is dropped before the cover
+    /// is finished (see [`Ticket`]).
+    pub fn request(&self, url: &str, width: u32, height: u32, done: impl FnOnce(Result<P::Picture, Error>) + Send + 'static) -> Ticket {
         let key = Sized { key: Key::of(url), width, height };
         let inner = &self.inner;
-        if let Some(image) = inner.memory.get(&key) {
-            done(Ok(image));
+        if let Some(picture) = inner.memory.get(&key) {
+            done(Ok(picture));
             return Ticket { inner: None, key, id: 0 };
         }
         let mut jobs = inner.jobs.lock();
@@ -196,28 +276,38 @@ impl Loader {
             Entry::Occupied(mut f) => f.get_mut().waiters.push((id, Box::new(done))),
             Entry::Vacant(v) => {
                 // A flight that landed between the look above and the lock left its cover in memory.
-                if let Some(image) = inner.memory.get(&key) {
+                if let Some(picture) = inner.memory.get(&key) {
                     drop(jobs);
-                    done(Ok(image));
+                    done(Ok(picture));
                     return Ticket { inner: None, key, id: 0 };
                 }
-                v.insert(Flight { url: url.to_owned(), started: false, waiters: vec![(id, Box::new(done))] });
-                jobs.queue.push(key);
-                if jobs.idle == 0 && jobs.workers < inner.workers {
-                    jobs.workers += 1;
-                    let inner = inner.clone();
-                    thread::Builder::new().name("nori-covers".into()).spawn(move || inner.work()).expect("a thread for covers");
-                } else {
-                    inner.work.notify_one();
-                }
+                v.insert(Flight { url: url.to_owned(), started: false, warm: false, waiters: vec![(id, Box::new(done))] });
+                inner.enqueue(&mut jobs, key, true);
             }
         }
         Ticket { inner: Some(inner.clone()), key, id }
     }
 
+    /// Fetches the cover at `url` onto the disk, if it is not there, without decoding it: a cover that
+    /// will be wanted (a song downloaded from a menu, which should arrive with its picture) without
+    /// holding memory for it now. It waits behind every view's request, so it never keeps a cover on
+    /// screen waiting. Provider covers are never kept, so they are not fetched either.
+    pub fn warm(&self, url: &str) {
+        if is_provider_cover(url) || self.inner.dir.is_none() {
+            return;
+        }
+        let key = Sized { key: Key::of(url), width: WARM, height: WARM };
+        let inner = &self.inner;
+        let mut jobs = inner.jobs.lock();
+        if let Entry::Vacant(v) = jobs.flights.entry(key) {
+            v.insert(Flight { url: url.to_owned(), started: false, warm: true, waiters: Vec::new() });
+            inner.enqueue(&mut jobs, key, false);
+        }
+    }
+
     /// The cover, waiting for it on this thread. Not from a `request` callback: that would wait on the
     /// worker it runs on.
-    pub fn load(&self, url: &str, width: u32, height: u32) -> Result<Arc<Image>, Error> {
+    pub fn load(&self, url: &str, width: u32, height: u32) -> Result<P::Picture, Error> {
         let (tx, rx) = mpsc::sync_channel(1);
         let _ticket = self.request(url, width, height, move |r| {
             let _ = tx.send(r);
@@ -225,17 +315,25 @@ impl Loader {
         rx.recv().unwrap_or(Err(Error::Closed))
     }
 
+    /// The file of the cover at `url` into `out`, from the disk or fetched (and kept), on this thread:
+    /// for a caller that wants something other than a picture out of it (a page's colours).
+    pub fn read(&self, url: &str, out: &mut Vec<u8>) -> Result<(), Error> {
+        let waker = Waker::from(Arc::new(Unpark(thread::current())));
+        self.inner.bytes(Key::of(url), url, out, &waker)
+    }
+
     /// Lets the decoded covers go, for a client told memory is short. The disk keeps them.
     pub fn trim_memory(&self) {
         self.inner.memory.clear();
     }
 
+    /// The disk cache, opened now if no worker has yet: this reads its directory.
     pub fn disk(&self) -> Option<&DiskCache> {
-        self.inner.disk.as_ref()
+        self.inner.disk()
     }
 }
 
-impl Drop for Loader {
+impl<P: Paint> Drop for Loader<P> {
     /// Stops the workers once they finish what they are on; whoever still waits gets `Closed`.
     fn drop(&mut self) {
         let flights = {
@@ -253,7 +351,7 @@ impl Drop for Loader {
     }
 }
 
-/// Wakes the worker parked on a future the transport has not finished.
+/// Wakes the thread parked on a future the transport has not finished.
 struct Unpark(Thread);
 
 impl Wake for Unpark {
@@ -267,7 +365,7 @@ impl Wake for Unpark {
 }
 
 /// Runs `f` to its end on this thread. A desktop transport finishes on its first poll; one that does not
-/// wakes this thread when it can go on.
+/// (Android's, answered by OkHttp's own threads) wakes this thread when it can go on.
 fn block_on<F: Future>(f: F, waker: &Waker) -> F::Output {
     let mut cx = Context::from_waker(waker);
     let mut f = pin!(f);
@@ -286,22 +384,63 @@ struct Worker {
     waker: Waker,
 }
 
-impl Inner {
+impl Worker {
+    fn new() -> Worker {
+        Worker { decoder: Decoder::new(), bytes: Vec::new(), waker: Waker::from(Arc::new(Unpark(thread::current()))) }
+    }
+}
+
+/// Counts a worker out however its thread ends, so the next request starts another in its place.
+struct Leaving<'a, P: Paint>(&'a Inner<P>);
+
+impl<P: Paint> Drop for Leaving<'_, P> {
+    fn drop(&mut self) {
+        self.0.jobs.lock().workers -= 1;
+    }
+}
+
+/// What a panic said, when it said it in words.
+fn said(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_default()
+}
+
+impl<P: Paint> Inner<P> {
+    fn disk(&self) -> Option<&DiskCache> {
+        self.disk.get_or_init(|| self.dir.as_ref().and_then(|d| DiskCache::open(d, self.disk_bytes).ok())).as_ref()
+    }
+
+    /// Queues the flight `key`, just filed, for a worker, `first` ahead of everything waiting or else
+    /// behind it: an idle worker is woken, or one more started while there are fewer than the limit.
+    fn enqueue(self: &Arc<Self>, jobs: &mut Jobs<P::Picture>, key: Sized, first: bool) {
+        if first {
+            jobs.queue.push(key);
+        } else {
+            jobs.queue.insert(0, key);
+        }
+        if jobs.idle == 0 && jobs.workers < self.workers {
+            jobs.workers += 1;
+            let inner = self.clone();
+            thread::Builder::new().name("nori-covers".into()).spawn(move || inner.work()).expect("a thread for covers");
+        } else {
+            self.work.notify_one();
+        }
+    }
+
     fn work(self: Arc<Self>) {
-        let mut w = Worker { decoder: Decoder::new(), bytes: Vec::new(), waker: Waker::from(Arc::new(Unpark(thread::current()))) };
+        let _leaving = Leaving(&self);
+        let mut w = Worker::new();
         loop {
-            let (key, url) = {
+            let (key, url, warm) = {
                 let mut jobs = self.jobs.lock();
                 loop {
                     if jobs.closed {
-                        jobs.workers -= 1;
                         return;
                     }
                     if let Some(key) = jobs.queue.pop() {
                         match jobs.flights.get_mut(&key) {
                             Some(f) if !f.started => {
                                 f.started = true;
-                                break (key, std::mem::take(&mut f.url));
+                                break (key, std::mem::take(&mut f.url), f.warm);
                             }
                             _ => continue,
                         }
@@ -311,45 +450,73 @@ impl Inner {
                     jobs.idle -= 1;
                 }
             };
-            let result = self.fetch(&key, &url, &mut w);
+            // One broken file must not stop every cover after it: a panic is this cover's error, and its
+            // waiters are answered like any other's.
+            let job = panic::catch_unwind(AssertUnwindSafe(|| if warm { self.warm(&key, &url, &mut w) } else { self.fetch(&key, &url, &mut w) }));
+            let result = job.unwrap_or_else(|p| {
+                // The decoder's buffers may be anywhere mid-picture, and the file is fetched again next
+                // time rather than kept.
+                w = Worker::new();
+                if let Some(d) = self.disk() {
+                    d.remove(key.key);
+                }
+                Err(Error::Panicked(said(&*p)))
+            });
             let waiters = self.jobs.lock().flights.remove(&key).map(|f| f.waiters).unwrap_or_default();
             for (_, done) in waiters {
-                done(result.clone());
+                let r = result.clone();
+                // Nor does a client's call back that panics: it loses its own cover, not the thread.
+                let _ = panic::catch_unwind(AssertUnwindSafe(move || done(r)));
             }
         }
     }
 
-    fn fetch(&self, key: &Sized, url: &str, w: &mut Worker) -> Result<Arc<Image>, Error> {
-        let from_disk = self.disk.as_ref().is_some_and(|d| d.read(key.key, &mut w.bytes));
-        if !from_disk {
-            let r = block_on(self.transport.get(url.to_owned(), self.timeout_ms), &w.waker)?;
-            if !(200..300).contains(&r.status) || r.body.is_empty() {
-                return Err(Error::Status(r.status));
-            }
-            w.bytes = r.body;
-            // Provider artwork is redrawn under the same address once the item is in the library.
-            if !is_provider_cover(url) {
-                if let Some(d) = &self.disk {
-                    let _ = d.put(key.key, &w.bytes);
-                }
-            }
+    /// The file onto the disk, unless it is there; no one waits for a warm-up, so it answers nobody.
+    fn warm(&self, key: &Sized, url: &str, w: &mut Worker) -> Result<P::Picture, Error> {
+        if self.disk().is_some_and(|d| !d.contains(key.key)) {
+            self.bytes(key.key, url, &mut w.bytes, &w.waker)?;
         }
+        Err(Error::Closed)
+    }
+
+    fn fetch(&self, key: &Sized, url: &str, w: &mut Worker) -> Result<P::Picture, Error> {
+        self.bytes(key.key, url, &mut w.bytes, &w.waker)?;
         if self.jobs.lock().flights.get(key).is_none_or(|f| f.waiters.is_empty()) {
             return Err(Error::Closed);
         }
-        let (width, height) = (key.width as usize, key.height as usize);
-        let pixels = match w.decoder.decode(&w.bytes, width, height, self.alpha) {
-            Ok(px) => px,
+        match self.paint.paint(&mut w.decoder, &w.bytes, key.width, key.height) {
+            Ok(picture) => {
+                self.memory.put(*key, picture.clone(), P::bytes(&picture));
+                Ok(picture)
+            }
             Err(e) => {
-                // A file that does not decode is fetched again next time rather than kept.
-                if let Some(d) = &self.disk {
+                // A file that does not decode is fetched again next time rather than kept: it may have
+                // been cut short. One in a format this cannot decode stays, or it would be fetched
+                // again every time it is shown.
+                if let (decode::Error::Corrupt(_), Some(d)) = (&e, self.disk()) {
                     d.remove(key.key);
                 }
-                return Err(Error::Decode(e));
+                Err(Error::Decode(e))
             }
-        };
-        let image = Arc::new(Image { width: key.width, height: key.height, pixels: pixels.into_boxed_slice() });
-        self.memory.put(*key, image.clone());
-        Ok(image)
+        }
+    }
+
+    /// The cover's file into `out`: from the disk, or fetched and kept there (a provider's is not).
+    fn bytes(&self, key: Key, url: &str, out: &mut Vec<u8>, waker: &Waker) -> Result<(), Error> {
+        if self.disk().is_some_and(|d| d.read(key, out)) {
+            return Ok(());
+        }
+        let r = block_on(self.transport.get(url.to_owned(), self.timeout_ms), waker)?;
+        if !(200..300).contains(&r.status) || r.body.is_empty() {
+            return Err(Error::Status(r.status));
+        }
+        *out = r.body;
+        // Provider artwork is redrawn under the same address once the item is in the library.
+        if !is_provider_cover(url) {
+            if let Some(d) = self.disk() {
+                let _ = d.put(key, out);
+            }
+        }
+        Ok(())
     }
 }

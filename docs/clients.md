@@ -14,7 +14,7 @@ Link these and call them; do not reimplement them.
 
 | Area | Crate / module |
 |---|---|
-| Server API, sync, the one app database (`nori.db`), settings with their schema and effects | `norimusic-core`: `api`, `client`, `db`, `settings_store`, `settings_schema` |
+| Server API, sync, the one app database (`nori.db`), settings with their schema and effects | `nori-core`: `api`, `client`, `db`, `settings_store`, `settings_schema` |
 | Library, search, browse, mixes, smart lists, stats, history, favourites, playlists, M3U | `library`, `search`, `browse`, `mixes`, `smart`, `history`, `stars`, `m3u` |
 | What each page shows, its menus and buttons, and every word on screen, pluralised and localised | `pages`, `menus`, `actions`, `words`, `fmt`, `nori-text` |
 | The queue: order, shuffle, autofill, radio, the offline bridge, error runs | `nori-player::playlist`, `queue`, `autofill`, `bridge`, `rules` |
@@ -28,8 +28,10 @@ Link these and call them; do not reimplement them.
 | Output devices: naming, ranking, per-device sound profiles, AutoEQ curves, bit-perfect decisions | `nori-player::outputs`, `device`, `dac`; `profiles`, `autoeq` |
 | Downloads and stream cache bookkeeping: what is stored, what to fetch next, what to evict | `transfers`, `stream_cache`, `cache_policy` |
 | Scrobbling decisions, lyrics (server and LRCLIB) with parsing and the current line | `scrobble`, `lrclib`, `lyrics`, `nori-look::lyrics` |
+| What a song that will not play says, the credits (the core's crates, Android's libraries, the typeface and the third parties' data), About's lines | `words::words_playback_error`, `settings_schema::core_credits`, `android_credits`, `data_credits`, `words::words_about_android` |
+| A perf recorder's bookkeeping: the state a stretch is filed under, what two readings of the counters make (the threads that woke most among them), the stretches kept, their sums by state, the page's figures, the audio output's line and the shared report | `perf_log` |
 | Cover colours: palette, theme, the page's colour scheme, the wash and melt behind the player | `nori-look::cover`, `palette`, `theme`, `dress` |
-| Cover art: fetched through the `Transport`, kept on disk and decoded in memory, JPEG, PNG and WebP decoded straight to the size drawn | `nori-covers` |
+| Cover art: fetched through the `Transport`, kept on disk and in memory, JPEG, PNG, WebP and a GIF's first frame decoded straight to the size drawn and turned as their EXIF says (Android's Bitmaps included) | `nori-covers` |
 | The car browse tree | `car` |
 
 ## What each client builds
@@ -68,10 +70,14 @@ only what touches the hardware:
   addresses, ReplayGain, error run and "skip explicit songs". `CoreApp::measuring(Measurer)` measures the
   songs ahead for AutoMix, and `per_device(core)` gives each output device its own sound. Edit the queue
   through the core's `playlist_*` calls and tell the engine (`queue_changed`); the controls are
-  `play_at`, `play`, `pause`, `next`, `previous`, `seek`, `set_settings`, `replan`, `set_repeat`,
-  `gain_changed`. A screen follows `Event`s (state, the song heard - through a mix, the moment the next
-  song is audible - errors, the output device, and positions only when asked for) and reads `Status` at
-  any time without waking the engine.
+  `play_at`, `play`, `pause`, `next`, `previous`, `seek`, `go_to`, `set_settings`, `replan`,
+  `set_repeat`, `gain_changed`, `set_tuning` (the equalizer screen's shallow buffer) and `pause_at_end`
+  (the sleep timer's "end of this song"). The player's own rules come with them: a seek or a `go_to`
+  while paused is held until play and fetches nothing, and a skip button while paused is a request for
+  music (`nori_player::transport::skip_plays`). A screen follows `Event`s (state, the song heard -
+  through a mix, the moment the next song is the louder - errors, the output device, a network stall
+  heard as buffering, playback stopping by itself, and positions only when asked for) and reads
+  `Status` at any time without waking the engine, the sound chain and the limiter's meter included.
 
 The engine does, from the core's decisions, everything ExoPlayer does around the Rust on Android: it
 loads each song in bursts per `load_control` (the whole song in one request when it fits, the next one
@@ -102,14 +108,15 @@ power-saving mode, waking when a second is left and taking everything the ring h
 woken in the same moment - both about every ten seconds while music plays, like the ExoPlayer path's
 deep buffer; the engine keeps no timer of its own for the ring then (`AudioOutput::bursts`). Fades
 run at the track's volume and a flush empties the track, since seconds of music sit in it
-(`AudioOutput::ramp`, `flush`, `holding`). Songs' bytes come through media3's data sources on the app's
-OkHttp client (`RustBridge.open`), so the profile's TLS, certificates and headers apply and the downloads,
-the stream cache and the precacher are the ExoPlayer path's; the queue is the core's (`CoreQueue`,
-`CoreApp`), and `EnginePlayer` (`RustPlayer.kt`) is a media3 player over it for the session, the
-notification, Android Auto and the widget. Not on that path yet: audio offload, the offline bridge,
-internet radio, the equalizer screen's shallow buffer (a band is heard after what is buffered), the
-limiter's meter, and bit-perfect output (a USB DAC gets its mixer attributes at the song's rate, but
-ReplayGain and the sound chain still touch the samples).
+(`AudioOutput::ramp`, `flush`, `holding`); a track that dies is opened again, and one that will not
+open is the engine's to hear of (`AudioOutput::failed`). A song's address and cache key are the core's
+(`stream::resolve_now`, over the network state Kotlin tells it, `network_metered`), and its bytes come
+through media3's data sources on the app's OkHttp client (`RustBridge.open`), so the profile's TLS,
+certificates and headers apply and the downloads, the stream cache and the precacher are the ExoPlayer
+path's; the queue is the core's (`CoreQueue`, `CoreApp`), and `EnginePlayer` (`RustPlayer.kt`) is a
+media3 player over it for the session, the notification, Android Auto and the widget. Not on that path
+yet: audio offload, the offline bridge, internet radio, and bit-perfect output (a USB DAC gets its mixer
+attributes at the song's rate, but ReplayGain and the sound chain still touch the samples).
 
 By default Android keeps ExoPlayer for loading, demuxing and output, around the same Rust:
 - **Loading and buffering:** fetch bytes (through the stream cache or a download), demux the container into
@@ -140,99 +147,131 @@ platform's threads or jobs, when the core says to (`Precacher.kt`, `AutoMixPrefe
   out.
 
 ### 4. Pictures
-- Load and cache cover images. A client without an image loader of its own links `nori-covers`, which
-  does all of it in pure Rust; Android keeps Coil and decodes with `nori-covers` inside it (below).
+- Draw cover images. Fetching, caching and decoding are `nori-covers`', on every client, Android
+  included: a client asks for a cover at a view's size and draws what comes back.
 - Hand decoded pixels to `nori-look::cover::derive`, which returns the page's colours and the wash
-  picture. Draw them; never recompute them.
+  picture. Draw them; never recompute them. Android has the core do both in one call (below).
 
 `nori-covers` (`crates/covers`) is platform-free:
-- **`Loader`** (`Loader::new(Config, Arc<dyn Transport>)`): `request(url, width, height, done)` answers
-  on one of a few worker threads (or at once, from memory) with an `Arc<Image>` of tight RGBA rows,
-  decoded to fill `width` x `height` the way a cover is drawn (the middle kept, the overhang cut). The
-  `Ticket` it returns cancels the request when dropped (a row scrolled away); `detach` lets it run on.
-  Views asking for one cover at one size while it is on its way share one fetch and one decode, and the
-  newest request is served first, so the covers on screen now come before the rows flung past.
-  `cached(url, w, h)` is the memory cache alone, for drawing at once; `load` waits on the calling
-  thread. Workers start with the first requests, at most `Config::workers`, and sleep when idle.
+- **`Loader`** (`Loader::new(Config, Arc<dyn Transport>)` for RGBA, `Loader::with_paint(.., paint)` for a
+  platform's own pictures): `request(url, width, height, done)` answers on one of a few worker threads
+  (or at once, from memory) with the cover decoded to fill `width` x `height` the way a cover is drawn
+  (the middle kept, the overhang cut); 0 x 0 is the file's own size, at most 2048 a side (a larger file
+  is shrunk in its shape; one past 16 MP is not decoded at all). The `Ticket` it returns cancels the
+  request when dropped (a row scrolled away); `detach` lets it run on. Views asking for one cover at one
+  size while it is on its way share one fetch and one decode, and the newest request is served first, so
+  the covers on screen now come before the rows flung past. `warm(url)` fetches onto the disk only,
+  behind every view's request (a download's covers); `read(url, bytes)` hands the file itself over on the
+  calling thread (a page's colours). `cached(url, w, h)` is the memory cache alone, for drawing at once;
+  `load` waits on the calling thread. Workers start with the first requests, at most `Config::workers`,
+  and sleep when idle; nothing touches the disk on the thread that asks, not even opening the cache.
+- **`Paint`**: what a cover's file becomes, on the worker that fetched it. `Rgba` is tight RGBA rows at
+  exactly the size asked for (an `Arc<Image>`); Android's paints a Bitmap (below).
 - Addresses are the core's (`cover_url_into`, or `Core.coverUrl`), so every client asks the server for
   the same renditions. Provider covers (`is_provider_cover`) are never written to disk.
 - **`DiskCache`**: the server's bytes, one file per address (its MD5) in the directory the client
   names, under `Config::disk_bytes` (the core's `cover_rules`), least recently used out first. The index
   is rebuilt from the directory when it opens, and a read sets the file's modification time, so the order
-  survives a restart without being state in the app's database.
+  survives a restart without being state in the app's database. A file that does not decode is deleted
+  and fetched again next time; one in a format the decoder does not know is kept.
 - **`MemoryCache`**: decoded covers by address and size, under a limit in bytes, least recently drawn
-  out first. `trim_memory` lets them all go.
+  out first. `trim_memory` lets them all go. 0 bytes keeps none, for a client that keeps its own.
 - **`Decoder`**: `decode_into(bytes, Target { px, width, height, stride }, alpha)` writes RGBA straight
   into the caller's rows (padded rows allowed, as a Bitmap or a texture upload buffer has them), straight
-  or premultiplied. A picture already that size is decoded into them with no copy between; anything else
-  is decoded whole into a buffer the decoder keeps and filtered in: an exact area average shrinking,
-  bilinear growing, in fixed point, two passes, nothing allocated once the buffers have grown. JPEG is
-  zune-jpeg (the fastest pure-Rust decoder, SIMD on x86 and NEON), except that a JPEG at least twice the
-  size drawn goes to jpeg-decoder, whose IDCT decodes at 1/2, 1/4 or 1/8 of the size (what Android's
-  `inSampleSize` does in libjpeg-turbo) - about a third faster on a desktop, with the pixels a step or
-  so from the exact average on real covers; `set_idct_scaling(false)` decodes those whole instead. PNG
-  is the `png` crate, WebP `image-webp`. Pictures over 16384 pixels a side are refused. `header(bytes)`
-  reads a file's format, size and whether its EXIF turns it from the headers alone, for a client that
-  sizes the picture it decodes into first.
+  or premultiplied, turned or mirrored the way the file's EXIF says (JPEG APP1, PNG eXIf, WebP EXIF,
+  found by walking the container, nothing decoded). A picture already that size is decoded into them with
+  no copy between; anything else is decoded whole into a buffer the decoder keeps and filtered in: an
+  exact area average shrinking, bilinear growing, in fixed point, two passes, nothing allocated once the
+  buffers have grown. JPEG is zune-jpeg (the fastest pure-Rust decoder, SIMD on x86 and NEON), except
+  that a JPEG at least twice the size drawn may go to jpeg-decoder, whose IDCT decodes at 1/2, 1/4 or 1/8
+  of the size (what Android's `inSampleSize` does in libjpeg-turbo) - about a third faster on a desktop,
+  with the pixels a step or so from the exact average; `set_idct_scaling(false)` decodes those whole
+  instead. PNG is the `png` crate, WebP `image-webp`, GIF the `gif` crate: its first frame, on its screen,
+  with what the frame leaves uncovered transparent (a cover is a still picture). Pictures over 16384
+  pixels a side are refused. `header(bytes)` reads a file's format, its size as shown and its
+  orientation from the headers alone; `Header::fill` is the size to decode to for a view (never grown
+  past the file's pixels).
+- **Not decoded: HEIF/HEIC and AVIF.** HEVC has no decoder in pure Rust. AV1 has one (rav1d), but
+  without its assembly (which would need nasm and the NDK's assemblers in the build) it added about
+  1.5 MB to the library and decoded a 320 px cover in 6.3 ms and an 800 px one in 38 ms on a desktop,
+  six times a JPEG's time, for a format a Subsonic server does not send when it is asked for a size (it
+  resizes to JPEG or PNG). Such a cover is `DecodeError::Unknown`: its view keeps its placeholder.
 
-Android keeps Coil for everything but the decoding: fetching, the disk and memory caches, requests and
-Compose. Its covers are decoded by `nori-covers`' `Decoder`, which measured nearly twice BitmapFactory's
-speed at list sizes and over three times at the player's on the phone, with the native heap flat (the
-table under "Measured"). The "Decode covers in the core" setting (Sound, Experimental; on by default)
-hands them back to Android's decoders.
+Android has no image library: Coil is gone, and there is no fallback to Android's decoders. The core
+fetches (through the app's own `Transport`, so covers ride the API's HTTP/2 connection), keeps the files
+on disk (`cacheDir/art`, `cover_rules`' size) and decodes; Kotlin keeps the Bitmaps it is handed and
+draws them.
 
-- **`RustCoverDecoder`** (app, a Coil `Decoder.Factory` ahead of Coil's own) reads the cover's bytes once
-  into a direct buffer it keeps (straight from the disk cache's file when Coil hands one over, otherwise
-  from the source without consuming it), asks the door for the picture's size from its headers, works out
-  the Bitmap's size with Coil's own `DecodeUtils` exactly as Coil's ImageDecoder path does (the shape
-  kept, fit or fill, grown only for an exact size), so layout does not change, and decodes into it.
-  A JPEG where Coil allows RGB_565 is decoded to 565, as Android's decoders would (the core packs it:
-  about 0.05 ms at 300 px, 0.7 ms at 1080 on a desktop); anything else is ARGB_8888, premultiplied.
-  A software Bitmap is decoded into directly; a hardware one (what the screens ask for) is decoded into
-  a software Bitmap kept for the next cover and copied to the GPU, the upload Android's decoders make
-  too. JPEGs are decoded whole, not shrunk by the IDCT: as fast on the phone (0.93 against 0.98 ms at
-  300 px, 2.80 ms both at 1080) and an exact average. Four decode at once, as Coil allows its own.
-- **What goes to Coil's decoders**: anything that is not JPEG, PNG or WebP (GIF, HEIF), a broken file,
-  a picture its EXIF turns or mirrors (they honour it; the core draws the pixels as stored), a file
-  over 16 MB, a colour space, config or unpremultiplied alpha asked for, any error from the door, and
-  everything while the setting is off. The decoder answers null and Coil tries the next one.
-- **The door** (`dev.nori.music.look.CoverPixels`, crates/android/src/covers.rs): `header` (the size, or
-  why not, `@FastNative`) and `decodeBuffer` read a direct buffer where it lies; `decodeFile` and
-  `decodeBytes` take a path or a byte array. Each decodes into a mutable software ARGB_8888 or RGB_565
-  Bitmap's locked pixels at the Bitmap's size. `decodeBuffer` borrows a decoder from a pool for the
-  cover and gives it back, so there are as many as decode at once, not one on every Coil I/O thread
-  that ever decoded; the other two keep one per thread.
-- The cover colours (`CoverLook.derive`) read what it makes as they read Android's: their request asks
-  for software ARGB_8888 without RGB_565, and gets it premultiplied, as `deriveBitmap` expects.
+- **The door** (`dev.nori.music.look.CoverPixels`, crates/android/src/covers.rs): `open` makes a loader
+  (cheap: the directory is read by its first thread) whose `Paint` decodes each cover straight into a
+  Bitmap made at the size `Header::fill` says, from a loader thread attached to the JVM: RGB_565 for a
+  JPEG (the core packs it), ARGB_8888 premultiplied otherwise, `setHasAlpha(false)` for a JPEG so drawing
+  skips blending it. From Android 9 the screens get hardware Bitmaps, as they did from Coil: the picture
+  is decoded into a software Bitmap the thread keeps for the next cover (reconfigured, not made again;
+  let go past 512x512) and copied to the GPU there, so no frame pays the upload. `request(loader, url, w,
+  h, waiter)` answers a handle; the core calls `waiter.done(bitmap, status)` once, on the loader thread
+  that finished it, and `cancel(handle)` (`@FastNative`) drops the core's ticket, after which it is not
+  called for a cover finished later (one finished as it is cancelled may still arrive, and Kotlin drops
+  it: `cancel` does not wait for a call back under way, which would be a `@FastNative` door waiting on
+  Java). `warm` and `clear` are the loader's; `colours` is the page's colours, below. The transport is
+  the one the app hands the core (`set_cover_transport`, where `Nori` builds it on the warm-up thread);
+  a cover that reaches the network before that waits for it on its loader thread, never on the main one.
+- **`CoverLoader`** (core/.../data): the app's one loader, and the Bitmaps' memory cache. That cache
+  has to be Kotlin's: a Bitmap is a Java object, and the core holding a reference to every one would keep
+  it from the collector without knowing when a view has let it go. It is an LRU by bytes
+  (`allocationByteCount`), per cover address, sized by `cover_rules`' share of the memory class as Coil's
+  was, trimmed as Coil's was when the system asks. Each address keeps its largest picture, and whether it
+  is the file's whole picture: a row's thumbnail is drawn from the grid's larger one rather than decoded
+  again, and a view that needs more is shown what is kept while the larger one comes. A request posts
+  its call back to the main thread (`Handler.post` of the request itself: nothing else allocated) and
+  keeps the picture there. `prefetch` decodes at the file's own size (at most 2048 a side) into memory
+  (the library's next screenful, the player's neighbours); `warm` is disk only (a download's covers, hundreds of them, which
+  would push the screen's covers out of memory). Provider covers are never kept.
+- **`Cover` and `rememberCover`** (app/.../ui): the one component every screen draws a cover with. It
+  asks at the view's own pixel size (a view sized by its layout asks once measured), draws the kept
+  picture at once, otherwise the plate, its sheen and then the picture faded in over 260 ms; a picture
+  that never comes leaves the note glyph, faded in. The picture is drawn in the draw phase, the middle of
+  it in the view's shape as `ContentScale.Crop` did, and the fade is read there too, so it recomposes
+  nothing. Leaving composition cancels the request. The player's sleeve and its neighbours take the same
+  `CoverImage` as a painter.
+- **The page's colours** (`CoverLoader.colours`, the door's `colours`): the core reads the cover's file
+  (disk or network), decodes the whole picture to fit 320 px in straight colours and hands the pixels to
+  `nori_look::cover::derive`, writing the look into an int array and the wash into a Bitmap: no Bitmap
+  of the cover in between, and no round trip through premultiplied pixels. One call works out the page
+  in the plain theme and on AMOLED black from the one decode, where the bar is black and the player
+  keeps the record's colours.
 
-The debug build measures both the door and the decoder in Coil (the perf build runs `coverbench` from
-its Performance page, docs/perf-build.md):
+The debug build measures the core's covers (the perf build runs the same from its Performance page,
+docs/perf-build.md):
 
 ```sh
 adb shell am broadcast -a dev.nori.music.TEST --es cmd coverbench --es arg 40
-adb shell am broadcast -a dev.nori.music.TEST --es cmd coverdecode --es arg 40
-adb logcat -s noritest   # one line each when done
+adb logcat -s noritest   # one line when done
 ```
 
-`coverbench` takes up to that many covers from Coil's disk cache (`cacheDir/covers`) and decodes each to
-300x300 and 1080x1080 with BitmapFactory the way Coil drives it (bounds first, the largest power-of-two
-`inSampleSize` that still fills the size, the rest by density scaling; ARGB_8888, and RGB_565 as the app's
-Coil asks for opaque covers) and with the Rust door into one reused Bitmap, with the IDCT shrinking and
-without, and into an RGB_565 one. For each: total and per-cover time, the Java heap allocated per cover
-(`art.gc.bytes-allocated`), GCs, and the Java and native heaps before and after. Then the first five
-covers are compared with BitmapFactory's ARGB_8888 pixels: the mean absolute difference per channel.
-
-`coverdecode` loads the same covers through Coil, once with `RustCoverDecoder` and once with Coil's
-decoders alone, memory and disk caches off: to 300 and 1080 px, as hardware, ARGB_8888 and RGB_565
-Bitmaps, from the file and from bytes in memory. For each, ms per cover both ways and how many covers the
-Rust decoder drew, handed on to Coil's and failed; then whether the cover colours of the first five come
-out the same from either decoder's Bitmap.
+`coverbench` takes up to that many covers from the disk cache (`cacheDir/art`) and decodes each to
+300x300 and 1080x1080 into one reused Bitmap: ARGB_8888 with the IDCT shrinking and without, and RGB_565.
+Then it loads up to that many covers the app has shown (the addresses kept in memory) from the disk
+through a loader of its own at 300 px, all asked for at once as a screenful is, once into software
+Bitmaps and once into hardware ones, so the GPU copy's cost is there to see. For each: total and
+per-cover time, the Java heap allocated per cover (`art.gc.bytes-allocated`), GCs, and the Java and
+native heaps before and after.
 
 ### 5. The interface
 - Every screen, its layout and text rendering. Take the words and page contents from the core.
+- **Where things sit on the screen.** The core gives the gradients' stops, the timings and the colours;
+  the boxes are the platform's. Android's player sleeve is 0.74 wide for 1 tall and runs 9.5 % of its
+  height under the title (`PlayerScreen.kt`), tuned for a phone held upright; the interface is scaled
+  to a phone 411 dp wide when Android's display size is set large (`Theme.uiScale`). A desktop window
+  lays its player out and sizes its text otherwise.
 - **Animations, gestures and transitions.** Their feel is per platform: easing, springs, flick
   thresholds, swipe maths. Android's are in `app/ui/` (`PlayerScreen.kt`, `Chrome.kt`, `Components.kt`),
   described in `docs/motion.md`.
+- **A perf recorder** (optional): read the platform's counters (CPU time, every thread's name, CPU time and
+  context switches, heap, memory, the battery's counter and gauge, frames, the network bytes, and the audio
+  output as the platform describes it against what was asked of it) at each change of state, and hand them
+  to `perf_log` (`perf_state`, `perf_stretch`, `perf_log_add`, `perf_page`, `perf_report`). Android's is
+  the perf build (`app/src/perf`, docs/perf-build.md).
 - Locale: pass the platform's decimal and grouping separators to `fmt_set_locale` once.
 - Drawing cost: redraw only when something visible changes. The Android player draws the seek bar once
   per pixel and the times from pre-laid-out glyphs; a paused player draws nothing.
@@ -240,8 +279,8 @@ out the same from either decoder's Bitmap.
 ## Calling the core cheaply
 - `crates/cli` (nori-cli) is a whole terminal client in a few hundred lines: arguments, commands and
   printing, and nothing else.
-- Rust clients call the crates directly. The core (`crates/core`, package `norimusic-core`, lib
-  `norimusic`) is a plain rlib with no JNI in it, and its uniffi exports sit behind the default `ffi`
+- Rust clients call the crates directly. The core (`crates/core`, package `nori-core`, lib
+  `nori_core`) is a plain rlib with no JNI in it, and its uniffi exports sit behind the default `ffi`
   feature: depend on it with `default-features = false` and nothing of uniffi is built. Everything the
   Android doors call is ordinary Rust there - `dsp::SoundChain` over sample slices, `heard::HeardClock`,
   `automix::store::AnalysisStream`, `automix::host::CoreHost` for the transition engine, the download
@@ -255,13 +294,16 @@ out the same from either decoder's Bitmap.
   8 ns. `crates/android/build.rs` generates the scaffolding into the library, and
   `cargo run -p uniffi-bindgen -- bindings src:nori-android <dir>` writes the Kotlin. A thread the core
   starts may call into Kotlin (a callback, a future it wakes): the runtime (`crates/uniffi-jni-runtime`)
-  attaches it once, detaches it when it ends, and finds the app's classes from it through the class loader
-  `JNI_OnLoad` handed over, since `FindClass` on such a thread only sees the system's.
+  attaches it once, under the thread's own name (attached without one, the JVM renames it "Thread-NN"),
+  detaches it when it ends, and finds the app's classes from it through the class loader
+  `JNI_OnLoad` handed over, since `FindClass` on such a thread only sees the system's. crates/android's
+  own doors attach their threads the same way (`attached` in lib.rs).
 - On Android every door is registered in `JNI_OnLoad` with `RegisterNatives` (none is looked up by a
   `Java_` symbol). A door whose Kotlin signature is primitives only is `@CriticalNative` - its Rust
   function takes no `JNIEnv` and no class, and Android 8 to 11 only honour that for registered methods - and
-  a short door over arrays or direct buffers that allocates no Java objects and calls nothing back is
-  `@FastNative`. Every raw pointer (a direct buffer's address, array elements, Bitmap pixels) is checked
+  a short door over arrays or direct buffers, or one that answers a short string (the equalizer's
+  figures, a row's download line, the Rust player's `eventText`), that calls nothing back and waits on no
+  lock another thread holds for long is `@FastNative`. Every raw pointer (a direct buffer's address, array elements, Bitmap pixels) is checked
   for null and against its length before a slice is made of it.
 - Measure before moving work across the boundary. The Android debug build's `bench` test command prints
   what each kind of crossing costs next to the same work in Kotlin.
@@ -279,17 +321,21 @@ slower), with the debug bridge's `bench` command:
 | A time label ("3:07") | - | 0.14 µs, one 24-byte string | Rust over JNI, cached per second |
 | A small uniffi call | - | 0.1-0.3 µs, no garbage (uniffi's JNI bindings; JNA was 10-25 µs and 1.5-4 KB) | Rust |
 | Decoding a packet | MediaCodec: a hop to the codec process, framework buffer objects per packet | in-process, nothing allocated | Rust (`nori_player::decode`) |
-| Decoding a cover to 300 px (40 real covers, Galaxy S22, arm64, Android 16) | BitmapFactory as Coil drives it: 1.71 ms | `nori-covers`: 0.93 ms decoded whole (0.98 ms with the IDCT shrinking) | Rust (`nori_covers::Decoder` inside Coil, which keeps fetching, caching and drawing) |
+| Decoding a cover to 300 px (40 real covers, Galaxy S22, arm64, Android 16) | BitmapFactory as Coil drove it: 1.71 ms | `nori-covers`: 0.93 ms decoded whole (0.98 ms with the IDCT shrinking) | Rust (`nori-covers` fetches, keeps and decodes; Kotlin keeps the Bitmaps and draws) |
 | Decoding a cover to 1080 px (the player), same phone | 9.48 ms, native heap up 14-178 MB during the run | 2.80 ms either way, native heap flat | Rust; the pixels are practically BitmapFactory's (mean difference under 0.25/255) |
 
 Kept in the client (Kotlin on Android), because crossing would cost more than the work:
 - **Per-frame gesture and animation maths**: drag offsets, spring and easing values, flick velocity
   tracking, sleeve lift and scale. Each is a few multiplications Compose already does inline (about
   1 ns); a crossing costs 8 ns at best, and the numbers are consumed by Compose on the same frame. The
-  decisions a gesture ends in (which way a swipe turns, where the sheet settles) are the core's, asked
-  once per release.
+  decisions a gesture ends in (which way a swipe turns, where the sheet settles, the flick speeds, how
+  far a drag must go, the give towards a record that is not there, how far back takes the player, how
+  small a held record gets) stay beside it too (Chrome.kt, PlayerScreen.kt, PlayerSheet.kt,
+  Components.kt): gestures are mobile UI, and a desktop or terminal client has other input.
 - **Drawing**: layout, text measurement, the glyph-cached seek times, bitmaps. The core says what to draw
-  and with which colours; the platform draws it.
+  and with which colours; the platform draws it. Phone-only layout lives here too, with no twin: the
+  sleeve's box (`PlayerScreen.SLEEVE`, `SLEEVE_UNDER_TEXT`) and the interface's scale for a large display
+  size (`Theme.uiScale`), both of which the core carried once.
 - **Threading of the platform player**: decoding runs synchronously on media3's playback thread
   (`RustAudioDecoder`), because a decoder thread of its own cost two wakeups a packet (24 wakeups/s
   screen-off, now 5).
@@ -317,12 +363,11 @@ platform object or cheaper than a crossing. They are for other clients.
 
 | Kotlin original | Rust twin |
 |---|---|
-| `isProviderCover` (ui/Components.kt) | `norimusic::covers::is_provider_cover` |
+| `Covers.isProvider` (data/Library.kt) | `nori_core::covers::is_provider_cover` |
 | `Library.coverUrl` with `Uri.encode` (data/Library.kt) | `covers::cover_url_into` (into a kept buffer) |
 | `SearchViewModel`'s live search debounce, `isBlank` | `search::live_delay_ms`, `search::kotlin_whitespace` |
 | AutoEQ fetches: `Http.get(..).decodeToString()` in `SettingsViewModel.downloadAutoEqIndex`, `DeviceSound.adopt` | `autoeq::fetch_text`, `autoeq::text` (the JVM's UTF-8 repair) |
 | `AutoMixPrefetch.onDevice`, `AutoMixPrefetch.update` | `automix::ahead::whole_on_device`, `automix::ahead::plan` |
-| `Precacher.update` after `PlaybackService.precacheAhead` | `rules::precache_list` |
 | `ResizableEvictor.trimLocked` (playback/MediaSources.kt) | `stream_cache::trim` |
 | `PlayerConnection.publish`'s heard row, `PlayerConnection.read` | `heard::shown_index`, `heard::HeardAt::unpack` |
 | `PlayerViewModel.setVolumeFraction`, `volumeFraction` | `rules::volume_step`, `rules::volume_fraction` |
@@ -342,6 +387,16 @@ What stays in the client with no twin:
 - **Glue around platform objects**: media3's player, sink, renderer and processors (`Stages.kt`,
   `Equalizer.kt`, `RustAudio.kt`'s buffer queues), OkHttp (the TLS setup, exception kinds, the per-host
   cache of `request_policy` answers, which only saves crossings), `ConnectivityManager`, `AudioManager`,
-  notifications, SharedPreferences carry-overs, Coil's requests and memory caches, and the uniffi/JNI
-  wrappers that unpack what the core packed (`LyricsClock`, `Stages.fadeVolume`).
-- **Drawing**: layout, glyph widths, gradients' brushes, slider widget geometry.
+  notifications, SharedPreferences carry-overs, the covers' Bitmap memory cache (its trim levels and
+  "each address keeps its largest picture": Bitmaps are Java objects), `EnginePlayer`'s media3 item list
+  (a mirror of the core's queue for the session; a client on nori-engine has the queue itself), the
+  sorting of media3's error codes and exceptions into the core's kinds (`failureKind`, `isNetworkish`,
+  the 5000s as the output), and the uniffi/JNI wrappers that unpack what the core packed (`LyricsClock`,
+  `Stages.fadeVolume`).
+- **The perf build's counters**: reading `/proc`, `BatteryManager`, `Debug.MemoryInfo`, `TrafficStats`,
+  the AudioTrack the player opened (`PlaybackService.track`) and `FrameMetrics`, and counting frames as they
+  are drawn. What a stretch is, which threads it names and how it is said are the core's (`perf_log`).
+- **The debug build's tools**: the test bridge's verbs (`ActionsViewModel.testAction`, `TestBridge.kt`) and
+  the benchmarks (`app/src/bench`), which measure Android's own crossings and Bitmaps.
+- **Drawing**: layout, glyph widths, gradients' brushes, slider widget geometry, the player's sleeve box
+  and the interface's scale.

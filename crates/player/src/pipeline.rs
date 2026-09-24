@@ -143,6 +143,8 @@ pub struct Sink<T: Track> {
     pub source_ended: bool,
     /// The largest reduction the limiter reported, dB.
     pub gain_reduction_db: f32,
+    /// What the limiter took off the last buffer through it, dB: the meter a screen shows.
+    pub meter_db: f32,
     pub track: T,
 }
 
@@ -179,6 +181,7 @@ impl<T: Track> Sink<T> {
             stage2: Vec::new(),
             source_ended: false,
             gain_reduction_db: 0.0,
+            meter_db: 0.0,
             track,
         }
     }
@@ -208,6 +211,7 @@ impl<T: Track> Sink<T> {
         self.carry = 0.0;
         self.source_ended = false;
         self.gain_reduction_db = 0.0;
+        self.meter_db = 0.0;
         self.track.flush();
     }
 
@@ -244,6 +248,16 @@ impl<T: Track> Sink<T> {
             s.flush();
             s
         });
+    }
+
+    /// Whether the sound chain (equalizer, pre-amp, limiter, ...) is in the path of the samples.
+    pub fn chain_in(&self) -> bool {
+        self.eq.is_some()
+    }
+
+    /// The format the silence skipper runs at, while it is in the path of the samples.
+    pub fn skipping_silence(&self) -> Option<Format> {
+        self.format.filter(|_| self.silence.is_some())
     }
 
     /// New sound settings: the equalizer picks them up on its next buffer, live.
@@ -345,7 +359,8 @@ impl<T: Track> Sink<T> {
                 self.floats_in.extend(input.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])));
                 self.floats_out.resize(self.floats_in.len(), 0.0);
                 eq.process_f32(&self.floats_in, &mut self.floats_out);
-                self.gain_reduction_db = self.gain_reduction_db.max(eq.gain_reduction_db());
+                self.meter_db = eq.gain_reduction_db();
+                self.gain_reduction_db = self.gain_reduction_db.max(self.meter_db);
                 data.extend(self.floats_out.iter().flat_map(|v| v.to_le_bytes()));
             }
             Some(eq) => {
@@ -353,10 +368,14 @@ impl<T: Track> Sink<T> {
                 self.samples_in.extend(input.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])));
                 self.samples_out.resize(self.samples_in.len(), 0);
                 eq.process_i16(&self.samples_in, &mut self.samples_out);
-                self.gain_reduction_db = self.gain_reduction_db.max(eq.gain_reduction_db());
+                self.meter_db = eq.gain_reduction_db();
+                self.gain_reduction_db = self.gain_reduction_db.max(self.meter_db);
                 data.extend(self.samples_out.iter().flat_map(|v| v.to_le_bytes()));
             }
-            None => data.extend_from_slice(input),
+            None => {
+                self.meter_db = 0.0;
+                data.extend_from_slice(input);
+            }
         }
         if let Some(s) = self.silence.as_mut() {
             let mut next = std::mem::take(&mut self.stage2);
@@ -731,6 +750,8 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     /// Playback stopped at this song because it would not play: nothing is read until a jump, and a
     /// play tries the song again, as a platform's player does after an error.
     stopped: Option<usize>,
+    /// The song the music stops at the end of ([`Player::pause_at_end`]).
+    stop_after: Option<usize>,
     /// The last turn stopped at its budget of buffers with the output still taking them.
     hungry: bool,
     /// The queue's ids as the player last followed it: an edit is read against them.
@@ -771,6 +792,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             skip_on_error: true,
             failed: None,
             stopped: None,
+            stop_after: None,
             hungry: false,
             ids: Vec::new(),
         };
@@ -785,7 +807,32 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     }
 
     fn next_of(&self, i: usize) -> Option<usize> {
+        if self.stop_after == Some(i) {
+            return None;
+        }
         self.queue.read(|q| q.next_of(i, q.repeat())).map(|n| self.playable(n))
+    }
+
+    /// The music stops at the end of the song playing (the sleep timer's "end of this song"): nothing
+    /// after it is read or mixed into, as at the end of the queue, and [`Player::ended`] says when it has
+    /// been heard to its end. Off again with `false`, or by the next jump.
+    pub fn pause_at_end(&mut self, on: bool) {
+        let Some(c) = self.current.filter(|_| on) else {
+            self.stop_after = None;
+            return;
+        };
+        // Read on into the next song already (one shorter than what is read ahead): the rest of this one
+        // is read again, so its end is where the music stops.
+        if self.reading.as_ref().is_some_and(|r| r.index != c) {
+            let at = self.position_ms();
+            self.jump(c, at);
+        }
+        self.stop_after = Some(c);
+    }
+
+    /// The song the music stops at the end of, while [`Player::pause_at_end`] is on.
+    pub fn stopping_after(&self) -> Option<usize> {
+        self.stop_after
     }
 
     /// `i`, or the first song after it that arriving on would not skip.
@@ -880,6 +927,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// (an explicit one) gives way to the first after it that does not.
     pub fn jump(&mut self, i: usize, from_ms: i64) {
         self.stopped = None;
+        self.stop_after = None;
         let i = self.playable(i);
         let id = self.id_at(i);
         let r = match self.tracks.open(&id, from_ms) {
@@ -887,12 +935,28 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             Err(why) => return self.fail(i, PlaybackError::Other, why),
         };
         let offset = self.fresh_offset();
-        self.call(|e, _, a| e.flush(a));
-        self.burst.restart();
-        self.sink.flush();
+        // A jump empties the output anyway, so a swap waiting for a boundary is made here, where it costs
+        // nothing. Left for the next song's start, which with a crossfade on is inside the mix, it cut the
+        // mix off where it was heard - and a jump back to the song on the page is not a change of song.
+        let swap = self.chain.boundary(false) == ChainAct::Rebuild;
+        let capacity = if self.chain.tuning { SHALLOW_US } else { BUFFER_US };
+        if swap {
+            self.app.log("chain swap at the boundary");
+            self.call(|e, _, a| e.reset(a));
+            self.burst.restart();
+            self.sink.rebuild(capacity, self.sound.on(), self.sound.clone());
+            self.sink.set_stages(self.speed.0, self.speed.1, self.skip_silence);
+        } else {
+            self.call(|e, _, a| e.flush(a));
+            self.burst.restart();
+            self.sink.flush();
+        }
         self.queue.moved_to(i);
         if self.begin(i, from_ms, offset, r) {
             self.set_current(i);
+        }
+        if let Some(f) = self.reading.as_ref().filter(|_| swap).map(|r| r.r.format()) {
+            self.app.log(&format!("AudioTrack {} Hz buffer={}", f.rate, f.bytes(capacity)));
         }
     }
 
@@ -1020,6 +1084,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     pub fn set_skip_silence(&mut self, on: bool) {
         self.skip_silence = on;
         self.sink.set_stages(self.speed.0, self.speed.1, on);
+        if let Some(f) = self.sink.skipping_silence() {
+            self.app.log(&format!("silence skipping in chain: {} Hz x{}", f.rate, f.channels));
+        }
     }
 
     /// Speed and pitch as set.
@@ -1114,6 +1181,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             if let Some(f) = self.failed.as_mut() {
                 f.0 = at(f.0);
             }
+            self.stop_after = self.stop_after.map(at);
             let after = self.reading.as_ref().and_then(|r| self.next_of(r.index));
             match self.next.as_mut() {
                 Some(n) if moved(&old, &self.ids, n.0).is_some_and(|i| Some(i) == after) => n.0 = after.expect("checked"),
@@ -1121,6 +1189,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             }
         }
         self.sync_queue();
+        // What follows the song playing may be another song now, and its ending was planned into the
+        // old one: asked again on the next buffer, as the platform player does on a timeline change.
+        self.engine.replan();
     }
 
     /// Repeat off, one or all (`playlist::REPEAT_*`): the player walks the queue that way from now on,

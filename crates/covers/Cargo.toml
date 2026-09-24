@@ -10,7 +10,7 @@ name = "nori_covers"
 
 [dependencies]
 # The platform's one GET (Transport), the covers' addresses and which of them are never kept.
-norimusic-core = { path = "../core", default-features = false }
+nori-core = { path = "../core", default-features = false }
 parking_lot = "0.12"
 md-5 = "0.11"
 # The fastest pure-Rust JPEG decoder at full size (SIMD IDCT and colour conversion on x86 and NEON).
@@ -21,6 +21,8 @@ zune-core = "0.5"
 jpeg-decoder = { version = "0.3", default-features = false }
 png = "0.18"
 image-webp = "0.2"
+# Only the decoder: its default color_quant is for writing GIFs.
+gif = { version = "0.14", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 # The transport the loader tests stand in for the network with.

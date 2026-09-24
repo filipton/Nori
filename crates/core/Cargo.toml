@@ -1,17 +1,17 @@
 [package]
-name = "norimusic-core"
+name = "nori-core"
 version.workspace = true
 edition.workspace = true
 
 [lib]
 crate-type = ["lib"]
-name = "norimusic"
+name = "nori_core"
 
 [features]
 default = ["ffi"]
 # The uniffi scaffolding the Android app's Kotlin bindings are generated from. A Rust client links the
 # core without it.
-ffi = ["dep:uniffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi", "nori-lyrics/ffi", "nori-devices/ffi", "nori-queue/ffi", "nori-transfers/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
@@ -29,6 +29,17 @@ libc = "0.2"
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
 nori-text = { path = "../text" }
+nori-model = { path = "../model" }
+nori-db = { path = "../db" }
+nori-words = { path = "../words" }
+nori-net = { path = "../net" }
+nori-library = { path = "../library" }
+nori-automix = { path = "../automix" }
+nori-settings = { path = "../settings" }
+nori-lyrics = { path = "../lyrics" }
+nori-devices = { path = "../devices" }
+nori-queue = { path = "../queue" }
+nori-transfers = { path = "../transfers" }
 
 [dev-dependencies]
 nori-player = { path = "../player", features = ["synth"] }

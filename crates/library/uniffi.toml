@@ -1,0 +1,9 @@
+[bindings.kotlin]
+package_name = "dev.nori.music.ffi.library"
+cdylib_name = "norimusic"
+android = true
+# Android's own cleaners (SystemCleaner, java.lang.ref.Cleaner) arrived in API 33 and the app starts at 26,
+# so the bindings free Rust objects with their own reference queue on one daemon thread.
+android_cleaner = false
+disable_java_cleaner = true
+generate_immutable_records = true

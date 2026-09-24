@@ -19,7 +19,18 @@
 //!   device's own and not a guess;
 //! - the end of the music: once, when the track has played its last frame.
 //!
+//! A track that dies (the sound server restarted, the device went away under it) refuses its writes
+//! with an error rather than taking nothing: it is opened again in its place, as ExoPlayer recovers from
+//! a write that failed, and what it held is lost. One that would not open again is the engine's to hear
+//! of ([`AudioOutput::failed`]): it stops and says so, and the writer sleeps until it is let go.
+//!
 //! Paused, or at the end, it sleeps until the engine says something.
+//!
+//! A sound server may give a smaller buffer than asked, or say it gave the size asked and take less. The
+//! writer is timed by what the track holds, never by what is pulled for it, and a track that refuses a
+//! write it had room for is counted as the size it held then: a small track is topped up once per half of
+//! what it holds, and the log says so when it opens. It still wakes no more often than that buffer
+//! demands, and the engine still once per burst.
 //!
 //! With seconds of music inside the track, what the ring does to samples as they are pulled is heard
 //! seconds later. So the fades run at the track's volume (the engine hands them over through
@@ -62,8 +73,8 @@ pub(crate) trait Sink: Send {
     /// [`CHUNK_BYTES`] long.
     fn staging(&mut self) -> &mut [f32];
     /// Writes bytes `from..from + len` of the staging memory, as much as fits without waiting. The
-    /// bytes taken.
-    fn write(&mut self, from: usize, len: usize) -> usize;
+    /// bytes taken, or the error the track answered with (it is dead and must be opened again).
+    fn write(&mut self, from: usize, len: usize) -> Result<usize, i32>;
     fn play(&mut self);
     fn pause(&mut self);
     /// Drops what was written and not yet played. Only while paused or stopped.
@@ -98,6 +109,8 @@ pub(crate) trait Ring: Send {
     fn pull_i16(&mut self, out: &mut [i16]) -> usize;
     fn flushed(&mut self) -> bool;
     fn ending(&self) -> bool;
+    /// Wakes the engine now: the output failed.
+    fn wake_engine(&self);
 }
 
 impl Ring for Feed {
@@ -116,6 +129,9 @@ impl Ring for Feed {
     fn ending(&self) -> bool {
         Feed::ending(self)
     }
+    fn wake_engine(&self) {
+        Feed::wake_engine(self)
+    }
 }
 
 /// CLOCK_MONOTONIC in ns: the clock the device's timestamps are on (Java's `System.nanoTime`).
@@ -126,6 +142,25 @@ pub(crate) fn mono_ns() -> i64 {
     // SAFETY: a plain system call writing into the struct handed to it.
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
     t.tv_sec as i64 * 1_000_000_000 + t.tv_nsec as i64
+}
+
+/// An AudioTrack's play head, which the platform gives as 32 bits that wrap (after six hours at
+/// 192 kHz, a day at 44.1): the last value read and the wraps counted since the last flush make it a
+/// count that only grows. Made anew at every flush, which sets the head back to nought.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct HeadCount {
+    last: u32,
+    wraps: u64,
+}
+
+impl HeadCount {
+    pub(crate) fn read(&mut self, raw: u32) -> u64 {
+        if raw < self.last {
+            self.wraps += 1;
+        }
+        self.last = raw;
+        self.wraps << 32 | raw as u64
+    }
 }
 
 /// The track's clock: moved by the writer, read by the engine (through `latency_us`) and by the
@@ -168,6 +203,13 @@ impl Clock {
     /// Frames waiting in the track (or pulled for it) and not yet heard.
     fn fill(&self, now_ns: i64) -> u64 {
         self.latency_frames(now_ns)
+    }
+
+    /// Frames the track took and has not played yet: what it holds, without what is pulled and still
+    /// waiting to go in. What the next top-up is timed by.
+    fn in_track(&self, now_ns: i64) -> u64 {
+        let c = *self.0.lock();
+        c.given.saturating_sub(c.heard_at(now_ns))
     }
 
     fn update(&self, f: impl FnOnce(&mut Counts)) {
@@ -224,12 +266,25 @@ struct Fade {
 pub(crate) struct Writer<R: Ring> {
     ring: R,
     sink: Box<dyn Sink>,
+    /// What opens a track in place of one that died, as it was asked for the first one.
+    opener: Arc<Mutex<Box<dyn Opener>>>,
+    format: OutputFormat,
+    asked: u64,
+    /// Why the track died and would not open again, for the engine ([`AudioOutput::failed`]).
+    failure: Arc<Mutex<Option<String>>>,
+    /// No track at all: nothing is written until the output is let go.
+    dead: bool,
+    /// A track was opened in place of a dead one: it fills from the next look.
+    revived: bool,
     clock: Arc<Clock>,
     bytes: Arc<AtomicU64>,
     channels: usize,
     rate: u32,
     float: bool,
+    /// What the track holds: the buffer it gave, or less once it has refused a write with room left.
     capacity: u64,
+    /// The track is topped up again when this much is left in it: [`LOW_US`], or half of a buffer too
+    /// small for that.
     low: u64,
     starts_full: bool,
     /// Bytes at the start of the staging memory the track did not take yet.
@@ -249,20 +304,26 @@ pub(crate) struct Writer<R: Ring> {
 }
 
 impl<R: Ring> Writer<R> {
-    pub(crate) fn new(ring: R, opened: Opened, format: OutputFormat, float: bool, clock: Arc<Clock>, bytes: Arc<AtomicU64>) -> Writer<R> {
+    pub(crate) fn new(ring: R, opened: Opened, reopen: Reopen, format: OutputFormat, float: bool, clock: Arc<Clock>, bytes: Arc<AtomicU64>) -> Writer<R> {
         let rate = format.rate;
         clock.update(|c| *c = Counts { rate, ..Counts::default() });
-        let low = (rate as i64 * LOW_US / 1_000_000) as u64;
+        said_small(opened.frames, reopen.frames, rate);
         Writer {
             ring,
             sink: opened.sink,
+            opener: reopen.opener,
+            format,
+            asked: reopen.frames,
+            failure: reopen.failure,
+            dead: false,
+            revived: false,
             clock,
             bytes,
             channels: format.channels,
             rate,
             float,
-            capacity: opened.frames.max(low * 2),
-            low,
+            capacity: opened.frames.max(1),
+            low: low_mark(opened.frames, rate),
             starts_full: opened.starts_full,
             staged: (0, 0),
             playing: false,
@@ -280,9 +341,18 @@ impl<R: Ring> Writer<R> {
         self.channels * if self.float { 4 } else { 2 }
     }
 
+    /// The track holds `frames` from now on, and is topped up at the low mark that goes with it.
+    fn holds(&mut self, frames: u64) {
+        self.capacity = frames.max(1);
+        self.low = low_mark(frames, self.rate);
+    }
+
     /// One wake: does what the engine asked and what the track needs, and says how long to sleep
     /// (ms; `None` until the engine says something).
     pub(crate) fn step(&mut self, now_ns: i64, c: &mut Control) -> Option<u64> {
+        if self.dead {
+            return None;
+        }
         let now_ms = now_ns / 1_000_000;
         let mut wake: Option<u64> = None;
         let mut at = |ms: u64| wake = Some(wake.map_or(ms, |w| w.min(ms)));
@@ -305,6 +375,13 @@ impl<R: Ring> Writer<R> {
             if self.playing {
                 self.start(now_ns);
             } else {
+                // The engine pauses when its own clock says the fade is over; this thread may have woken a
+                // step late and not reached the end yet. Finish it, so the track stops at the fade's target
+                // (silence) rather than a step short of it.
+                if let Some(f) = self.fade.take() {
+                    self.sink.set_volume(f.to);
+                    self.volume = f.to;
+                }
                 self.sink.pause();
                 self.clock.freeze(now_ns);
                 if let Some((frames, ns)) = self.sink.heard(false) {
@@ -376,7 +453,10 @@ impl<R: Ring> Writer<R> {
     /// Tops the track up when it is due, and says when to look again.
     fn fill(&mut self, now_ns: i64) -> Option<u64> {
         let ms = |frames: u64, rate: u32| frames * 1000 / rate.max(1) as u64;
-        let fill = self.clock.fill(now_ns);
+        // Timed by what the track holds, not by what is pulled for it: a chunk left over from a track
+        // that was full is not music the track can play, and counted in, a track too small to take much
+        // was looked at again every fill tick.
+        let fill = self.clock.in_track(now_ns);
         if self.drained {
             if self.ring.available() == 0 {
                 return None;
@@ -389,11 +469,19 @@ impl<R: Ring> Writer<R> {
         }
         self.read_clock();
         let full = self.top_up(now_ns);
-        let fill = self.clock.fill(now_ns);
+        if self.dead {
+            return None;
+        }
+        if std::mem::take(&mut self.revived) {
+            return Some(FILL_TICK_MS);
+        }
+        let fill = self.clock.in_track(now_ns);
         if full {
             self.filling = false;
             self.starved_ms = FILL_TICK_MS;
-            return Some(ms(fill.saturating_sub(self.low), self.rate) + 1);
+            // Never sooner than a fill tick: a track that says it is full with less than the low mark in
+            // it would otherwise be asked again every millisecond.
+            return Some((ms(fill.saturating_sub(self.low), self.rate) + 1).max(FILL_TICK_MS));
         }
         if self.ring.ending() && self.ring.available() == 0 {
             // The last of the music is in the track. One that starts only when full is told to play
@@ -403,7 +491,7 @@ impl<R: Ring> Writer<R> {
                 self.sink.stop();
                 self.drained = true;
             }
-            return Some(ms(fill, self.rate) + 1);
+            return Some(ms(self.clock.fill(now_ns), self.rate) + 1);
         }
         // The ring had less than the track has room for. Between bursts that is only the engine decoding
         // the next one, and the track has plenty; while filling, or low, the engine is still decoding its
@@ -422,7 +510,7 @@ impl<R: Ring> Writer<R> {
         let fb = self.frame_bytes();
         let chunk_frames = CHUNK_BYTES / fb;
         loop {
-            if self.staged.1 > 0 && !self.write_staged() {
+            if self.staged.1 > 0 && !self.write_staged(now_ns) {
                 return true;
             }
             let room = self.capacity.saturating_sub(self.clock.fill(now_ns));
@@ -457,22 +545,94 @@ impl<R: Ring> Writer<R> {
                 return false;
             }
             self.staged = (0, got * fb);
-            if !self.write_staged() {
+            if !self.write_staged(now_ns) {
                 return true;
             }
         }
     }
 
-    /// Writes what is staged. False when the track would not take all of it (it is full).
-    fn write_staged(&mut self) -> bool {
+    /// Writes what is staged. False when the track would not take all of it (it is full), or died.
+    fn write_staged(&mut self, now_ns: i64) -> bool {
         let (from, len) = self.staged;
-        let taken = self.sink.write(from, len).min(len);
+        let taken = match self.sink.write(from, len) {
+            Ok(n) => n.min(len),
+            Err(code) => {
+                self.revive(now_ns, code);
+                return false;
+            }
+        };
         let fb = self.frame_bytes();
         self.clock.update(|c| c.given += (taken / fb) as u64);
         self.bytes.fetch_add(taken as u64, Ordering::Relaxed);
         self.staged = if taken < len { (from + taken, len - taken) } else { (0, 0) };
+        if taken < len {
+            self.refused(now_ns);
+        }
         taken == len
     }
+
+    /// The track would not take everything offered, which is only ever offered when the buffer it said it
+    /// has has room for it: it holds less than it said (a sound server that gives less than asked, and
+    /// says the size asked). What it holds now is at most what it can hold, since the ear lags what the
+    /// track has let go: that is its size from now on, so the writer sleeps until that much has played
+    /// down instead of asking again every fill tick. A small difference is the clock's, and left alone.
+    fn refused(&mut self, now_ns: i64) {
+        let holds = self.clock.in_track(now_ns).max(self.rate as u64 / 10);
+        if holds + self.capacity / 8 < self.capacity {
+            log(&format!("the AudioTrack took no more at {} ms of the {} ms it said it holds: counted as {} ms", holds * 1000 / self.rate as u64, self.capacity * 1000 / self.rate as u64, holds * 1000 / self.rate as u64));
+            self.holds(holds);
+        }
+    }
+}
+
+impl<R: Ring> Writer<R> {
+    /// The track refused a write with an error: it is dead. Another is opened in its place and filled
+    /// from the ring; what the dead one held is lost, and the ear is where the ring is. One that will
+    /// not open is the engine's to hear of.
+    fn revive(&mut self, now_ns: i64, code: i32) {
+        log(&format!("the AudioTrack failed a write ({code}): opening another"));
+        self.sink.release();
+        let opened = self.opener.lock().open(self.format, self.float, self.asked);
+        match opened {
+            Ok(o) => {
+                self.sink = o.sink;
+                said_small(o.frames, self.asked, self.rate);
+                self.holds(o.frames);
+                self.starts_full = o.starts_full;
+                self.staged = (0, 0);
+                self.drained = false;
+                self.revived = true;
+                self.sink.set_volume(self.volume);
+                // The new track counts its frames from nought, as after a flush.
+                self.clock.update(|c| {
+                    c.ahead = 0;
+                    c.given = 0;
+                    c.heard = 0;
+                    c.at_ns = now_ns;
+                    c.running = false;
+                });
+                if self.playing {
+                    self.start(now_ns);
+                } else {
+                    self.filling = true;
+                }
+            }
+            Err(e) => {
+                log(&format!("the AudioTrack would not open again: {e}"));
+                *self.failure.lock() = Some(e);
+                self.dead = true;
+                self.ring.wake_engine();
+            }
+        }
+    }
+}
+
+/// What the writer needs to open a track again: the opener, the size asked for, and where to say it
+/// could not.
+pub(crate) struct Reopen {
+    pub opener: Arc<Mutex<Box<dyn Opener>>>,
+    pub frames: u64,
+    pub failure: Arc<Mutex<Option<String>>>,
 }
 
 /// Shared by the output (on the engine's thread), its writer thread and the app's doors.
@@ -485,6 +645,8 @@ pub(crate) struct Shared {
     pub bytes: Arc<AtomicU64>,
     /// Told whenever the track's route changes.
     pub watch: Mutex<Option<DeviceWatch>>,
+    /// Why the track died and would not open again, until the engine has heard.
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl Shared {
@@ -498,7 +660,7 @@ impl Shared {
 
 /// The engine's output over an AudioTrack.
 pub(crate) struct TrackOutput {
-    opener: Box<dyn Opener>,
+    opener: Arc<Mutex<Box<dyn Opener>>>,
     float: bool,
     shared: Arc<Shared>,
     format: Option<OutputFormat>,
@@ -508,7 +670,7 @@ pub(crate) struct TrackOutput {
 impl TrackOutput {
     /// `float` is the high quality output setting: the track takes float samples, else 16-bit ones.
     pub(crate) fn new(opener: Box<dyn Opener>, float: bool, shared: Arc<Shared>) -> TrackOutput {
-        TrackOutput { opener, float, shared, format: None, thread: None }
+        TrackOutput { opener: Arc::new(Mutex::new(opener)), float, shared, format: None, thread: None }
     }
 }
 
@@ -528,9 +690,11 @@ impl AudioOutput for TrackOutput {
         let format = self.format.ok_or("the output was not opened")?;
         self.close();
         let frames = (format.rate as i64 * TRACK_US / 1_000_000) as u64;
-        let opened = self.opener.open(format, self.float, frames).inspect_err(|e| log(&format!("the AudioTrack would not open: {e}")))?;
+        let opened = self.opener.lock().open(format, self.float, frames).inspect_err(|e| log(&format!("the AudioTrack would not open: {e}")))?;
         *self.shared.control.lock() = Control::default();
-        let writer = Writer::new(feed, opened, format, self.float, self.shared.clock.clone(), self.shared.bytes.clone());
+        *self.shared.failure.lock() = None;
+        let reopen = Reopen { opener: self.opener.clone(), frames, failure: self.shared.failure.clone() };
+        let writer = Writer::new(feed, opened, reopen, format, self.float, self.shared.clock.clone(), self.shared.bytes.clone());
         let shared = self.shared.clone();
         let t = std::thread::Builder::new().name("nori-track".into()).spawn(move || run(writer, shared)).map_err(|e| e.to_string())?;
         *self.shared.writer.lock() = Some(t.thread().clone());
@@ -575,6 +739,10 @@ impl AudioOutput for TrackOutput {
         true
     }
 
+    fn failed(&mut self) -> Option<String> {
+        self.shared.failure.lock().take()
+    }
+
     fn close(&mut self) {
         if let Some(t) = self.thread.take() {
             self.shared.tell(|c| c.stop = true);
@@ -593,6 +761,21 @@ impl Drop for TrackOutput {
 /// One line in the app's log.
 fn log(message: &str) {
     nori_core::alog::info(&format!("rust track: {message}"));
+}
+
+/// The low mark for a track of `frames`: [`LOW_US`], or half of a track too small for that, so the
+/// writer wakes once per half of what it holds and never more often than the buffer demands.
+fn low_mark(frames: u64, rate: u32) -> u64 {
+    ((rate as i64 * LOW_US / 1_000_000) as u64).min(frames / 2)
+}
+
+/// A track that gave less than was asked is said in the log once, as it is opened: it is topped up more
+/// often, which is what its wakeups are.
+fn said_small(frames: u64, asked: u64, rate: u32) {
+    if frames < asked {
+        let ms = |f: u64| f * 1000 / rate.max(1) as u64;
+        log(&format!("the AudioTrack holds {} ms of the {} ms asked: topped up every {} ms or so", ms(frames), ms(asked), ms(frames - low_mark(frames, rate)).max(FILL_TICK_MS)));
+    }
 }
 
 fn run<R: Ring>(mut w: Writer<R>, shared: Arc<Shared>) {
@@ -639,6 +822,11 @@ mod tests {
         written_bytes: u64,
         /// The value of the last sample written, to tell the music before a flush from the music after.
         last: f32,
+        /// The sound server died under it: every write is refused with ERROR_DEAD_OBJECT.
+        dead: bool,
+        /// Tracks opened in place of a dead one, and whether another may be.
+        reopened: u32,
+        refuse_open: bool,
     }
 
     struct FakeSink {
@@ -652,8 +840,11 @@ mod tests {
         fn staging(&mut self) -> &mut [f32] {
             &mut self.staging
         }
-        fn write(&mut self, from: usize, len: usize) -> usize {
+        fn write(&mut self, from: usize, len: usize) -> Result<usize, i32> {
             let mut t = self.track.lock();
+            if t.dead {
+                return Err(-6);
+            }
             let fb = if self.float { 8 } else { 4 };
             let frames = ((t.capacity - t.buffered) as usize).min(len / fb);
             if frames > 0 {
@@ -663,7 +854,7 @@ mod tests {
             }
             t.buffered += frames as u64;
             t.written_bytes += (frames * fb) as u64;
-            frames * fb
+            Ok(frames * fb)
         }
         fn play(&mut self) {
             let mut t = self.track.lock();
@@ -727,6 +918,7 @@ mod tests {
         refills: u32,
         flushed: bool,
         value: f32,
+        engine_woken: u32,
     }
 
     impl FakeRing {
@@ -734,7 +926,7 @@ mod tests {
             let low = (RATE as i64 * (RING_LOW_US - 250_000) / 1_000_000) as usize;
             // A burst is ten seconds counted from the ear, which moves on while it is decoded: a little more.
             let burst = (RATE as i64 * (BUFFER_US + 200_000) / 1_000_000) as usize;
-            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5 };
+            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5, engine_woken: 0 };
             r.refill();
             r
         }
@@ -787,6 +979,9 @@ mod tests {
             let r = self.lock();
             r.left == 0
         }
+        fn wake_engine(&self) {
+            self.lock().engine_woken += 1;
+        }
     }
 
     struct Sim {
@@ -798,20 +993,52 @@ mod tests {
         control: Control,
         wakes: u32,
         next: Option<i64>,
+        failure: Arc<Mutex<Option<String>>>,
+    }
+
+    /// Opens the simulated track again, empty, as a new AudioTrack in place of a dead one.
+    struct FakeOpener {
+        track: Arc<Mutex<Track>>,
+        float: bool,
+        now: Arc<AtomicU64>,
+    }
+
+    impl Opener for FakeOpener {
+        fn open(&mut self, _format: OutputFormat, float: bool, frames: u64) -> Result<Opened, String> {
+            assert_eq!(float, self.float);
+            let mut t = self.track.lock();
+            if t.refuse_open {
+                return Err("no sound server".into());
+            }
+            let starts_full = t.starts_full;
+            *t = Track { capacity: frames, starts_full, volume: 1.0, reopened: t.reopened + 1, underruns: t.underruns, ..Track::default() };
+            let sink = FakeSink { track: self.track.clone(), staging: vec![0.0; CHUNK_BYTES / 4], float, now: self.now.clone() };
+            Ok(Opened { sink: Box::new(sink), frames, starts_full })
+        }
     }
 
     impl Sim {
         fn new(music_s: u64, float: bool, starts_full: bool) -> Sim {
+            Sim::granted(music_s, float, starts_full, TRACK_US, TRACK_US)
+        }
+
+        /// A track that says it holds `said_us` of music and holds `holds_us`, whatever was asked of it.
+        fn granted(music_s: u64, float: bool, starts_full: bool, said_us: i64, holds_us: i64) -> Sim {
             let ring = Arc::new(Mutex::new(FakeRing::new(music_s)));
-            let capacity = (RATE as i64 * TRACK_US / 1_000_000) as u64;
-            let track = Arc::new(Mutex::new(Track { capacity, starts_full, volume: 1.0, ..Track::default() }));
+            let capacity = (RATE as i64 * said_us / 1_000_000) as u64;
+            let holds = (RATE as i64 * holds_us / 1_000_000) as u64;
+            let track = Arc::new(Mutex::new(Track { capacity: holds, starts_full, volume: 1.0, ..Track::default() }));
             let now = Arc::new(AtomicU64::new(1_000 * MS as u64));
             let sink = FakeSink { track: track.clone(), staging: vec![0.0; CHUNK_BYTES / 4], float, now: now.clone() };
             let clock = Arc::new(Clock::default());
             let format = OutputFormat { rate: RATE, channels: 2 };
             let opened = Opened { sink: Box::new(sink), frames: capacity, starts_full };
-            let writer = Writer::new(ring.clone(), opened, format, float, clock.clone(), Arc::new(AtomicU64::new(0)));
-            Sim { writer, ring, track, clock, now, control: Control::default(), wakes: 0, next: Some(0) }
+            let opener = FakeOpener { track: track.clone(), float, now: now.clone() };
+            let failure = Arc::new(Mutex::new(None));
+            let asked = (RATE as i64 * TRACK_US / 1_000_000) as u64;
+            let reopen = Reopen { opener: Arc::new(Mutex::new(Box::new(opener))), frames: asked, failure: failure.clone() };
+            let writer = Writer::new(ring.clone(), opened, reopen, format, float, clock.clone(), Arc::new(AtomicU64::new(0)));
+            Sim { writer, ring, track, clock, now, control: Control::default(), wakes: 0, next: Some(0), failure }
         }
 
         fn now(&self) -> i64 {
@@ -863,6 +1090,74 @@ mod tests {
         // Every top-up took the whole ring past its low mark: each woke the engine for its next burst, so it
         // needs no timer of its own.
         assert_eq!(refills, wakes, "one burst decoded for every top-up");
+    }
+
+    #[test]
+    fn a_track_that_gives_less_than_asked_is_topped_up_once_per_half_of_it() {
+        // A sound server that gives a third of a second of the eleven and a half asked. Timed by what was
+        // pulled for it rather than what it held, the writer looked every fill tick: fifty wakes a second.
+        let mut s = Sim::granted(600, false, false, 300_000, 300_000);
+        s.play();
+        s.run(5_000);
+        let wakes = s.wakes;
+        s.run(120_000);
+        let wakes = s.wakes - wakes;
+        assert_eq!(s.track.lock().underruns, 0, "never runs dry");
+        assert!((700..=900).contains(&wakes), "once per 150 ms, what the buffer demands: {wakes} wakes in two minutes");
+    }
+
+    #[test]
+    fn a_track_that_holds_less_than_it_says_is_counted_as_what_it_holds() {
+        // Says it holds the eleven and a half seconds asked, and takes half a second.
+        let mut s = Sim::granted(600, true, false, TRACK_US, 500_000);
+        s.play();
+        s.run(5_000);
+        let wakes = s.wakes;
+        s.run(120_000);
+        let wakes = s.wakes - wakes;
+        assert_eq!(s.track.lock().underruns, 0, "never runs dry");
+        assert!(wakes <= 600, "about once per quarter of a second once its size is known: {wakes} wakes in two minutes");
+    }
+
+    #[test]
+    fn the_play_head_counts_on_past_its_32_bits() {
+        let mut h = HeadCount::default();
+        assert_eq!(h.read(10), 10);
+        assert_eq!(h.read(u32::MAX - 5), u32::MAX as u64 - 5);
+        assert_eq!(h.read(20), (1u64 << 32) + 20, "the wrap is counted, not read as the start again");
+        assert_eq!(h.read(30), (1u64 << 32) + 30);
+    }
+
+    #[test]
+    fn a_track_that_dies_is_opened_again_and_the_music_goes_on() {
+        let mut s = Sim::new(600, false, false);
+        s.play();
+        s.run(15_000);
+        let wakes = s.wakes;
+        s.track.lock().dead = true;
+        // Its next top-up finds it dead: another is opened and filled, and the music goes on from the ring.
+        s.run(15_000);
+        let t = s.track.lock();
+        assert_eq!(t.reopened, 1, "one track opened in place of the dead one");
+        assert!(t.buffered > 0 && t.started, "the new one is filled and playing: {} buffered, started {}", t.buffered, t.started);
+        assert!(s.wakes - wakes < 10, "no retrying every millisecond: {} wakes", s.wakes - wakes);
+        assert!(s.failure.lock().is_none());
+    }
+
+    #[test]
+    fn a_track_that_dies_and_will_not_open_again_is_the_engine_s_to_hear_of() {
+        let mut s = Sim::new(600, false, false);
+        s.play();
+        s.run(15_000);
+        {
+            let mut t = s.track.lock();
+            t.dead = true;
+            t.refuse_open = true;
+        }
+        s.run(15_000);
+        assert!(s.failure.lock().is_some(), "the failure is kept for the engine");
+        assert_eq!(s.ring.lock().engine_woken, 1, "and the engine woken to hear it");
+        assert_eq!(s.next, None, "the writer sleeps until it is let go");
     }
 
     #[test]
@@ -961,11 +1256,11 @@ mod tests {
         fn staging(&mut self) -> &mut [f32] {
             &mut self.1
         }
-        fn write(&mut self, from: usize, len: usize) -> usize {
+        fn write(&mut self, from: usize, len: usize) -> Result<usize, i32> {
             // SAFETY: the staging memory is f32s, aligned for i16, and the writer keeps the range inside it.
             let samples = unsafe { std::slice::from_raw_parts((self.1.as_ptr() as *const u8).add(from) as *const i16, len / 2) };
             self.0.lock().written.extend_from_slice(samples);
-            len
+            Ok(len)
         }
         fn play(&mut self) {
             let mut l = self.0.lock();
@@ -1102,7 +1397,10 @@ mod tests {
         engine.pause();
         assert!(wait(5, || live.lock().since.is_none()), "paused");
         let l = live.lock();
-        assert!(l.volumes.len() >= 5, "the fade out ran in steps: {:?}", l.volumes);
+        // A fade, not a cut: more than one step, only ever down. How many steps fit in the 200 ms depends
+        // on how often a loaded machine wakes the writer, so the count is not the test.
+        assert!(l.volumes.len() >= 2, "the fade out ran in steps: {:?}", l.volumes);
+        assert!(l.volumes.windows(2).all(|w| w[1] <= w[0]), "only ever down: {:?}", l.volumes);
         assert_eq!(l.volumes.last(), Some(&0.0));
         drop(l);
 

@@ -1,6 +1,5 @@
 package dev.nori.music.app.perf
 
-import android.content.Intent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
@@ -37,10 +36,12 @@ import dev.nori.music.app.ui.LocalNav
 import dev.nori.music.app.ui.PillButton
 import dev.nori.music.app.ui.SectionHeader
 import dev.nori.music.app.ui.Space
+import dev.nori.music.app.ui.say
 
 /**
  * The Performance page: the states added up, the frames, the stretches themselves, and the buttons.
  * Opening it reads the counters once, so the stretch under way is on it too; nothing on it updates by itself.
+ * What each row says is the core's (perf_log.rs `perf_page`, `words_perf`).
  */
 @Composable
 internal fun PerfPage(recorder: Recorder) {
@@ -51,8 +52,8 @@ internal fun PerfPage(recorder: Recorder) {
     val covers by recorder.coverBench
     Column(Modifier.verticalScroll(rememberScrollState()).animateContentSize()) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Performance", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(say.performance, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
         }
         // The first reading takes a few milliseconds on the recorder's thread; the figures fade in once it is there.
         AnimatedVisibility(read != null, enter = fadeIn()) { read?.let { Recorded(it, calls, covers, recorder) } }
@@ -63,44 +64,38 @@ internal fun PerfPage(recorder: Recorder) {
 @Composable
 private fun Recorded(shown: Shown, calls: String, covers: String, recorder: Recorder) {
     val context = LocalContext.current
-    val all = shown.kept + listOfNotNull(shown.live)
-    val totals = Totals.of(all)
+    val page = shown.page
+    val w = recorder.words
     Column {
         FlowRow(
             Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PillButton("Share report", Icons.Outlined.Share, {
-                val text = report(shown, calls, covers)
-                context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), null))
-            }, prominent = true)
-            PillButton("Start fresh", Icons.Outlined.Delete, recorder::clear)
+            PillButton(w.shareReport, Icons.Outlined.Share, { recorder.share(context, calls, covers) }, prominent = true)
+            PillButton(w.startFresh, Icons.Outlined.Delete, recorder::clear)
         }
 
-        SectionHeader("By state")
-        if (totals.isEmpty()) Note("Nothing recorded yet. A stretch is kept when the app moves into another state: the screen goes off, music stops, the player opens.")
-        totals.forEach { t -> Figures(stateName(t.state) + if (t.count > 1) " (${t.count})" else "", t.line()) }
+        SectionHeader(w.byState)
+        if (page.totals.isEmpty()) Note(w.nothingRecorded)
+        page.totals.forEach { Figures(it.title, it.detail) }
 
-        SectionHeader("Frames")
-        val drawn = all.sumOf { it.frames }
-        val janky = all.sumOf { it.janky }
-        if (drawn == 0L) Note("No frames counted yet: they are counted while the app is on screen.")
-        else Figures(f("%d frames, %d janky (%.1f %%)", drawn, janky, janky * 100.0 / drawn), f("The slowest took %.0f ms", all.maxOf { it.worstMs }))
+        SectionHeader(w.frames)
+        page.frames?.let { Figures(it.title, it.detail) } ?: Note(w.noFrames)
 
-        SectionHeader("Stretches")
-        shown.live?.let { Figures("Now: " + stateName(it.state), it.line()) }
-        shown.kept.asReversed().take(40).forEach { s -> Figures(stateName(s.state), s.line()) }
+        SectionHeader(w.stretches)
+        page.live?.let { Figures(it.title, it.detail) }
+        page.stretches.forEach { Figures(it.title, it.detail) }
 
-        SectionHeader("Benchmarks")
+        SectionHeader(w.benchmarks)
         FlowRow(
             Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            PillButton("Run call benchmark", Icons.Outlined.Speed, recorder::runCalls)
-            PillButton("Run cover benchmark", Icons.Outlined.Image, recorder::runCovers)
+            PillButton(w.runCalls, Icons.Outlined.Speed, recorder::runCalls)
+            PillButton(w.runCovers, Icons.Outlined.Image, recorder::runCovers)
         }
-        if (calls.isNotEmpty()) Figures("Calls", calls)
-        if (covers.isNotEmpty()) Figures("Covers", covers)
+        if (calls.isNotEmpty()) Figures(w.calls, calls)
+        if (covers.isNotEmpty()) Figures(w.covers, covers)
     }
 }
 

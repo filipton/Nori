@@ -1,7 +1,7 @@
 package dev.nori.music.look
 
 import dalvik.annotation.optimization.CriticalNative
-import dev.nori.music.ffi.Lyrics
+import dev.nori.music.ffi.model.Lyrics
 
 /**
  * How a page of lyrics moves with the song - which line is lit, how long its change takes, how far the
@@ -16,7 +16,7 @@ import dev.nori.music.ffi.Lyrics
  * that one number; only lyrics it no longer keeps are handed over whole.
  */
 class LyricsClock(lyrics: Lyrics, positionMs: Long) : AutoCloseable {
-    private var h = LyricsJni.kept(lyrics.key.toLong(), positionMs).takeIf { it != 0L } ?: dev.nori.music.ffi.lyricsClock(lyrics, positionMs)
+    private var h = LyricsJni.kept(lyrics.key.toLong(), positionMs).takeIf { it != 0L } ?: dev.nori.music.ffi.lyrics.lyricsClock(lyrics, positionMs)
 
     /** Whether the lyrics carry per-word times, so the active line can fill in as it is sung. */
     val sweeps: Boolean = LyricsJni.sweeps(h)

@@ -36,25 +36,25 @@ fun AutoEqScreen(vm: SettingsViewModel) {
     val nav = LocalNav.current
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Headphone presets", style = MaterialTheme.typography.headlineSmall)
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(say.headphonePresets, style = MaterialTheme.typography.headlineSmall)
         }
         if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-        ui.applied?.let { Text("Applied $it. The equalizer screen now holds that curve.", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary) }
+        ui.applied?.let { Text(androidx.compose.runtime.remember(it) { dev.nori.music.ffi.words.wordsAutoeqApplied(it) }, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary) }
 
         if (ui.count == 0) {
             Text(
-                "AutoEQ measures headphones and publishes a correction curve for each. Downloading the list is one 850 kB request to github.com; after that, searching happens on this device.",
+                say.autoeqAbout,
                 Modifier.padding(16.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            PillButton("Download the list", null, vm::downloadAutoEqIndex, Modifier.padding(horizontal = Space.gutter), prominent = true, enabled = !ui.busy)
+            PillButton(say.downloadTheList, null, vm::downloadAutoEqIndex, Modifier.padding(horizontal = Space.gutter), prominent = true, enabled = !ui.busy)
             return@Column
         }
 
         Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(ui.countWords, Modifier.weight(1f).padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(vm::downloadAutoEqIndex, enabled = !ui.busy) { Text("Refresh list") }
+            TextButton(vm::downloadAutoEqIndex, enabled = !ui.busy) { Text(say.refreshList) }
         }
         SearchField(ui.query, vm::searchAutoEq, ui.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
@@ -64,8 +64,8 @@ fun AutoEqScreen(vm: SettingsViewModel) {
                     Text(e.caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            if (!ui.tooShort && ui.hits.isEmpty()) item { Text("Nothing matches", Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            item { Text("Curves by the AutoEQ project (jaakkopasanen/AutoEq). Tapping one replaces the equalizer's bands.", Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            if (!ui.tooShort && ui.hits.isEmpty()) item { Text(say.nothingMatches, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text(say.autoeqCredit, Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
     }
 }

@@ -77,6 +77,39 @@ pub fn params(plan: &TransitionPlan) -> Vec<f32> {
     p
 }
 
+/// Where in a transition the incoming song becomes the louder of the two, ms from its start: the moment
+/// a listener hears the next song rather than the last one's ending, and so the moment a page may say
+/// the next song is playing. Worked out from the gain curves [`Mixer::configure`] takes from the same
+/// array - the filters and the bass swap colour the sound, they do not decide which song it is - in
+/// steps of 10 ms; the whole transition when the incoming song never gets there. Allocates nothing.
+pub fn crossover_ms(p: &[f32]) -> i64 {
+    let get = |i: usize| p.get(i).copied().filter(|v| v.is_finite()).unwrap_or(-1.0) as f64;
+    let len = get(param::DURATION).max(0.0);
+    let curve = match get(param::CURVE) as i32 {
+        1 => FadeCurve::Linear,
+        2 => FadeCurve::SineSquared,
+        _ => FadeCurve::EqualPower,
+    };
+    let span = |a: f64, b: f64| if a < 0.0 || b < 0.0 || b < a { (0.0, len) } else { (a.min(len), b.min(len)) };
+    let progress = |(start, end): (f64, f64), t: f64| if t <= start { 0.0 } else if t >= end { 1.0 } else { (t - start) / (end - start) };
+    let out_fade = span(get(param::OUT_FADE_START), get(param::OUT_FADE_END));
+    let in_fade = span(get(param::IN_FADE_START), get(param::IN_FADE_END));
+    let gain = |i: usize| p.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0) as f64;
+    let out_gain = 10f64.powf(gain(param::OUT_GAIN_DB).clamp(-24.0, 12.0) / 20.0);
+    let in_gain_db = gain(param::IN_GAIN_DB).clamp(-12.0, 12.0);
+    let glide = (len * 3.0 / 4.0, len);
+    let mut t = 0.0;
+    while t < len {
+        let g_out = Mixer::fade(curve, progress(out_fade, t), true) * out_gain;
+        let g_in = Mixer::fade(curve, progress(in_fade, t), false) * 10f64.powf(in_gain_db * (1.0 - progress(glide, t)) / 20.0);
+        if g_in >= g_out {
+            return t as i64;
+        }
+        t += 10.0;
+    }
+    len as i64
+}
+
 #[derive(Clone, Copy, Default)]
 struct Coef {
     b0: f64,
@@ -515,6 +548,24 @@ mod tests {
             assert!((l - w).abs() < 1e-5, "frame {i}: {l} vs {w}");
         }
         assert!(m.done());
+    }
+
+    #[test]
+    fn the_incoming_song_takes_over_where_it_becomes_the_louder() {
+        // An equal-power fade crosses in the middle; one whose incoming side is trimmed down crosses
+        // later; one that only lets the incoming song in over its second half crosses later still.
+        let mut p = plan();
+        assert_eq!(crossover_ms(&params(&p)), 500);
+        p.in_gain_db = -6.0;
+        let trimmed = crossover_ms(&params(&p));
+        assert!(trimmed > 550 && trimmed < 1000, "{trimmed}");
+        p.in_gain_db = 0.0;
+        (p.in_fade_start_ms, p.in_fade_end_ms) = (500, 1000);
+        (p.out_fade_start_ms, p.out_fade_end_ms) = (0, 1000);
+        let late = crossover_ms(&params(&p));
+        assert!(late > 600 && late < 1000, "{late}");
+        // Nothing to cross: the whole transition.
+        assert_eq!(crossover_ms(&[]), 0);
     }
 
     #[test]

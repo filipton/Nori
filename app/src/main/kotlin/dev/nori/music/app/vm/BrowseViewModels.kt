@@ -2,23 +2,23 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.AlbumSort
-import dev.nori.music.ffi.albumSortKept
-import dev.nori.music.ffi.albumSortSaved
-import dev.nori.music.ffi.albumsExhausted
-import dev.nori.music.ffi.songSortKept
-import dev.nori.music.ffi.songSortSaved
-import dev.nori.music.ffi.Album
-import dev.nori.music.ffi.AlbumDetail
-import dev.nori.music.ffi.Artist
-import dev.nori.music.ffi.ArtistDetail
-import dev.nori.music.ffi.ArtistInfo
-import dev.nori.music.ffi.Genre
-import dev.nori.music.ffi.Playlist
-import dev.nori.music.ffi.PlaylistDetail
-import dev.nori.music.ffi.RadioStation
-import dev.nori.music.ffi.Song
-import dev.nori.music.ffi.Starred
+import dev.nori.music.ffi.library.AlbumSort
+import dev.nori.music.ffi.library.albumSortKept
+import dev.nori.music.ffi.library.albumSortSaved
+import dev.nori.music.ffi.library.albumsExhausted
+import dev.nori.music.ffi.library.songSortKept
+import dev.nori.music.ffi.library.songSortSaved
+import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.library.AlbumDetail
+import dev.nori.music.ffi.model.Artist
+import dev.nori.music.ffi.library.ArtistDetail
+import dev.nori.music.ffi.model.ArtistInfo
+import dev.nori.music.ffi.model.Genre
+import dev.nori.music.ffi.model.Playlist
+import dev.nori.music.ffi.library.PlaylistDetail
+import dev.nori.music.ffi.model.RadioStation
+import dev.nori.music.ffi.model.Song
+import dev.nori.music.ffi.library.Starred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
@@ -35,12 +35,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import dev.nori.music.ffi.HomeShelf
-import dev.nori.music.ffi.browsePaging
-import dev.nori.music.ffi.homePinned
-import dev.nori.music.ffi.homeRefreshDrops
-import dev.nori.music.ffi.homeShelves
-import dev.nori.music.ffi.songSorts
+import dev.nori.music.ffi.library.HomeShelf
+import dev.nori.music.ffi.library.browsePaging
+import dev.nori.music.ffi.library.homePinned
+import dev.nori.music.ffi.library.homeRefreshDrops
+import dev.nori.music.ffi.library.homeShelves
+import dev.nori.music.ffi.library.songSorts
 
 /**
  * One row of the home page. Not every shelf is a shelf of albums: the playlists are playlists and the
@@ -304,13 +304,13 @@ class SongsViewModel(app: Application) : NoriViewModel(app) {
 }
 
 class DecadesViewModel(app: Application) : NoriViewModel(app) {
-    val decades: StateFlow<Load<List<dev.nori.music.ffi.Decade>>> = flow { emit(nori.library.decades()) }.asLoad()
+    val decades: StateFlow<Load<List<dev.nori.music.ffi.library.Decade>>> = flow { emit(nori.library.decades()) }.asLoad()
 }
 
 class FoldersViewModel(app: Application) : NoriViewModel(app) {
     val roots: StateFlow<Load<List<Artist>>> = nori.library.folders().asLoad()
 }
 
-class FolderViewModel(app: Application) : DetailViewModel<dev.nori.music.ffi.Directory>(app) {
+class FolderViewModel(app: Application) : DetailViewModel<dev.nori.music.ffi.model.Directory>(app) {
     override fun load(id: String) = nori.library.folder(id)
 }

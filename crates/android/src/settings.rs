@@ -20,7 +20,7 @@ pub(crate) static EQ_WORDS: Class = Class {
         native!(c"ceiling", c"(F)Ljava/lang/String;", ceiling),
         native!(c"reduction", c"(F)Ljava/lang/String;", reduction),
         native!(c"crossfeed", c"(F)Ljava/lang/String;", crossfeed),
-        native!(c"hz", c"(F)Ljava/lang/String;", hz),
+        native!(c"hzTitle", c"(F)Ljava/lang/String;", hz_title),
         native!(c"shape", c"(ZF)Ljava/lang/String;", shape),
         native!(c"bandName", c"(IFI)Ljava/lang/String;", band_name),
         native!(c"freqToSlider", c"(F)F", freq_to_slider),
@@ -57,8 +57,8 @@ extern "system" fn crossfeed(env: JNIEnv, _: JClass, db: jfloat) -> jstring {
     java_string(&env, &fmt::eq_crossfeed(db))
 }
 
-extern "system" fn hz(env: JNIEnv, _: JClass, freq: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_hz(freq))
+extern "system" fn hz_title(env: JNIEnv, _: JClass, freq: jfloat) -> jstring {
+    java_string(&env, &fmt::eq_hz_title(freq))
 }
 
 extern "system" fn shape(env: JNIEnv, _: JClass, slope: jboolean, q: jfloat) -> jstring {
@@ -104,6 +104,7 @@ extern "system" fn set_level(level: jint, value: jfloat) -> jlong {
         1 => EqLevel::Balance,
         2 => EqLevel::Limiter,
         3 => EqLevel::Crossfeed,
+        4 => EqLevel::ReplayGainPreamp,
         _ => return -1,
     };
     match nori_core::settings_store::edit_level(level, value) {

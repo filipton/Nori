@@ -1,14 +1,15 @@
-//! How a page looks, as Kotlin reaches it: `nori_look` over JNI - a cover's Bitmap read where it lies,
-//! its wash drawn straight into a Bitmap and its look into a small int array - so nothing is boxed,
-//! serialised or copied twice, and the UI only ever looks colours up. The lyrics page is prepared once
-//! per song through uniffi (`nori_core::look`) and then asked every frame here with primitives in and
-//! one packed `long` out, allocating nothing on either side.
+//! How a page looks, as Kotlin reaches it: `nori_look` over JNI - a cover's page worked out from the
+//! pixels the cover loader decodes (covers.rs), its wash drawn straight into a Bitmap and its look into a
+//! small int array - so nothing is boxed, serialised or copied twice, and the UI only ever looks colours
+//! up. The lyrics page is prepared once per song through uniffi (`nori_core::look`) and then asked every
+//! frame here with primitives in and one packed `long` out, allocating nothing on either side.
 
 use jni::objects::{JClass, JIntArray, JObject};
 use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use jni::JNIEnv;
-#[cfg_attr(not(target_os = "android"), allow(unused_imports))]
-use nori_look::cover::{derive, WASH_OUT};
+use nori_look::cover::derive;
+#[cfg(target_os = "android")]
+use nori_look::cover::WASH_OUT;
 use nori_look::dress;
 use nori_look::lyrics::LyricClock;
 
@@ -24,7 +25,6 @@ pub(crate) static COVER: Class = Class {
         native!(c"transportGlyph", c"(ZZZ)I", transport_glyph),
         native!(c"heroButtons", c"(ZZZZZZ)I", hero_buttons),
         native!(c"heroPlayLabel", c"(Z)Ljava/lang/String;", hero_play_label),
-        native!(c"deriveBitmap", c"(Landroid/graphics/Bitmap;ZZ[ILandroid/graphics/Bitmap;)I", derive_bitmap),
         native!(c"plain", c"([I[I)V", plain),
         native!(c"tones", c"(IZ[I)V", tones),
         native!(c"amoled", c"([I)V", amoled),
@@ -45,8 +45,8 @@ pub(crate) static LYRICS: Class = Class {
     ],
 };
 
-/// A software ARGB_8888 `Bitmap`'s own memory (or RGB_565, where the caller says it takes one), read and
-/// written in place through Android's bitmap API (libjnigraphics): no copy of the picture into a Java
+/// A software ARGB_8888 `Bitmap`'s own memory (or RGB_565, where the caller says it takes one), written
+/// in place through Android's bitmap API (libjnigraphics): no copy of the picture into a Java
 /// array, and none across into Rust. Locked for as long as the value lives. Anything else - another
 /// format, a hardware bitmap, a size that does not add up - is refused, and the caller gets nothing
 /// rather than a guess.
@@ -127,22 +127,16 @@ pub(crate) mod bitmap {
             self.width * if self.rgb565 { 2 } else { 4 }
         }
 
-        pub fn row(&self, y: usize) -> &[u8] {
-            assert!(y < self.height);
-            // SAFETY: the locked pixels are `height` rows `stride` bytes apart, each at least `row_bytes`
-            // long (checked in `lock`), and `y` is one of them.
-            unsafe { std::slice::from_raw_parts(self.px.add(y * self.stride), self.row_bytes()) }
-        }
-
         pub fn row_mut(&mut self, y: usize) -> &mut [u8] {
             assert!(y < self.height);
-            // SAFETY: as in `row`, and `&mut self` keeps the row to one writer.
+            // SAFETY: the locked pixels are `height` rows `stride` bytes apart, each at least `row_bytes`
+            // long (checked in `lock`), `y` is one of them, and `&mut self` keeps the row to one writer.
             unsafe { std::slice::from_raw_parts_mut(self.px.add(y * self.stride), self.row_bytes()) }
         }
 
         /// All the rows at once, `stride` bytes apart, the last one only as long as its pixels.
         pub fn pixels_mut(&mut self) -> &mut [u8] {
-            // SAFETY: as in `row`: the last row starts `(height - 1) * stride` bytes in and holds
+            // SAFETY: as in `row_mut`: the last row starts `(height - 1) * stride` bytes in and holds
             // `row_bytes`, and `&mut self` keeps the pixels to one writer.
             unsafe { std::slice::from_raw_parts_mut(self.px, (self.height - 1) * self.stride + self.row_bytes()) }
         }
@@ -157,18 +151,6 @@ pub(crate) mod bitmap {
     }
 }
 
-/// One pixel as a Bitmap keeps it (R, G, B, A, premultiplied) to ARGB as `Bitmap.getPixels` gives it.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn unpremultiplied(p: &[u8]) -> u32 {
-    let a = p[3] as u32;
-    let c = |v: u8| match a {
-        255 => v as u32,
-        0 => 0,
-        _ => ((v as u32 * 255 + a / 2) / a).min(255),
-    };
-    (a << 24) | (c(p[0]) << 16) | (c(p[1]) << 8) | c(p[2])
-}
-
 /// ARGB to a Bitmap's own layout (R, G, B, A, premultiplied), as `Bitmap.setPixels` would store it.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn premultiplied(argb: u32, out: &mut [u8]) {
@@ -180,27 +162,20 @@ fn premultiplied(argb: u32, out: &mut [u8]) {
     out[3] = a as u8;
 }
 
-/// The page for the cover `bitmap` (software ARGB_8888), read where it lies. `out` gets the page's look
-/// (`dress::LEN` entries); the wash is drawn straight into `wash` (a mutable `WASH_OUT`² ARGB_8888
-/// bitmap). Returns 0 for no page, 1 for a page, 2 for a page with its wash (not on AMOLED black).
-extern "system" fn derive_bitmap(env: JNIEnv, _: JClass, bitmap: JObject, dark: jboolean, amoled: jboolean, out: JIntArray, wash: JObject) -> jint {
+/// The page for a cover's `pixels` (ARGB, `w` x `h`; the cover loader decodes them, covers.rs). `out`
+/// gets the page's look (`dress::LEN` entries); the wash is drawn straight into `wash` (a mutable
+/// `WASH_OUT`² ARGB_8888 bitmap). Returns 0 for no page, 1 for a page, 2 for a page with its wash (not on
+/// AMOLED black).
+pub(crate) fn page(env: &JNIEnv, pixels: &[u32], w: usize, h: usize, dark: bool, amoled: bool, out: &JIntArray, wash: &JObject) -> jint {
+    let c = derive(pixels, w, h, dark, amoled);
+    let look = dress::page(c.edge, c.background, c.on, c.accent, c.wash_edge).map(|v| v as i32);
+    if env.set_int_array_region(out, 0, &look).is_err() {
+        return 0;
+    }
+    let Some(pixels) = c.wash else { return 1 };
     #[cfg(target_os = "android")]
     {
-        let px = {
-            let Some(b) = bitmap::Locked::new(&env, &bitmap) else { return 0 };
-            let mut px = Vec::with_capacity(b.width * b.height);
-            for y in 0..b.height {
-                px.extend(b.row(y).chunks_exact(4).map(unpremultiplied));
-            }
-            (px, b.width, b.height)
-        };
-        let c = derive(&px.0, px.1, px.2, dark != 0, amoled != 0);
-        let look = dress::page(c.edge, c.background, c.on, c.accent, c.wash_edge).map(|v| v as i32);
-        if env.set_int_array_region(&out, 0, &look).is_err() {
-            return 0;
-        }
-        let Some(pixels) = c.wash else { return 1 };
-        let Some(mut w) = bitmap::Locked::new(&env, &wash) else { return 1 };
+        let Some(mut w) = bitmap::Locked::new(env, wash) else { return 1 };
         if w.width != WASH_OUT || w.height != WASH_OUT {
             return 1;
         }
@@ -214,8 +189,8 @@ extern "system" fn derive_bitmap(env: JNIEnv, _: JClass, bitmap: JObject, dark: 
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = (env, bitmap, dark, amoled, out, wash);
-        0
+        let _ = (wash, pixels);
+        1
     }
 }
 
@@ -367,11 +342,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_bitmaps_pixels_read_and_write_like_get_and_set_pixels() {
-        assert_eq!(unpremultiplied(&[0x12, 0x34, 0x56, 0xFF]), 0xFF123456);
-        assert_eq!(unpremultiplied(&[0, 0, 0, 0]), 0);
-        // Half transparent white is stored as half-bright grey and comes back white.
-        assert_eq!(unpremultiplied(&[0x80, 0x80, 0x80, 0x80]), 0x80FFFFFF);
+    fn a_bitmaps_pixels_are_written_like_set_pixels() {
         let mut px = [0u8; 4];
         premultiplied(0xFF123456, &mut px);
         assert_eq!(px, [0x12, 0x34, 0x56, 0xFF]);

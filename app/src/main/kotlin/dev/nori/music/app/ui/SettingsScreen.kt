@@ -58,8 +58,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.SettingRow
-import dev.nori.music.ffi.SettingsSection
+import dev.nori.music.ffi.settings.SettingRow
+import dev.nori.music.ffi.settings.SettingsSection
 import dev.nori.music.settings.ServerProfile
 
 /**
@@ -187,8 +187,8 @@ fun SettingsScreen(vm: SettingsViewModel) {
     // (the core's `settings_search`), asked once per change of the query.
     val hits = remember(query) { if (query.isBlank()) emptyList() else vm.searchSettings(query) }
     Column {
-        LargeTitle("Settings")
-        SearchField(query, { query = it }, "Search settings", Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
+        LargeTitle(say.settings)
+        SearchField(query, { query = it }, say.searchSettings, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
         if (query.isNotBlank()) {
             // A result is the setting itself: tapping opens its page and puts the finger on the row.
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
@@ -205,7 +205,7 @@ fun SettingsScreen(vm: SettingsViewModel) {
                         Hairline(startIndent = Space.gutter)
                     }
                 }
-                if (hits.isEmpty()) item { EmptyNote("Nothing matches \"$query\"") }
+                if (hits.isEmpty()) item { EmptyNote(remember(query) { dev.nori.music.ffi.words.wordsNothingMatches(query) }) }
             }
             return@Column
         }
@@ -229,8 +229,8 @@ fun SettingsScreen(vm: SettingsViewModel) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Outlined.Speed, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
                         Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                            Text("Performance", style = MaterialTheme.typography.bodyLarge)
-                            Text("Battery, CPU, wakeups and frames, as recorded", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(say.performance, style = MaterialTheme.typography.bodyLarge)
+                            Text(say.performanceDetail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -260,7 +260,7 @@ fun SettingsGroupScreen(vm: SettingsViewModel, id: String, highlight: String = "
     CompositionLocalProvider(LocalSpotlight provides SettingSpotlight(highlight.ifEmpty { null }) { y -> if (target < 0) target = y }) {
         Column(Modifier.verticalScroll(scroll)) {
             Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+                IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
                 Text(page.title, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
             }
             when (id) {
@@ -319,7 +319,8 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
                 }
                 is SettingRow.Slider -> {
                     Text(row.label, Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp), style = MaterialTheme.typography.bodySmall)
-                    NoriSlider(row.value, row.min..row.max, { v -> vm.set(row.name, v.toString()) }, Modifier.padding(horizontal = 16.dp), centred = row.centred)
+                    // A slider the core names a level for is edited in place on every step, like the equalizer's.
+                    NoriSlider(row.value, row.min..row.max, { v -> row.level?.let { vm.setLevel(it, v) } ?: vm.set(row.name, v.toString()) }, Modifier.padding(horizontal = 16.dp), centred = row.centred)
                 }
                 is SettingRow.Palette -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     row.colours.forEach { c ->
@@ -334,8 +335,8 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
                             Text(row.label, color = if (row.active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                             Text(row.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        TextButton({ editing = p.servers.firstOrNull { it.id == row.id } }) { Text("Edit") }
-                        TextButton({ vm.removeServer(row.id) }) { Text("Remove") }
+                        TextButton({ editing = p.servers.firstOrNull { it.id == row.id } }) { Text(say.edit) }
+                        TextButton({ vm.removeServer(row.id) }) { Text(say.remove) }
                     }
                     Hairline(startIndent = 16.dp)
                 }

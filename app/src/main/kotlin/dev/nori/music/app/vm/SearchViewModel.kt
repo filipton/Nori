@@ -2,10 +2,10 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.SearchResult
-import dev.nori.music.ffi.SearchScope
+import dev.nori.music.ffi.model.SearchResult
+import dev.nori.music.ffi.library.SearchScope
 import dev.nori.music.ffi.SearchSession
-import dev.nori.music.ffi.SearchView
+import dev.nori.music.ffi.library.SearchView
 import dev.nori.music.net.said
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
@@ -50,7 +50,7 @@ class SearchViewModel(app: Application) : NoriViewModel(app) {
     private val query = MutableStateFlow("")
     private val _ui = MutableStateFlow(SearchUi())
     val ui: StateFlow<SearchUi> = _ui
-    private val localLimit by lazy { dev.nori.music.ffi.librarySizes().localSearch }
+    private val localLimit by lazy { dev.nori.music.ffi.library.librarySizes().localSearch }
 
     init {
         viewModelScope.launch { _ui.update { it.copy(history = nori.library.searchHistory()) } }

@@ -1,145 +1,9 @@
-//! Search results as the search screen shows them: everything, only the library, or only what the
-//! providers offer (octo-fiesta marks provider items `isExternal`; Navidrome's are the rest). The split
-//! is made once per answer, so switching between the three costs nothing.
-
-use std::collections::HashSet;
+//! Search as the core answers it, from its index or from the server. How results are split and shown is
+//! nori-library's.
 
 use crate::{Core, Result, SearchResult};
 
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SearchSplit {
-    pub everything: SearchResult,
-    /// Only the library's items; None when that is everything (there are no provider items).
-    pub library: Option<SearchResult>,
-    /// Only the providers' items; None when there are none.
-    pub providers: Option<SearchResult>,
-    pub has_providers: bool,
-}
-
-fn split(r: SearchResult) -> SearchSplit {
-    let has_providers = r.songs.iter().any(|s| s.is_external) || r.albums.iter().any(|a| a.is_external) || r.artists.iter().any(|a| a.is_external);
-    if !has_providers {
-        return SearchSplit { everything: r, library: None, providers: None, has_providers };
-    }
-    let part = |external: bool| SearchResult {
-        artists: r.artists.iter().filter(|a| a.is_external == external).cloned().collect(),
-        albums: r.albums.iter().filter(|a| a.is_external == external).cloned().collect(),
-        songs: r.songs.iter().filter(|s| s.is_external == external).cloned().collect(),
-    };
-    let (library, providers) = (part(false), part(true));
-    SearchSplit { everything: r, library: Some(library), providers: Some(providers), has_providers }
-}
-
-fn distinct<T>(list: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
-    let mut seen = HashSet::new();
-    list.into_iter().filter(|x| seen.insert(id(x).to_string())).collect()
-}
-
-/// The server's answer, ready to show. A merged provider result may repeat an id, and lists are keyed by
-/// id, so only the first of each is kept.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn search_split(result: SearchResult) -> SearchSplit {
-    split(SearchResult {
-        artists: distinct(result.artists, |a| &a.id),
-        albums: distinct(result.albums, |a| &a.id),
-        songs: distinct(result.songs, |s| &s.id),
-    })
-}
-
-/// Which of the answer the search screen shows.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum SearchScope {
-    #[default]
-    Everything,
-    /// Only what is in the library already; everything when there are no provider items.
-    Library,
-    /// Only what the providers offer; nothing when there is none.
-    Providers,
-}
-
-/// The scope chips and their words, in their order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SearchScopeChip {
-    pub scope: SearchScope,
-    pub label: String,
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn search_scopes() -> Vec<SearchScopeChip> {
-    [(SearchScope::Everything, "Everything"), (SearchScope::Library, "In library"), (SearchScope::Providers, "Not in library yet")]
-        .map(|(scope, label)| SearchScopeChip { scope, label: label.into() })
-        .to_vec()
-}
-
-impl SearchSplit {
-    /// The answer narrowed to `scope`.
-    fn shown(&self, scope: SearchScope) -> SearchResult {
-        match scope {
-            SearchScope::Everything => self.everything.clone(),
-            SearchScope::Library => self.library.clone().unwrap_or_else(|| self.everything.clone()),
-            SearchScope::Providers => self.providers.clone().unwrap_or_default(),
-        }
-    }
-}
-
-/// What the search screen shows now.
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SearchView {
-    /// What is in the field, as typed.
-    pub text: String,
-    /// The query that is asked: the text trimmed. Empty for none.
-    pub query: String,
-    /// The answer narrowed to the scope; None with no query (the recent searches show instead).
-    pub shown: Option<SearchResult>,
-    /// The answer is the server's rather than the offline index's.
-    pub from_server: bool,
-    /// The server is being asked.
-    pub searching: bool,
-    /// The server could not be asked, in words; the offline answer stays on screen.
-    pub error: Option<String>,
-    pub scope: SearchScope,
-    /// The scope chips are offered: there are provider items, or a scope other than everything is on.
-    pub scopes_offered: bool,
-    /// The server answered with nothing at all.
-    pub nothing_found: bool,
-}
-
-#[derive(Default)]
-struct Session {
-    text: String,
-    split: Option<SearchSplit>,
-    from_server: bool,
-    searching: bool,
-    error: Option<String>,
-    scope: SearchScope,
-}
-
-impl Session {
-    fn query(&self) -> &str {
-        self.text.trim()
-    }
-
-    fn view(&self) -> SearchView {
-        let shown = self.split.as_ref().map(|s| s.shown(self.scope));
-        let has_providers = self.split.as_ref().is_some_and(|s| s.has_providers);
-        let empty = shown.as_ref().is_some_and(|r| r.songs.is_empty() && r.albums.is_empty() && r.artists.is_empty());
-        SearchView {
-            text: self.text.clone(),
-            query: self.query().to_string(),
-            nothing_found: self.from_server && empty,
-            shown,
-            from_server: self.from_server,
-            searching: self.searching,
-            error: self.error.clone(),
-            scope: self.scope,
-            scopes_offered: has_providers || self.scope != SearchScope::Everything,
-        }
-    }
-}
+pub use nori_library::search::*;
 
 /// Live search in two layers, as one state: every keystroke is answered at once from the offline index,
 /// and once typing pauses the server is asked too, because only the server (octo-fiesta) knows what is
@@ -224,9 +88,6 @@ impl SearchSession {
     }
 }
 
-/// Shorter than this, a query is a keystroke on the way to one, not one worth remembering.
-const REMEMBER_MIN_UTF16: usize = 2;
-
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The offline index's answer to every keystroke, split like the server's (it never holds provider items).
@@ -245,27 +106,8 @@ impl Core {
     }
 }
 
-/// How long live search waits after the last keystroke before it asks the server: at once for a blank
-/// field (which only clears the results), otherwise the user's `delay_ms`.
-///
-/// Twin of the `debounce` in `SearchViewModel` (app/.../vm/SearchViewModel.kt), which Android keeps: it
-/// is the argument of a coroutine operator, asked on the main thread per keystroke.
-pub fn live_delay_ms(query: &str, delay_ms: i64) -> i64 {
-    if query.chars().all(kotlin_whitespace) { 0 } else { delay_ms }
-}
-
-/// Kotlin's `Char.isWhitespace` on the JVM, which `isBlank` goes by: Java's whitespace or a Unicode space
-/// separator. That is not Rust's `char::is_whitespace` - the four ASCII separators U+001C-U+001F count,
-/// U+0085 does not - and a blank field must be blank to both.
-pub fn kotlin_whitespace(c: char) -> bool {
-    matches!(
-        c,
-        '\t'..='\r' | '\u{1c}'..='\u{20}' | '\u{a0}' | '\u{1680}' | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
-    )
-}
-
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Album, Artist, Song};
 
@@ -277,33 +119,6 @@ mod tests {
             albums: vec![a("al", false), a("ext-al", true), a("ext-al", true)],
             songs: vec![s("1", false), s("ext-2", true), s("1", false), s("3", false)],
         }
-    }
-
-    fn ids<T>(l: &[T], id: impl Fn(&T) -> &str) -> Vec<&str> {
-        l.iter().map(id).collect()
-    }
-
-    #[test]
-    fn server_answers_are_deduplicated_and_split() {
-        let r = search_split(result());
-        assert!(r.has_providers);
-        assert_eq!(ids(&r.everything.songs, |s| &s.id), ["1", "ext-2", "3"]);
-        assert_eq!(ids(&r.everything.albums, |a| &a.id), ["al", "ext-al"]);
-        let (lib, prov) = (r.library.unwrap(), r.providers.unwrap());
-        assert_eq!(ids(&lib.songs, |s| &s.id), ["1", "3"]);
-        assert_eq!(lib.artists.len(), 1);
-        assert_eq!(ids(&prov.songs, |s| &s.id), ["ext-2"]);
-        assert_eq!(ids(&prov.albums, |a| &a.id), ["ext-al"]);
-        assert!(prov.artists.is_empty());
-    }
-
-    #[test]
-    fn a_library_only_answer_is_not_copied() {
-        let mut r = result();
-        r.songs.retain(|s| !s.is_external);
-        r.albums.retain(|a| !a.is_external);
-        let s = search_split(r);
-        assert!(!s.has_providers && s.library.is_none() && s.providers.is_none());
     }
 
     #[test]

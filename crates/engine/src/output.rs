@@ -81,6 +81,12 @@ pub trait AudioOutput: Send {
     fn bursts(&self) -> bool {
         false
     }
+    /// The device stopped taking music and could not be opened again (a sound server that died): asked
+    /// by the engine whenever it looks, and woken for with [`Feed::wake_engine`]. The engine then stops,
+    /// says so, and lets the output go, so the next play opens a new one where the music was.
+    fn failed(&mut self) -> Option<String> {
+        None
+    }
     /// Lets the device go.
     fn close(&mut self);
 }
@@ -293,6 +299,11 @@ impl Feed {
         n as usize
     }
 
+    /// Wakes the engine now, for something the device must tell it at once ([`AudioOutput::failed`]).
+    pub fn wake_engine(&self) {
+        self.ring.engine.unpark();
+    }
+
     /// Frames of music waiting in the ring.
     pub fn available(&self) -> usize {
         self.ring.filled() as usize
@@ -451,6 +462,11 @@ impl RingTrack {
         if let Some(r) = &self.ring {
             r.ended.store(ended, Ordering::Release);
         }
+    }
+
+    /// Why the device failed, once: it would not open, or it stopped taking music and would not open again.
+    pub(crate) fn take_failure(&mut self) -> Option<String> {
+        self.failed.take().map(|e| format!("the output would not open: {e}")).or_else(|| self.output.failed().map(|e| format!("the output stopped: {e}")))
     }
 
     pub(crate) fn underruns(&self) -> u64 {

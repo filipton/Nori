@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/android", "crates/cli", "crates/core", "crates/covers", "crates/engine", "crates/http", "crates/look", "crates/mpris", "crates/output-cpal", "crates/player", "crates/text", "crates/uniffi-bindgen", "crates/uniffi-jni-runtime"]
+members = ["crates/android", "crates/automix", "crates/cli", "crates/core", "crates/covers", "crates/db", "crates/devices", "crates/engine", "crates/http", "crates/library", "crates/look", "crates/lyrics", "crates/model", "crates/mpris", "crates/net", "crates/output-cpal", "crates/player", "crates/queue", "crates/settings", "crates/text", "crates/transfers", "crates/uniffi-bindgen", "crates/uniffi-jni-runtime", "crates/words"]
 
 [workspace.package]
 version = "0.3.3"

@@ -56,6 +56,18 @@ For each stretch:
 | gauge mA | what the fuel gauge said at the two ends (its own average, `CURRENT_AVERAGE`, where it keeps one, else `CURRENT_NOW`): a cross-check, not a measurement |
 | °C | battery temperature at the two ends |
 | frames, janky | frames the app drew while on screen, and those that missed their deadline (Android 12 on) or took longer than one refresh of the display (before); the slowest frame's time |
+| network | bytes the app received and sent over the stretch (`TrafficStats`), where the phone counts them |
+
+Under each stretch, on the page and in the report, two lines say why it cost what it did:
+
+| Line | What it is |
+|---|---|
+| threads by wakeups | the six threads that woke most over the stretch (`/proc/self/task/*/stat` and `status`): each one's name, wakeups per second and CPU time. A thread that started during the stretch is marked "(new)". The Rust player's threads carry their own names (`nori-engine`, `nori-track`, `nori-load`, `nori-open`, `nori-covers`, `nori-analysis`); Java's are the platform's (`binder:…`, `RenderThread`, `main` is the app's package name) |
+| output | the AudioTrack the player last opened, as the platform describes it when the stretch ended, against what was asked of it: the engine, rate, channels and encoding, the buffer in ms (given, of what was asked, and the most it could grow to), the performance mode asked for and given (the Rust player asks for power saving, the platform's deep-buffer output; media3 asks for none), whether it is offloaded to the audio chip, where it is routed, its underruns since it was made, and whether it was playing |
+
+A buffer much smaller than asked, or power saving asked and not given, is what makes a writer wake more
+often than the design says: the Rust player's writer then tops the track up once per half of what it
+holds (and says so in the log), which the thread line shows as `nori-track`'s wakeups.
 
 "By state" adds the stretches of each state up. Battery is the whole phone's, not the app's alone:
 the screen, the radio and every other app are in it, which is why a fair test holds them still (below).
@@ -63,7 +75,10 @@ CPU, wakeups, allocations and PSS are the app's own.
 
 Stretches are kept in the app's database (`perf_stretches`, crates/core/src/perf_log.rs) for 14 days.
 Stretches under 3 seconds are the blinks between two states (the screen going off also stops the
-activity) and are dropped. The stretch under way when the process dies is lost; the page shows it as
+activity) and are dropped. Android reads the counters and counts the frames (`app/src/perf`); which
+state a stretch is filed under, what two readings make, the sums by state and every word on the page
+and in the report are the core's (`perf_state`, `perf_stretch`, `perf_page`, `perf_report`), so a
+desktop recorder files and reports the same way. The stretch under way when the process dies is lost; the page shows it as
 "Now" while it lasts.
 
 ## What it costs
@@ -73,7 +88,8 @@ power is connected or not, playback starts or stops (the service's own broadcast
 the front or leaves it, the player opens or closes, a setting above changes, or the Performance page
 opens. Each reading takes a few milliseconds (the PSS is most of it), on a thread of its own that
 sleeps in its looper in between. With the screen off and music playing the recorder does not run at
-all, so it adds **no wakeups of its own** to the numbers it records.
+all, so it adds **no wakeups of its own** to the numbers it records. The thread list, the output and the
+network bytes are read at the same moments, not in between.
 
 While the app is on screen, Android hands every frame's timings to that thread
 (`Window.addOnFrameMetricsAvailableListener`); the listener is removed when the app leaves the
@@ -108,5 +124,6 @@ monospaced font.
 
 "Run call benchmark" and "Run cover benchmark" run the same code as the debug build's `bench` and
 `coverbench` test commands (`app/src/bench/.../Bench.kt`): what a crossing into the core costs by kind
-against the same work in Kotlin, and cover decoding by BitmapFactory against the Rust decoder
-(docs/clients.md). The cover benchmark needs covers in the cache, so browse some albums first.
+against the same work in Kotlin, and what the core's covers cost: the decode alone, and the whole way to a
+software or hardware Bitmap (docs/clients.md). The cover benchmark needs covers on the disk and in memory,
+so browse some albums first.

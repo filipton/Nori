@@ -1,8 +1,9 @@
-//! How the app moves and lays its pages out, as numbers and small rules every front end shares: when a
-//! drag changes the record and when it springs back, how long the waits and fades are, which glyph the
-//! transport shows, where the seek bar's time comes from, the sleeve's geometry and every gradient's
-//! stops (`nori_look::sleeve`). The platform reads [`stage`] once, at start, and asks the rules at the
-//! moment something happens (a finger lifts, a song changes) - never per frame.
+//! How the app draws its pages and times them, as numbers and small rules every front end shares: how
+//! long the waits and fades are, which glyph the transport shows, where the seek bar's time comes from and
+//! every gradient's stops (`nori_look::sleeve`). Where things sit on a phone's screen is the phone's. The platform reads [`stage`] once,
+//! at start, and asks the rules at the moment something happens (a song changes) - never per frame. How a
+//! touch gesture feels (flick speeds, how far a drag turns a record, where the sheet settles) is the
+//! platform's own: a desktop or terminal client has other input.
 
 use nori_look::sleeve;
 
@@ -25,12 +26,6 @@ pub struct Stage {
     /// How much of the sleeve's height goes soft at its bottom; the same share its colour is averaged
     /// from (`nori_look::cover`).
     pub melt: f32,
-    /// Width over height of the player's sleeve.
-    pub sleeve: f32,
-    /// How much of the sleeve runs on under the title block.
-    pub sleeve_under_text: f32,
-    /// How much of the width a record held by a finger takes.
-    pub lifted_width: f32,
     pub rub_out: Vec<GradientStop>,
     pub soft: Vec<GradientStop>,
     pub soft_from: f32,
@@ -40,15 +35,6 @@ pub struct Stage {
     pub hero_stops: Vec<f32>,
     pub floor_stops: Vec<f32>,
     pub lyrics_mask: Vec<GradientStop>,
-
-    /// A slow drag changes the record past this share of the width; the same share arms a row's swipe.
-    pub turn: f32,
-    /// Towards a record that is not there a drag gives this much of the finger's travel, and no more
-    /// than this share of the width.
-    pub give: f32,
-    pub give_limit: f32,
-    /// How far the back gesture takes the player down before it is let go.
-    pub back_travel: f32,
 
     /// The spinner in Play only comes in after this long buffering: most skips start inside it, and a
     /// spinner flicking into the pause button for a frame made skipping feel rough.
@@ -65,15 +51,15 @@ pub struct Stage {
     pub lyrics_reading_ms: i64,
     /// Data that arrives within this long of a page opening was never waited for: it snaps in.
     pub quick_load_ms: i64,
+    /// How often the limiter's meter is read while the equalizer is on screen: quick enough to follow a
+    /// peak, slow enough that the screen is not redrawn for nothing between them.
+    pub meter_ms: i64,
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn stage() -> Stage {
     Stage {
         melt: nori_look::cover::MELT,
-        sleeve: sleeve::SLEEVE,
-        sleeve_under_text: sleeve::SLEEVE_UNDER_TEXT,
-        lifted_width: sleeve::LIFTED_WIDTH,
         rub_out: stops(&sleeve::RUB_OUT),
         soft: stops(&sleeve::SOFT),
         soft_from: sleeve::SOFT_FROM,
@@ -83,10 +69,6 @@ pub fn stage() -> Stage {
         hero_stops: sleeve::HERO_STOPS.to_vec(),
         floor_stops: sleeve::FLOOR_STOPS.to_vec(),
         lyrics_mask: stops(&sleeve::LYRICS_MASK),
-        turn: TURN,
-        give: GIVE,
-        give_limit: GIVE_LIMIT,
-        back_travel: BACK_TRAVEL,
         spinner_after_ms: 300,
         panel_ms: 360,
         sleeve_hold_ms: 600,
@@ -94,59 +76,7 @@ pub fn stage() -> Stage {
         colour_fade_ms: 420,
         lyrics_reading_ms: nori_look::lyrics::READING_MS,
         quick_load_ms: 300,
-    }
-}
-
-// ---- gestures ----------------------------------------------------------------------------------------------
-
-const TURN: f32 = 0.3;
-/// A release faster than this, in pixels a second, changes the record whatever the distance: on the
-/// player's sleeve...
-const FLICK_PX_S: f32 = 1_000.0;
-/// ...and on the now playing bar, a small strip under the thumb, where a flick is shorter and slower.
-const BAR_FLICK_PX_S: f32 = 900.0;
-const GIVE: f32 = 0.2;
-const GIVE_LIMIT: f32 = 0.06;
-/// The player sheet: a release faster than this goes the way it was flicked...
-const SHEET_FLICK_PX_S: f32 = 900.0;
-/// ...and a slow drag that has come this share of the way finishes the move it started.
-const SHEET_COMMIT: f32 = 0.15;
-const BACK_TRAVEL: f32 = 0.2;
-
-/// Where a sideways drag on a row of records goes when the finger lifts at `offset` pixels (negative:
-/// towards the next) with `velocity` pixels a second, on a row `width` wide: -1 to the next record, 1 to
-/// the one before, 0 back where it was. Past [`TURN`] of the width, or flicked; never towards a record
-/// that is not there. `bar` is the now playing bar, which takes a slower flick than the sleeve.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn swipe_turn(offset: f32, velocity: f32, width: f32, has_before: bool, has_after: bool, bar: bool) -> i32 {
-    let flick = if bar { BAR_FLICK_PX_S } else { FLICK_PX_S };
-    if offset < 0.0 && has_after && (velocity < -flick || offset < -width * TURN) {
-        -1
-    } else if offset > 0.0 && has_before && (velocity > flick || offset > width * TURN) {
-        1
-    } else {
-        0
-    }
-}
-
-/// Where the player sheet settles when the finger lifts: 1 open, 0 put away. `from` is the end it was
-/// nearer when the drag began, `progress` where it is now and `velocity` the finger's (down positive).
-/// A flick goes the way it was flicked; a drag that has come a little way finishes the move it started,
-/// and a smaller one goes back. Deciding by the halfway point instead meant a pull down from the player
-/// had to cover half the screen before it would close.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn sheet_target(from: f32, progress: f32, velocity: f32) -> f32 {
-    let moved = progress - from;
-    if velocity < -SHEET_FLICK_PX_S {
-        1.0
-    } else if velocity > SHEET_FLICK_PX_S {
-        0.0
-    } else if moved > SHEET_COMMIT {
-        1.0
-    } else if moved < -SHEET_COMMIT {
-        0.0
-    } else {
-        from
+        meter_ms: 120,
     }
 }
 
@@ -255,41 +185,21 @@ pub struct QueueRows {
     pub reorderable: bool,
 }
 
-/// `order` is the player's play order; when it does not cover the queue (the player has not said yet)
-/// the list's own order stands in.
+/// The panel's rows for a queue of `len` songs as the page holds it, in the core's play order; when that
+/// does not cover the page's queue (the change has not reached it yet) the list's own order stands in.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn queue_rows(order: Vec<u32>, len: u32, shuffle: bool) -> QueueRows {
-    let order = if order.len() == len as usize { order } else { (0..len).collect() };
+pub fn queue_rows(len: u32, shuffle: bool) -> QueueRows {
+    rows(crate::playlist::with(|p| (p.len() == len as usize).then(|| p.play_order().map(|i| i as u32).collect())), len, shuffle)
+}
+
+fn rows(order: Option<Vec<u32>>, len: u32, shuffle: bool) -> QueueRows {
+    let order = order.filter(|o| o.len() == len as usize).unwrap_or_else(|| (0..len).collect());
     QueueRows { order, reorderable: !shuffle }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_swipe_turns_past_a_third_or_flicked() {
-        assert_eq!(swipe_turn(-310.0, 0.0, 1000.0, true, true, false), -1);
-        assert_eq!(swipe_turn(-290.0, 0.0, 1000.0, true, true, false), 0);
-        assert_eq!(swipe_turn(-20.0, -1_001.0, 1000.0, true, true, false), -1);
-        assert_eq!(swipe_turn(-20.0, -999.0, 1000.0, true, true, false), 0);
-        assert_eq!(swipe_turn(-500.0, -5_000.0, 1000.0, true, false, false), 0, "no record that way");
-        assert_eq!(swipe_turn(400.0, 0.0, 1000.0, true, false, false), 1);
-        assert_eq!(swipe_turn(40.0, 1_200.0, 1000.0, false, true, false), 0);
-        // The now playing bar takes the slower flick it always did.
-        assert_eq!(swipe_turn(-20.0, -950.0, 1000.0, true, true, true), -1);
-        assert_eq!(swipe_turn(-20.0, -899.0, 1000.0, true, true, true), 0);
-    }
-
-    #[test]
-    fn the_sheet_finishes_what_a_drag_started() {
-        assert_eq!(sheet_target(0.0, 0.1, -901.0), 1.0);
-        assert_eq!(sheet_target(1.0, 0.9, 901.0), 0.0);
-        assert_eq!(sheet_target(0.0, 0.16, 0.0), 1.0);
-        assert_eq!(sheet_target(1.0, 0.84, 0.0), 0.0);
-        assert_eq!(sheet_target(1.0, 0.9, 0.0), 1.0);
-        assert_eq!(sheet_target(0.0, 0.1, 500.0), 0.0);
-    }
 
     #[test]
     fn play_shows_pause_while_it_waits_and_spins_only_late() {
@@ -317,14 +227,14 @@ mod tests {
 
     #[test]
     fn the_queue_lists_in_play_order_and_reorders_only_unshuffled() {
-        assert_eq!(queue_rows(vec![2, 0, 1], 3, true), QueueRows { order: vec![2, 0, 1], reorderable: false });
-        assert_eq!(queue_rows(vec![], 3, false), QueueRows { order: vec![0, 1, 2], reorderable: true });
+        assert_eq!(rows(Some(vec![2, 0, 1]), 3, true), QueueRows { order: vec![2, 0, 1], reorderable: false });
+        assert_eq!(rows(None, 3, false), QueueRows { order: vec![0, 1, 2], reorderable: true });
     }
 
     #[test]
     fn one_stage() {
         let s = stage();
-        assert_eq!((s.melt, s.sleeve, s.turn, s.spinner_after_ms, s.colour_wait_ms), (0.19, 0.74, 0.3, 300, 1_200));
+        assert_eq!((s.melt, s.spinner_after_ms, s.colour_wait_ms, s.meter_ms), (0.19, 300, 1_200, 120));
         assert_eq!(s.rub_out.len(), 7);
         assert_eq!(band_matrix(0.0, 1.0, 1.0, 1.0)[0], 1.0);
         assert!(player_black(true, false));

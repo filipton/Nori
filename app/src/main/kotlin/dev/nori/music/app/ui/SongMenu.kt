@@ -57,9 +57,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import dev.nori.music.app.vm.ActionsViewModel
-import dev.nori.music.ffi.Artist
-import dev.nori.music.ffi.Playlist
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Artist
+import dev.nori.music.ffi.model.Playlist
+import dev.nori.music.ffi.model.Song
 
 /**
  * One line of a sheet. The icon is what keeps a column of these from reading as a wall of text, so
@@ -115,8 +115,8 @@ fun SongMenu(
                 Cover(actions.cover(song.coverArt, CoverSize.ROW), 52.dp, radius = 8.dp)
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                     Text(song.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Text("${song.artist} · ${song.album}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    if (song.suffix.isNotEmpty()) Caption(remember(song) { dev.nori.music.ffi.songFormat(song) })
+                    Text(remember(song) { dev.nori.music.ffi.words.wordsSongLine(song.artist, song.album) }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    if (song.suffix.isNotEmpty()) Caption(remember(song) { dev.nori.music.ffi.words.songFormat(song) })
                 }
             }
             Hairline(startIndent = Space.gutter)
@@ -131,33 +131,33 @@ fun SongMenu(
             val marks by actions.starMarks.collectAsState()
             val starred = marks.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
             val download = when (song.id) {
-                in downloads.doneIds -> dev.nori.music.ffi.SongDownload.DONE
-                in downloads.pendingIds -> dev.nori.music.ffi.SongDownload.PENDING
-                else -> dev.nori.music.ffi.SongDownload.NONE
+                in downloads.doneIds -> dev.nori.music.ffi.library.SongDownload.DONE
+                in downloads.pendingIds -> dev.nori.music.ffi.library.SongDownload.PENDING
+                else -> dev.nori.music.ffi.library.SongDownload.NONE
             }
             // What the menu offers, in what order and in what words, is the core's (`menus::song_menu`);
             // this draws each line with its icon and does what it names.
-            val items = remember(song, starred, download, player != null) { dev.nori.music.ffi.songMenu(song, starred, download, player != null) }
-            @Composable fun line(i: dev.nori.music.ffi.SongMenuItem) = when (val a = i.action) {
-                is dev.nori.music.ffi.SongAction.Favourite -> Item(i.label, if (a.on) Icons.Filled.FavoriteBorder else Icons.Filled.Favorite) { actions.star(song, a.on); onDismiss() }
-                dev.nori.music.ffi.SongAction.PlayNext -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
-                dev.nori.music.ffi.SongAction.AddToQueue -> Item(i.label, Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
-                dev.nori.music.ffi.SongAction.AddToPlaylist -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
-                dev.nori.music.ffi.SongAction.RemoveDownload -> Item(i.label, Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
-                dev.nori.music.ffi.SongAction.StopDownload -> Item(i.label, Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
-                dev.nori.music.ffi.SongAction.Download -> Item(i.label, Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
-                is dev.nori.music.ffi.SongAction.GoToAlbum -> Item(i.label, Icons.Filled.Album) { nav.album(a.id); onDismiss() }
+            val items = remember(song, starred, download, player != null) { dev.nori.music.ffi.library.songMenu(song, starred, download, player != null) }
+            @Composable fun line(i: dev.nori.music.ffi.library.SongMenuItem) = when (val a = i.action) {
+                is dev.nori.music.ffi.library.SongAction.Favourite -> Item(i.label, if (a.on) Icons.Filled.FavoriteBorder else Icons.Filled.Favorite) { actions.star(song, a.on); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.PlayNext -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.AddToQueue -> Item(i.label, Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.AddToPlaylist -> Item(i.label, Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
+                dev.nori.music.ffi.library.SongAction.RemoveDownload -> Item(i.label, Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.StopDownload -> Item(i.label, Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Download -> Item(i.label, Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
+                is dev.nori.music.ffi.library.SongAction.GoToAlbum -> Item(i.label, Icons.Filled.Album) { nav.album(a.id); onDismiss() }
                 // The song's own cover stands in for a lone artist's until their page has one.
-                is dev.nori.music.ffi.SongAction.GoToArtist -> Item(i.label, Icons.Filled.Person) {
+                is dev.nori.music.ffi.library.SongAction.GoToArtist -> Item(i.label, Icons.Filled.Person) {
                     nav.artist(a.id, Artist(a.id, a.name, song.coverArt.takeIf { song.artists.size <= 1 }, null, 0u, false, false)); onDismiss()
                 }
-                dev.nori.music.ffi.SongAction.AddToLibrary -> Item(i.label, Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
-                dev.nori.music.ffi.SongAction.SleepTimer -> Item(i.label, Icons.Filled.Bedtime) { sleeping = true }
-                dev.nori.music.ffi.SongAction.StartRadio -> Item(i.label, Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
-                dev.nori.music.ffi.SongAction.InstantMix -> Item(i.label, Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
-                dev.nori.music.ffi.SongAction.ExcludeFromMixes -> Item(i.label, Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
-                dev.nori.music.ffi.SongAction.Share -> Item(i.label, Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
-                dev.nori.music.ffi.SongAction.Details -> Item(i.label, Icons.Filled.Info) { details = true }
+                dev.nori.music.ffi.library.SongAction.AddToLibrary -> Item(i.label, Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.SleepTimer -> Item(i.label, Icons.Filled.Bedtime) { sleeping = true }
+                dev.nori.music.ffi.library.SongAction.StartRadio -> Item(i.label, Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.InstantMix -> Item(i.label, Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.ExcludeFromMixes -> Item(i.label, Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Share -> Item(i.label, Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Details -> Item(i.label, Icons.Filled.Info) { details = true }
             }
             items.forEach { if (!it.more) line(it) }
             Hairline(startIndent = Space.gutter)
@@ -167,7 +167,7 @@ fun SongMenu(
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
                 Icon(Icons.Filled.MoreHoriz, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("More", Modifier.weight(1f).padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
+                Text(say.more, Modifier.weight(1f).padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
                 // The chevron turns over rather than swapping for its opposite, so the row says which
                 // way it is about to move before it moves.
                 Icon(
@@ -189,10 +189,10 @@ private fun SleepMenu(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () 
     val state by player.state.collectAsState()
     ModalBottomSheet(onDismissRequest = onDone, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
-            SectionTitle("Sleep timer")
+            SectionTitle(say.sleepTimer)
             val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
             // The choices are the core's (`menus::sleep_choices`); "Off" is all zeros.
-            val choices = remember(running) { dev.nori.music.ffi.sleepChoices(running) }
+            val choices = remember(running) { dev.nori.music.ffi.library.sleepChoices(running) }
             choices.forEach { c -> Item(c.label) { player.sleep(c.minutes.toInt(), c.endOfTrack, c.songs.toInt()); onDone() } }
         }
     }
@@ -205,15 +205,15 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
     LaunchedEffect(Unit) { playlists = actions.playlists() }
     AlertDialog(
         onDismissRequest = onDone,
-        title = { Text("Add to playlist") },
+        title = { Text(say.addToPlaylist) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(name, { name = it }, label = { Text("New playlist") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(name, { name = it }, label = { Text(say.newPlaylist) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 playlists?.forEach { p -> Text(p.name, Modifier.fillMaxWidth().clickable { actions.addToPlaylist(p, songs); onDone() }.padding(vertical = 12.dp)) }
             }
         },
-        confirmButton = { TextButton({ actions.addToNewPlaylist(name.trim(), songs); onDone() }, enabled = name.isNotBlank()) { Text("Create") } },
-        dismissButton = { TextButton(onDone) { Text("Cancel") } },
+        confirmButton = { TextButton({ actions.addToNewPlaylist(name.trim(), songs); onDone() }, enabled = name.isNotBlank()) { Text(say.create) } },
+        dismissButton = { TextButton(onDone) { Text(say.cancel) } },
     )
 }
 
@@ -221,11 +221,11 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
 @Composable
 fun TrackInfo(song: Song, onDone: () -> Unit) {
     // Which rows there are, in what order and how each reads is nori-core's (`fmt::track_info`).
-    val rows = remember(song) { dev.nori.music.ffi.trackInfo(song) }
+    val rows = remember(song) { dev.nori.music.ffi.words.trackInfo(song) }
     AlertDialog(
-        onDismissRequest = onDone, title = { Text("Details") },
+        onDismissRequest = onDone, title = { Text(say.details) },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { r -> Text(r.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(r.value, Modifier.padding(bottom = 8.dp)) } } },
-        confirmButton = { TextButton(onDone) { Text("Close") } },
+        confirmButton = { TextButton(onDone) { Text(say.close) } },
     )
 }
 
@@ -238,13 +238,13 @@ fun SelectionBar(actions: ActionsViewModel) {
     if (picking) PlaylistPicker(selection, actions) { picking = false; actions.clearSelection() }
     androidx.compose.material3.Surface(tonalElevation = 6.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("${selection.size} selected", Modifier.weight(1f).padding(start = 8.dp))
-            TextButton({ actions.play(selection); actions.clearSelection() }) { Text("Play") }
-            TextButton({ actions.playNext(selection); actions.clearSelection() }) { Text("Next") }
-            TextButton({ actions.enqueue(selection); actions.clearSelection() }) { Text("Queue") }
-            TextButton({ picking = true }) { Text("Playlist") }
-            TextButton({ actions.download(selection); actions.clearSelection() }) { Text("Get") }
-            IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, "Clear selection") }
+            Text(remember(selection.size) { dev.nori.music.ffi.words.wordsSelected(selection.size.toUInt()) }, Modifier.weight(1f).padding(start = 8.dp))
+            TextButton({ actions.play(selection); actions.clearSelection() }) { Text(say.play) }
+            TextButton({ actions.playNext(selection); actions.clearSelection() }) { Text(say.next) }
+            TextButton({ actions.enqueue(selection); actions.clearSelection() }) { Text(say.queue) }
+            TextButton({ picking = true }) { Text(say.playlist) }
+            TextButton({ actions.download(selection); actions.clearSelection() }) { Text(say.get) }
+            IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, say.clearSelection) }
         }
     }
 }

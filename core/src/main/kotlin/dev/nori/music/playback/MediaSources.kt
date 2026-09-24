@@ -1,6 +1,7 @@
 package dev.nori.music.playback
 
 import android.content.Context
+import dalvik.annotation.optimization.FastNative
 import android.net.Uri
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
@@ -17,7 +18,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.downloads.DownloadsJni
 import dev.nori.music.ffi.Client
-import dev.nori.music.ffi.StreamQuality
+import dev.nori.music.ffi.net.StreamQuality
 import dev.nori.music.net.Http
 import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Quality
@@ -26,11 +27,11 @@ import java.io.File
 /** The stream cache's keys and their order of use, kept in the core (crates/core/src/stream_cache.rs). */
 internal object StreamCacheJni {
     init { System.loadLibrary("norimusic") }
-    @JvmStatic external fun touch(key: String)
+    @JvmStatic @FastNative external fun touch(key: String)
     /** What the cache held when this process first looked; told once. */
     @JvmStatic external fun seed(keys: Array<String>)
     /** The next key to drop, forgotten by the core as it is handed out; null when there is none. */
-    @JvmStatic external fun next(): String?
+    @JvmStatic @FastNative external fun next(): String?
     /** A song's streamed copies, forgotten by the core as they are handed out. */
     @JvmStatic external fun copies(id: String): Array<String>
     @JvmStatic @CriticalNative external fun clear()
@@ -107,9 +108,18 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
 
     val network: DataSource.Factory = OkHttpDataSource.Factory(http.streamFactory)
 
-    /** The rolling cache over the network; also what the precacher writes through. */
+    /** The rolling cache over the network. */
     val streamCached: CacheDataSource.Factory = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+
+    /**
+     * What the precacher writes through: the same, except that a stretch of a song the player is writing
+     * right then is waited for rather than fetched past the cache. The player loads the next song itself
+     * as the one before is whole, and the precacher, finding it locked, downloaded the rest of it a
+     * second time without keeping any of it.
+     */
+    val precaching: CacheDataSource.Factory = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
+        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or CacheDataSource.FLAG_BLOCK_ON_CACHE)
 
     private val cached: DataSource.Factory = CacheDataSource.Factory()
         .setCache(downloadCache)
@@ -133,12 +143,32 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
         return dataSpec.buildUpon().setUri(Uri.parse(target.url)).setKey(target.key).build()
     }
 
+    /** The songs to fetch ahead now, each with its address and key (`Client::precache_targets`). */
+    fun precacheTargets(): List<dev.nori.music.ffi.net.Fetch> = client.precacheTargets(http.metered)
+
+    /** Where the precacher reads [song] from, already resolved by the core. */
+    fun spec(song: dev.nori.music.ffi.net.Fetch): DataSpec {
+        applyStreamLimit()
+        return DataSpec.Builder().setUri(Uri.parse(song.url)).setKey(song.key).build()
+    }
+
+    /**
+     * A song's bytes from [from] on, at [url] under the cache key [key] as the core resolved them (the Rust
+     * player opens its songs so): a download, then the stream cache, then the network. The source and how
+     * many bytes are left (C.LENGTH_UNSET unknown).
+     */
+    fun openResolved(url: String, key: String, from: Long): Pair<DataSource, Long> {
+        applyStreamLimit()
+        val source = cached.createDataSource()
+        return source to source.open(DataSpec.Builder().setUri(Uri.parse(url)).setKey(key).setPosition(from).build())
+    }
+
     /** The key [resolve] would give a song that is not downloaded, without building its URL. */
     fun streamKey(id: String): String = settings.value.let { client.streamKey(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
 
     private fun Quality.ffi() = StreamQuality(bitRate.coerceAtLeast(0).toUInt(), format)
 
-    fun downloadKey(id: String) = dev.nori.music.ffi.downloadKey(id)
+    fun downloadKey(id: String) = dev.nori.music.ffi.net.downloadKey(id)
 
     fun downloadUrl(id: String): String = client.downloadTarget(id, settings.value.download.ffi()).url
 

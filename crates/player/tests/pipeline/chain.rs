@@ -31,6 +31,9 @@ fn the_limiter_only_catches_peaks() {
     let mut p = Player::new(vec![track("a", &song)]);
     p.set_sound(limiter());
     p.play_from(0);
+    // The meter a screen reads shows the limiter at work while it is.
+    p.run_for(5_000);
+    assert!(p.sink.chain_in() && p.sink.meter_db > 0.0, "the meter reads {} dB", p.sink.meter_db);
     assert!(p.run_to_end(40_000));
     let reduction = p.sink.gain_reduction_db;
     assert!(reduction > 0.0 && reduction < 6.0, "the limiter took {reduction} dB off mastered music");
@@ -188,4 +191,29 @@ fn tuning_borrows_the_shallow_buffer_and_gives_it_back_at_the_next_boundary() {
     p.run_for(3_000);
     assert!(p.sink.heard_frames - before >= frames(2.9) as u64, "still playing after the deep swap");
     assert_eq!(p.app.log.iter().filter(|l| l.contains("chain swap at the boundary")).count(), 2, "{:?}", p.app.log);
+}
+
+#[test]
+fn a_swap_waiting_for_a_boundary_is_made_at_a_jump_and_leaves_the_next_mix_whole() {
+    // The limiter leaves the chain while a song plays: the rebuild waits. Then the same song is played
+    // again from near its end, with a crossfade into the next: the jump empties the output anyway, so
+    // the rebuild is made there - not at the next song's start, in the middle of the mix it would cut.
+    let (a, b) = (music(40.0, 51), music(40.0, 52));
+    let mut p = Player::with_prefs(vec![track("a", &a), track("b", &b)], crossfade(4));
+    p.set_sound(limiter());
+    p.play_from(0);
+    p.run_for(3_000);
+    p.set_sound(Sound::default());
+    assert!(p.app.logged("chain swap deferred"), "{:?}", p.app.log);
+    p.jump(0, 30_000);
+    assert!(p.app.logged("chain swap at the boundary"), "made at the jump: {:?}", p.app.log);
+    assert!(p.run_until(12_000, |p| p.mixing()), "{:?}", p.app.log);
+    let mut heard_mixing = 0;
+    while p.mixing() {
+        p.run_for(100);
+        heard_mixing += 100;
+    }
+    assert!(heard_mixing >= 3_800, "the whole four-second mix is heard: {heard_mixing} ms");
+    assert_eq!(p.app.log.iter().filter(|l| l.contains("chain swap at the boundary")).count(), 1, "{:?}", p.app.log);
+    assert!(p.sink.gaps.is_empty(), "{:?}", p.sink.gaps);
 }

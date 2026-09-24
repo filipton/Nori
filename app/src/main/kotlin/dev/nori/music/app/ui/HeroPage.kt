@@ -79,7 +79,7 @@ fun HeroPage(
      * (`pages::PageQueue`), so the two big buttons answer for that queue rather than for the player in
      * general (`pages::hero_buttons`). Null: the page has no queue of its own.
      */
-    queue: dev.nori.music.ffi.PageQueue? = null,
+    queue: dev.nori.music.ffi.library.PageQueue? = null,
     /** Icon buttons on the line with the pills: favourite, queue, download. */
     actions: @Composable RowScope.() -> Unit = {},
     /**
@@ -107,7 +107,7 @@ fun HeroPage(
     val pausing = bits and 4 != 0
     val playLabel = remember(pausing) { CoverLook.heroPlayLabel(pausing) }
     val buttons = remember(bits, playLabel) {
-        dev.nori.music.ffi.HeroButtons(
+        dev.nori.music.ffi.library.HeroButtons(
             shuffleLit = bits and 1 != 0, shuffleEnabled = bits and 2 != 0, shufflePress = heroPress(bits shr 4),
             playLabel = playLabel, pausing = pausing, playEnabled = bits and 8 != 0, playPress = heroPress(bits shr 6),
         )
@@ -197,15 +197,15 @@ fun HeroPage(
                             Modifier.fillMaxWidth().padding(start = Space.gutter, end = Space.gutter, top = 16.dp),
                             Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
                         ) {
-                            val press: (dev.nori.music.ffi.HeroPress, (() -> Unit)?) -> Unit = { p, start ->
+                            val press: (dev.nori.music.ffi.library.HeroPress, (() -> Unit)?) -> Unit = { p, start ->
                                 when (p) {
-                                    dev.nori.music.ffi.HeroPress.START -> start?.invoke()
-                                    dev.nori.music.ffi.HeroPress.TOGGLE -> player.toggle()
-                                    dev.nori.music.ffi.HeroPress.SHUFFLE_OFF -> player.toggleShuffle()
+                                    dev.nori.music.ffi.library.HeroPress.START -> start?.invoke()
+                                    dev.nori.music.ffi.library.HeroPress.TOGGLE -> player.toggle()
+                                    dev.nori.music.ffi.library.HeroPress.SHUFFLE_OFF -> player.toggleShuffle()
                                 }
                             }
                             CircleButton(
-                                Icons.Filled.Shuffle, "Shuffle",
+                                Icons.Filled.Shuffle, say.shuffle,
                                 enabled = buttons.shuffleEnabled, lit = buttons.shuffleLit,
                                 onClick = { press(buttons.shufflePress, onShuffle) },
                             )
@@ -228,7 +228,7 @@ fun HeroPage(
             }
             // Back floats over the artwork on a soft disc, so it reads on any cover.
             Box(Modifier.statusBarsPadding().padding(start = 12.dp, top = 10.dp)) {
-                ScrimIconButton(Icons.AutoMirrored.Filled.ArrowBack, "Back", LocalNav.current::back)
+                ScrimIconButton(Icons.AutoMirrored.Filled.ArrowBack, say.back, LocalNav.current::back)
             }
         }
     }
@@ -236,7 +236,7 @@ fun HeroPage(
 
 /** Two bits of `HeroButtons::pack`: what a button presses. */
 private fun heroPress(bits: Int) = when (bits and 3) {
-    1 -> dev.nori.music.ffi.HeroPress.TOGGLE
-    2 -> dev.nori.music.ffi.HeroPress.SHUFFLE_OFF
-    else -> dev.nori.music.ffi.HeroPress.START
+    1 -> dev.nori.music.ffi.library.HeroPress.TOGGLE
+    2 -> dev.nori.music.ffi.library.HeroPress.SHUFFLE_OFF
+    else -> dev.nori.music.ffi.library.HeroPress.START
 }

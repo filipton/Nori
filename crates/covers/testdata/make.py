@@ -8,7 +8,7 @@ import math
 import os
 import random
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 here = os.path.dirname(os.path.abspath(__file__))
 W, H = 40, 30
@@ -82,3 +82,48 @@ raw(area(Image.open(path("photo.jpg")), 12), "photo.jpg-12-area.rgba")
 half = Image.open(path("photo.jpg"))
 half.draft("RGB", (20, 15))
 raw(area(half, 12, 4), "photo.jpg-12-half.rgba")
+
+# GIF: the first frame of an animation, and a first frame that covers only part of the screen. The rest of
+# that one is transparent, as a browser shows it (Pillow paints it black), so the test checks it itself.
+second = photo.transpose(Image.FLIP_LEFT_RIGHT)
+photo.quantize(64).save(path("photo.gif"), save_all=True, append_images=[second.quantize(64)], duration=100, loop=0)
+raw(Image.open(path("photo.gif")), "photo.gif.rgba")
+with open(path("part.gif"), "wb") as f:
+    # A 40x30 screen with no global palette, then one 20x10 frame at (8, 6) with its own two colours.
+    f.write(b"GIF89a" + W.to_bytes(2, "little") + H.to_bytes(2, "little") + b"\x00\x00\x00")
+    f.write(b"\x2c" + (8).to_bytes(2, "little") + (6).to_bytes(2, "little") + (20).to_bytes(2, "little") + (10).to_bytes(2, "little") + b"\x80")
+    f.write(bytes([0, 0, 0, 250, 40, 60]))
+    # LZW with a minimum code size of 2: clear, then 200 ones as literals, resetting before the table fills.
+    out, acc, n = bytearray(), 0, 0
+    def put(code, width):
+        global acc, n
+        acc |= code << n
+        n += width
+        while n >= 8:
+            out.append(acc & 0xFF)
+            acc >>= 8
+            n -= 8
+    for i in range(200):
+        if i % 2 == 0:
+            put(4, 3)  # clear: the table never grows past three bits
+        put(1, 3)
+    put(5, 3)  # end
+    if n:
+        out.append(acc & 0xFF)
+    f.write(b"\x02")
+    for i in range(0, len(out), 255):
+        chunk = out[i:i + 255]
+        f.write(bytes([len(chunk)]) + chunk)
+    f.write(b"\x00\x3b")
+
+# EXIF orientation: the same photo saved with each turn and mirror, as a camera writes it. The pixels are
+# stored as they were. The reference is Pillow turning them (exif_transpose).
+for o in (3, 6, 8, 2, 5, 7):
+    exif = Image.Exif()
+    exif[0x0112] = o
+    photo.save(path(f"turned-{o}.jpg"), quality=90, subsampling=2, exif=exif.tobytes())
+    raw(ImageOps.exif_transpose(Image.open(path(f"turned-{o}.jpg"))), f"turned-{o}.jpg.rgba")
+exif = Image.Exif()
+exif[0x0112] = 6
+photo.save(path("turned-6.png"), exif=exif.tobytes())
+photo.save(path("turned-6.webp"), quality=90, exif=exif.tobytes())
