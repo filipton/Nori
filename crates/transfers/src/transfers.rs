@@ -43,6 +43,7 @@ pub enum Phase {
     Done = 3,
 }
 
+/// What the screens say about a song being downloaded, read once from the downloads table.
 #[derive(Debug, Clone, Default)]
 pub struct Info {
     title: String,
@@ -150,6 +151,7 @@ struct Notice {
     permille: i32,
 }
 
+/// Every download the platform has reported, the batch they make and what the notification says.
 #[derive(Debug, Default)]
 pub struct Tracker {
     slots: Vec<Slot>,
@@ -691,6 +693,7 @@ pub struct DownloadRecovery {
     pub unfinished: bool,
 }
 
+/// media3's `Download.STATE_REMOVING`: a download being taken back.
 pub const REMOVING: i32 = 5;
 
 /// Which songs the downloads table holds and whether each has finished, kept beside the table so one

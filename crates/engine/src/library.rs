@@ -23,6 +23,9 @@ pub enum Source {
     /// A URL whose bytes the stream cache keeps under `key`: read from the disk when the cache has all
     /// of it, and written into it as it loads when not.
     Cached { url: String, bytes: Arc<dyn ByteSource>, store: Arc<Store>, key: String },
+    /// A live stream (internet radio): endless, never cached or fetched ahead, played as it comes
+    /// (`Loader::live`).
+    Live { url: String, bytes: Arc<dyn ByteSource> },
 }
 
 /// A song ready to be opened: where it is, a hint at its container (a file extension such as "mp3",
@@ -89,6 +92,44 @@ impl<L: Library> Sources<L> {
         loader
     }
 
+    /// A live stream's loader, made anew each time it is opened: a live stream is where the station is
+    /// now, and what an earlier connection held of it is past.
+    fn live(&mut self, id: &str, url: &str, bytes: &Arc<dyn ByteSource>) -> Arc<Loader> {
+        self.loaders.retain(|(i, _)| i != id);
+        let loader = Loader::live(bytes.clone(), url.to_string());
+        self.loaders.push((id.to_string(), loader.clone()));
+        if self.loaders.len() > KEPT {
+            self.loaders.remove(0);
+        }
+        loader
+    }
+
+    /// Song `id` read from `from_ms` as its packets, undecoded, for an output that decodes them itself
+    /// (`Demuxed::load_packets`). A live stream is not read so. `ahead`: only looked at while another
+    /// song plays from memory, so it holds what that one leaves of the cap, as a song fetched ahead does.
+    pub fn open_packets(&mut self, id: &str, from_ms: i64, ahead: bool) -> Result<Demuxed, String> {
+        let at = self.library.locate(id)?;
+        let budget = ahead.then(|| self.left_for(id));
+        let file = |path: &PathBuf| {
+            let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let hint = at.hint.clone().or_else(|| path.extension().map(|e| e.to_string_lossy().into_owned()));
+            Demuxed::open_packets(Box::new(file), hint.as_deref(), from_ms, at.duration_ms)
+        };
+        match &at.source {
+            Source::File(path) => file(path),
+            Source::Cached { store, key, .. } if self.loading(id).is_none() && store.cached(key).is_some() => file(&store.cached(key).expect("checked")),
+            Source::Url { url, bytes } => {
+                let loader = self.loader(id, url, bytes, at.duration_ms, None, budget);
+                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms))
+            }
+            Source::Cached { url, bytes, store, key } => {
+                let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)), budget);
+                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms))
+            }
+            Source::Live { .. } => Err("a live stream is decoded here".into()),
+        }
+    }
+
     /// Every song's bytes go (a long pause): they are fetched, or read from the disk, again when needed.
     pub fn let_go(&mut self) {
         self.loaders.clear();
@@ -133,6 +174,11 @@ impl<L: Library> Songs for Sources<L> {
             Source::Cached { url, bytes, store, key } => {
                 let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)), None);
                 Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, self.encoding))
+            }
+            // A live stream starts where the station is now, whatever place was asked for.
+            Source::Live { url, bytes } => {
+                let loader = self.live(id, url, bytes);
+                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), 0, None, self.encoding))
             }
         }
     }

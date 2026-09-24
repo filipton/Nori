@@ -11,17 +11,15 @@ name = "nori_queue"
 [features]
 # The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
 # crate without them.
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 parking_lot = "0.12"
+# "Keep playing" remembers what it picked, in the app's database.
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 nori-model = { path = "../model" }
 nori-db = { path = "../db" }
-nori-words = { path = "../words" }
 nori-net = { path = "../net" }
 # A play counted goes into the library's history; a radio or a mix is drawn from the library.
 nori-library = { path = "../library" }

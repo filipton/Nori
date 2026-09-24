@@ -265,6 +265,116 @@ fn phrase_cues_land_on_the_structure() {
     assert!(t.silence_end_ms as f64 - t.outro_start_ms as f64 >= 16.0 * bar - 100.0);
 }
 
+/// Grooves whose strongest single lag is not the beat: drum and bass (kick on 1 and the and of 3) and a funk
+/// groove built on dotted eighths. The autocorrelation alone read 116 and 139; the metrical comb reads the
+/// beat (or its octave, which the planner folds).
+#[test]
+fn the_tempo_is_a_beat_whose_bar_repeats() {
+    use super::eval::{Song, Style, FULL};
+    for (song, want) in [
+        (Song { sections: vec![(28, FULL)], ..Song::new("dnb", Style::DnB, 174.0, 0, true) }, 174.0),
+        (Song { sections: vec![(20, FULL)], ..Song::new("funk", Style::Funk, 104.0, 10, false) }, 104.0),
+    ] {
+        let (x, _) = song.render();
+        let t = analyse("t", &x, song.rate).track;
+        println!("{}: {:.2} BPM (conf {:.2})", song.name, t.bpm, t.bpm_confidence);
+        assert!(octave_ok(t.bpm, want, 0.01), "{}: {}", song.name, t.bpm);
+    }
+}
+
+/// A steady syncopated groove whose tempo is read right is trusted, over the whole song and at both ends, so the
+/// planner mixes it on the beat. Its lag of five sixteenths scores nearly as well as the beat itself, and counting
+/// that as a rival took the trust from grids like these: the 125 BPM outro, read right and steady to 0.95, scored
+/// confidence 0.44.
+#[test]
+fn a_steady_syncopated_groove_is_trusted() {
+    use super::eval::{Song, Style, DRUMS, FULL};
+    use super::plan::{MIN_BPM_CONFIDENCE, MIN_STABILITY};
+    for (bpm, swing) in [(125.0, 0.66), (128.0, 0.5), (130.0, 0.58)] {
+        let song = Song { swing, sections: vec![(8, DRUMS), (24, FULL), (8, FULL)], ..Song::new("broken", Style::Broken, bpm, 4, false) };
+        let (x, _) = song.render();
+        let t = analyse("t", &x, song.rate).track;
+        for (end, got, conf, stab) in [
+            ("whole", t.bpm, t.bpm_confidence, t.stability),
+            ("intro", t.intro_bpm, t.intro_bpm_confidence, t.intro_stability),
+            ("outro", t.outro_bpm, t.outro_bpm_confidence, t.outro_stability),
+        ] {
+            println!("{bpm} swing {swing} {end}: {got:.2} BPM (conf {conf:.2}, stab {stab:.2})");
+            assert!(octave_ok(got, bpm, 0.01), "{bpm} {end}: {got}");
+            assert!(conf >= MIN_BPM_CONFIDENCE && stab >= MIN_STABILITY, "{bpm} {end}: conf {conf} stab {stab}");
+        }
+    }
+}
+
+/// A band tuned 40 cents sharp or flat is still in its key: the tuning is measured from the spectral peaks and
+/// taken out before the profile is matched. Before, +38 cents read a semitone high.
+#[test]
+fn a_detuned_band_keeps_its_key() {
+    use super::eval::{Song, Style, FULL, KEYS};
+    for (cents, tonic, minor) in [(40.0, 7, true), (-40.0, 2, false), (0.0, 9, true)] {
+        let song = Song { cents, progression: 1, sections: vec![(4, KEYS), (16, FULL)], ..Song::new("detuned", Style::Backbeat, 120.0, tonic, minor) };
+        let (x, truth) = song.render();
+        let mut an = analysis::Analyzer::new(song.rate, 0);
+        an.feed(&x);
+        let f = an.take_features();
+        let tune = structure::tuning(&f) * 100.0;
+        let t = finish("t", &f).track;
+        println!("{cents:+} cents: measured {tune:+.1}, key {} (want {})", structure::camelot_name(t.key), structure::camelot_name(truth.key));
+        assert!((tune - cents).abs() < 8.0, "{cents}: tuning {tune}");
+        assert_eq!(t.key, truth.key, "{cents}: {}", structure::camelot_name(t.key));
+        assert!(t.key_confidence >= 0.4, "{cents}: confidence {}", t.key_confidence);
+    }
+}
+
+/// DJ-friendly house: 16 bars of drums alone, the groove, 16 bars of drums alone. The kick carries nearly all the
+/// level, so the old level-jump rule saw no intro or outro at all; the bass and chords arriving (tonal energy,
+/// brightness) are what mark them. A beatless pad opening ends where the beat starts.
+#[test]
+fn drum_intros_and_outros_are_sections() {
+    use super::eval::{Song, Style, DRUMS, FULL};
+    let song = Song { sections: vec![(16, DRUMS), (32, FULL), (16, DRUMS)], ..Song::new("house", Style::House, 124.0, 9, true) };
+    let (x, truth) = song.render();
+    let t = analyse("t", &x, song.rate).track;
+    let beat = 60.0 / 124.0;
+    let (intro, outro) = (t.intro_end_ms as f64 / 1000.0, t.outro_start_ms as f64 / 1000.0);
+    println!("intro {intro:.2} (want {:.2}), outro {outro:.2} (want {:.2})", truth.intro_end, truth.outro_start.unwrap());
+    assert!((intro - truth.intro_end).abs() <= beat, "intro {intro}");
+    assert!((outro - truth.outro_start.unwrap()).abs() <= beat, "outro {outro}");
+
+    let song = Song { ambient_s: 30.0, sections: vec![(32, FULL)], ..Song::new("pad", Style::House, 122.0, 3, false) };
+    let (x, truth) = song.render();
+    let t = analyse("t", &x, song.rate).track;
+    let intro = t.intro_end_ms as f64 / 1000.0;
+    assert!((intro - truth.intro_end).abs() <= 60.0 / 122.0, "intro {intro}, the beat starts at {}", truth.intro_end);
+}
+
+/// A waltz is measured in bars of three, its downbeats on the bass; a four-beat song keeps bars of four.
+#[test]
+fn a_waltz_has_three_beats_to_the_bar() {
+    use super::eval::{grid, precision, Song, Style, FULL};
+    let song = Song { sections: vec![(24, FULL)], ..Song::new("waltz", Style::Waltz, 150.0, 5, false) };
+    let (x, truth) = song.render();
+    let t = analyse("t", &x, song.rate).track;
+    assert_eq!(t.beats_per_bar, 3, "{t:?}");
+    let (_, downbeats) = grid(&t, truth.beats[4], truth.music.1 - 1.0);
+    assert!(precision(&truth.downbeats, &downbeats) >= 0.9, "downbeats {downbeats:?}");
+    let four = analyse("t", &Synth { chords: vec![(0, false), (5, false)], ..Synth::new(126.0) }.render(), 44100).track;
+    assert_eq!(four.beats_per_bar, 4);
+}
+
+/// Half-time: the grid may run at half the written tempo, but a bar must still start on the kick, not on the
+/// snare's beat three. The kick is what lands heavily in the low band; the snare only leaks into it.
+#[test]
+fn half_time_bars_start_on_the_kick() {
+    use super::eval::{grid, precision, Song, Style, FULL};
+    let song = Song { sections: vec![(24, FULL)], ..Song::new("halftime", Style::HalfTime, 140.0, 5, true) };
+    let (x, truth) = song.render();
+    let t = analyse("t", &x, song.rate).track;
+    let (_, downbeats) = grid(&t, truth.beats[4], truth.music.1 - 1.0);
+    println!("{:.2} BPM, downbeats {:?}", t.bpm, &downbeats[..4.min(downbeats.len())]);
+    assert!(precision(&truth.downbeats, &downbeats) >= 0.9, "{:.2} BPM phase {}", t.bpm, t.downbeat_phase);
+}
+
 #[test]
 fn plan_from_real_analyses() {
     let a = analyse("a", &Synth { secs: 120.0, ..Synth::new(128.0) }.render(), 44100).track;
@@ -277,7 +387,7 @@ fn plan_from_real_analyses() {
     assert_eq!(params[mixer::param::DURATION], p.duration_ms as f32);
 }
 
-/// `cargo test --release -p norimusic analysis_cost -- --ignored --nocapture`
+/// `cargo test --release -p nori-player analysis_cost -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn analysis_cost() {
@@ -301,7 +411,7 @@ fn analysis_cost() {
 }
 
 /// Analyses a raw PCM file, to compare what the app measures with what the file really is:
-/// `NORI_PCM=/path/file.s16 NORI_RATE=44100 NORI_CH=2 cargo test --release -p norimusic -- --ignored --nocapture pcm_file`
+/// `NORI_PCM=/path/file.s16 NORI_RATE=44100 NORI_CH=2 cargo test --release -p nori-player -- --ignored --nocapture pcm_file`
 #[test]
 #[ignore]
 fn pcm_file() {

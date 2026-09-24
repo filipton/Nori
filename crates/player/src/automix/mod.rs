@@ -1,16 +1,22 @@
 //! AutoMix: DJ-style transitions (see docs/research/automix.md).
 //!
 //! - `analysis` + `tempo` + `structure` + `loudness`: one pass over a track's PCM gives a `TrackAnalysis`
-//!   (tempo and beat grid, downbeats, phrase cues, key, loudness, silence and MixRamp points). Coarse uniffi call
-//!   with the whole decoded track, or a JNI streaming tap on PCM the player already decodes.
-//! - `store`: the `track_analysis` table and the `Core` methods around it.
+//!   (tempo and beat grid, downbeats, phrase cues, the drop, the exit, key, loudness, silence, a hidden track's gap
+//!   and MixRamp points), streamed: from a whole song decoded ahead (nori-engine's measurer) or from the PCM the
+//!   player already decodes (the transition engine's tap). The `track_analysis` table is nori-automix's.
+//! - `beats` (+ `neural` with the `neural-beats` feature): Beat This!, an optional neural beat tracker, run over the
+//!   first and last 30 s of a song; its grids replace the classical intro and outro grids where it is sure.
 //! - `plan`: a pure function from two analyses and the user's settings to a `TransitionPlan`.
-//! - `mixer` and `stretch`: per-buffer JNI building blocks that render a plan (gain curves, bass swap, filter
-//!   sweep; time-stretch of the incoming track).
+//! - `mixer` and `stretch`: per-buffer building blocks that render a plan (gain curves, bass swap, filter
+//!   sweeps, vocal duck, echo; time-stretch of the incoming track).
+//! - `eval` (tests only): the synthetic songs and pairs the analysis and the planned transitions are scored on.
 
 pub mod analysis;
+pub mod beats;
 pub mod loudness;
 pub mod mixer;
+#[cfg(feature = "neural-beats")]
+pub mod neural;
 pub mod plan;
 pub mod resample;
 pub mod stretch;
@@ -20,17 +26,21 @@ pub mod tempo;
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;
 #[cfg(test)]
+mod eval;
+#[cfg(test)]
 mod tests;
 
 use crate::types::TrackAnalysis;
 use analysis::{Analyzer, Features};
 
 /// Bump when the analysis changes enough that stored rows should be redone.
-pub const ANALYSIS_VERSION: i32 = 4;
+pub const ANALYSIS_VERSION: i32 = 9;
 /// How much music at each end the intro and outro grids are measured over: long enough for a steady
 /// tempo estimate (dozens of beats at any tempo), short enough that a live band's drift inside it is
 /// a fraction of a beat.
 pub const GRID_WINDOW_S: f64 = 40.0;
+/// A silence inside the music at least this long is a gap a mix may leave by (a hidden track's), not a rest.
+const LONG_GAP_MS: i64 = 6_000;
 /// Below these the grid is not used for cue placement either (cues fall back to the energy envelope).
 const CUE_MIN_CONFIDENCE: f32 = 0.4;
 const CUE_MIN_STABILITY: f32 = 0.5;
@@ -65,7 +75,7 @@ pub struct Grid {
 /// The beat grid of `[from_s, to_s)` alone: the same tempo estimate and downbeat search as the whole
 /// track, on that stretch of the onset envelope. The first beat is given in track time, so the grid
 /// `offset + n * period` lands on the same beats as it does inside the window.
-pub fn window_grid(f: &Features, from_s: f64, to_s: f64) -> Grid {
+pub fn window_grid(f: &Features, from_s: f64, to_s: f64, meter: i64) -> Grid {
     if !(f.fps > 0.0) || to_s - from_s < GRID_WINDOW_S / 2.0 {
         return Grid::default();
     }
@@ -78,7 +88,7 @@ pub fn window_grid(f: &Features, from_s: f64, to_s: f64) -> Grid {
     if !(t.bpm > 0.0 && t.bpm.is_finite()) {
         return Grid::default();
     }
-    let db = structure::downbeat(&t, f, (from_s, to_s));
+    let db = structure::downbeat(&t, f, (from_s, to_s), Some(meter));
     Grid { bpm: t.bpm, confidence: t.confidence, offset_ms: t.offset_s * 1000.0, stability: t.stability, downbeat_phase: db.phase }
 }
 
@@ -104,29 +114,52 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
     let music = if silent { (0.0, f.duration_s) } else { (s0 as f64 / 1000.0, s1 as f64 / 1000.0) };
 
     let t = if silent { tempo::Tempo::default() } else { tempo::estimate(&f.onset, f.fps, f.t0) };
-    let db = structure::downbeat(&t, f, music);
+    let db = structure::downbeat(&t, f, music, None);
+    let meter = if db.beats_per_bar == 3 { 3 } else { 4 };
     let grid_ok = t.bpm > 0.0 && t.confidence >= CUE_MIN_CONFIDENCE && t.stability >= CUE_MIN_STABILITY;
-    let (intro, outro) = if silent { (0.0, 0.0) } else { structure::cues(&t, &db, f, music, grid_ok) };
-    let (key, key_confidence) = if silent { (0, 0.0) } else { structure::key(&f.chroma) };
+    // A hidden track short enough to leave, after a long silence: the song proper ends at the silence, and its
+    // outro, the grid a mix locks to and the voices over its end are measured there, not on the hidden track.
+    // (The music after it counts against the skip cap; the silence does not.)
+    let gap = if silent { None } else { loudness::last_gap(&f.blocks_raw, LONG_GAP_MS) };
+    let leave = gap.filter(|(_, g1)| s1 - g1 <= plan::MAX_SKIP_MS);
+    let song = leave.map_or(music, |(g0, _)| (music.0, g0 as f64 / 1000.0));
+    let (intro, outro) = if silent { (0.0, 0.0) } else { structure::cues(&t, &db, f, song, grid_ok) };
+    let (key, key_confidence) = if silent { (0, 0.0) } else { structure::key_of(structure::tuned_profile(f)) };
     // What the overlap windows sound like: vocal share and brightness of the outgoing outro and the
     // incoming intro, for the pair gates in `plan`. Silence has neither.
     let (outro_vocal, outro_centroid, intro_vocal, intro_centroid) = if silent {
         (0.0, 0.0, 0.0, 0.0)
     } else {
         (
-            window_mean(&f.vocal, f.fps, f.t0, outro, music.1),
-            window_mean(&f.centroid, f.fps, f.t0, outro, music.1),
+            window_mean(&f.vocal, f.fps, f.t0, outro, song.1),
+            window_mean(&f.centroid, f.fps, f.t0, outro, song.1),
             window_mean(&f.vocal, f.fps, f.t0, music.0, intro),
             window_mean(&f.centroid, f.fps, f.t0, music.0, intro),
         )
     };
 
+    // Where the arrangement arrives, and whether the run-up to it and what follows it are sung.
+    let bar_s = if t.bpm > 0.0 { 60.0 / t.bpm * meter as f64 } else { 0.0 };
+    let found = if silent || !grid_ok { None } else { structure::drop_point(&t, &db, f, music) };
+    let drop = found.map(|d| d.at);
+    let (drop_runup_vocal, drop_vocal) = drop.map_or((0.0, 0.0), |d| {
+        (
+            window_mean(&f.vocal, f.fps, f.t0, (d - 8.0 * bar_s).max(music.0), d),
+            window_mean(&f.vocal, f.fps, f.t0, d, (d + 8.0 * bar_s).min(music.1)),
+        )
+    });
+
+    // Where the ending stops being worth playing: a closing breakdown, or the gap before a hidden track.
+    let exit = if silent { None } else { structure::breakdown(&t, &db, f, music, song.1, grid_ok) }.or(leave.map(|(g0, _)| g0 as f64 / 1000.0));
+    let last = exit.unwrap_or(music.1);
+    let exit_vocal = if silent { 0.0 } else { window_mean(&f.vocal, f.fps, f.t0, (last - if bar_s > 0.0 { 8.0 * bar_s } else { 16.0 }).max(music.0), last) };
+
     let (outro_grid, intro_grid) = if silent {
         (Grid::default(), Grid::default())
     } else {
         (
-            window_grid(f, (music.1 - GRID_WINDOW_S).max(music.0), music.1),
-            window_grid(f, music.0, (music.0 + GRID_WINDOW_S).min(music.1)),
+            window_grid(f, (song.1 - GRID_WINDOW_S).max(music.0), song.1, meter),
+            window_grid(f, music.0, (music.0 + GRID_WINDOW_S).min(music.1), meter),
         )
     };
 
@@ -140,6 +173,7 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
         stability: t.stability,
         downbeat_phase: db.phase,
         downbeat_confidence: db.confidence,
+        beats_per_bar: if silent || t.bpm <= 0.0 { 0 } else { meter as i32 },
         lufs: lufs as f32,
         key,
         key_confidence,
@@ -164,6 +198,18 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
         intro_beat_offset_ms: intro_grid.offset_ms,
         intro_stability: intro_grid.stability,
         intro_downbeat_phase: intro_grid.downbeat_phase,
+        drop_ms: drop.map_or(0, |d| (d * 1000.0).round() as i64),
+        drop_runup_vocal,
+        drop_vocal,
+        drop_runup_tonal_db: found.map_or(0.0, |d| d.runup_tonal_db),
+        exit_ms: exit.map_or(0, |e| (e * 1000.0).round() as i64),
+        gap_ms: gap.map_or(0, |g| g.0),
+        gap_end_ms: gap.map_or(0, |g| g.1),
+        exit_vocal,
+        intro_beats_per_bar: 0,
+        outro_beats_per_bar: 0,
+        intro_grid_source: beats::GRID_CLASSICAL,
+        outro_grid_source: beats::GRID_CLASSICAL,
     };
     Analysis { track, tempo: t }
 }

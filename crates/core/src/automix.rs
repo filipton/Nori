@@ -1,7 +1,8 @@
 //! AutoMix is nori-automix's; here are the analysis store's calls on the core's own database, and the
 //! calls that finish a measurement into it.
 
-use nori_automix::store::{get, missing, put, stream};
+use nori_automix::beats::{EndGrid, MixEnd};
+use nori_automix::store::{get, missing, neural_missing, put, put_measured, stream};
 
 use crate::{Core, Result, TrackAnalysis};
 
@@ -44,8 +45,7 @@ impl Core {
     /// CPU-seconds for 4 minutes on a desktop; the database is only locked for the write.
     pub fn analysis_run(&self, song_id: String, pcm: Vec<u8>, sample_rate: i32, channels: i32, encoding: i32) -> Result<TrackAnalysis> {
         let a = analyse_bytes(&song_id, &pcm, sample_rate, channels, encoding).track;
-        put(&self.db.lock(), &a)?;
-        Ok(a)
+        Ok(put_measured(&self.db.lock(), a)?)
     }
 
     /// [`Core::analysis_finish_stream`], but only for a whole song: `expected_ms` is the song's length as
@@ -77,7 +77,27 @@ impl Core {
             a.take_features()
         };
         let a = finish(&song_id, &f).track;
-        put(&self.db.lock(), &a)?;
-        Ok(Some(a))
+        Ok(Some(put_measured(&self.db.lock(), a)?))
+    }
+}
+
+/// Beat This!'s side of the store, for nori-engine's measurer; nothing here runs the model.
+impl Core {
+    /// Which of `song_ids` have a current analysis with an end the beat model has not looked at yet, in the order
+    /// given. Songs with no current analysis are left out: they need measuring first (`analysis_missing`).
+    pub fn analysis_neural_missing(&self, song_ids: Vec<String>) -> Result<Vec<String>> {
+        let song_ids: Vec<String> = song_ids.into_iter().filter(|id| crate::queue::analysable(id)).collect();
+        Ok(neural_missing(&self.db.lock(), &song_ids)?)
+    }
+
+    /// What the model found at `end` of `song_id` (`None`: nothing it was sure of, or too little music there):
+    /// the grid replaces the stored one at that end when it is confident, and the end is marked as looked at
+    /// either way. Whether the grid was adopted; false with no analysis to add to.
+    pub fn analysis_neural_store(&self, song_id: &str, end: MixEnd, grid: Option<EndGrid>) -> Result<bool> {
+        let c = self.db.lock();
+        let Some(mut row) = get(&c, song_id)? else { return Ok(false) };
+        let adopted = nori_automix::beats::merge(&mut row, end, grid);
+        put(&c, &row)?;
+        Ok(adopted)
     }
 }

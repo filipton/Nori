@@ -26,13 +26,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import dev.nori.music.Nori
 import dev.nori.music.app.PerfHooks
-import dev.nori.music.ffi.PerfCounters
-import dev.nori.music.ffi.PerfDevice
-import dev.nori.music.ffi.PerfFrames
-import dev.nori.music.ffi.PerfOutput
-import dev.nori.music.ffi.PerfPage
-import dev.nori.music.ffi.PerfStretch
-import dev.nori.music.ffi.PerfThread
+import dev.nori.music.ffi.perf.PerfCounters
+import dev.nori.music.ffi.perf.PerfDevice
+import dev.nori.music.ffi.perf.PerfFormat
+import dev.nori.music.ffi.perf.PerfFrames
+import dev.nori.music.ffi.perf.PerfLogs
+import dev.nori.music.ffi.perf.PerfNote
+import dev.nori.music.ffi.perf.PerfOutput
+import dev.nori.music.ffi.perf.PerfPage
+import dev.nori.music.ffi.perf.PerfSong
+import dev.nori.music.ffi.perf.PerfStretch
+import dev.nori.music.ffi.perf.PerfThread
+import dev.nori.music.playback.OpenedTrack
+import dev.nori.music.playback.PlaybackObserver
 import dev.nori.music.playback.PlaybackService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.android.asCoroutineDispatcher
@@ -51,15 +57,22 @@ import java.io.File
  * settings change, which ends one stretch and starts the next, and when the Performance page opens
  * (the stretch so far). Nothing here ticks: every read is set off by a broadcast (screen on or off,
  * power connected, the service's play/pause), an activity starting or stopping, the player sheet or
- * a settings change. While the phone sleeps with music playing nothing here runs at all, so the
- * recorder adds no wakeups of its own to the numbers it records. Why a stretch cost what it did is read
+ * a settings change. While the phone sleeps with music playing this runs only when a song changes,
+ * which the service's broadcast already woke it for, so the recorder adds no wakeups of its own to the
+ * numbers it records. Why a stretch cost what it did is read
  * at its ends as well: every thread's name, CPU time and wakeups, the AudioTrack the player opened, and
  * the bytes the app moved over the network.
+ *
+ * What happened during a stretch is its timeline (the core's `perf_note`): the player service tells this
+ * each song, output, error and tuning change as it happens ([PlaybackObserver]), and the settings flow
+ * each change; the output's underrun count is read at a stretch's ends and at each song. The app's own
+ * log is read from logcat only when the report is shared or the page's log is opened, and a crash is
+ * kept in the app's database as the process dies, and the crash buffer at each start.
  *
  * Everything happens on one background thread, which sleeps in its looper between events. The frame
  * listener is there only while an activity is started, so it costs nothing with the screen off.
  */
-internal class Recorder(private val app: Application) : PerfHooks.Recorder {
+internal class Recorder(private val app: Application) : PerfHooks.Recorder, PlaybackObserver {
     private val thread = HandlerThread("perf", Process.THREAD_PRIORITY_BACKGROUND).apply { start() }
     private val handler = Handler(thread.looper)
     private val main = Handler(Looper.getMainLooper())
@@ -87,6 +100,9 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
     val shown = mutableStateOf<Shown?>(null)
     val callBench = mutableStateOf("")
     val coverBench = mutableStateOf("")
+    /** The page's log section as the core laid it out, read when it is unfolded, and whether it is. */
+    val log = mutableStateOf("")
+    val logOpen = mutableStateOf(false)
     /** The page's fixed words, the core's. */
     val words by lazy { dev.nori.music.ffi.words.wordsPerf() }
 
@@ -119,6 +135,13 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
     }
 
     fun install() {
+        // A crash is kept before the process dies, then handed on to the platform's handler as before.
+        val before = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching { dev.nori.music.ffi.perf.perfCrashKeep("exception", System.currentTimeMillis(), "thread ${t.name}: ${e.stackTraceToString()}") }
+            before?.uncaughtException(t, e) ?: Process.killProcess(Process.myPid())
+        }
+        PlaybackService.observer = this
         var started = 0
         app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
             override fun onActivityStarted(activity: Activity) {
@@ -156,10 +179,18 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
             // is the core's, read from the settings it keeps, which have the change before this hears of it.
             val prefs = Nori.get(app).settings.prefs
             settings = cfg()
-            CoroutineScope(handler.asCoroutineDispatcher()).launch {
+            val scope = CoroutineScope(handler.asCoroutineDispatcher())
+            // Every change goes on the timeline, told first so that it lands in the stretch it ends; the
+            // first value only tells the core where changes count from.
+            scope.launch {
+                prefs.collect { dev.nori.music.ffi.perf.perfNoteSettings(System.currentTimeMillis()) }
+            }
+            scope.launch {
                 prefs.map { cfg() }.distinctUntilChanged().collect { settings = it; changed() }
             }
             changed()
+            // A crash buffer from an earlier run is kept, so the report has it after logcat has let it go.
+            dev.nori.music.ffi.perf.perfCrashKeep("buffer", System.currentTimeMillis(), logcat("-b", "crash", "-d", "-v", "threadtime", "-t", "200", failed = ""))
         }
     }
 
@@ -167,18 +198,72 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
         handler.post { playerOpen = open; changed() }
     }
 
+    // ---- the timeline: told by the player service, on its threads, and noted on this one ----
+
+    override fun song(id: String) {
+        val t = System.currentTimeMillis()
+        handler.post {
+            underruns(t)
+            val nori = Nori.get(app)
+            // A song the queue does not know comes back with its id only.
+            val s = dev.nori.music.ffi.queue.queueSongs(listOf(id)).firstOrNull()
+            val copy = if (s != null) runCatching { nori.sources.streamCopy(id) }.getOrNull() else null
+            val song = PerfSong(
+                id = id, title = s?.title?.ifEmpty { null } ?: id, artist = s?.artist.orEmpty(), suffix = s?.suffix.orEmpty(),
+                bitRate = s?.bitRate?.toInt() ?: 0, samplingRate = s?.samplingRate?.toInt() ?: 0, bitDepth = s?.bitDepth?.toInt() ?: 0,
+                channels = s?.channelCount?.toInt() ?: 0, downloaded = s != null && nori.sources.isDownloaded(id),
+                cacheKey = copy?.first.orEmpty(), cachedWhole = copy?.second == true,
+            )
+            note(t, PerfNote.Song(song))
+        }
+    }
+
+    override fun format(id: String, codec: String, container: String, rate: Int, channels: Int, bitrate: Int, delay: Int, padding: Int) {
+        val t = System.currentTimeMillis()
+        handler.post { note(t, PerfNote.Format(id, PerfFormat(codec, container, rate, channels, bitrate, delay, padding))) }
+    }
+
+    override fun engine(engine: String?) {
+        val t = System.currentTimeMillis()
+        handler.post { note(t, PerfNote.Engine(engine)) }
+    }
+
+    override fun track(opened: OpenedTrack?) {
+        val t = System.currentTimeMillis()
+        // Read on this thread a moment later: what the platform made of the track by then.
+        handler.post { note(t, PerfNote.Output(opened?.let { System.identityHashCode(it.track).toLong() } ?: 0L, opened?.let(::output))) }
+    }
+
+    override fun error(message: String) {
+        val t = System.currentTimeMillis()
+        handler.post { note(t, PerfNote.Error(message)) }
+    }
+
+    override fun tuning(on: Boolean) {
+        val t = System.currentTimeMillis()
+        handler.post { note(t, PerfNote.Tuning(on)) }
+    }
+
+    private fun note(t: Long, note: PerfNote) = runCatching { dev.nori.music.ffi.perf.perfNote(t, note) }
+
+    /** The output's underrun count, read now: the core notes it when it grew. A getter, no wakeup of its own. */
+    private fun underruns(t: Long) {
+        val opened = PlaybackService.track ?: return
+        runCatching { opened.track.underrunCount }.getOrNull()?.let { note(t, PerfNote.Underruns(System.identityHashCode(opened.track).toLong(), it)) }
+    }
+
     @Composable
     override fun Page() = PerfPage(this)
 
     /** The state a stretch is filed under (the core's `perf_state`). */
-    private fun key(): String = dev.nori.music.ffi.perfState(charging, screenOn, playing, foreground, playerOpen)
+    private fun key(): String = dev.nori.music.ffi.perf.perfState(charging, screenOn, playing, foreground, playerOpen)
 
     /**
      * The settings that change what playing costs, in one line (the core's `perf_config`), the playback
      * path first: the one the service runs, which took the setting when it started; with no service yet,
      * the one it will start with.
      */
-    private fun cfg(): String = dev.nori.music.ffi.perfConfig(PlaybackService.engine)
+    private fun cfg(): String = dev.nori.music.ffi.perf.perfConfig(PlaybackService.engine)
 
     /** Something happened: when it moved the app into another state, one stretch ends and the next begins. */
     private fun changed() {
@@ -186,8 +271,9 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
         settings = cfg()
         val key = key()
         if (start != null && key == startKey && settings == startCfg) return
+        underruns(System.currentTimeMillis())
         val now = counters()
-        start?.let { s -> stretch(s, now, live = false)?.let { dev.nori.music.ffi.perfLogAdd(now.wallMs, it) } }
+        start?.let { s -> stretch(s, now, live = false)?.let { dev.nori.music.ffi.perf.perfLogAdd(now.wallMs, it) } }
         begin(now, key)
     }
 
@@ -200,8 +286,9 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
 
     /** What the page shows, read again: the kept stretches and the one under way so far. */
     fun refresh() = handler.post {
+        underruns(System.currentTimeMillis())
         val live = start?.let { stretch(it, counters(), live = true) }
-        val page = dev.nori.music.ffi.perfPage(live)
+        val page = dev.nori.music.ffi.perf.perfPage(live)
         main.post { shown.value = Shown(page, live) }
     }
 
@@ -216,16 +303,44 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
                 Build.MANUFACTURER, Build.MODEL, Build.DEVICE, Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
                 dev.nori.music.app.BuildConfig.VERSION_NAME, dev.nori.music.app.BuildConfig.GIT_SHA, dev.nori.music.app.BuildConfig.BUILD_TYPE,
             )
-            val text = dev.nori.music.ffi.perfReport(live, device, calls, covers)
+            val text = dev.nori.music.ffi.perf.perfReport(live, device, calls, covers, logs())
             main.post {
                 context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), null))
             }
         }
     }
 
+    /** The page's log section, read now; folded again with [hideLog]. */
+    fun showLog() = handler.post {
+        val text = dev.nori.music.ffi.perf.perfLogText(logs())
+        main.post { log.value = text; logOpen.value = true }
+    }
+
+    fun hideLog() { logOpen.value = false }
+
+    /**
+     * What logcat has for the app, read now: this process's last lines, and the crash buffer, which an app
+     * reads for its own earlier processes too. A child process for each, only when asked for.
+     */
+    private fun logs() = PerfLogs(
+        app = logcat("-d", "-v", "threadtime", "--pid=${Process.myPid()}", "-t", "400"),
+        crash = logcat("-b", "crash", "-d", "-v", "threadtime", "-t", "200", failed = ""),
+    )
+
+    /**
+     * logcat's answer to [args], or what went wrong ([failed] instead, when given). Its complaints are
+     * not its answer: a crash buffer it would not give must not be kept as a crash.
+     */
+    private fun logcat(vararg args: String, failed: String? = null): String = runCatching {
+        val p = ProcessBuilder("logcat", *args).redirectError(ProcessBuilder.Redirect.to(File("/dev/null"))).start()
+        val out = p.inputStream.bufferedReader().use { it.readText() }
+        check(p.waitFor() == 0) { "logcat exited with ${p.exitValue()}" }
+        out
+    }.getOrElse { failed ?: "logcat could not be read: $it" }
+
     /** "Start fresh": everything kept is forgotten, and the stretch under way starts again from now. */
     fun clear() = handler.post {
-        dev.nori.music.ffi.perfLogClear()
+        dev.nori.music.ffi.perf.perfLogClear()
         begin(counters(), key())
         refresh()
     }
@@ -248,14 +363,15 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
      * `perf_stretch`); none for a blink, unless it is the [live] one the page shows.
      */
     private fun stretch(a: PerfCounters, b: PerfCounters, live: Boolean): PerfStretch? =
-        dev.nori.music.ffi.perfStretch(startKey, startCfg, a, b, PerfFrames(frames, janky, worstNs), PlaybackService.offloadWanted, output(), live)
+        dev.nori.music.ffi.perf.perfStretch(startKey, startCfg, a, b, PerfFrames(frames, janky, worstNs), PlaybackService.offloadWanted, output(), live)
 
     /**
      * The AudioTrack the player last opened, as the platform describes it now, against what was asked of
      * it; none with no player. A track released since reads as what it last said, or not at all.
      */
-    private fun output(): PerfOutput? {
-        val opened = PlaybackService.track ?: return null
+    private fun output(): PerfOutput? = PlaybackService.track?.let(::output)
+
+    private fun output(opened: OpenedTrack): PerfOutput? {
         val t = opened.track
         return runCatching {
             val device = t.routedDevice
@@ -266,6 +382,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder {
                 offloaded = Build.VERSION.SDK_INT >= 29 && t.isOffloadedPlayback,
                 deviceType = device?.type ?: 0, deviceName = device?.productName?.toString().orEmpty(),
                 underruns = t.underrunCount, playState = t.playState,
+                // Only the Rust player says why it plays on the CPU.
+                pcmWhy = PlaybackService.rustPlayer?.takeIf { opened.engine == "rust" }?.pcmWhy.orEmpty(),
             )
         }.getOrNull()
     }

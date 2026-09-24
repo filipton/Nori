@@ -129,10 +129,12 @@ fn allocating(e: &mut TransitionEngine<u32>, d: &mut Sink, h: &mut App, data: &[
 
 #[test]
 fn passing_straight_through_allocates_nothing() {
-    for analyse in [false, true] {
+    // At a song's ReplayGain the buffer is scaled in a copy from the pool, which is sized once.
+    for (analyse, gain) in [(false, 1.0), (true, 1.0), (false, 0.5), (true, 0.5)] {
         let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Sink { bytes: 0 }, App { plan: None, analyse });
         e.configure(&mut d, &mut h, stream("a", FMT), 1);
-        assert_eq!(feed(&mut e, &mut d, &mut h, &tone(20.0, 440.0), 0, 8), 0, "analysing: {analyse}");
+        e.set_gain(gain);
+        assert_eq!(feed(&mut e, &mut d, &mut h, &tone(20.0, 440.0), 0, 8), 0, "analysing: {analyse}, at {gain}");
     }
 }
 
@@ -158,6 +160,16 @@ fn converting_another_rate_allocates_nothing() {
 
 #[test]
 fn holding_and_mixing_allocate_nothing_per_buffer() {
+    holding_and_mixing(1.0, 1.0);
+}
+
+#[test]
+fn holding_and_mixing_songs_at_their_own_volumes_allocate_nothing_per_buffer() {
+    holding_and_mixing(0.5, 0.8);
+}
+
+/// A crossfade from a song at volume `a` into one at `b`.
+fn holding_and_mixing(a: f32, b: f32) {
     let s = AutoMixSettings { max_transition_s: 6.0, ..Default::default() };
     let t = plan::plan(None, None, 60_000, 60_000, &s);
     let p = Plan {
@@ -174,11 +186,13 @@ fn holding_and_mixing_allocate_nothing_per_buffer() {
     };
     let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Sink { bytes: 0 }, App { plan: Some(p), analyse: false });
     e.configure(&mut d, &mut h, stream("a", FMT), 1);
+    e.set_gain(a);
     // Up to the hold, then the held ending (the first buffers into the hold size its storage).
     feed(&mut e, &mut d, &mut h, &tone(4.0, 440.0), 0, 0);
     let held = feed(&mut e, &mut d, &mut h, &tone(6.0, 440.0), 4_000_000, 16);
     e.configure(&mut d, &mut h, stream("b", FMT), 2);
     e.handle_discontinuity(&mut d, &mut h);
+    e.set_gain(b);
     let mixed = allocating(&mut e, &mut d, &mut h, &tone(12.0, 330.0), 10_000_000, 16);
     assert_eq!(held, 0, "holding");
     // The one buffer the mix ends in hands the rest of itself on in a chunk of a new size and closes

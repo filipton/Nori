@@ -7,7 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Counting plays is the core's (crates/core/src/scrobble.rs): it sums listening time from play and
+ * Counting plays is the core's (crates/queue/src/scrobble.rs): it sums listening time from play and
  * pause edges, judges a song when it is left, and records it in the local history. This hands it the
  * edges and sends the server what the core says to.
  */

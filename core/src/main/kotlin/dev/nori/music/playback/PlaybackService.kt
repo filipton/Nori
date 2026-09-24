@@ -88,8 +88,10 @@ class PlaybackService : MediaLibraryService() {
         const val ARG_MINUTES = "minutes"
         const val ARG_END_OF_TRACK = "endOfTrack"
         const val ARG_SONGS = "songs"
-        /** Whether the chain is currently asking for offload; read by the test bridge, which cannot see in here. */
-        @Volatile var offloadWanted = false
+        /** Whether the ExoPlayer path's chain is asking for offload. */
+        @Volatile private var exoOffloadWanted = false
+        /** Whether the chain is currently asking for offload; read by the test bridge and the perf recorder, which cannot see in here. */
+        val offloadWanted: Boolean get() = rustPlayer?.offloadWanted ?: exoOffloadWanted
         /** The Rust player while it is the one playing; read by the test bridge. */
         @Volatile var rustPlayer: EnginePlayer? = null
             private set
@@ -98,7 +100,12 @@ class PlaybackService : MediaLibraryService() {
             private set
         /** The AudioTrack the player last opened, and what was asked of it; null with no service. For the perf recorder. */
         @Volatile var track: OpenedTrack? = null
-            internal set
+            internal set(value) {
+                field = value
+                observer?.track(value)
+            }
+        /** The perf build's recorder, told what happens as it happens; null in every other build. */
+        @Volatile var observer: PlaybackObserver? = null
     }
 
     private lateinit var nori: Nori
@@ -128,7 +135,7 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var analyser: AutoMixPrefetch
     private val precache = Runnable { precacheAhead(); analyseAhead() }
     private val measure = Runnable { analyseAhead() }
-    /** How long each chore waits (crates/core/src/rules.rs playback_timings), read once. */
+    /** How long each chore waits (crates/queue/src/rules.rs playback_timings), read once. */
     private val timings by lazy { dev.nori.music.ffi.queue.playbackTimings() }
     /** What the volume should be once no fade is running: 1, or the ReplayGain attenuation. */
     private var targetVolume = 1f
@@ -189,12 +196,15 @@ class PlaybackService : MediaLibraryService() {
             EnginePlayer(this, nori).also { rust = it; rustPlayer = it }
         } else exoPlayer().also { exo = it }
         engine = if (rust != null) "rust" else "exoplayer"
-        // A song fetched ahead can be measured now rather than at the next queue move, which for the song
-        // after the first one streamed is after its boundary (see AutoMixPrefetch).
-        precacher = Precacher(nori.sources) { main.removeCallbacks(measure); main.post(measure) }
-        analyser = AutoMixPrefetch(nori.sources, { nori.core }) { transitionSink?.replan(); rust?.replan() }
-        // The bridge edits ExoPlayer's list and reads its errors; the Rust player has none yet.
-        exo?.let { offlineBridge = OfflineBridge(this, it, { nori.core }, main, ::applyEdit) }
+        observer?.engine(engine)
+        precacher = Precacher(nori.sources)
+        // A song that has become whole on the device is measured then, whoever fetched it (see AutoMixPrefetch).
+        analyser = AutoMixPrefetch(nori.sources) { transitionSink?.replan(); rust?.replan() }
+        // Nothing is watched until a bridge starts (see OfflineBridge), so both players have one. ExoPlayer's
+        // errors reach it through onPlayerError; the Rust player says itself when the core handed a failure
+        // to the bridge.
+        offlineBridge = OfflineBridge(this, player, { nori.core }, main, ::applyEdit)
+        rust?.onBridge = ::bridgeRust
         player.addListener(listener)
 
         // Fired from the audio device callback (main) and from the audio track provider (playback thread);
@@ -218,9 +228,10 @@ class PlaybackService : MediaLibraryService() {
             // the planner's settings follow there by themselves, so a screen's setting costs nothing here.
             nori.settings.effects.collect { e ->
                 if (e and 1 != 0) applyAudio(nori.settings.value)
-                // The sound chain's values alone: ExoPlayer's chain reads them from the core as it runs; the
-                // Rust player keeps its own and is handed them.
-                else if (e and 8 != 0) rust?.applySettings()
+                // The sound chain's values alone (8), or the fades and high quality output (16): ExoPlayer's
+                // path reads them as it uses them (high quality output when it is built); the Rust player
+                // keeps its own and is handed them.
+                else if (e and (8 or 16) != 0) rust?.applySettings()
                 if (e and 2 != 0) applyGain()
                 if (e and 4 != 0) setupTransitions()
             }
@@ -307,6 +318,17 @@ class PlaybackService : MediaLibraryService() {
             }
             override fun onAudioSinkError(eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime, audioSinkError: Exception) {
                 android.util.Log.w("nori", "audio sink error: $audioSinkError")
+                observer?.error("audio sink error: $audioSinkError")
+            }
+
+            // The perf build's timeline: what the decoder was handed for which song. Once per song.
+            override fun onAudioInputFormatChanged(
+                eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+                format: androidx.media3.common.Format, decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?,
+            ) {
+                val o = observer ?: return
+                val id = runCatching { eventTime.timeline.getWindow(eventTime.windowIndex, androidx.media3.common.Timeline.Window()).mediaItem.mediaId }.getOrNull() ?: return
+                o.format(id, format.sampleMimeType.orEmpty(), format.containerMimeType.orEmpty(), format.sampleRate, format.channelCount, format.bitrate, format.encoderDelay, format.encoderPadding)
             }
         })
         player.addAudioOffloadListener(object : ExoPlayer.AudioOffloadListener {
@@ -326,6 +348,7 @@ class PlaybackService : MediaLibraryService() {
         rustPlayer = null
         engine = null
         track = null
+        observer?.engine(null)
         persistQueue(push = false)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
         main.removeCallbacks(precache)
@@ -349,12 +372,13 @@ class PlaybackService : MediaLibraryService() {
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
+            item?.let { observer?.song(it.mediaId) }
             val looped = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
             // The Rust player walked the core's queue itself (explicit songs skipped, the ReplayGain volume
             // set): this is only the song the ear arrived on.
             if (rust != null) return arrived(item, if (looped) dev.nori.music.ffi.queue.TrackChange.LOOPED else dev.nori.music.ffi.queue.TrackChange.MOVED)
             // The core follows the player onto the song and says what arriving there means (an explicit
-            // song skipped, a repeat loop, a new song; crates/core/src/playlist.rs playlist_transition).
+            // song skipped, a repeat loop, a new song; crates/queue/src/playlist.rs playlist_transition).
             val arrival = dev.nori.music.ffi.queue.playlistTransition(player.currentMediaItemIndex, looped)
             // A settings change that needed a new chain waited for a boundary instead of cutting the
             // track: this is it. Skipped on a repeat-one loop, which should restart seamlessly; the
@@ -394,10 +418,6 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onIsLoadingChanged(isLoading: Boolean) {
             if (isLoading && !wifiLock.isHeld) wifiLock.acquire() else if (!isLoading && wifiLock.isHeld) wifiLock.release()
-            // A burst of loading has ended, and the player fetches the next song itself as the one before
-            // is whole: that song is on the device now, and the precacher, finding it being written,
-            // fetched nothing and said nothing. Measuring looks again (nothing at all while AutoMix is off).
-            if (!isLoading) { main.removeCallbacks(measure); main.postDelayed(measure, timings.measureAfterEditMs) }
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -430,6 +450,7 @@ class PlaybackService : MediaLibraryService() {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            observer?.error(generateSequence<Throwable>(error) { it.cause }.joinToString(" <- "))
             // The Rust player skips or stops by the core's rules itself; what reaches here is its output
             // or the engine failing to start, which trying again would not change.
             if (rust != null) { android.util.Log.w("nori", "rust player: $error"); return }
@@ -437,7 +458,7 @@ class PlaybackService : MediaLibraryService() {
             // stream goes back to the CPU path, a network failure goes to the offline bridge when it is on,
             // anything else skips a few and then stops.
             // The platform only reads its exceptions into a kind; what to do, and the run of songs that
-            // would not play, are the core's (nori_player::queue::on_error through crates/core/src/rules.rs).
+            // would not play, are the core's (nori_player::queue::on_error through crates/queue/src/rules.rs).
             val sink = generateSequence(error.cause) { it.cause }.any {
                 it is AudioSink.InitializationException || it is AudioSink.WriteException || it is AudioSink.ConfigurationException
             }
@@ -462,6 +483,17 @@ class PlaybackService : MediaLibraryService() {
         override fun onPlaybackStateChanged(state: Int) {
             if (state == Player.STATE_ENDED) scrobbler.onTrack(null, dev.nori.music.ffi.queue.TrackChange.ENDED, false)
         }
+    }
+
+    /**
+     * The Rust player stopped at a song the network would not bring, the core having said it is the
+     * offline bridge's (rules.rs queue_error): the bridge takes it, or it is skipped like any failure, as
+     * ExoPlayer's errors are. Whether the music goes on.
+     */
+    private fun bridgeRust(): Boolean = when {
+        offlineBridge?.take() == true -> { dev.nori.music.ffi.queue.queueBridged(); true }
+        dev.nori.music.ffi.queue.queueBridgeFailed() -> { skipAfterError(); true }
+        else -> false
     }
 
     /** The core said to skip a song that will not play (and counted it). */
@@ -534,7 +566,7 @@ class PlaybackService : MediaLibraryService() {
         if (chain.defer()) android.util.Log.i("nori", "chain swap deferred to the next track")
     }
 
-    /** The planner reads the transition settings itself (crates/core/src/automix/planner.rs); only the output's say is handed over. */
+    /** The planner reads the transition settings itself (crates/automix/src/planner.rs); only the output's say is handed over. */
     private fun setupTransitions() {
         // The Rust player hands the planner the output's say itself, and asks again.
         rust?.let { return it.replan() }
@@ -544,14 +576,16 @@ class PlaybackService : MediaLibraryService() {
 
     /**
      * DSP, crossfade, speed, offload and bit-perfect constrain each other. What may run and whether the
-     * output is rebuilt for it is the core's (crates/core/src/dsp.rs audio_apply, over its own settings);
+     * output is rebuilt for it is the core's (crates/settings/src/dsp.rs audio_apply, over its own settings);
      * the sound chain follows the settings there by itself. This applies the answer to media3.
      */
     private fun applyAudio(p: Prefs) {
         nori.dac.setEnabled(p.bitPerfect)
         // The Rust player puts the same policy over its own chain (nori-engine's `apply`): it is handed the
-        // settings, and takes offload, speed, silence skipping and the transitions from them.
+        // settings and what only the platform sees of the output (something USB, a DAC playing
+        // bit-perfect), and takes offload, speed, silence skipping and the transitions from them.
         rust?.let { r ->
+            r.setOutput(nori.outputs.usb.value, nori.dac.state.value.bitPerfect)
             r.applySettings()
             main.removeCallbacks(measure)
             main.postDelayed(measure, timings.measureAfterSettingsMs)
@@ -573,7 +607,7 @@ class PlaybackService : MediaLibraryService() {
         player.playbackParameters = androidx.media3.common.PlaybackParameters(a.speed, a.pitch)
         // Offload hands the compressed stream to the audio chip: only while nothing needs the samples, and
         // never to a USB output, which the chip cannot reach. See nori_player::policy.
-        offloadWanted = policy.offload
+        exoOffloadWanted = policy.offload
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon().setAudioOffloadPreferences(
             AudioOffloadPreferences.Builder()
                 .setAudioOffloadMode(if (policy.offload) AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED else AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED)
@@ -616,9 +650,15 @@ class PlaybackService : MediaLibraryService() {
         if (dev.nori.music.ffi.queue.playlistWindow()) transitionSink?.replan()
     }
 
-    /** ReplayGain as plain volume: costs nothing and survives offload. Attenuation only. */
+    /**
+     * ReplayGain as plain volume: costs nothing and survives offload. Attenuation only. One volume for the
+     * whole output, set when media3 moves to the next item: through a crossfade or an AutoMix both songs
+     * sound at the next one's volume, and a pair far apart in gain steps where the item changes. The Rust
+     * player scales each song's own samples before its transition engine mixes them
+     * (`TransitionEngine::set_gain`); this path keeps the volume, which offload needs.
+     */
     private fun applyGain() {
-        // The Rust player sets each song's level on its first sample; it only needs telling the settings changed.
+        // The Rust player puts each song's volume on its own samples; it only needs telling the settings changed.
         rust?.let { return it.gainChanged() }
         // The level is the core's decision (nori_player::policy::replay_gain over its queue and settings).
         targetVolume = dev.nori.music.ffi.queue.playlistGain(nori.dac.state.value.bitPerfect)
@@ -706,7 +746,7 @@ class PlaybackService : MediaLibraryService() {
             if (dev.nori.music.ffi.queue.skipPlays(playWhenReady)) play()
         }
 
-        // The queue is the core's (crates/core/src/playlist.rs): each change is made there first, and
+        // The queue is the core's (crates/queue/src/playlist.rs): each change is made there first, and
         // the player is told the same change and, while shuffling, the play order the core chose.
         override fun addMediaItem(mediaItem: MediaItem) = addMediaItems(Int.MAX_VALUE, listOf(mediaItem))
         override fun addMediaItem(index: Int, mediaItem: MediaItem) = addMediaItems(index, listOf(mediaItem))
@@ -861,14 +901,14 @@ class PlaybackService : MediaLibraryService() {
      * to have played the track through: the first time two songs met they were faded rather than mixed,
      * and the plan for the boundary the listener was already in the middle of arrived too late to use.
      * Off entirely when AutoMix is (the core then names no songs), and it never fetches anything (see
-     * AutoMixPrefetch).
+     * AutoMixPrefetch). Asked again with the same songs, it does nothing.
      */
-    private fun analyseAhead() = analyser.update(dev.nori.music.ffi.queue.queueMeasure())
+    private fun analyseAhead() = analyser.update()
 
     /**
      * Keeps the music going past the end of the queue. When to fetch (the last song, or one song left,
      * one fetch at a time; never for a radio stream or a repeating queue) is the core's
-     * (crates/core/src/autofill.rs over nori_player::queue::Refill), and so is what comes - the user's
+     * (crates/queue/src/autofill.rs over nori_player::queue::Refill), and so is what comes - the user's
      * choice twice over, and every route reads the library, so this never makes octo-fiesta download a
      * provider track.
      */
@@ -905,7 +945,7 @@ class PlaybackService : MediaLibraryService() {
 
     private fun persistQueue(push: Boolean) {
         main.removeCallbacks(saveQueue)
-        // The queue is the core's (crates/core/src/playlist.rs); only the place in the song is the player's.
+        // The queue is the core's (crates/queue/src/playlist.rs); only the place in the song is the player's.
         val current = player.currentMediaItem?.mediaId
         val position = player.currentPosition.coerceAtLeast(0)
         scope.launch(Dispatchers.IO) {
@@ -965,6 +1005,7 @@ class PlaybackService : MediaLibraryService() {
             if (command.customAction == CMD_FILL_NEXT) fillThenNext()
             // The Rust player keeps the same rule in its own pipeline (nori_player::transport::Chain::tuning).
             if (command.customAction == CMD_TUNING) rust?.setTuning(args.getBoolean(ARG_ON))
+            if (command.customAction == CMD_TUNING) observer?.tuning(args.getBoolean(ARG_ON))
             if (command.customAction == CMD_TUNING && exo != null) {
                 val on = args.getBoolean(ARG_ON)
                 // Shallow buffer makes a band move audible within ~0.5 s instead of up to the deep
@@ -1024,7 +1065,7 @@ class PlaybackService : MediaLibraryService() {
             .setIsBrowsable(true).setIsPlayable(false).setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED).build()
     ).build()
 
-    /** What a folder of the car's tree holds is the core's (crates/core/src/car.rs); this makes the items. */
+    /** What a folder of the car's tree holds is the core's (crates/library/src/car.rs); this makes the items. */
     private suspend fun children(parent: String): List<MediaItem> {
         val page = nori.client.browseChildren(parent)
         return page.folders.map(::folder) + items(page.songs)
@@ -1036,3 +1077,29 @@ class PlaybackService : MediaLibraryService() {
  * mode [askedMode]. The perf build reads what the platform made of it against that; nothing else does.
  */
 class OpenedTrack(val track: AudioTrack, val engine: String, val askedBytes: Int, val askedMode: Int)
+
+/**
+ * What the perf build's recorder is told as it happens, for the timeline under each stretch
+ * (docs/perf-build.md). Only that build sets [PlaybackService.observer]; in every other build it stays
+ * null and each call site is one null check. Called on whatever thread the event is on: the recorder
+ * hands everything to its own.
+ */
+interface PlaybackObserver {
+    /** The ear arrived on the song [id] (a media id). */
+    fun song(id: String)
+
+    /** The decoder was handed the song [id]'s format, perhaps ahead of the song. -1 for what is not known. */
+    fun format(id: String, codec: String, container: String, rate: Int, channels: Int, bitrate: Int, delay: Int, padding: Int)
+
+    /** The service started with [engine] ("rust", "exoplayer"), or ended (null). */
+    fun engine(engine: String?)
+
+    /** A player opened an output, or the service let it go (null). */
+    fun track(opened: OpenedTrack?)
+
+    /** Playback failed, in the player's words. */
+    fun error(message: String)
+
+    /** The equalizer screen's tuning mode came on or off. */
+    fun tuning(on: Boolean)
+}

@@ -7,6 +7,12 @@
 //! (`Loader::limit`), and the rest in a burst of its own once it plays.
 //! Given a stream cache entry to fill, the loader writes each burst into it as it comes; a song heard
 //! again then plays from the disk and the network is not asked at all.
+//!
+//! A live stream (internet radio) has no end and cannot be asked for again from where it stopped, so it
+//! is not fetched in bursts: its one connection stays open for as long as it plays, and what it holds is
+//! a window that moves with the reader ([`Loader::live`]). The station's announcements (ICY
+//! `StreamTitle`), sent between its bytes, are taken out as they come and said once the reader passes
+//! them ([`Loader::announced`]).
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -30,6 +36,13 @@ pub struct Body {
 /// Blocking is fine: it runs on the loader's own thread.
 pub trait ByteSource: Send + Sync {
     fn open(&self, url: &str, from: u64) -> Result<Body, String>;
+
+    /// A live stream from where it is now, asking for the station's announcements between its bytes
+    /// (the `Icy-MetaData: 1` header): the body, and how many bytes of music come between two
+    /// announcements (the answer's `icy-metaint`; none when the server sends none).
+    fn open_live(&self, url: &str) -> Result<(Body, Option<usize>), String> {
+        self.open(url, 0).map(|b| (b, None))
+    }
 }
 
 /// How much to keep loaded, as `nori_player::transport::load_control` gives it: fill up to `high`
@@ -44,8 +57,9 @@ pub struct Window {
 /// A bitrate to size the window by when the song's is not known: 320 kbps, so the window errs on
 /// the side of fetching more.
 const BYTES_PER_MS_GUESS: u64 = 40;
-/// Read in pieces this big.
-const CHUNK: usize = 64 * 1024;
+/// Read in pieces this big: as much as makes a song ready to play ([`READY`]), so a burst crosses from
+/// the client's HTTP stack a few times a second rather than once per network packet.
+const CHUNK: usize = 256 * 1024;
 /// A reader this far past what is loaded has seeked: the fetch starts again there.
 const FAR: u64 = 1024 * 1024;
 /// A song's bytes are ready to be read without waiting when this much is there (or all of it).
@@ -54,6 +68,14 @@ pub(crate) const READY: u64 = 256 * 1024;
 const RETRIES: u32 = 3;
 /// How long the demuxer waits for bytes before it gives up on the song.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// A live stream is ready to be read when this much is there: two seconds at 128 kbps, and the
+/// server's own burst on connecting is usually more.
+const LIVE_READY: u64 = 32 * 1024;
+/// What a live stream keeps behind the reader (for the container reader's look back), and the most it
+/// holds ahead of it: the server sends a live stream at its own pace after a first burst, so this is
+/// only ever reached by a reader that stopped (paused), and the connection then waits in the socket.
+const LIVE_BEHIND: u64 = 256 * 1024;
+const LIVE_AHEAD: u64 = 2 * 1024 * 1024;
 
 impl Window {
     /// The window for a song of `duration_ms` and `len` bytes (either may be unknown), from
@@ -92,6 +114,12 @@ struct State {
     /// At most this many bytes held, below the window's own cap: a song fetched ahead gets what the
     /// one playing leaves of the cap (`Loader::limit`).
     budget: Option<u64>,
+    /// A live stream: endless, one connection, a window that moves with the reader.
+    live: bool,
+    /// The station's announcements not yet passed by the reader, each with the byte it came at, and the
+    /// last one passed, until it is asked for.
+    titles: std::collections::VecDeque<(u64, String)>,
+    announced: Option<String>,
 }
 
 impl State {
@@ -117,7 +145,14 @@ impl State {
     }
 
     fn ready(&self) -> bool {
-        self.at_end() || self.error.is_some() || self.ahead() >= READY
+        self.at_end() || self.error.is_some() || self.ahead() >= if self.live { LIVE_READY } else { READY }
+    }
+
+    /// The announcements the reader has passed: the last of them is the one heard next.
+    fn passed(&mut self) {
+        while self.titles.front().is_some_and(|(at, _)| *at <= self.reader_at) {
+            self.announced = self.titles.pop_front().map(|(_, t)| t);
+        }
     }
 }
 
@@ -147,6 +182,21 @@ impl Loader {
             .spawn(move || l.run(&*source, &url, load, duration_ms, keep))
             .expect("a thread for loading");
         Arc::new(Loader(loaded))
+    }
+
+    /// A live stream (internet radio) at `url`, played for as long as it is held: see the module's words.
+    pub fn live(source: Arc<dyn ByteSource>, url: String) -> Arc<Loader> {
+        let loaded = Arc::new(Loaded { state: Mutex::new(State { live: true, ..State::default() }), cv: Condvar::new() });
+        let l = loaded.clone();
+        std::thread::Builder::new().name("nori-live".into()).spawn(move || l.run_live(&*source, &url)).expect("a thread for loading");
+        Arc::new(Loader(loaded))
+    }
+
+    /// The station's latest announcement the reader has reached, once: None when there is none new.
+    pub fn announced(&self) -> Option<String> {
+        let mut s = self.0.state.lock();
+        s.passed();
+        s.announced.take()
     }
 
     /// Times the network was opened for this song: one per burst.
@@ -347,6 +397,76 @@ impl Loaded {
         }
     }
 
+    /// A live stream: its one connection read as the bytes come, the announcements taken out of them,
+    /// what the reader has left behind let go. A connection that drops is made again, the stream going on
+    /// from wherever the station is by then; one that cannot be made again is the stream's end.
+    fn run_live(&self, source: &dyn ByteSource, url: &str) {
+        let mut body: Option<Icy> = None;
+        let mut chunk = vec![0u8; CHUNK];
+        let mut failures = 0;
+        loop {
+            {
+                let mut s = self.state.lock();
+                loop {
+                    if s.closed {
+                        return;
+                    }
+                    if body.is_none() || s.ahead() < LIVE_AHEAD {
+                        break;
+                    }
+                    // A reader that stopped: the connection waits in the socket until it reads on.
+                    self.cv.wait(&mut s);
+                }
+                let keep_from = s.reader_at.saturating_sub(LIVE_BEHIND);
+                if keep_from > s.base {
+                    let drop = ((keep_from - s.base) as usize).min(s.data.len());
+                    s.data.drain(..drop);
+                    s.base += drop as u64;
+                }
+            }
+            if body.is_none() {
+                match source.open_live(url) {
+                    Ok((b, every)) => {
+                        self.state.lock().bursts += 1;
+                        body = Some(Icy::new(b.reader, every));
+                    }
+                    Err(e) => {
+                        failures += 1;
+                        if failures > RETRIES {
+                            let mut s = self.state.lock();
+                            s.error = Some(e);
+                            s.done = true;
+                            self.wake(&mut s);
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(500 << failures));
+                        continue;
+                    }
+                }
+            }
+            let icy = body.as_mut().expect("a body is open");
+            let got = icy.read(&mut chunk);
+            let title = icy.title.take();
+            let mut s = self.state.lock();
+            match got {
+                Ok(n) if n > 0 => {
+                    failures = 0;
+                    s.data.extend_from_slice(&chunk[..n]);
+                }
+                // The station closed the stream, or the connection broke: made again.
+                _ => {
+                    body = None;
+                    failures += 1;
+                }
+            }
+            if let Some(t) = title {
+                let at = s.end();
+                s.titles.push_back((at, t));
+            }
+            self.wake(&mut s);
+        }
+    }
+
     /// Bytes arrived: a blocked reader reads on, and a waiting engine is told once there is enough.
     fn wake(&self, s: &mut State) {
         if s.blocked {
@@ -379,7 +499,7 @@ impl Read for LoadedReader {
                 self.pos += n as u64;
                 s.reader_at = self.pos;
                 // Within the low mark of the end of what is here: the loader's next burst is due.
-                if !s.at_end() && s.window.is_some_and(|w| s.ahead() < w.low) {
+                if !s.at_end() && (s.window.is_some_and(|w| s.ahead() < w.low) || (s.live && s.ahead() < LIVE_AHEAD)) {
                     l.cv.notify_all();
                 }
                 return Ok(n);
@@ -390,7 +510,10 @@ impl Read for LoadedReader {
                 }
                 return Ok(0);
             }
-            if self.pos < s.base || self.pos > end + FAR {
+            if s.live && self.pos < s.base {
+                return Err(io::Error::other("a live stream cannot be read again from further back"));
+            }
+            if !s.live && (self.pos < s.base || self.pos > end + FAR) {
                 s.restart = Some(self.pos);
             }
             s.reader_at = self.pos;
@@ -403,6 +526,71 @@ impl Read for LoadedReader {
             }
         }
     }
+}
+
+/// A live stream's body with the station's announcements taken out: every `every` bytes of music the
+/// server puts one byte saying how many sixteens of bytes of announcement follow (none, mostly), and
+/// the announcement itself, `StreamTitle='...';`.
+struct Icy {
+    inner: Box<dyn Read + Send>,
+    every: Option<usize>,
+    /// Bytes of music left before the next announcement.
+    left: usize,
+    /// The last title announced, until the loader takes it.
+    title: Option<String>,
+}
+
+impl Icy {
+    fn new(inner: Box<dyn Read + Send>, every: Option<usize>) -> Icy {
+        let every = every.filter(|&n| n > 0);
+        Icy { inner, every, left: every.unwrap_or(0), title: None }
+    }
+
+    /// The announcement at this point of the stream, read whole.
+    fn announcement(&mut self) -> io::Result<()> {
+        let mut len = [0u8; 1];
+        self.inner.read_exact(&mut len)?;
+        let n = len[0] as usize * 16;
+        if n == 0 {
+            return Ok(());
+        }
+        let mut text = vec![0u8; n];
+        self.inner.read_exact(&mut text)?;
+        if let Some(t) = stream_title(&text) {
+            self.title = Some(t);
+        }
+        Ok(())
+    }
+}
+
+impl Read for Icy {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(every) = self.every else { return self.inner.read(buf) };
+        if self.left == 0 {
+            self.announcement()?;
+            self.left = every;
+        }
+        let want = buf.len().min(self.left);
+        let n = self.inner.read(&mut buf[..want])?;
+        self.left -= n;
+        Ok(n)
+    }
+}
+
+/// The title in an ICY announcement (`StreamTitle='Artist - Song';StreamUrl='';`), padded with NULs to
+/// its sixteens; None when it names none. Stations send Latin-1 as often as UTF-8, so bytes that are not
+/// UTF-8 are read as Latin-1.
+pub fn stream_title(text: &[u8]) -> Option<String> {
+    let text = match std::str::from_utf8(text) {
+        Ok(t) => t.to_string(),
+        Err(_) => text.iter().map(|&b| b as char).collect(),
+    };
+    let from = text.find("StreamTitle='")? + "StreamTitle='".len();
+    let rest = &text[from..];
+    // The title ends at the quote that closes the field; a quote inside it is left in.
+    let end = rest.find("';").or_else(|| rest.rfind('\'')).unwrap_or(rest.len());
+    let title = rest[..end].trim_matches(char::from(0)).trim();
+    (!title.is_empty()).then(|| title.to_string())
 }
 
 impl Seek for LoadedReader {

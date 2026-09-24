@@ -25,6 +25,7 @@ mod dsp;
 mod engine;
 mod heard;
 mod look;
+mod measure;
 mod player;
 mod playlist;
 mod seek;
@@ -60,7 +61,7 @@ macro_rules! native {
 }
 pub(crate) use native;
 
-static CLASSES: [&Class; 18] = [
+static CLASSES: [&Class; 19] = [
     &covers::CLASS,
     &decoder::CLASS,
     &dsp::CLASS,
@@ -69,6 +70,7 @@ static CLASSES: [&Class; 18] = [
     &heard::PLAYHEAD,
     &look::COVER,
     &look::LYRICS,
+    &measure::CLASS,
     &player::CLASS,
     &playlist::CLASS,
     &seek::CLASS,

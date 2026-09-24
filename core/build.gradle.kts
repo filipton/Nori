@@ -24,6 +24,10 @@ plugins {
 val shipping = gradle.startParameter.taskNames.any { t -> listOf("release", "perf", "bundle").any { t.contains(it, ignoreCase = true) } }
 val rustTargets = (project.findProperty("rustTargets") as String? ?: if (shipping) "arm64-v8a" else "x86_64").split(",")
 val rustProfile = project.findProperty("rustProfile") as String? ?: "release"
+// Cargo features of the core, none by default. `-PrustFeatures=neural-beats` builds in tract for "Better beat
+// detection" (docs/research/analysis.md): the arm64 library grows by about 14.5 MB, which every install would
+// carry for a switch that is off by default, so the app's builds leave it out and the setting is not shown.
+val rustFeatures = project.findProperty("rustFeatures") as String? ?: ""
 val cargoRoot = rootProject.projectDir
 val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")
     ?: file("${System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk").listFiles()
@@ -53,6 +57,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
     @get:InputFile @get:PathSensitive(PathSensitivity.RELATIVE) abstract val cargoToml: RegularFileProperty
     @get:Input abstract val targets: ListProperty<String>
     @get:Input abstract val profile: Property<String>
+    @get:Input abstract val features: Property<String>
     @get:Input abstract val ndkDir: Property<String>
     @get:Internal abstract val workDir: DirectoryProperty
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
@@ -66,6 +71,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
         targets.get().forEach { args += listOf("-t", it) }
         args += listOf("-o", out.absolutePath, "build", "-p", "nori-android")
         if (profile.get() == "release") args += "--release"
+        if (features.get().isNotBlank()) args += listOf("--features", features.get())
         exec.exec {
             workingDir = workDir.get().asFile
             environment("ANDROID_NDK_HOME", ndkDir.get())
@@ -98,6 +104,7 @@ val cargoNdkBuild = tasks.register<CargoNdkTask>("cargoNdkBuild") {
     cargoToml.set(File(cargoRoot, "Cargo.toml"))
     targets.set(rustTargets)
     profile.set(rustProfile)
+    features.set(rustFeatures)
     ndkDir.set(ndkDirPath)
     workDir.set(cargoRoot)
     outputDir.set(layout.buildDirectory.dir("rust/jniLibs"))
@@ -122,6 +129,8 @@ dependencies {
     api(libs.media3.exoplayer)
     api(libs.media3.session)
     implementation(libs.media3.datasource.okhttp)
+    // Moving covers are HLS (MotionPlayer); nothing of it is loaded while they are switched off.
+    implementation(libs.media3.exoplayer.hls)
     api(libs.okhttp)
     api(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.guava)

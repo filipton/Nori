@@ -10,22 +10,24 @@ pub mod history;
 pub mod m3u;
 pub mod mixes;
 pub mod profiles;
-pub mod perf_log;
 pub mod smart;
 pub mod actions;
 pub mod browse;
 pub mod covers;
+pub mod motion;
 pub mod search;
 pub mod words;
 pub mod client;
 pub mod cache_policy;
-pub mod lrclib;
+pub mod race;
 pub mod stream;
 pub mod autofill;
 pub mod car;
 pub mod playlist;
 pub mod library;
 pub mod stage;
+#[cfg(feature = "neural-beats")]
+pub mod beat_download;
 
 use std::sync::Arc;
 
@@ -38,8 +40,9 @@ pub use nori_model::{alog, lines, model, CoreError};
 pub use nori_devices::{autoeq, outputs};
 pub use nori_library::{menus, pages, rows, stars};
 pub use nori_lyrics::lyrics::lyrics_from_lrc;
-pub use nori_lyrics::{look, lyrics};
+pub use nori_lyrics::{formats, look, lrclib, lyrics, services};
 pub use nori_net::{api, transport};
+pub use nori_perf::perf_log;
 pub use nori_queue::{heard, rules, scrobble};
 pub use nori_transfers::stream_cache;
 pub use nori_settings::{decoder, dsp, settings, settings_schema, settings_store};
@@ -267,6 +270,16 @@ fn parse(body: &[u8]) -> Result<Response> {
 
 // ---- the object Kotlin holds -----------------------------------------------
 
+/// The core the app is using now, for a player's measurer that reads the core's queue and analyses
+/// (nori-engine's `Measurer::on_shelf`). The crates below find its database and downloads through
+/// `nori_db::active` and `transfers::held`.
+static ACTIVE: Mutex<std::sync::Weak<Core>> = Mutex::new(std::sync::Weak::new());
+
+/// The core the app is using now, if there is one.
+pub fn active() -> Option<Arc<Core>> {
+    ACTIVE.lock().upgrade()
+}
+
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct Core {
     /// Shared with nori-db's active database while this is the newest core ([`nori_db::active`]).
@@ -283,11 +296,13 @@ impl Core {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
     pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
         let db = db::open(&db_path, &server)?;
+        nori_automix::beat_model::set_home(&db_path);
         let held = transfers::Held::load(&db)?;
         let core = Arc::new(Core { db: Arc::new(Mutex::new(db)), server: RwLock::new(api::Server::default()), held: Arc::new(Mutex::new(held)) });
         // The newest core is the one the app is using: the parts of the core that run without Kotlin (the
         // transition planner on the audio thread, analyses finished in the background, a song asked
         // about by a list row) find its database and its downloads through these.
+        *ACTIVE.lock() = Arc::downgrade(&core);
         nori_db::set_active(&core.db);
         transfers::set_active_held(&core.held);
         Ok(core)

@@ -60,3 +60,37 @@ fn plan_through_the_ffi() {
     assert_eq!(p.kind, crate::TransitionKind::BeatMatched, "{}", p.reason);
     assert_eq!(automix_mixer_params(p.clone()).len(), mixer::param::COUNT);
 }
+
+/// Stored rows go through the database with their grid sources, a classical measurement of the same file keeps
+/// the model's grid, and a row the model has looked at is no longer asked for.
+#[test]
+fn the_database_keeps_what_the_beat_model_found() {
+    use nori_player::automix::beats::{EndGrid, MixEnd, GRID_CHECKED, GRID_NEURAL};
+    let core = Core::new(String::new(), "t".into()).unwrap();
+    let row = TrackAnalysis {
+        song_id: "s".into(),
+        analysis_version: ANALYSIS_VERSION,
+        duration_ms: 200_000,
+        silence_start_ms: 1_500,
+        silence_end_ms: 198_000,
+        intro_bpm: 100.0,
+        outro_bpm: 101.0,
+        beats_per_bar: 4,
+        ..Default::default()
+    };
+    core.analysis_store(row.clone()).unwrap();
+    core.analysis_store(TrackAnalysis { song_id: "old".into(), analysis_version: 1, ..row.clone() }).unwrap();
+    assert_eq!(core.analysis_neural_missing(vec!["s".into(), "old".into(), "none".into()]).unwrap(), vec!["s".to_string()]);
+    let sure = EndGrid { bpm: 90.0, offset_ms: 10.0, confidence: 1.0, stability: 1.0, downbeat_phase: 0, beats_per_bar: 3, other_phase: -1, anchor_ms: 0.0 };
+    assert!(core.analysis_neural_store("s", MixEnd::Intro, Some(sure)).unwrap());
+    assert!(!core.analysis_neural_store("s", MixEnd::Outro, None).unwrap());
+    assert!(!core.analysis_neural_store("none", MixEnd::Outro, None).unwrap());
+    let stored = core.analysis_get("s".into()).unwrap().unwrap();
+    assert_eq!((stored.intro_bpm, stored.intro_beats_per_bar, stored.intro_grid_source, stored.outro_grid_source), (90.0, 3, GRID_NEURAL, GRID_CHECKED));
+    assert!(core.analysis_neural_missing(vec!["s".into()]).unwrap().is_empty());
+    // Measured again classically (the playback tap finishing the same song), the model's grid stays.
+    let s = Synth { secs: 200.0, ..Synth::new(120.0) };
+    let bytes: Vec<u8> = s.render().iter().flat_map(|v| v.to_le_bytes()).collect();
+    let again = core.analysis_run("s".into(), bytes, s.rate as i32, 1, PCM_FLOAT).unwrap();
+    assert_eq!((again.intro_grid_source, again.intro_bpm, again.outro_grid_source), (GRID_NEURAL, 90.0, GRID_CHECKED));
+}

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nori_engine::{Body, ByteSource};
-use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
+use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
 use ureq::Agent;
 
 /// The largest API answer taken; a whole library page is far below it.
@@ -70,6 +70,36 @@ impl Transport for Http {
         Ok(TransportResponse { status, body })
     }
 
+    async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError> {
+        let timeout = (request.timeout_ms > 0).then(|| Duration::from_millis(request.timeout_ms as u64));
+        let r = match &request.json {
+            Some(json) => {
+                let mut req = self.agent.post(&request.url).header("Content-Type", "application/json");
+                for (name, value) in &request.headers {
+                    req = req.header(name, value);
+                }
+                if timeout.is_some() {
+                    req = req.config().timeout_global(timeout).build();
+                }
+                req.send(json.as_bytes())
+            }
+            None => {
+                let mut req = self.agent.get(&request.url);
+                for (name, value) in &request.headers {
+                    req = req.header(name, value);
+                }
+                if timeout.is_some() {
+                    req = req.config().timeout_global(timeout).build();
+                }
+                req.call()
+            }
+        }
+        .map_err(failure)?;
+        let status = r.status().as_u16();
+        let body = r.into_body().with_config().limit(MAX_ANSWER).read_to_vec().map_err(failure)?;
+        Ok(TransportResponse { status, body })
+    }
+
     fn address_changed(&self) {}
 }
 
@@ -92,6 +122,19 @@ impl ByteSource for Http {
         };
         let reader: Box<dyn Read + Send> = Box::new(r.into_body().into_reader());
         Ok(Body { start, len, reader })
+    }
+
+    /// A station's stream, with its announcements asked for (`Icy-MetaData: 1`); the answer says how
+    /// many bytes of music come between two (`icy-metaint`).
+    fn open_live(&self, url: &str) -> Result<(Body, Option<usize>), String> {
+        let r = self.agent.get(url).header("Icy-MetaData", "1").call().map_err(|e| e.to_string())?;
+        let status = r.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {status}"));
+        }
+        let every = r.headers().get("icy-metaint").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+        let reader: Box<dyn Read + Send> = Box::new(r.into_body().into_reader());
+        Ok((Body { start: 0, len: None, reader }, every))
     }
 }
 

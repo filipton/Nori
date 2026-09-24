@@ -242,15 +242,17 @@ pub(crate) mod tests {
     use parking_lot::Mutex;
 
     use super::*;
-    use crate::transport::{TransportError, TransportResponse};
+    use crate::transport::{Exchange, TransportError, TransportResponse};
 
     pub const OK: &str = r#"{"subsonic-response":{"status":"ok","version":"1.16.1"}}"#;
 
-    /// Answers from a script, in order, and remembers every URL it was asked for.
+    /// Answers from a script, in order, and remembers every URL it was asked for (and the headers and
+    /// body of a request that had them).
     #[derive(Default)]
     pub struct Fake {
         pub answers: Mutex<VecDeque<Result<(u16, Vec<u8>), FailureKind>>>,
         pub asked: Mutex<Vec<(String, u32)>>,
+        pub sent: Mutex<Vec<Exchange>>,
         pub switched: Mutex<u32>,
     }
 
@@ -274,6 +276,10 @@ pub(crate) mod tests {
                 Ok((status, body)) => Ok(TransportResponse { status, body }),
                 Err(kind) => Err(TransportError::Failed { kind, detail: Some(format!("{kind:?}")) }),
             }
+        }
+        async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError> {
+            self.sent.lock().push(request.clone());
+            self.get(request.url, request.timeout_ms).await
         }
         fn address_changed(&self) {
             *self.switched.lock() += 1;

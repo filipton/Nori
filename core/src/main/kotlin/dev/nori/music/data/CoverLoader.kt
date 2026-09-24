@@ -1,11 +1,16 @@
 package dev.nori.music.data
 
+import android.app.Activity
 import android.app.ActivityManager
+import android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+import android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_VISIBLE
+import android.app.Application
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.LruCache
@@ -46,18 +51,48 @@ class CoverLoader private constructor(context: Context) {
 
     init {
         // What Coil did with its memory cache: everything goes when the app is in the background and
-        // the system is short, half of it when the app is running low.
+        // the system is short, half of it when the app is running low. The loader's threads and their
+        // buffers go too: a cover asked for later starts a thread again.
         app.registerComponentCallbacks(object : ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
                 @Suppress("DEPRECATION")
                 if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND) memory.evictAll()
                 else if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) memory.trimToSize(memory.maxSize() / 2)
+                @Suppress("DEPRECATION")
+                if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) CoverPixels.rest(loader)
             }
 
             override fun onConfigurationChanged(newConfig: Configuration) {}
 
             @Deprecated("Deprecated in Java")
-            override fun onLowMemory() = memory.evictAll()
+            override fun onLowMemory() {
+                memory.evictAll()
+                CoverPixels.rest(loader)
+            }
+        })
+        // Whether any screen is in sight, for the loader to rest when none is (the screen off, another
+        // app). Not from onTrimMemory: while music plays the service keeps the process important, and
+        // Android sends no UI_HIDDEN.
+        val state = ActivityManager.RunningAppProcessInfo().also { ActivityManager.getMyMemoryState(it) }
+        CoverPixels.show(loader, state.importance == IMPORTANCE_FOREGROUND || state.importance == IMPORTANCE_VISIBLE)
+        (app as? Application)?.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            private var started = 0
+
+            override fun onActivityStarted(activity: Activity) {
+                if (started++ == 0) CoverPixels.show(loader, true)
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                // The loader may have been made after an activity started, which is then not counted.
+                started = maxOf(0, started - 1)
+                if (started == 0) CoverPixels.show(loader, false)
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
         })
     }
 

@@ -17,6 +17,7 @@ pub struct SearchSplit {
     pub has_providers: bool,
 }
 
+/// A server's answer split once into everything, the library's and the providers'.
 pub fn split(r: SearchResult) -> SearchSplit {
     let has_providers = r.songs.iter().any(|s| s.is_external) || r.albums.iter().any(|a| a.is_external) || r.artists.iter().any(|a| a.is_external);
     if !has_providers {

@@ -115,9 +115,11 @@ fn the_song_playing_is_measured_as_it_plays_and_kept_only_whole() {
     p.play_from(0);
     assert!(p.run_until(70_000, |p| p.app.analyses.contains_key("a")), "{:?}", p.app.log);
     assert!((p.app.analyses["a"].bpm - 118.0).abs() < 0.5, "{}", p.app.analyses["a"].bpm);
-    // A song cut short by a seek is not an analysis of the song.
+    // A song cut short by a seek is not an analysis of the song. The seek lands a couple of seconds
+    // before the mix out of a, which starts at 20.6 s: the synth stops part way through a bar, an
+    // ending the planner leaves before (`exit_ms`).
     p.run_for(3_000);
-    p.seek(20_000);
+    p.seek(18_000);
     p.run_until(30_000, |p| p.ended());
     assert!(!p.app.analyses.contains_key("b"), "b was heard in part only: {:?}", p.app.log);
 }
@@ -159,3 +161,41 @@ fn with_nothing_measured_it_fades_and_the_bar_waits_until_the_next_song_is_heard
     assert!(!p.app.logged("letting the ending play"), "{:?}", p.app.log);
     assert!(p.sink.gaps.is_empty(), "{:?}", p.sink.gaps);
 }
+
+/// The songs the page shows from the start of the queue to its end, sampled every `step_ms`, each change
+/// once: a page that goes back to a song it has left shows up as that song twice.
+fn shown_run(p: &mut Player, step_ms: i64) -> Vec<usize> {
+    let mut run: Vec<usize> = Vec::new();
+    let mut waited = 0;
+    while !p.ended() && waited < 200_000 {
+        if let Some(i) = p.bar().index.or(p.current()) {
+            if run.last() != Some(&i) {
+                run.push(i);
+            }
+        }
+        p.run_for(step_ms);
+        waited += step_ms;
+    }
+    run
+}
+
+#[test]
+fn the_page_moves_on_once_per_song_through_a_mix() {
+    // The engine lets the mix go once the whole of it has been heard, and the player moves on to the
+    // next song at about the same moment. Whichever comes first, the page must not go back to the song
+    // it has left for the moment in between: that is the old cover flashing up after the new one.
+    for (measured_ahead, max_s) in [(true, 16), (false, 12)] {
+        let prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: max_s, echo_out: false, ..prefs_off() };
+        let mut p = Player::with_prefs(vec![song("a", 120.0), song("b", 120.0), song("c", 120.0)], prefs);
+        p.measure_on_move = false;
+        if measured_ahead {
+            for id in ["a", "b", "c"] {
+                p.app.analyses.insert(id.into(), measured(id, 120.0));
+            }
+        }
+        p.play_from(0);
+        let run = shown_run(&mut p, 5);
+        assert_eq!(run, vec![0, 1, 2], "measured ahead {measured_ahead}: {:?}", p.app.log);
+    }
+}
+

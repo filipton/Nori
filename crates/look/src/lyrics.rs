@@ -33,6 +33,19 @@ pub const SWEEP_FRAMES: u32 = 2;
 /// note keeps the boundary still, nothing on screen changes.
 const SWEEP_STEP: f32 = 0.04;
 
+/// A sung word rises as it is sung, over at least this long, so a quick syllable does not jump...
+pub const RISE_MIN_MS: i64 = 180;
+/// ...and settles back over this long once it is done, so a finished line is flat again and nothing
+/// drops when the next line takes over.
+pub const SETTLE_MS: i64 = 420;
+/// A note held this long or longer glows while it is held...
+pub const HELD_MS: i64 = 900;
+/// ...and its glow fades over this long once it ends.
+pub const GLOW_FADE_MS: i64 = 500;
+/// How long after a word ends it still moves (settling, its glow fading): while any word of the line
+/// being sung is inside this, the platform draws every frame rather than every second one.
+pub const MOTION_TAIL_MS: i64 = if SETTLE_MS > GLOW_FADE_MS { SETTLE_MS } else { GLOW_FADE_MS };
+
 /// One press of "Sooner" or "Later", for the few songs whose timings are wrong.
 pub const NUDGE_STEP_MS: i64 = 250;
 
@@ -43,6 +56,11 @@ pub const READING_MS: i64 = 4_000;
 pub const NEXT_LINE: f32 = 0.35;
 /// ...and once it has been sung: dimmer again, so the eye goes forward.
 pub const PAST_LINE: f32 = NEXT_LINE * 0.55;
+/// How lit the words of the line being sung are before they are sung, when it fills word by word: well
+/// above the other lines, so the line reads as the one sung, and well below its sung words, which are
+/// fully lit. A line fading between two strengths keeps its unsung words at the lower of this and its
+/// strength, so a finished line dims from where it was without a step.
+pub const UNSUNG: f32 = 0.55;
 
 /// How lit line `line` is with `active` the line being sung (-1 before the first). Untimed words are all
 /// fully lit: nothing says which one is being sung.
@@ -75,12 +93,15 @@ pub struct Word {
     pub end: u32,
 }
 
-/// A line as the timing needs it: when it is sung, its length in UTF-16 units and its words.
+/// A line as the timing needs it: when it is sung, its length in UTF-16 units and its words, and the
+/// same of the backing vocals sung over it (drawn under it, filled on their own).
 #[derive(Debug, Clone, Default)]
 pub struct Line {
     pub start_ms: i64,
     pub len: u32,
     pub words: Vec<Word>,
+    pub backing_len: u32,
+    pub backing: Vec<Word>,
 }
 
 /// What the lyrics look like at one moment.
@@ -100,9 +121,12 @@ pub struct Frame {
 pub struct Step {
     /// What to draw: the new moment when `redraw`, otherwise what is already on screen.
     pub frame: Frame,
-    /// When to ask again: display frames while sweeping, milliseconds otherwise; 0 for never (the lyrics
-    /// are not timed, so nothing moves).
+    /// When to ask again: display frames while sweeping, milliseconds otherwise or when `still`; 0 for
+    /// never (the lyrics are not timed, so nothing moves).
     pub wait: u32,
+    /// Sweeping, but nothing will change for `wait` milliseconds: between two words, or once a line is
+    /// sung and the next one has not started. The platform sleeps instead of counting display frames.
+    pub still: bool,
     /// Whether anything on screen changed; when not, the platform should not invalidate.
     pub redraw: bool,
 }
@@ -119,6 +143,9 @@ pub struct LyricTiming {
     lens: Vec<u32>,
     /// Each line's words, as a range of `words`: one allocation for the whole song.
     spans: Vec<(u32, u32)>,
+    /// The same for each line's backing vocals, in the same `words`.
+    backing_lens: Vec<u32>,
+    backing_spans: Vec<(u32, u32)>,
     words: Vec<Word>,
 }
 
@@ -131,6 +158,8 @@ impl LyricTiming {
         let mut starts = Vec::new();
         let mut lens = Vec::new();
         let mut spans = Vec::new();
+        let mut backing_lens = Vec::new();
+        let mut backing_spans = Vec::new();
         let mut words = Vec::new();
         for l in lines.into_iter().take(MAX_LINES) {
             starts.push(l.start_ms);
@@ -138,6 +167,10 @@ impl LyricTiming {
             let from = words.len() as u32;
             words.extend_from_slice(&l.words);
             spans.push((from, words.len() as u32));
+            backing_lens.push(l.backing_len);
+            let from = words.len() as u32;
+            words.extend_from_slice(&l.backing);
+            backing_spans.push((from, words.len() as u32));
         }
         let n = starts.len();
         let glide: Vec<i32> = (0..n)
@@ -153,7 +186,7 @@ impl LyricTiming {
             switch_at.push(if i == 0 { at } else { at.max(switch_at[i - 1] + 1) });
         }
         let sorted = starts.windows(2).all(|w| w[0] <= w[1]);
-        LyricTiming { synced, word_timed, starts, sorted, switch_at, glide, lens, spans, words }
+        LyricTiming { synced, word_timed, starts, sorted, switch_at, glide, lens, spans, backing_lens, backing_spans, words }
     }
 
     pub fn synced(&self) -> bool {
@@ -197,9 +230,22 @@ impl LyricTiming {
     /// rests at the word's end. A line without words is all or nothing. In `f32`, step for step as the
     /// app drew it, so the boundary lands on the same pixel.
     pub fn sung_offset(&self, line: usize, ms: i64) -> f32 {
-        let (Some(&(from, to)), Some(&len), Some(&start)) = (self.spans.get(line), self.lens.get(line), self.starts.get(line)) else {
+        let (Some(&span), Some(&len), Some(&start)) = (self.spans.get(line), self.lens.get(line), self.starts.get(line)) else {
             return 0.0;
         };
+        self.sung_in(span, len, start, ms)
+    }
+
+    /// How far into `line`'s backing vocals the singing is at `ms`, as [`LyricTiming::sung_offset`] for
+    /// the line itself: each part fills on its own time.
+    pub fn backing_sung(&self, line: usize, ms: i64) -> f32 {
+        let (Some(&span), Some(&len), Some(&start)) = (self.backing_spans.get(line), self.backing_lens.get(line), self.starts.get(line)) else {
+            return 0.0;
+        };
+        self.sung_in(span, len, start, ms)
+    }
+
+    fn sung_in(&self, (from, to): (u32, u32), len: u32, start: i64, ms: i64) -> f32 {
         if from == to {
             return if ms >= start { len as f32 } else { 0.0 };
         }
@@ -218,6 +264,14 @@ impl LyricTiming {
         at
     }
 
+    /// Whether anything in the line being sung at `t` moves on its own at `t`: a word or a backing word
+    /// being sung, or rising, settling or glowing within [`MOTION_TAIL_MS`] of its end.
+    pub fn moving(&self, t: i64) -> bool {
+        let Some(line) = self.sung_line(t) else { return false };
+        let alive = |&(from, to): &(u32, u32)| self.words[from as usize..to as usize].iter().any(|w| t >= w.start_ms && t <= w.end_ms + MOTION_TAIL_MS);
+        self.spans.get(line).is_some_and(alive) || self.backing_spans.get(line).is_some_and(alive)
+    }
+
     /// The lyrics as they look at `t`.
     pub fn frame(&self, t: i64) -> Frame {
         let active = if self.synced { self.line_at(t) } else { -1 };
@@ -232,18 +286,55 @@ impl LyricTiming {
     /// the next line's timestamp, the sweep therefore holds the page still until that timestamp, and the
     /// next change starts on it rather than half a change ahead as it does without the sweep. That is how
     /// the lyrics have always moved, and it is kept.
-    pub fn moved(&self, shown: i64, t: i64, sweep: bool) -> bool {
+    ///
+    /// With `lively` (words rise and glow as they are sung), anything moving is a change too.
+    pub fn moved(&self, shown: i64, t: i64, sweep: bool, lively: bool) -> bool {
         if !sweep {
             return true;
         }
         let Some(line) = self.sung_line(t) else { return true };
-        self.sung_line(shown) != Some(line) || (self.sung_offset(line, t) - self.sung_offset(line, shown)).abs() >= SWEEP_STEP
+        self.sung_line(shown) != Some(line)
+            || (self.sung_offset(line, t) - self.sung_offset(line, shown)).abs() >= SWEEP_STEP
+            || (self.backing_sung(line, t) - self.backing_sung(line, shown)).abs() >= SWEEP_STEP
+            || (lively && (self.moving(t) || self.moving(shown)))
     }
 
-    /// How long until the page may look different after `t`: see [`Step::wait`].
-    pub fn wait(&self, t: i64, sweep: bool) -> u32 {
+    /// While sweeping, how long after `t` nothing in the line being sung changes, in milliseconds (within
+    /// 8 to 500): between its words, or once it is sung until the next line. None while a word or a
+    /// backing word is being sung, or, `lively`, while one still rises, settles or glows. Before the first
+    /// line it is until the first change.
+    pub fn quiet_ms(&self, t: i64, lively: bool) -> Option<u32> {
+        let next = match self.sung_line(t) {
+            None => self.switch_at.iter().chain(&self.starts).copied().filter(|&s| s > t).min(),
+            Some(line) => {
+                if lively && self.moving(t) {
+                    return None;
+                }
+                let mut next = self.starts.get(line + 1).copied().filter(|&s| s > t);
+                for &(from, to) in [self.spans.get(line), self.backing_spans.get(line)].into_iter().flatten() {
+                    for w in &self.words[from as usize..to as usize] {
+                        if t >= w.start_ms && t < w.end_ms {
+                            return None;
+                        }
+                        if w.start_ms > t {
+                            next = Some(next.map_or(w.start_ms, |n| n.min(w.start_ms)));
+                        }
+                    }
+                }
+                next
+            }
+        };
+        Some(next.map_or(WAKE_MAX_MS, |n| (n - t).clamp(WAKE_MIN_MS, WAKE_MAX_MS)) as u32)
+    }
+
+    /// How long until the page may look different after `t`: see [`Step::wait`]. With `lively`, every
+    /// display frame while something in the line moves: a soft edge crossing a quick syllable at half the
+    /// frame rate walks in steps, and a rising word judders.
+    pub fn wait(&self, t: i64, sweep: bool, lively: bool) -> u32 {
         if !self.synced {
             0
+        } else if sweep && lively && self.moving(t) {
+            1
         } else if sweep {
             SWEEP_FRAMES
         } else {
@@ -271,21 +362,40 @@ impl LyricClock {
     }
 
     /// The per-frame question: the player is at `position_ms`; `sweep` is whether the listener wants the
-    /// fill (it only happens when the lyrics allow it). `force` draws the new moment whatever changed,
-    /// for the first look after starting or resuming.
-    pub fn advance(&self, position_ms: i64, sweep: bool, force: bool) -> Step {
+    /// fill (it only happens when the lyrics allow it), `lively` whether the words may rise and glow as
+    /// they are sung (not with movement reduced). `force` draws the new moment whatever changed, for the
+    /// first look after starting or resuming.
+    pub fn advance(&self, position_ms: i64, sweep: bool, lively: bool, force: bool) -> Step {
         let sweep = sweep && self.timing.sweeps();
         let t = position_ms + self.nudge.load(Relaxed);
-        let redraw = force || self.timing.moved(self.shown.load(Relaxed), t, sweep);
+        let redraw = force || self.timing.moved(self.shown.load(Relaxed), t, sweep, lively);
         if redraw {
             self.shown.store(t, Relaxed);
         }
-        Step { frame: self.timing.frame(self.shown.load(Relaxed)), wait: self.timing.wait(t, sweep), redraw }
+        let (wait, still) = match self.timing.quiet_ms(t, lively) {
+            Some(ms) if sweep => (ms, true),
+            _ => (self.timing.wait(t, sweep, lively), false),
+        };
+        Step { frame: self.timing.frame(self.shown.load(Relaxed)), wait, still, redraw }
     }
 
     /// What is on screen now.
     pub fn shown(&self) -> Frame {
         self.timing.frame(self.shown.load(Relaxed))
+    }
+
+    /// The moment on screen, the nudge in it: what a word's rise and glow are drawn for.
+    pub fn shown_ms(&self) -> i64 {
+        self.shown.load(Relaxed)
+    }
+
+    /// How far into the lit line's backing vocals the singing is, at the moment on screen.
+    pub fn backing_sung(&self) -> f32 {
+        let t = self.shown.load(Relaxed);
+        match usize::try_from(self.timing.line_at(t)) {
+            Ok(line) if self.timing.synced => self.timing.backing_sung(line, t),
+            _ => 0.0,
+        }
     }
 
     /// A tap on `line`: shows it at once and returns where the player should seek to, which is the line's
@@ -311,9 +421,9 @@ impl LyricClock {
 
 // ---- one i64 per answer -------------------------------------------------------------------------------------
 
-const SUNG_BITS: u32 = 30;
+const SUNG_BITS: u32 = 29;
 /// Fraction bits of the sung offset: it crosses within a quarter of a millionth of a character of what was
-/// worked out, a ten-thousandth of a pixel on the widest glyph, for lines of up to 4095 characters.
+/// worked out, a ten-thousandth of a pixel on the widest glyph, for lines of up to 2047 characters.
 pub const SUNG_FRAC: u32 = 18;
 const ACTIVE_BITS: u32 = 13;
 const GLIDE_BITS: u32 = 10;
@@ -321,7 +431,8 @@ const WAIT_BITS: u32 = 9;
 const ACTIVE_AT: u32 = SUNG_BITS;
 const GLIDE_AT: u32 = ACTIVE_AT + ACTIVE_BITS;
 const WAIT_AT: u32 = GLIDE_AT + GLIDE_BITS;
-const REDRAW_AT: u32 = WAIT_AT + WAIT_BITS;
+const STILL_AT: u32 = WAIT_AT + WAIT_BITS;
+const REDRAW_AT: u32 = STILL_AT + 1;
 /// The bits of a packed [`Step`] that describe the [`Frame`]; the rest say when to ask again.
 pub const FRAME_BITS: u32 = WAIT_AT;
 
@@ -330,7 +441,7 @@ fn field(v: i64, bits: u32) -> i64 {
 }
 
 impl Frame {
-    /// `sung` in the low 30 bits (fixed point, [`SUNG_FRAC`] fraction bits), then `active + 1` in 13 and
+    /// `sung` in the low 29 bits (fixed point, [`SUNG_FRAC`] fraction bits), then `active + 1` in 13 and
     /// `glide_ms` in 10.
     pub fn pack(&self) -> i64 {
         let sung = field((self.sung.max(0.0) * (1u32 << SUNG_FRAC) as f32) as i64, SUNG_BITS);
@@ -347,13 +458,19 @@ impl Frame {
 }
 
 impl Step {
-    /// The frame's bits ([`Frame::pack`]), then `wait` in 9 and `redraw` in 1: 63 bits, never negative.
+    /// The frame's bits ([`Frame::pack`]), then `wait` in 9, `still` in 1 and `redraw` in 1: 63 bits,
+    /// never negative.
     pub fn pack(&self) -> i64 {
-        self.frame.pack() | field(self.wait as i64, WAIT_BITS) << WAIT_AT | (self.redraw as i64) << REDRAW_AT
+        self.frame.pack() | field(self.wait as i64, WAIT_BITS) << WAIT_AT | (self.still as i64) << STILL_AT | (self.redraw as i64) << REDRAW_AT
     }
 
     pub fn unpack(v: i64) -> Step {
-        Step { frame: Frame::unpack(v), wait: ((v >> WAIT_AT) & ((1 << WAIT_BITS) - 1)) as u32, redraw: (v >> REDRAW_AT) & 1 == 1 }
+        Step {
+            frame: Frame::unpack(v),
+            wait: ((v >> WAIT_AT) & ((1 << WAIT_BITS) - 1)) as u32,
+            still: (v >> STILL_AT) & 1 == 1,
+            redraw: (v >> REDRAW_AT) & 1 == 1,
+        }
     }
 }
 
@@ -373,7 +490,7 @@ mod tests {
     }
 
     fn lines(starts: &[i64]) -> Vec<Line> {
-        starts.iter().map(|&s| Line { start_ms: s, len: 10, words: Vec::new() }).collect()
+        starts.iter().map(|&s| Line { start_ms: s, len: 10, words: Vec::new(), ..Default::default() }).collect()
     }
 
     fn w(start_ms: i64, end_ms: i64, start: u32, end: u32) -> Word {
@@ -401,11 +518,11 @@ mod tests {
 
     #[test]
     fn the_sweep_is_linear_in_a_word_and_rests_between_words() {
-        let t = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 11, words: vec![w(1000, 1400, 0, 5), w(1600, 2000, 6, 11)] }]);
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 11, words: vec![w(1000, 1400, 0, 5), w(1600, 2000, 6, 11)], ..Default::default() }]);
         let at = |ms| t.sung_offset(0, ms);
         assert_eq!((at(900), at(1000), at(1200), at(1400), at(1500), at(1600), at(1700), at(2000), at(9000)), (0.0, 0.0, 2.5, 5.0, 5.0, 5.0, 7.25, 11.0, 11.0));
         // A word with no length is done the moment it starts; a line without words is all or nothing.
-        let t = LyricTiming::new(true, true, vec![Line { start_ms: 0, len: 4, words: vec![w(500, 500, 0, 4)] }, Line { start_ms: 800, len: 7, words: vec![] }]);
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 0, len: 4, words: vec![w(500, 500, 0, 4)], ..Default::default() }, Line { start_ms: 800, len: 7, words: vec![], ..Default::default() }]);
         assert_eq!((t.sung_offset(0, 499), t.sung_offset(0, 500), t.sung_offset(1, 799), t.sung_offset(1, 800)), (0.0, 4.0, 0.0, 7.0));
     }
 
@@ -423,36 +540,36 @@ mod tests {
     fn waking_is_at_the_next_change_within_8_to_500_ms_and_every_second_frame_when_sweeping() {
         let t = LyricTiming::new(true, false, lines(&[1000, 1200, 5000]));
         // Glides 170, 620, 620; switch_at: 1000-85=915, 1200-310=890 -> 916, 5000-310=4690.
-        assert_eq!((t.wait(0, false), t.wait(700, false), t.wait(914, false), t.wait(921, false), t.wait(4700, false)), (500, 215, 8, 500, 500));
-        assert_eq!(t.wait(0, true), SWEEP_FRAMES);
-        assert_eq!(LyricTiming::new(false, false, lines(&[-1, -1])).wait(0, false), 0, "untimed lyrics never wake");
+        assert_eq!((t.wait(0, false, false), t.wait(700, false, false), t.wait(914, false, false), t.wait(921, false, false), t.wait(4700, false, false)), (500, 215, 8, 500, 500));
+        assert_eq!(t.wait(0, true, false), SWEEP_FRAMES);
+        assert_eq!(LyricTiming::new(false, false, lines(&[-1, -1])).wait(0, false, false), 0, "untimed lyrics never wake");
     }
 
     #[test]
     fn only_a_visible_change_of_the_sweep_redraws() {
-        let t = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 10, words: vec![w(1000, 2000, 0, 10)] }, Line { start_ms: 5000, len: 3, words: vec![] }]);
-        assert!(t.moved(0, 500, false), "without the sweep every wake-up is a change");
-        assert!(t.moved(0, 500, true), "before the first line");
-        assert!(!t.moved(1000, 1003, true), "0.03 characters");
-        assert!(t.moved(1000, 1005, true), "0.05 characters");
-        assert!(!t.moved(2000, 4000, true), "between words nothing moves");
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 10, words: vec![w(1000, 2000, 0, 10)], ..Default::default() }, Line { start_ms: 5000, len: 3, words: vec![], ..Default::default() }]);
+        assert!(t.moved(0, 500, false, false), "without the sweep every wake-up is a change");
+        assert!(t.moved(0, 500, true, false), "before the first line");
+        assert!(!t.moved(1000, 1003, true, false), "0.03 characters");
+        assert!(t.moved(1000, 1005, true, false), "0.05 characters");
+        assert!(!t.moved(2000, 4000, true, false), "between words nothing moves");
         // The lit line changes at 4690 but the sung one only at 5000: the page holds until then.
-        assert!(!t.moved(2000, 4800, true) && t.line_at(4800) == 1);
-        assert!(t.moved(2000, 5000, true));
+        assert!(!t.moved(2000, 4800, true, false) && t.line_at(4800) == 1);
+        assert!(t.moved(2000, 5000, true, false));
     }
 
     #[test]
     fn a_clock_draws_only_what_changed_and_nudges_and_taps() {
-        let timing = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 10, words: vec![w(1000, 2000, 0, 10)] }, Line { start_ms: 5000, len: 3, words: vec![] }]);
+        let timing = LyricTiming::new(true, true, vec![Line { start_ms: 1000, len: 10, words: vec![w(1000, 2000, 0, 10)], ..Default::default() }, Line { start_ms: 5000, len: 3, words: vec![], ..Default::default() }]);
         let c = LyricClock::new(timing, 0);
         assert_eq!(c.shown(), Frame { active: -1, glide_ms: GLIDE_MS, sung: 0.0 });
-        let s = c.advance(1500, true, false);
-        assert_eq!(s, Step { frame: Frame { active: 0, glide_ms: 620, sung: 5.0 }, wait: SWEEP_FRAMES, redraw: true });
-        let s = c.advance(1502, true, false);
+        let s = c.advance(1500, true, false, false);
+        assert_eq!(s, Step { frame: Frame { active: 0, glide_ms: 620, sung: 5.0 }, wait: SWEEP_FRAMES, still: false, redraw: true });
+        let s = c.advance(1502, true, false, false);
         assert!(!s.redraw && s.frame.sung == 5.0, "what is on screen stays");
-        assert!(c.advance(1502, true, true).redraw);
+        assert!(c.advance(1502, true, false, true).redraw);
         assert_eq!(c.nudge(1), 250);
-        assert_eq!(c.advance(1500, true, false).frame.sung, 7.5, "sooner: the words are ahead of the player");
+        assert_eq!(c.advance(1500, true, false, false).frame.sung, 7.5, "sooner: the words are ahead of the player");
         assert_eq!((c.nudge(-1), c.nudge(-1), c.nudge(-1)), (0, -250, -500));
         assert_eq!(c.tap(1), 5500, "seek to where the line is drawn");
         assert_eq!(c.shown().active, 1);
@@ -463,24 +580,60 @@ mod tests {
         assert_eq!(c.tap(0), 500);
         // Words not timed: no sweep whatever the listener asked for, and a wake-up at the next line.
         let c = LyricClock::new(LyricTiming::new(true, false, lines(&[1000, 5000])), 0);
-        assert_eq!(c.advance(0, true, false).wait, 500);
-        assert_eq!(c.advance(4400, true, false).wait, 290);
+        assert_eq!(c.advance(0, true, false, false).wait, 500);
+        assert_eq!(c.advance(4400, true, false, false).wait, 290);
+    }
+
+    #[test]
+    fn backing_vocals_fill_on_their_own_time_and_moving_words_draw_every_frame() {
+        let line = Line { start_ms: 1000, len: 5, words: vec![w(1000, 1500, 0, 5)], backing_len: 4, backing: vec![w(1600, 2000, 0, 4)] };
+        let t = LyricTiming::new(true, true, vec![line, Line { start_ms: 9000, len: 3, ..Default::default() }]);
+        assert_eq!((t.backing_sung(0, 1500), t.backing_sung(0, 1800), t.backing_sung(0, 2000)), (0.0, 2.0, 4.0));
+        assert_eq!(t.sung_offset(1, 9000), 3.0, "the backing words are not the next line's");
+        assert!(t.moving(1200) && t.moving(2000 + MOTION_TAIL_MS) && !t.moving(2001 + MOTION_TAIL_MS));
+        assert_eq!((t.wait(1200, true, true), t.wait(1200, true, false), t.wait(5000, true, true)), (1, SWEEP_FRAMES, SWEEP_FRAMES));
+        // A word settling after the fill is done is a change only while words move at all.
+        assert!(t.moved(2100, 2110, true, true) && !t.moved(2100, 2110, true, false));
+        let c = LyricClock::new(t, 0);
+        c.advance(1800, true, true, false);
+        assert_eq!((c.shown_ms(), c.backing_sung()), (1800, 2.0));
+    }
+
+    #[test]
+    fn a_sweep_sleeps_while_nothing_on_its_line_changes() {
+        let line = Line { start_ms: 1000, len: 11, words: vec![w(1000, 1400, 0, 5), w(1600, 2000, 6, 11)], backing_len: 3, backing: vec![w(2200, 2300, 0, 3)] };
+        let t = LyricTiming::new(true, true, vec![line, Line { start_ms: 2600, len: 3, ..Default::default() }]);
+        // Before the first line: until it takes over (310 ms ahead of its timestamp).
+        assert_eq!(t.quiet_ms(0, false), Some(500));
+        assert_eq!(t.quiet_ms(600, false), Some(90));
+        // Inside a word, and inside a backing word: every frame.
+        assert_eq!((t.quiet_ms(1200, false), t.quiet_ms(2250, false)), (None, None));
+        // Between words, until the next one; then the backing words; then the next line.
+        assert_eq!((t.quiet_ms(1450, false), t.quiet_ms(2000, false), t.quiet_ms(2300, false)), (Some(150), Some(200), Some(300)));
+        // Words that still settle or glow keep it drawing every frame.
+        assert_eq!((t.quiet_ms(1450, true), t.quiet_ms(2300, true)), (None, None));
+        let c = LyricClock::new(t, 0);
+        let s = c.advance(1450, true, false, false);
+        assert_eq!((s.wait, s.still), (150, true));
+        let s = c.advance(1450, false, false, false);
+        assert!(!s.still, "without the sweep the wait is milliseconds anyway");
+        assert_eq!((c.advance(1200, true, false, false).wait, c.advance(1200, true, false, false).still), (SWEEP_FRAMES, false));
     }
 
     #[test]
     fn untimed_lyrics_light_nothing_and_never_wake() {
         let c = LyricClock::new(LyricTiming::new(false, false, lines(&[-1, -1, -1])), 0);
-        let s = c.advance(10_000, true, true);
-        assert_eq!(s, Step { frame: Frame { active: -1, glide_ms: GLIDE_MS, sung: 0.0 }, wait: 0, redraw: true });
+        let s = c.advance(10_000, true, false, true);
+        assert_eq!(s, Step { frame: Frame { active: -1, glide_ms: GLIDE_MS, sung: 0.0 }, wait: 0, still: false, redraw: true });
     }
 
     #[test]
     fn a_packed_step_comes_back() {
-        let third = Step::unpack(Step { frame: Frame { active: 0, glide_ms: 620, sung: 1.0 / 3.0 }, wait: 0, redraw: false }.pack()).frame.sung;
+        let third = Step::unpack(Step { frame: Frame { active: 0, glide_ms: 620, sung: 1.0 / 3.0 }, wait: 0, still: false, redraw: false }.pack()).frame.sung;
         assert!((third - 1.0 / 3.0).abs() < 1.0 / (1 << SUNG_FRAC) as f32);
-        for sung in [0.0f32, 7.5, 7.25, 63.999_99, 1234.567, 4095.99] {
-            for (active, glide_ms, wait, redraw) in [(-1, 620, 0, false), (0, 160, 2, true), (8190, 594, 500, true)] {
-                let s = Step { frame: Frame { active, glide_ms, sung }, wait, redraw };
+        for sung in [0.0f32, 7.5, 7.25, 63.999_99, 1234.567, 2047.99] {
+            for (active, glide_ms, wait, still, redraw) in [(-1, 620, 0, false, false), (0, 160, 2, false, true), (8190, 594, 500, true, true), (3, 300, 17, true, false)] {
+                let s = Step { frame: Frame { active, glide_ms, sung }, wait, still, redraw };
                 assert!(s.pack() >= 0);
                 assert_eq!(Step::unpack(s.pack()), s);
                 assert_eq!(Frame::unpack(s.pack() & ((1 << FRAME_BITS) - 1)), s.frame);

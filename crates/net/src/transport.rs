@@ -102,6 +102,21 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for TransportError {
     }
 }
 
+/// A request to a third party that wants more than a plain GET: headers of its own (a Referer, the
+/// user's key for a service) or a body. Never the music server's: its requests are plain GETs, signed
+/// in the address. The platform sends it as it is, with the app's own User-Agent, and hands back
+/// whatever came, error statuses included.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct Exchange {
+    pub url: String,
+    pub headers: std::collections::HashMap<String, String>,
+    /// POSTed as `application/json` when there is one (YouTube Music's player API); a GET otherwise.
+    pub json: Option<String>,
+    /// As [`Transport::get`]'s: 0 is the platform's usual timeouts, otherwise the whole call's limit.
+    pub timeout_ms: u32,
+}
+
 /// One GET, implemented once by the platform. Rust never holds a socket; it asks for bytes here.
 #[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
 #[async_trait::async_trait]
@@ -109,6 +124,10 @@ pub trait Transport: Send + Sync {
     /// The status and the whole body. `timeout_ms` 0 means the platform's usual timeouts; otherwise
     /// the whole call gives up after that long. Dropping the future cancels the request.
     async fn get(&self, url: String, timeout_ms: u32) -> Result<TransportResponse, TransportError>;
+
+    /// [`Transport::get`] with the headers and body [`Exchange`] says, for the third parties that ask
+    /// for them (lyrics services, Apple's catalogue for moving covers).
+    async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError>;
 
     /// The address requests go to changed (the LAN / WAN switch), so anything the platform built from
     /// the old one - the signed cover-art prefix - has to be built again.

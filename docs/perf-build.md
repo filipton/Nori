@@ -40,8 +40,11 @@ The app's life is cut into **stretches**, each spent in one state:
 | Charging | kept apart; left out of every battery figure |
 
 A stretch also ends when a setting that changes the cost changes (equalizer, AutoMix, crossfade,
-offload, hi-res, bit-perfect), so every stretch was spent with one set of them; the stretch lists them,
-and whether the music was offloaded to the audio chip or played on the CPU when it ended.
+offload, hi-res, bit-perfect), so every stretch was spent with one set of them; the stretch lists them
+in brackets, ending with whether offload was **wanted**: "offload wanted", or "offload not wanted: <the
+setting that keeps it off>". Wanted is not given: whether the audio chip really played the music is the
+output line's "offload given" or "PCM (<why>)", and the time it did is "offloaded 45 min 00 s of 1 h
+00 min (75 %)" on the stretch and, added up, on each state.
 
 For each stretch:
 
@@ -65,6 +68,21 @@ Under each stretch, on the page and in the report, two lines say why it cost wha
 | threads by wakeups | the six threads that woke most over the stretch (`/proc/self/task/*/stat` and `status`): each one's name, wakeups per second and CPU time. A thread that started during the stretch is marked "(new)". The Rust player's threads carry their own names (`nori-engine`, `nori-track`, `nori-load`, `nori-open`, `nori-covers`, `nori-analysis`); Java's are the platform's (`binder:…`, `RenderThread`, `main` is the app's package name) |
 | output | the AudioTrack the player last opened, as the platform describes it when the stretch ended, against what was asked of it: the engine, rate, channels and encoding, the buffer in ms (given, of what was asked, and the most it could grow to), the performance mode asked for and given (the Rust player asks for power saving, the platform's deep-buffer output; media3 asks for none), whether it is offloaded to the audio chip, where it is routed, its underruns since it was made, and whether it was playing |
 
+Under those, the stretch's **timeline**: what happened during it, one timestamped line each, folded on
+the page ("12 events") and printed in full in the report. At most 150 per stretch; past that the oldest
+go, and the stretch says how many.
+
+| Event | What it says |
+|---|---|
+| song | the song the ear arrived on: the file as the server has it (suffix, rate, bit depth, bit rate) and where its bytes come from (the download, the stream cache at which quality, or the network); with ExoPlayer, what the decoder was handed as well (codec, container, rate, bit rate, encoder delay and padding) |
+| settings | which settings changed, from what to what (the servers and keys only as "changed"); a slider dragged is one event |
+| engine | the player service started with an engine, or ended |
+| output | an AudioTrack opened or reopened, as the output line says it (format, buffer, mode, offload, route), or let go |
+| offload | entered, or left and why (the player's own reason, or the setting that keeps it off) |
+| underruns | the output's underrun count grew, with the reading before, between which and this one they first appeared |
+| error | a song or the output failed, in the player's words |
+| tuning | the equalizer screen's tuning mode (a shallow buffer) on or off |
+
 A buffer much smaller than asked, or power saving asked and not given, is what makes a writer wake more
 often than the design says: the Rust player's writer then tops the track up once per half of what it
 holds (and says so in the log), which the thread line shows as `nori-track`'s wakeups.
@@ -73,7 +91,8 @@ holds (and says so in the log), which the thread line shows as `nori-track`'s wa
 the screen, the radio and every other app are in it, which is why a fair test holds them still (below).
 CPU, wakeups, allocations and PSS are the app's own.
 
-Stretches are kept in the app's database (`perf_stretches`, crates/core/src/perf_log.rs) for 14 days.
+Stretches are kept in the app's database (`perf_stretches`, crates/perf/src/perf_log.rs) for 14 days,
+each with its timeline; the last crash of each kind in `perf_crashes`. "Start fresh" forgets both.
 Stretches under 3 seconds are the blinks between two states (the screen going off also stops the
 activity) and are dropped. Android reads the counters and counts the frames (`app/src/perf`); which
 state a stretch is filed under, what two readings make, the sums by state and every word on the page
@@ -87,9 +106,17 @@ Nothing ticks. The counters are read only when something happens: the screen goe
 power is connected or not, playback starts or stops (the service's own broadcast), the app comes to
 the front or leaves it, the player opens or closes, a setting above changes, or the Performance page
 opens. Each reading takes a few milliseconds (the PSS is most of it), on a thread of its own that
-sleeps in its looper in between. With the screen off and music playing the recorder does not run at
-all, so it adds **no wakeups of its own** to the numbers it records. The thread list, the output and the
+sleeps in its looper in between. With the screen off and music playing the recorder runs only when a
+song changes, a moment the player and the service's broadcast already wake for, so it adds **no
+wakeups of its own** to the numbers it records. The thread list, the output and the
 network bytes are read at the same moments, not in between.
+
+The timeline is told, not looked for: the player service hands the recorder each song, output, error
+and tuning change as it happens (`PlaybackObserver`, null in every other build), and the settings flow
+each change. A song change wakes the recorder's thread once, as the service's broadcast on every song
+already did; it reads the output's underrun count then (a getter) and the song's record, and hands the
+core one note. The app's log is read from logcat only when the report is shared or the page's log is
+unfolded; the crash buffer once when the app starts, so a crash outlives logcat's buffer.
 
 While the app is on screen, Android hands every frame's timings to that thread
 (`Window.addOnFrameMetricsAvailableListener`); the listener is removed when the app leaves the
@@ -116,9 +143,13 @@ each (the report lists every stretch, with its settings).
 ## Sharing
 
 "Share report" opens Android's share sheet with the report as plain text: the device, the Android
-version, the build (version and commit), the table by state, the last stretches, and the benchmark
-results if they were run this session. Send it anywhere text goes; the table is in columns for a
-monospaced font.
+version, the build (version and commit), the table by state and how much of each state was really
+offloaded, the last stretches each with its output and its timeline, the benchmark results if they were
+run this session, and at the end the app's own log: the crash buffer (this and earlier runs of the
+app) or the copy of it kept at the last start, the last uncaught exception (kept in the app's database
+by the recorder's handler as the process died, then handed on to the platform's), and the process's
+last 400 log lines (`logcat --pid`), at most 60 000 characters. Send it anywhere text goes; the table
+is in columns for a monospaced font. The page shows the same log folded at its end.
 
 ## Benchmarks
 

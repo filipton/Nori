@@ -199,7 +199,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val item = p.currentMediaItem
         val fresh = queueChanged || !old.connected
         val look = fresh || p.shuffleModeEnabled != old.shuffle
-        // The queue is the core's (crates/core/src/playlist.rs), read in one call; the controller's copy
+        // The queue is the core's (crates/queue/src/playlist.rs), read in one call; the controller's copy
         // of it trails the service a little, so the core's is taken when both are the same length. A
         // timeline change is not always a queue change (a song's source opening is one too), so the
         // core's revision is asked first and a queue the page already holds is not copied over again.
@@ -468,7 +468,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 }
 
 /**
- * The seek bar's place over a [HeardJni] clock (crates/core/src/heard.rs over nori_player::heard::Playhead):
+ * The seek bar's place over a [HeardJni] clock (crates/queue/src/heard.rs over nori_player::heard::Playhead):
  * asked every frame the bar is drawn, so primitives only.
  */
 internal object PlayheadJni {
@@ -483,7 +483,7 @@ internal object PlayheadJni {
 }
 
 /**
- * The core's queue (crates/core/src/playlist.rs) where it is asked on every player event or edit:
+ * The core's queue (crates/queue/src/playlist.rs) where it is asked on every player event or edit:
  * primitives in and out, nothing copied.
  */
 internal object PlaylistJni {

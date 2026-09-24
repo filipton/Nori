@@ -113,6 +113,12 @@ pub struct StoredPrefs {
     pub auto_mix_filters: bool,
     pub auto_mix_echo_out: bool,
     pub auto_mix_keep_pitch: bool,
+    /// "Better beat detection": Beat This!, a neural beat tracker, reads the first and last half minute of the
+    /// songs coming up for AutoMix's beat grids, once per song. Only in a build with the `neural-beats` feature;
+    /// its model is downloaded once. Off by default.
+    pub auto_mix_better_beats: bool,
+    /// The beat model may be downloaded over mobile data; otherwise it waits for Wi-Fi.
+    pub auto_mix_beats_mobile_data: bool,
     pub speed: f32,
     pub skip_silence: bool,
     pub scrobble_percent: i32,
@@ -121,14 +127,30 @@ pub struct StoredPrefs {
     pub third_party_lookups: bool,
     pub profile_per_output: bool,
     pub auto_eq_auto: bool,
-    pub weighted_shuffle: bool,
     pub lyrics_sweep: bool,
     pub soft_sleeve: bool,
+    /// Moving covers: an album's motion artwork from Apple Music plays in the player's sleeve, where it
+    /// has one. Needs `third_party_lookups`. Off by default; off, nothing of it is built.
+    pub motion_artwork: bool,
+    /// Moving covers only on unmetered networks: each is a few megabytes.
+    pub motion_artwork_wifi_only: bool,
     pub favourite_notice: bool,
     pub lyrics_keep_screen_on: bool,
     pub lyrics_translation: bool,
     pub lyrics_size: i32,
-    pub lyrics_lrclib: bool,
+    /// Look lyrics up online when the server has no timed ones; needs `third_party_lookups`. Stored as
+    /// "lyricsLrclib", from when LRCLIB was the only place asked.
+    pub lyrics_online: bool,
+    /// Every lyrics service by name, in the order they rank (`lyrics_sources`).
+    pub lyrics_order: Vec<String>,
+    /// The lyrics services switched on, by name.
+    pub lyrics_on: Vec<String>,
+    /// Keep asking past lyrics timed line by line for lyrics timed word by word, whoever ranks higher.
+    pub lyrics_prefer_words: bool,
+    /// The user's own PaxSenix key, for its Spotify and Musixmatch lyrics; empty for none.
+    pub paxsenix_key: String,
+    /// A BetterLyrics key, with which it looks up songs it has not stored yet; empty for none.
+    pub better_lyrics_key: String,
     pub theme: i32,
     pub amoled: bool,
     pub player_colours: bool,
@@ -136,6 +158,9 @@ pub struct StoredPrefs {
     pub accent: i64,
     pub cover_colors: bool,
     pub reduce_motion: bool,
+    /// Animate even with Android's animations off; on unless the listener turns it off. Stored as
+    /// "animateAnyway": the old "ignoreSystemMotion" was written off on every phone before this was the
+    /// default, and it would have kept the animations off there.
     pub ignore_system_motion: bool,
     pub ui_scale: f32,
     pub tap_action: i32,
@@ -356,6 +381,8 @@ impl Default for StoredPrefs {
             auto_mix_filters: true,
             auto_mix_echo_out: true,
             auto_mix_keep_pitch: true,
+            auto_mix_better_beats: false,
+            auto_mix_beats_mobile_data: false,
             speed: 1.0,
             skip_silence: false,
             scrobble_percent: 50,
@@ -364,14 +391,20 @@ impl Default for StoredPrefs {
             third_party_lookups: false,
             profile_per_output: true,
             auto_eq_auto: false,
-            weighted_shuffle: true,
             lyrics_sweep: true,
             soft_sleeve: true,
+            motion_artwork: false,
+            motion_artwork_wifi_only: true,
             favourite_notice: true,
             lyrics_keep_screen_on: true,
             lyrics_translation: true,
             lyrics_size: 1,
-            lyrics_lrclib: true,
+            lyrics_online: true,
+            lyrics_order: crate::lyrics_sources::default_order(),
+            lyrics_on: crate::lyrics_sources::default_on(),
+            lyrics_prefer_words: true,
+            paxsenix_key: String::new(),
+            better_lyrics_key: String::new(),
             theme: 0,
             amoled: false,
             player_colours: true,
@@ -379,7 +412,7 @@ impl Default for StoredPrefs {
             accent: 0xFF6750A4,
             cover_colors: true,
             reduce_motion: false,
-            ignore_system_motion: false,
+            ignore_system_motion: true,
             ui_scale: 0.0,
             tap_action: 0,
             swipe_right: 1,
@@ -591,6 +624,10 @@ impl Raw<'_> {
             _ => None,
         }
     }
+    /// Names kept as one comma-separated text; none when nothing was stored.
+    fn list(&self, k: &str) -> Option<Vec<String>> {
+        self.text(k).map(names)
+    }
     /// An enum stored as its ordinal; one out of range (a value from a newer version) is the default.
     fn ordinal(&self, k: &str, count: i32, d: i32) -> i32 {
         Some(self.int(k, d)).filter(|i| (0..count).contains(i)).unwrap_or(d)
@@ -663,6 +700,8 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         auto_mix_filters: r.flag("autoMixFilters", true),
         auto_mix_echo_out: r.flag("autoMixEchoOut", true),
         auto_mix_keep_pitch: r.flag("autoMixKeepPitch", true),
+        auto_mix_better_beats: r.flag("autoMixBetterBeats", false),
+        auto_mix_beats_mobile_data: r.flag("autoMixBeatsMobileData", false),
         speed: r.float("speed", 1.0),
         skip_silence: r.flag("skipSilence", false),
         scrobble_percent: r.int("scrobblePercent", 50),
@@ -671,21 +710,27 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         auto_eq_auto: r.flag("autoEqAuto", false),
         taste_model: r.flag("tasteModel", true),
         third_party_lookups: r.flag("thirdPartyLookups", false),
-        weighted_shuffle: r.flag("weightedShuffle", true),
         lyrics_sweep: r.flag("lyricsSweep", true),
         soft_sleeve: r.flag("softSleeve", true),
+        motion_artwork: r.flag("motionArtwork", false),
+        motion_artwork_wifi_only: r.flag("motionArtworkWifiOnly", true),
         favourite_notice: r.flag("favouriteNotice", true),
         lyrics_keep_screen_on: r.flag("lyricsKeepScreenOn", true),
         lyrics_translation: r.flag("lyricsTranslation", true),
         lyrics_size: r.int("lyricsSize", 1),
-        lyrics_lrclib: r.flag("lyricsLrclib", true),
+        lyrics_online: r.flag("lyricsLrclib", true),
+        lyrics_order: crate::lyrics_sources::complete_order(&r.list("lyricsOrder").unwrap_or_default()),
+        lyrics_on: r.list("lyricsOn").map_or(d.lyrics_on, |on| crate::lyrics_sources::known(&on)),
+        lyrics_prefer_words: r.flag("lyricsPreferWords", true),
+        paxsenix_key: r.text("paxSenixKey").unwrap_or_default().to_string(),
+        better_lyrics_key: r.text("betterLyricsKey").unwrap_or_default().to_string(),
         theme: r.ordinal("theme", THEMES, 0),
         amoled: r.flag("amoled", false),
         dynamic_color: r.flag("dynamicColor", true),
         accent: r.long("accent", d.accent),
         cover_colors: r.flag("coverColors", true),
         reduce_motion: r.flag("reduceMotion", false),
-        ignore_system_motion: r.flag("ignoreSystemMotion", false),
+        ignore_system_motion: r.flag("animateAnyway", true),
         ui_scale: r.float("uiScale", 0.0),
         player_colours: r.flag("playerColours", true),
         tap_action: r.ordinal("tapAction", TAP_ACTIONS, d.tap_action),
@@ -723,23 +768,27 @@ pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     flag("autoMixFilters", p.auto_mix_filters);
     flag("autoMixEchoOut", p.auto_mix_echo_out);
     flag("autoMixKeepPitch", p.auto_mix_keep_pitch);
+    flag("autoMixBetterBeats", p.auto_mix_better_beats);
+    flag("autoMixBeatsMobileData", p.auto_mix_beats_mobile_data);
     flag("skipSilence", p.skip_silence);
     flag("profilePerOutput", p.profile_per_output);
     flag("autoEqAuto", p.auto_eq_auto);
     flag("tasteModel", p.taste_model);
     flag("thirdPartyLookups", p.third_party_lookups);
-    flag("weightedShuffle", p.weighted_shuffle);
     flag("lyricsSweep", p.lyrics_sweep);
     flag("softSleeve", p.soft_sleeve);
+    flag("motionArtwork", p.motion_artwork);
+    flag("motionArtworkWifiOnly", p.motion_artwork_wifi_only);
     flag("favouriteNotice", p.favourite_notice);
     flag("lyricsKeepScreenOn", p.lyrics_keep_screen_on);
     flag("lyricsTranslation", p.lyrics_translation);
-    flag("lyricsLrclib", p.lyrics_lrclib);
+    flag("lyricsLrclib", p.lyrics_online);
+    flag("lyricsPreferWords", p.lyrics_prefer_words);
     flag("amoled", p.amoled);
     flag("dynamicColor", p.dynamic_color);
     flag("coverColors", p.cover_colors);
     flag("reduceMotion", p.reduce_motion);
-    flag("ignoreSystemMotion", p.ignore_system_motion);
+    flag("animateAnyway", p.ignore_system_motion);
     flag("playerColours", p.player_colours);
     flag("skipExplicit", p.skip_explicit);
     let mut int = |k: &str, v: i32| put.insert(k.to_string(), PrefValue::Number { v });
@@ -789,6 +838,10 @@ pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     text("homeRows", rows.join(","));
     text("pinnedPlaylists", p.pinned_playlists.join("\n"));
     text("listPrefs", serde_json::to_string(&p.list_prefs).unwrap_or_else(|_| "{}".to_string()));
+    text("lyricsOrder", p.lyrics_order.join(","));
+    text("lyricsOn", p.lyrics_on.join(","));
+    text("paxSenixKey", p.paxsenix_key.clone());
+    text("betterLyricsKey", p.better_lyrics_key.clone());
     put.insert("accent".to_string(), PrefValue::Big { v: p.accent });
     put
 }
@@ -803,6 +856,11 @@ pub struct SettingChange {
     pub apply_cache_limit: bool,
     pub server: bool,
     pub effect: u32,
+}
+
+/// Comma-separated names, each trimmed, the empty ones left out.
+fn names(value: &str) -> Vec<String> {
+    value.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()
 }
 
 /// Stream quality as a value: "0:" is the original file, "320:mp3" a bitrate and a format.
@@ -851,17 +909,45 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "playerColours" => n.player_colours = on,
         "coverColors" => n.cover_colors = on,
         "dynamicColor" => n.dynamic_color = on,
-        // The lookups switch covers LRCLIB too, so it takes the lyrics half with it both ways.
-        "thirdPartyLookups" => (n.third_party_lookups, n.lyrics_lrclib) = (on, on),
-        // Lyrics from LRCLIB need lookups, so switching them on switches lookups on; off leaves the
-        // lookups (update checks) as they are.
-        "lyricsLrclib" => (n.lyrics_lrclib, n.third_party_lookups) = (on, on || p.third_party_lookups),
+        // The lookups switch covers the lyrics services too, so it takes the lyrics half with it both ways.
+        "thirdPartyLookups" => (n.third_party_lookups, n.lyrics_online) = (on, on),
+        // Lyrics online need lookups, so switching them on switches lookups on; off leaves the lookups
+        // (update checks) as they are. Stored as "lyricsLrclib", and still answers to it.
+        "lyricsOnline" | "lyricsLrclib" => (n.lyrics_online, n.third_party_lookups) = (on, on || p.third_party_lookups),
+        "lyricsPreferWords" => n.lyrics_prefer_words = on,
+        "paxSenixKey" => n.paxsenix_key = value.trim().to_string(),
+        "betterLyricsKey" => n.better_lyrics_key = value.trim().to_string(),
+        // The whole ranking, by name (the test bridge).
+        "lyricsOrder" => n.lyrics_order = crate::lyrics_sources::complete_order(&names(value)),
+        // Back to how they come out of the box (the test bridge).
+        "lyricsSources" if value.trim().eq_ignore_ascii_case("default") => {
+            n.lyrics_order = crate::lyrics_sources::default_order();
+            n.lyrics_on = crate::lyrics_sources::default_on();
+        }
+        // The services asked, in this order, and no others (the test bridge): `lyricsSources lrclib,unison`.
+        "lyricsSources" => {
+            let on = crate::lyrics_sources::known(&names(value));
+            let rest = p.lyrics_order.iter().filter(|s| !on.contains(s)).cloned();
+            n.lyrics_order = on.iter().cloned().chain(rest).collect();
+            n.lyrics_on = on;
+        }
+        // One service up or down among the ones asked, held and dragged: `NETEASE:-1`.
+        "lyricsMove" => {
+            let (service, by) = value.split_once(':')?;
+            let service = crate::lyrics_sources::LyricsService::named(service)?;
+            n.lyrics_order = crate::lyrics_sources::moved(p, service, by.trim().parse().ok()?);
+        }
         "crossfadeKeepAlbums" => n.crossfade_keep_albums = on,
         "lyricsSweep" => n.lyrics_sweep = on,
         "lyricsTranslation" => n.lyrics_translation = on,
         "lyricsKeepScreenOn" => n.lyrics_keep_screen_on = on,
         "lyricsSize" => n.lyrics_size = clamp(int, LYRICS_SIZE, p.lyrics_size),
         "softSleeve" => n.soft_sleeve = on,
+        // Moving covers need lookups, so switching them on switches lookups on, as lyrics online do.
+        "motionArtwork" => (n.motion_artwork, n.third_party_lookups) = (on, on || p.third_party_lookups),
+        "motionArtworkWifiOnly" => n.motion_artwork_wifi_only = on,
+        // The row says "on mobile data", the setting "Wi-Fi only": the one is the other turned round.
+        "motionArtworkMobile" => n.motion_artwork_wifi_only = !on,
         "favouriteNotice" => n.favourite_notice = on,
         "crossfadeSec" => n.crossfade_sec = int.unwrap_or(p.crossfade_sec),
         "autoMixMaxS" => n.auto_mix_max_s = int.unwrap_or(p.auto_mix_max_s),
@@ -871,6 +957,8 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "autoMixBassSwap" => n.auto_mix_bass_swap = on,
         "autoMixFilters" => n.auto_mix_filters = on,
         "autoMixEchoOut" => n.auto_mix_echo_out = on,
+        "autoMixBetterBeats" => n.auto_mix_better_beats = on,
+        "autoMixBeatsMobileData" => n.auto_mix_beats_mobile_data = on,
         "coversAhead" => n.covers_ahead = clamp(int, COVERS_AHEAD, p.covers_ahead),
         "cacheMb" => n.cache_mb = clamp(int, CACHE_MB, p.cache_mb),
         "parallelDownloads" => n.parallel_downloads = clamp(int, PARALLEL_DOWNLOADS, p.parallel_downloads),
@@ -901,10 +989,17 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "autoFillBasis" => n.auto_fill_basis = named(&AUTO_FILL_BASES)?,
         "autoEqAuto" => n.auto_eq_auto = on,
         "profilePerOutput" => n.profile_per_output = on,
-        "weightedShuffle" => n.weighted_shuffle = on,
         "skipExplicit" => n.skip_explicit = on,
         "playbackEngine" => n.playback_engine = named(&PLAYBACK_ENGINE_NAMES)?,
         "skipOnError" => n.skip_on_error = on,
+        // One lyrics service switched on or off: `lyricsService:NETEASE`.
+        _ if name.starts_with("lyricsService:") => {
+            let service = crate::lyrics_sources::LyricsService::named(&name["lyricsService:".len()..])?;
+            n.lyrics_on.retain(|s| s != service.name());
+            if on {
+                n.lyrics_on.push(service.name().to_string());
+            }
+        }
         "theme" => n.theme = named(&THEME_MODES)?,
         "accent" => n.accent = value.trim().parse::<i64>().unwrap_or(p.accent),
         "uiScale" => n.ui_scale = float.unwrap_or(p.ui_scale),
@@ -1632,14 +1727,33 @@ mod tests {
     #[test]
     fn the_lyrics_lookup_and_the_lookups_switch_go_together() {
         let p = StoredPrefs::default();
-        let on = set_by_name(&p, "lyricsLrclib", "true").unwrap().prefs;
-        assert!(on.lyrics_lrclib && on.third_party_lookups, "lyrics online switches lookups on");
+        let on = set_by_name(&p, "lyricsOnline", "true").unwrap().prefs;
+        assert!(on.lyrics_online && on.third_party_lookups, "lyrics online switches lookups on");
         let off = set_by_name(&on, "lyricsLrclib", "false").unwrap().prefs;
-        assert!(!off.lyrics_lrclib && off.third_party_lookups, "and off leaves the lookups alone");
+        assert!(!off.lyrics_online && off.third_party_lookups, "and off leaves the lookups alone");
         let all_off = set_by_name(&on, "thirdPartyLookups", "false").unwrap().prefs;
-        assert!(!all_off.lyrics_lrclib && !all_off.third_party_lookups);
+        assert!(!all_off.lyrics_online && !all_off.third_party_lookups);
         let all_on = set_by_name(&all_off, "thirdPartyLookups", "true").unwrap().prefs;
-        assert!(all_on.lyrics_lrclib && all_on.third_party_lookups);
+        assert!(all_on.lyrics_online && all_on.third_party_lookups);
+    }
+
+    #[test]
+    fn lyrics_services_are_switched_ranked_and_kept() {
+        let p = StoredPrefs::default();
+        let on = set_by_name(&p, "lyricsService:netease", "true").unwrap().prefs;
+        assert_eq!(on.lyrics_on, ["UNISON", "LRCLIB", "NETEASE"]);
+        assert!(set_by_name(&p, "lyricsService:nobody", "true").is_none(), "no such service");
+        let moved = set_by_name(&on, "lyricsMove", "LRCLIB:-1").unwrap().prefs;
+        assert_eq!(crate::lyrics_sources::switched_on(&moved).iter().map(|s| s.name()).collect::<Vec<_>>(), ["UNISON", "LRCLIB", "NETEASE"], "LRCLIB passes NetEase");
+        let only = set_by_name(&p, "lyricsSources", "lrclib, kugou").unwrap().prefs;
+        assert_eq!(only.lyrics_on, ["LRCLIB", "KUGOU"]);
+        assert_eq!(only.lyrics_order[..2], ["LRCLIB", "KUGOU"]);
+        let back = set_by_name(&only, "lyricsSources", "default").unwrap().prefs;
+        assert_eq!((back.lyrics_on, back.lyrics_order), (p.lyrics_on.clone(), p.lyrics_order.clone()));
+        let keyed = set_by_name(&only, "paxSenixKey", "  k  ").unwrap().prefs;
+        let back = load(&save(&keyed));
+        assert_eq!((back.lyrics_on, back.lyrics_order, back.paxsenix_key), (keyed.lyrics_on.clone(), keyed.lyrics_order.clone(), "k".to_string()));
+        assert_eq!(load(&HashMap::new()).lyrics_on, ["UNISON", "LRCLIB"], "nothing stored: the open ones");
     }
 
     #[test]

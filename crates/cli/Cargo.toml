@@ -9,6 +9,11 @@ description = "A terminal client built from the core, nori-engine and the cpal o
 name = "nori-cli"
 path = "src/main.rs"
 
+[features]
+# "Better beat detection": the measurer runs Beat This! through tract (nori-engine's feature). Off unless asked
+# for, so a plain build links nothing of it.
+neural-beats = ["nori-engine/neural-beats"]
+
 [dependencies]
 nori-core = { path = "../core", default-features = false }
 nori-engine = { path = "../engine", features = ["core"] }

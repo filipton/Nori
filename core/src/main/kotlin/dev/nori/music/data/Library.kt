@@ -11,6 +11,11 @@ import dev.nori.music.ffi.model.Genre
 import dev.nori.music.ffi.model.IngestStats
 import dev.nori.music.ffi.model.Lyrics
 import dev.nori.music.ffi.words.LyricsOrigin
+import dev.nori.music.ffi.lyrics.LyricsPick
+import dev.nori.music.ffi.lyrics.LyricsShown
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.channelFlow
 import dev.nori.music.ffi.Page
 import dev.nori.music.ffi.model.Playlist
 import dev.nori.music.ffi.library.PlaylistDetail
@@ -180,19 +185,23 @@ class Library(
     fun lyrics(songId: String): Flow<Lyrics> = cached(Read.LyricsBySong(songId)) { (it as Page.LyricsPage).v }
 
     /**
-     * The server's lyrics, or when it has no synced ones and the settings allow it, LRCLIB's. What follows
-     * the server's answer is the core's decision (`lyrics_after_server`).
+     * The server's lyrics, and when it has no timed ones and the settings allow it, what the lyrics
+     * services have: asked together, ranked and remembered by the core (`lyrics_lookup`), each better
+     * answer emitted as it comes. Leaving the lyrics stops collecting this, which cancels the lookup and
+     * every request in it.
      */
-    fun lyricsFor(song: Song): Flow<FoundLyrics> = flow {
+    fun lyricsFor(song: Song): Flow<FoundLyrics> = channelFlow {
         var fromServer: Lyrics? = null
-        // An empty answer from the server is not shown here while LRCLIB may still have the song; the core
-        // hands it back below if nothing better follows.
-        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) emit(FoundLyrics(it, LyricsOrigin.SERVER)) }
+        // An empty answer from the server is not shown here while a service may still have the song; the
+        // core hands it back below if nothing better follows.
+        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) send(FoundLyrics(it, LyricsOrigin.SERVER)) }
         val server = fromServer
         val hasLines = server != null && server.lines.isNotEmpty()
-        lifted { client.lyricsAfterServer(song.id, hasLines, server?.synced == true) }
-            ?.let { emit(FoundLyrics(it.lyrics, if (it.lrclib) LyricsOrigin.LRCLIB else LyricsOrigin.SERVER)) }
-    }.flowOn(Dispatchers.IO)
+        val shown = object : LyricsShown {
+            override fun show(pick: LyricsPick) { trySend(FoundLyrics(pick.lyrics, pick.origin)) }
+        }
+        lifted { client.lyricsLookup(song.id, hasLines, server?.synced == true, shown) }
+    }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
 
     // ---- local only: history, mixes, smart playlists (all computed in the Rust core from the index) ----
 

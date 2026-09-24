@@ -226,6 +226,95 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   switches, seek / volume - already eased or intentional snaps under `reduceMotion`.
 - Status: **done**
 
+### 18. The sleeve's soft bottom through every move — `PlayerScreen.kt` `SoftSleeve`, `SleeveShade`
+
+- Found: the owner saw the blur at the cover's foot "appear only after the animation ends" and
+  "hide and appear" on a slow drag. The blurred band existed only on the resting sleeve, so it
+  vanished on the first frame of a pull down or a lyrics change and came back on the last; on a
+  record in the hand it stayed at full strength and smeared the lifted card's foot. The status bar's
+  shade vanished and came back with the sheet flight too.
+- Done as: one `SoftSleeve` (blurred copy plus rub-out, the band's tint still nori-look's through
+  `BandEffect`) used by `SleeveCarousel`, `FlyingCover` and `PanelFlight`, each passing a blur strength
+  from its own motion: `1 - lift` on a swipe, the second half of `sheet.progress` on the flight, the
+  first 45 % of the lyrics flight. `SleeveShade` fades the status bar's shade the same way. The flights'
+  layers are the sleeve's height rather than the screen's.
+- Check: slow swipe held half way (no haze on the lifted card); slow sheet pull down and back up (the
+  blur thins as the cover leaves and is whole when it lands, with no step at either end); artwork →
+  lyrics → artwork. Checked on the emulator frame by frame (animations slowed five times): the blur
+  goes as a held record lifts and returns as it settles, thins over a slow pull and comes back with the
+  flight into the sleeve, and follows artwork → lyrics → artwork; no step at either end. Not yet on a phone.
+- Status: **doing**
+
+### 19. The moving cover — `SleeveMotion.kt` `MotionDirector`, `MotionCover`, `SleeveMotion`
+
+- Now: with Settings, Look, "Moving covers" on, an album's Apple Music motion artwork plays in the
+  sleeve over the still cover (a TextureView inside the showing record, inside `SoftSleeve`). It is the
+  one thing that moves without being touched, like the playing bars, and only while the player is fully
+  open on the artwork, the app is in front with the screen on, the record is at rest, no finger is on
+  the player and motion is not reduced.
+- Should: never appear or leave in one frame. In: 480 ms, only after its first frame is on the surface,
+  and 350 ms after a move has ended (at once after a tap that moved nothing). Out: 160 ms, at a
+  finger's first touch (ahead of a swipe, a skip, a pull on the sheet or a panel change), when the
+  sheet leaves fully open, and on a new album before its video is loaded. Flights draw the still cover.
+- Check: an album with motion artwork: open the player (the still cover comes alive after a beat);
+  touch and hold the sleeve (the video steps back before the record lifts); swipe, skip with a button,
+  pull the sheet slowly, go to the lyrics and back; turn the screen off and on. With reduced motion on,
+  the cover stays still.
+- A song that changes by itself (item 21) takes the video out with the record it played on, fading as
+  it slides; it used to vanish on the slide's first frame, the still cover showing in its place. The
+  surface is composed beside the records rather than inside the showing one, so it is never made again
+  mid-move. With the moving covers on, a song change crashed the app: the lookup of an album without a
+  video answers none, and the generated Kotlin asserted every async answer non-null (fixed in
+  crates/uniffi-bindgen).
+- Known: a very quick pull on the sheet or the back gesture can catch the video part faded, since the
+  sleeve hands over to the flight's still cover on the first frame of a move; and the blurred band at
+  the sleeve's foot is the still cover's (a surface is drawn once; see handoff.md, "Moving covers").
+- Status: **doing**
+
+### 20. Lyrics sung the way Apple's are — `LyricsView.kt` `SungText`, `drawSung`, nori-look `lyrics.rs`
+
+- Now: the lit line's fill has a soft edge 24 dp wide instead of a cut through the letter; each timed
+  word or syllable rises 2 dp as it is sung and settles over 420 ms once done; a note held 0.9 s or more
+  swells 4 % with a soft light under it. Backing vocals are drawn smaller under their line and fill on
+  their own times; a duet's other voice sings from the right, each side leaving a lane clear.
+- The timings are nori-look's (`RISE_MIN_MS`, `SETTLE_MS`, `HELD_MS`, `GLOW_FADE_MS`, handed to Kotlin
+  in `stage`), and so is when to draw: every display frame while a word of the sung line moves
+  (`LyricTiming::moving`, the clock's `lively`), every second frame otherwise. The rise and glow
+  themselves are per-frame animation maths, kept in Kotlin (docs/clients.md). Only the moving pieces are
+  drawn on their own; the brushes are made once and moved, so a frame allocates nothing new. With
+  movement reduced there is only the fill, at every second frame.
+- Colours, as Apple's: every timed line is drawn by `SungText` with its own strength (the core's, moving
+  over the change): sung words at that strength with a soft glow under them (the text's own shape
+  blurred, following the fill's edge), unsung words of the line being sung at nori-look's `UNSUNG` (0.55),
+  the other lines at 0.35 ahead and 0.19 behind. A line that stops being sung keeps its fill as it was
+  last drawn and dims as a whole while the next brightens and the list glides: before, the finished line
+  was swapped for a plain fully lit copy (a one-frame snap to white) and then faded. Lines timed by the
+  line only are lit whole, with the same glow.
+- Idle: while sweeping, the clock sleeps (in ms, `Step::still`) between words and after a line is sung
+  instead of waking every second display frame. Measured on the emulator (60 Hz): about 60 frames/s
+  while a word-timed line is sung with the rise on, nothing rendered while the lyrics are still or paused.
+- Check: a word-timed song (English and CJK), a duet, a song with backing vocals, reduced motion on,
+  and `dumpsys gfxinfo` while a line sweeps. Continuity is easiest to see with the app's "Animate
+  anyway" off and Android's animator scale at 5, the app started after setting it.
+- Status: **doing**
+
+### 21. A song that changes by itself — `PlayerScreen.kt` `SleeveCarousel` (`natural`), `Chrome.kt` `SwipeCarousel`
+
+- Was: the end of a song, gapless, a crossfade or an AutoMix switch dissolved the sleeve in place
+  (480 ms) and cut the now playing bar, where a skip slides the records.
+- Now: a step to the song either side slides the way a skip does - the record left goes out one side,
+  the new one comes in lifted from the other and settles - on the sleeve and on the bar. It starts
+  where the page changes song, which for a mix is where the incoming song becomes the louder
+  (nori-player's heard.rs), and the page's colour fade (420 ms) runs alongside. Decided while
+  composing, so the new song's first frame already has its record off the edge; counted in frames
+  (`settleByFrames`), so the slow frame that composes a new song slows the slide rather than skipping
+  it. Anything else (a new queue, a song tapped far down the list, covers not in hand, the player or
+  the bar out of sight) changes as before; `reduceMotion()` keeps the snap.
+- Check: AutoMix on, the player open, `tools/app.sh do "seek <ms>"` to 25 s before the end, record
+  through the switch: the old record stays whole until the switch, then slides out as the new one
+  slides in, once.
+- Status: **done**
+
 ## Decisions and traps
 
 - The owner rejected a sideways slide once because the pages faded while they slid, which read as
@@ -234,6 +323,6 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - `NavHost`'s default predictive-back transition scales the leaving page to 70 % over a page that is
   already fully drawn; always give `predictivePopEnterTransition`/`predictivePopExitTransition`.
 - Compose scales every animation by Android's animator duration scale; `Prefs.ignoreSystemMotion`
-  makes the app ignore that. Test with the emulator's scale at 1 (Developer options).
+  (on by default) makes the app ignore that. Test with the emulator's scale at 1 (Developer options).
 - Nothing here may tick while music plays with the screen off (`tools/bench.sh`); a transition that
   is over is over, and `PlayerLayer` skips a fully covered page.

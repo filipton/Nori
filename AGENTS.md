@@ -32,23 +32,81 @@ crates/look/    Rust, platform-free: how a page looks and moves. The colours a p
                 and redraw pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
 crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
                 decimal separator is handed in once), with Java's rounding.
-crates/core/    Rust, platform-free: the app's state, an rlib a desktop or terminal client links as it is
-                (package nori-core, lib `nori_core`). The Subsonic client and network policy (client.rs,
-                transport.rs, cache_policy.rs, stream.rs, library.rs), one SQLite/FTS5 database for the
-                whole app with every server's rows keyed by its id (db.rs), settings (settings.rs codec and
-                rules, settings_store.rs the live copy, settings_schema.rs every settings page, profiles.rs),
-                the queue the app plays (playlist.rs; the songs in it by id, queue.rs; the rules, rules.rs),
-                refilling it (autofill.rs), the offline bridge (bridge.rs), downloads (transfers.rs), the
-                stream cache's order (stream_cache.rs), stars, actions, menus, pages and every word the app
-                says (stars.rs, actions.rs, menus.rs, pages.rs, words.rs, fmt.rs), browsing and search
-                (browse.rs, search.rs), the player's stage constants (stage.rs), the car's browse tree
-                (car.rs), scrobbling, the transition planner (automix/planner.rs) and the engine's host
-                (automix/host.rs), the sound chain that follows the settings (dsp.rs), the ear's clock
-                (heard.rs), the streaming analyser (automix/store.rs). Plain Rust types in and out, no
-                JNI. Its uniffi exports sit behind the default `ffi` feature; `cargo build -p
-                nori-core --no-default-features` builds it without uniffi. Kotlin asks and draws;
-                the core decides, and reacts to its own state (a settings change reaches the planner
-                and the sound chain by itself).
+crates/core/    Rust, platform-free: the top of the app's state, an rlib a desktop or terminal client links
+                as it is (package nori-core, lib `nori_core`). It holds what ties the crates below together:
+                the `Core` a platform opens per server profile (lib.rs: the database handle, the server's
+                address, parsing the server's answers into the index) and the Subsonic `Client` over it
+                (client.rs), their calls into each domain - one file per domain named like the domain
+                crate's module, holding only the `impl Core`/`impl Client` blocks and the tests that need a
+                core (history.rs, playlist.rs, transfers.rs, ...) - the reads and their response cache
+                (cache_policy.rs), the covers worth fetching ahead (covers.rs), an album's moving cover
+                found in Apple Music's catalogue (motion.rs), the stage's constants
+                (stage.rs) and the few words that read the app's state (words.rs). It re-exports every
+                domain crate under the paths clients use (`nori_core::playlist`, `::settings_store`,
+                `::transfers`, `::Song`, ...). Depends on every crate below. Kotlin asks and draws; the
+                core decides, and reacts to its own state (a settings change reaches the planner and the
+                sound chain by itself). Each crate of the core keeps its uniffi exports behind an `ffi`
+                feature, on by default only here; `cargo build -p nori-core --no-default-features`, or any
+                domain crate built on its own, has no uniffi in it. Plain Rust types in and out, no JNI.
+crates/model/   Rust, platform-free: the shapes every part of the core shares (package nori-model): the
+                library's records as the server sends them, the index stores them and Kotlin gets them
+                (model.rs, with the player's own records described again for uniffi), the few words a record
+                carries about itself (lines.rs), the core's error (`CoreError`) and its log (alog.rs).
+                Depends on nori-player and nori-text.
+crates/db/      Rust, platform-free: the app's one SQLite/FTS5 database (package nori-db): its schema, opened
+                for one server's rows (`sid()`), the library index and its search, the database of the core
+                in use for the parts that run without one handed to them (`active`), and the one thread
+                that writes in the background (background.rs). Depends on nori-model.
+crates/words/   Rust, platform-free: every word the app says and every number it writes (package
+                nori-words): confirmations, labels and sentences (words.rs), times, decibels, sizes and
+                captions (fmt.rs). Depends on nori-model, nori-player and nori-text.
+crates/net/     Rust, platform-free: the Subsonic API below the client (package nori-net): request signing
+                and addresses (api.rs), the `Transport` a platform implements and what a failure means
+                (transport.rs), the profile, the writes and what they make stale (requests.rs), and the
+                audio's cache keys and the network the phone is on (stream.rs). Depends on nori-model.
+crates/library/ Rust, platform-free: the music library as the app shows it (package nori-library): play
+                history and the taste model (history.rs), mixes and the "For you" row (mixes.rs,
+                mixes/board.rs), smart playlists (smart.rs, smart/draft.rs), M3U (m3u.rs), browsing and
+                search (browse.rs, search.rs), this session's stars (stars.rs), how each page is laid out
+                (pages.rs, rows.rs), the song menus (menus.rs), the car's browse tree (car.rs) and the
+                repository's small decisions (library.rs). Depends on nori-model, nori-db, nori-words,
+                nori-net and nori-look.
+crates/automix/ Rust, platform-free: AutoMix over the app's database (package nori-automix): the analysis
+                store and the streaming analyser (store.rs), the transition planner the audio path asks
+                (planner.rs), the transition engine's host (host.rs), measuring ahead (ahead.rs) and where the
+                optional beat model's file is (beat_model.rs).
+                Depends on nori-model, nori-db and nori-player.
+crates/settings/ Rust, platform-free: the settings (package nori-settings): codec, defaults and rules
+                (settings.rs), the live copy kept in the app's database (settings_store.rs), every settings
+                page as data (settings_schema.rs), the lyrics services and which of them are asked
+                (lyrics_sources.rs), and what follows them by itself - the sound chain
+                (dsp.rs) and which streams the core's decoder takes (decoder.rs). Depends on nori-model,
+                nori-db, nori-words, nori-library (the settings search), nori-automix (a change reaches the
+                planner), nori-player and nori-look.
+crates/lyrics/  Rust, platform-free: lyrics (package nori-lyrics): the server's and the lyrics services' in
+                one shape with every word timed, backing vocals and duet sides (lyrics.rs); every format
+                the services answer in (formats.rs: lyricsfile, TTML, YRC, KRC, QRC and the cache's own;
+                json.rs; html.rs; each tested on a sample in testdata/); the sixteen services, asked
+                through the core's Transport (services.rs, LRCLIB's in lrclib.rs); asking them together,
+                ranked, bounded and remembered in the response cache (race.rs); and the lyrics page's
+                clock (look.rs). Depends on nori-model, nori-net, nori-words, nori-settings and nori-look.
+crates/devices/ Rust, platform-free: the output side (package nori-devices): the platform's output devices
+                as the player's and the ones known (outputs.rs), which sound each device gets (profiles.rs)
+                and the AutoEQ index (autoeq.rs). Depends on nori-model, nori-db, nori-net, nori-settings
+                and nori-player.
+crates/queue/   Rust, platform-free: the queue the app plays (package nori-queue): its list and order
+                (playlist.rs over nori-player's), the songs in it by id (queue.rs), how it moves and what
+                the controls do (rules.rs), refilling it and taking turns with what it picked lately
+                (autofill.rs), the offline bridge (bridge.rs), the
+                ear's song (heard.rs), counting plays (scrobble.rs) and what playing something means
+                (actions.rs). Depends on nori-model, nori-db, nori-net, nori-library, nori-automix,
+                nori-settings and nori-player.
+crates/transfers/ Rust, platform-free: what is kept on the device (package nori-transfers): downloads as
+                they run, what they say and which songs are downloaded (transfers.rs), and the stream
+                cache's order (stream_cache.rs). Depends on nori-model, nori-db, nori-words, nori-net,
+                nori-settings and nori-text.
+crates/perf/    Rust, platform-free: the perf recorder's bookkeeping (package nori-perf, perf_log.rs).
+                Depends on nori-model, nori-library, nori-settings, nori-devices, nori-player and nori-text.
 crates/engine/  Rust, platform-free: the whole player for a platform without one (package nori-engine):
                 songs loaded in bursts per `load_control` through a client's ByteSource, teed into the
                 stream cache (source.rs), demuxed with symphonia's format readers, opened off the engine's
@@ -56,10 +114,15 @@ crates/engine/  Rust, platform-free: the whole player for a platform without one
                 an MP4's gapless numbers from mp4.rs), the shared pipeline on one engine thread that
                 sleeps between bursts (engine.rs: ReplayGain, high quality output, idle release, device
                 changes), and a lock-free ring a sound card pulls from (output.rs: the AudioOutput trait
-                a client implements). library.rs says where songs are, store.rs keeps songs on disk (the
+                a client implements; a device opened per song's format for bit-perfect output). offload.rs
+                hands songs as packets to an output that decodes them itself (audio offload: gapless on
+                one track, minutes between top-ups); source.rs also plays live streams (internet radio,
+                ICY announcements). library.rs says where songs are, store.rs keeps songs on disk (the
                 stream cache and downloads), wav.rs renders to a file, and the `core` feature (core.rs)
                 plays the core's queue with its planner, settings, stream addresses and error run, and
-                runs downloads and AutoMix's measuring ahead from the core's bookkeeping.
+                runs downloads and AutoMix's measuring ahead from the core's bookkeeping; with the
+                `neural-beats` feature the measurer also runs Beat This! (tract) over the ends of the songs
+                coming up, a feature the app's builds leave out (`-PrustFeatures=neural-beats`).
                 tests/engine.rs checks it against sim.rs sample for sample; tests/core.rs over the core,
                 tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
@@ -82,8 +145,13 @@ crates/cli/     Rust, desktop: nori-cli, the terminal client that proves the spl
 crates/android/ Rust, Android only: the library the app loads (package nori-android, cdylib `norimusic`, so
                 libnorimusic.so): the core with its uniffi scaffolding, and the JNI doors with primitives
                 and direct buffers on every hot path. The scaffolding is JNI too: build.rs generates it
-                with uniffi-bindgen-kotlin-jni from the core's exports (the Kotlin in package
-                dev.nori.music.ffi and uniffi comes from crates/uniffi-bindgen), and JNI_OnLoad hands it
+                with uniffi-bindgen-kotlin-jni from the exports of the core and of every crate of it,
+                which this crate depends on directly with their `ffi` feature on (the Kotlin comes from
+                crates/uniffi-bindgen: nori-core's in package dev.nori.music.ffi, each other crate's in a
+                package of its own below it - dev.nori.music.ffi.model, .db, .words, .net, .library,
+                .automix, .settings, .lyrics, .devices, .queue, .transfers, .perf, as its uniffi.toml says -
+                and the runtime in package uniffi); a new crate of the core goes into build.rs's list,
+                this crate's dependencies and nori-core's `ffi` feature. JNI_OnLoad hands it
                 the JavaVM and the app's class loader. The doors are one module per group (decoder.rs, dsp.rs,
                 stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps written in
                 place - covers.rs - the cover loader, decoding into Bitmaps and calling Kotlin back -

@@ -47,8 +47,18 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.asAndroidPath
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.ClipOp
+import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.style.ResolvedTextDirection
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.runtime.mutableFloatStateOf
+import dev.nori.music.ffi.model.LyricWord
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextLayoutResult
@@ -69,35 +79,41 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.Load
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.model.LyricLine
 import dev.nori.music.look.CoverLook
 import androidx.compose.ui.graphics.ColorProducer
 import dev.nori.music.look.LyricsClock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
+private fun ease(t: Float): Float = t.coerceIn(0f, 1f).let { it * it * (3f - 2f * it) }
+
 /**
- * The part of a laid-out paragraph before [offset], as a clip into [path]: whole visual lines above, a
- * partial one at the boundary. The path is the line's own and is refilled, not made, on every frame.
+ * How far a sung word or syllable stands above its line, 0..1: it rises as it is sung (over at least the
+ * core's `lyricsRiseMinMs`, so a quick syllable does not jump) and settles back over `lyricsSettleMs` once
+ * it is done, so a finished line is flat again and nothing drops when the next line takes over.
  */
-private fun sungRegion(path: Path, layout: TextLayoutResult, offset: Float): Path {
-    path.reset()
-    val p = path.asAndroidPath()
-    val index = offset.toInt().coerceIn(0, layout.layoutInput.text.length)
-    val row = layout.getLineForOffset(index)
-    for (r in 0 until row) p.addRect(0f, layout.getLineTop(r), layout.size.width.toFloat(), layout.getLineBottom(r), android.graphics.Path.Direction.CCW)
-    val from = layout.getHorizontalPosition(index, true)
-    val next = (index + 1).coerceAtMost(layout.layoutInput.text.length)
-    val to = if (layout.getLineForOffset(next) == row) layout.getHorizontalPosition(next, true) else layout.getLineRight(row)
-    val x = from + (to - from) * (offset - index)
-    p.addRect(layout.getLineLeft(row), layout.getLineTop(row), x, layout.getLineBottom(row), android.graphics.Path.Direction.CCW)
-    return path
+private fun lift(w: LyricWord, ms: Long): Float {
+    if (ms <= w.startMs) return 0f
+    val up = ease((ms - w.startMs).toFloat() / maxOf(w.endMs - w.startMs, stage.lyricsRiseMinMs))
+    val down = if (ms <= w.endMs) 0f else ease((ms - w.endMs).toFloat() / stage.lyricsSettleMs)
+    return up * (1f - down)
+}
+
+/** How much a held note glows, 0..1: only one held for `lyricsHeldMs` or more, gathering while it is held and fading after. */
+private fun glow(w: LyricWord, ms: Long): Float {
+    val held = w.endMs - w.startMs
+    if (held < stage.lyricsHeldMs || ms <= w.startMs) return 0f
+    return if (ms < w.endMs) ease((ms - w.startMs).toFloat() / held) else 1f - ease((ms - w.endMs).toFloat() / stage.lyricsGlowFadeMs)
 }
 
 @Composable
 fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean) {
-    val load by vm.lyrics.collectAsStateWithLifecycle()
+    val loaded by vm.lyrics.collectAsStateWithLifecycle()
     val playerState by vm.state.collectAsStateWithLifecycle()
+    // Only the words of the song on the page: an answer for any other song (the one before, handed over
+    // as the panel opens, or still on its way out as the song changes) is the loader until the right
+    // one comes.
+    val load = loaded.of(playerState.current?.id, Load.Loading)
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val shown = LocalPlayerShown.current
@@ -123,7 +139,10 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
             label = "lyrics",
         ) { p ->
             when (p) {
-                is dev.nori.music.data.FoundLyrics -> LyricsBody(vm, p, playing)
+                // The words on their way out (a new song's, or its loader, took over) stay as they were
+                // left: the playhead is the next song's now, and following it jumped them back to the
+                // top in one frame while they faded.
+                is dev.nori.music.data.FoundLyrics -> LyricsBody(vm, p, playing, following = p === phase)
                 // In the middle, where "No lyrics" would be: it is waiting, not a line of words yet.
                 LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
@@ -140,7 +159,7 @@ private enum class LyricsPhase { LOADING, NONE }
 
 /** The words of one song, in time with it. */
 @Composable
-private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, playing: Boolean) {
+private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, playing: Boolean, following: Boolean) {
     val lyrics = found.lyrics
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
@@ -162,15 +181,36 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     // Keyed on the clock, so on the next song this loop times the new lines, not the old. One call per
     // look: the clock says what to draw, whether it changed, and how long to sleep - a number of display
     // frames while sweeping, otherwise until the next line takes over; never, for words that are not timed.
-    LaunchedEffect(playing, live, sweep, clock) {
-        var step = clock.at(vm.positionMs, sweep, force = true)
+    // The moment on screen and how far the lit line's backing vocals are sung, written with the frame:
+    // the words' rise and glow are drawn for the moment, which moves while the fill stands still.
+    var shownMs by remember(clock) { mutableLongStateOf(clock.shownMs()) }
+    // The same moment outside the snapshot system: a line looks at it while drawing to see whether any of
+    // its words still move, and only then reads [shownMs] and is redrawn as it changes.
+    val lastMs = remember(clock) { longArrayOf(clock.shownMs()) }
+    var backingSung by remember(clock) { mutableFloatStateOf(0f) }
+    val hasBacking = remember(lyrics) { lyrics.lines.any { it.backing.isNotEmpty() } }
+    // Words rise and glow as they are sung unless movement is reduced; then there is only the fill.
+    val lively = !reduceMotion()
+    LaunchedEffect(playing, live, sweep, lively, clock, following) {
+        if (!following) return@LaunchedEffect
+        var step = clock.at(vm.positionMs, sweep, lively, force = true)
         frame = LyricsClock.frame(step)
+        shownMs = clock.shownMs()
+        lastMs[0] = shownMs
+        if (hasBacking) backingSung = clock.backingSung()
         while (playing && live && isActive) {
             val wait = LyricsClock.wait(step)
             if (wait == 0) break
-            if (sweep) repeat(wait) { withFrameMillis { } } else delay(wait.toLong())
-            step = clock.at(vm.positionMs, sweep, force = false)
-            if (LyricsClock.redraw(step)) frame = LyricsClock.frame(step)
+            // Display frames while the fill moves; asleep between words and after a line is sung, when
+            // nothing would be drawn anyway.
+            if (sweep && !LyricsClock.still(step)) repeat(wait) { withFrameMillis { } } else delay(wait.toLong())
+            step = clock.at(vm.positionMs, sweep, lively, force = false)
+            if (LyricsClock.redraw(step)) {
+                frame = LyricsClock.frame(step)
+                shownMs = clock.shownMs()
+                lastMs[0] = shownMs
+                if (hasBacking) backingSung = clock.backingSung()
+            }
         }
     }
     val active by remember(clock) { derivedStateOf { LyricsClock.active(frame) } }
@@ -183,9 +223,13 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     val look = LocalLook.current
     val bright = remember(look) { ColorProducer { look.color(CoverLook.ON) } }
     val dim = remember(look) { ColorProducer { look.color(CoverLook.ON_35) } }
+    val moment = remember(clock) { { shownMs } }
+    val peek = remember(clock) { { lastMs[0] } }
     val translated = remember(look) { ColorProducer { look.color(CoverLook.ON_80) } }
     val accent = remember(look) { ColorProducer { look.color(CoverLook.ACCENT) } }
     val list = rememberLazyListState()
+    // Whether the song is a duet at all: only then does either side keep a lane clear.
+    val duet = remember(lyrics) { lyrics.lines.any { it.voice.toInt() == 1 } }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val third = with(LocalDensity.current) { (maxHeight / 3).roundToPx() }
         // The line being sung rests a third of the way down, and the list glides there. It used to call
@@ -258,7 +302,16 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                 },
         ) {
             itemsIndexed(lyrics.lines, key = { i, _ -> i }) { i, line ->
-                Column(Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(clock.tap(i)); frame = clock.shown() }.padding(vertical = 8.dp)) {
+                // In a duet the other voice sings from the right, and each side leaves a lane clear on the
+                // far side, so two singers read as a conversation rather than as one column.
+                val right = line.voice.toInt() == 1
+                val align = if (right) TextAlign.End else TextAlign.Start
+                Column(
+                    Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(clock.tap(i)); frame = clock.shown(); shownMs = clock.shownMs() }
+                        .padding(vertical = 8.dp)
+                        .padding(start = if (duet && right) DUET_LANE else 0.dp, end = if (duet && !right) DUET_LANE else 0.dp),
+                    horizontalAlignment = if (right) Alignment.End else Alignment.Start,
+                ) {
                     val weight = if (line.background) FontWeight.Normal else FontWeight.SemiBold
                     // Every line owns its brightness and always moves it *from wherever it is now*
                     // towards what it should be. An earlier version drove all lines from one shared
@@ -273,21 +326,48 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                         if (plain) strength.snapTo(target)
                         else strength.animateTo(target, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
                     }
+                    // Read in the draw phase: a fading line redraws, it does not recompose.
+                    val level = remember(strength) { { strength.value } }
+                    // How far the line and its backing vocals were last drawn sung, kept once it is no longer
+                    // the line sung: a finished line dims from exactly how it was left. Filling the rest of it
+                    // in first was the one-frame jump of a nearly sung line to fully lit.
+                    val held = remember(lyrics) { FloatArray(2) }
+                    val sungNow = sweep && i == active
                     when {
-                        !lyrics.synced -> LookText(line.text, bright, style = style)
-                        i == active && sweep -> SweepLine(line, style.copy(fontWeight = weight), dim, bright) { LyricsClock.sung(frame) }
-                        else -> {
-                            LookText(
-                                line.text, bright, style = style.copy(fontWeight = weight),
-                                // Read in the draw phase: a fading line redraws, it does not recompose.
-                                modifier = Modifier.graphicsLayer { alpha = strength.value },
+                        !lyrics.synced -> LookText(line.text, bright, style = style, textAlign = align)
+                        else -> SungText(
+                            line.text, if (sweep) line.words else emptyList(), style.copy(fontWeight = weight), bright, align, sweep && lively, level,
+                            when {
+                                sungNow -> { { LyricsClock.sung(frame).also { held[0] = it } } }
+                                sweep -> { { held[0] } }
+                                // Timed by the line only: the line lit is lit whole.
+                                else -> WHOLE
+                            },
+                            moment, peek,
+                        )
+                    }
+                    // Backing vocals sung over the line: smaller, under it, lit as they are sung, the way Apple
+                    // sets them. Kept inside the line, so the light never leaves the lead singer.
+                    if (line.backing.isNotEmpty()) {
+                        val backingStyle = style.copy(fontSize = style.fontSize * BACKING_SIZE, fontWeight = FontWeight.Normal)
+                        if (lyrics.synced) {
+                            SungText(
+                                line.backing, if (sweep) line.backingWords else emptyList(), backingStyle, translated, align, sweep && lively, level,
+                                when {
+                                    sungNow -> { { backingSung.also { held[1] = it } } }
+                                    sweep -> { { held[1] } }
+                                    else -> WHOLE
+                                },
+                                moment, peek, Modifier.padding(top = 2.dp),
                             )
+                        } else {
+                            LookText(line.backing, translated, style = backingStyle, textAlign = align, modifier = Modifier.padding(top = 2.dp))
                         }
                     }
                     // The translation follows its line's fade rather than switching on the moment the line
                     // is reached - otherwise it lit up a frame ahead of the words above it.
                     if (prefs.lyricsTranslation) line.translation?.let {
-                        LookText(it, translated, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.graphicsLayer { alpha = strength.value })
+                        LookText(it, translated, style = MaterialTheme.typography.bodyMedium, textAlign = align, modifier = Modifier.graphicsLayer { alpha = strength.value })
                     }
                 }
             }
@@ -376,23 +456,230 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
     }
 }
 
+/** A text laid out once, with the outline of each sung piece and its box, so drawing a frame makes nothing new. */
+private class Laid(val layout: TextLayoutResult, val pieces: Array<Path>) {
+    val boxes: Array<Rect> = Array(pieces.size) { pieces[it].getBounds() }
+}
+
 /**
- * The active line: drawn dim, then drawn again bright through a clip that ends where the singing is.
- * [sung] is read in the draw phase only, so a new frame redraws this one text and recomposes nothing.
+ * The brushes a sung text is drawn with, made once and moved rather than made again: the fill's soft edge
+ * (a gradient [FEATHER] wide, slid to where the singing is), a held note's light (a round gradient,
+ * scaled to the word) and the glow under the sung words. Each is made again only when its colour changes,
+ * which while a line is sung it does not.
+ */
+private class Brushes(private val feather: Float, private val blur: Float) {
+    private val move = android.graphics.Matrix()
+    private var edgeColour = 0
+    private var edgeRtl = false
+    private var edge: android.graphics.LinearGradient? = null
+    private var edgeBrush: Brush? = null
+    private var lightColour = 0
+    private var light: android.graphics.RadialGradient? = null
+    private var lightBrush: Brush? = null
+    private var glowColour = 0
+    private var glow: Shadow? = null
+
+    /** Bright before [x] and clear after it (the other way round for right-to-left), softly in between. */
+    fun edge(colour: Color, x: Float, rtl: Boolean): Brush {
+        val c = colour.toArgb()
+        val s = edge?.takeIf { c == edgeColour && rtl == edgeRtl } ?: run {
+            val clear = c and 0x00FFFFFF
+            android.graphics.LinearGradient(-feather / 2f, 0f, feather / 2f, 0f, if (rtl) clear else c, if (rtl) c else clear, android.graphics.Shader.TileMode.CLAMP)
+                .also { edge = it; edgeColour = c; edgeRtl = rtl; edgeBrush = ShaderBrush(it) }
+        }
+        move.setTranslate(x, 0f)
+        s.setLocalMatrix(move)
+        return edgeBrush ?: ShaderBrush(s)
+    }
+
+    /** A soft round light of [colour], [r] across from its middle at ([cx], [cy]). */
+    fun light(colour: Color, cx: Float, cy: Float, r: Float): Brush {
+        val c = colour.toArgb()
+        val s = light?.takeIf { c == lightColour } ?: run {
+            android.graphics.RadialGradient(0f, 0f, 1f, c, c and 0x00FFFFFF, android.graphics.Shader.TileMode.CLAMP)
+                .also { light = it; lightColour = c; lightBrush = ShaderBrush(it) }
+        }
+        move.setScale(r, r)
+        move.postTranslate(cx, cy)
+        s.setLocalMatrix(move)
+        return lightBrush ?: ShaderBrush(s)
+    }
+
+    /**
+     * The sung words' glow: their own shape, blurred, in [colour]. A shadow colour that is not opaque keeps
+     * its own alpha, and drawn with the fill's soft edge it follows that edge, so the glow gathers behind
+     * the singing rather than running ahead of it.
+     */
+    fun glow(colour: Color): Shadow {
+        val c = colour.toArgb()
+        return glow?.takeIf { c == glowColour } ?: Shadow(colour, androidx.compose.ui.geometry.Offset.Zero, blur).also { glow = it; glowColour = c }
+    }
+}
+
+/**
+ * Timed text lit as it is sung - a line, or its backing vocals - the way Apple's lyrics are. [level] is how
+ * lit the line is (the core's strength, moving between lines): sung words are that bright and glow softly,
+ * unsung ones no brighter than the core's `lyricsUnsung`, so the line being sung is white where it has
+ * been sung, a dimmer white ahead, and the other lines dimmer still. As a line stops being sung it keeps
+ * its fill and dims as a whole, and the next one brightens the same way: nothing about either changes in
+ * one frame. [sung] is how far the singing is (a UTF-16 offset with a fraction; past the end for a line lit
+ * whole), with an edge that fades over [FEATHER] instead of cutting through the letter.
+ *
+ * When [lively], each word or syllable rises a little as it is sung and settles once it is done, and a
+ * held note swells slightly and glows while it is held, all at the moment [ms]; [peek] is the same moment
+ * read without being watched, so a line whose words are all still does not redraw as the moment moves.
+ * Everything is read in the draw phase, so a frame redraws this one text and recomposes nothing. A piece
+ * at rest is drawn with the rest of the text; only the ones moving are drawn on their own, clipped to
+ * their letters, so a line costs a draw or two more a frame while it is sung and none once it is still.
  */
 @Composable
-private fun SweepLine(line: LyricLine, style: TextStyle, dim: ColorProducer, bright: ColorProducer, sung: () -> Float) {
-    var layout by remember(line) { mutableStateOf<TextLayoutResult?>(null) }
-    val clip = remember { Path() }
+private fun SungText(
+    text: String, words: List<LyricWord>, style: TextStyle, bright: ColorProducer, align: TextAlign,
+    lively: Boolean, level: () -> Float, sung: () -> Float, ms: () -> Long, peek: () -> Long, modifier: Modifier = Modifier,
+) {
+    var laid by remember(text, words) { mutableStateOf<Laid?>(null) }
+    val density = LocalDensity.current
+    val rise = with(density) { RISE.toPx() }
+    val spread = with(density) { GLOW_SPREAD.toPx() }
+    val blur = with(density) { SUNG_GLOW.toPx() }
+    val brushes = remember(density) { Brushes(with(density) { FEATHER.toPx() }, blur) }
+    // The pieces moving on this frame, gathered into one outline the rest of the text is drawn around.
+    val moving = remember { Path() }
     LookText(
-        line.text, dim, style = style, onTextLayout = { layout = it },
-        modifier = Modifier.drawWithContent {
-            drawContent()
-            val l = layout ?: return@drawWithContent
-            clipPath(sungRegion(clip, l, sung())) { drawText(l, color = bright()) }
+        text, bright, style = style, textAlign = align,
+        onTextLayout = { l ->
+            val n = text.length
+            laid = Laid(l, Array(words.size) { k -> l.getPathForRange(words[k].start.toInt().coerceIn(0, n), words[k].end.toInt().coerceIn(0, n)) })
+        },
+        modifier = modifier.drawWithContent {
+            // Laid out before it is drawn; nothing is drawn in the colour the plain text would have.
+            val d = laid ?: return@drawWithContent
+            val l = d.layout
+            val colour = bright()
+            val s = level()
+            // Unsung words at the lower of the line's strength and the core's; sung ones drawn over them,
+            // as much as it takes for the two together to come to the line's strength.
+            val low = minOf(s, stage.lyricsUnsung)
+            val over = if (s > low) (s - low) / (1f - low) else 0f
+            val base = colour.copy(alpha = colour.alpha * low)
+            val lit = colour.copy(alpha = colour.alpha * over)
+            // Only a line lit above its unsung words asks how far it is sung.
+            val at = if (over > 0f) sung() else 0f
+            val shine = if (over > 0f) brushes.glow(colour.copy(alpha = colour.alpha * SUNG_GLOW_ALPHA * over)) else null
+            if (!lively || words.isEmpty() || !stirring(words, peek())) {
+                drawSung(l, at, base, lit, shine, spread, brushes)
+                return@drawWithContent
+            }
+            val now = ms()
+            moving.reset()
+            var k = 0
+            while (k < words.size) {
+                if (lift(words[k], now) > 0f || glow(words[k], now) > 0f) moving.addPath(d.pieces[k])
+                k++
+            }
+            clipPath(moving, ClipOp.Difference) { drawSung(l, at, base, lit, shine, spread, brushes) }
+            // Each moving piece on its own, moved as it is sung, clipped to the piece in its own moved
+            // space, so it carries its letters and nothing of its neighbours'. Its glow is the one drawn
+            // with the rest: only the letters are clipped out of that, not the light around them.
+            k = 0
+            while (k < words.size) {
+                val w = words[k]
+                val up = lift(w, now)
+                val g = glow(w, now)
+                if (up > 0f || g > 0f) {
+                    val piece = d.pieces[k]
+                    val box = d.boxes[k]
+                    withTransform({
+                        translate(0f, -up * rise)
+                        if (g > 0f) scale(1f + SWELL * g, 1f + SWELL * g, box.center)
+                    }) {
+                        if (g > 0f) halo(box, g, lit, spread, brushes)
+                        clipPath(piece) { drawSung(l, at, base, lit, null, spread, brushes) }
+                    }
+                }
+                k++
+            }
         },
     )
 }
+
+/** Whether any of [words] rises, settles or glows at [ms]. */
+private fun stirring(words: List<LyricWord>, ms: Long): Boolean {
+    var k = 0
+    while (k < words.size) {
+        if (lift(words[k], ms) > 0f || glow(words[k], ms) > 0f) return true
+        k++
+    }
+    return false
+}
+
+/**
+ * [l] in [base], and in [lit] over it as far as [at] (a UTF-16 offset with a fraction), with [glow] under
+ * the lit part. The rows above are lit whole; on the row being sung the light fades out over the feather
+ * centred on where the singing is, which is what makes a fill look sung rather than wiped. A right-to-left
+ * row fades the other way. The clips reach [spread] past the text where nothing else is, so the glow is
+ * not cut off at the line's edges.
+ */
+private fun DrawScope.drawSung(l: TextLayoutResult, at: Float, base: Color, lit: Color, glow: Shadow?, spread: Float, brushes: Brushes) {
+    if (base.alpha > 0f) drawText(l, color = base)
+    val n = l.layoutInput.text.length
+    if (lit.alpha <= 0f || at <= 0f || n == 0) return
+    if (at >= n) {
+        drawText(l, color = lit, shadow = glow)
+        return
+    }
+    val index = at.toInt().coerceIn(0, n - 1)
+    val row = l.getLineForOffset(index)
+    val from = l.getHorizontalPosition(index, true)
+    val to = if (index + 1 < n && l.getLineForOffset(index + 1) == row) l.getHorizontalPosition(index + 1, true) else l.getLineRight(row)
+    val x = from + (to - from) * (at - index)
+    val top = l.getLineTop(row)
+    if (row > 0) clipRect(-spread, -spread, size.width + spread, top) { drawText(l, color = lit, shadow = glow) }
+    val rtl = l.getParagraphDirection(index) == ResolvedTextDirection.Rtl
+    val bottom = if (row == l.lineCount - 1) size.height + spread else l.getLineBottom(row)
+    // The edge is made opaque and faded by the draw's alpha, so a line dimming does not make it again.
+    clipRect(-spread, if (row == 0) -spread else top, size.width + spread, bottom) {
+        drawText(l, brush = brushes.edge(lit.copy(alpha = 1f), x, rtl), alpha = lit.alpha, shadow = glow)
+    }
+}
+
+/**
+ * A held note's light: a soft oval of the text's own colour under the word, wider than it is tall, so the
+ * word seems to glow without its letters being cut by the clip that draws them.
+ */
+private fun DrawScope.halo(box: Rect, g: Float, colour: Color, spread: Float, brushes: Brushes) {
+    val r = box.height / 2f + spread / 2f
+    val sx = ((box.width + spread * 2f) / (r * 2f)).coerceAtLeast(1f)
+    withTransform({ scale(sx, 1f, box.center) }) {
+        drawCircle(brushes.light(colour, box.center.x, box.center.y, r), radius = r, center = box.center, alpha = GLOW_ALPHA * g)
+    }
+}
+
+/** The glow under sung words: how far it blurs, and how strong it is on a line fully lit. */
+private val SUNG_GLOW = 7.dp
+private const val SUNG_GLOW_ALPHA = 0.5f
+
+/** How far a line timed by the line only is sung once it is lit: all of it. */
+private val WHOLE: () -> Float = { Float.MAX_VALUE }
+
+/** How wide the soft edge of the fill is. */
+private val FEATHER = 24.dp
+
+/** How far a word rises as it is sung. */
+private val RISE = 2.dp
+
+/** How much a held note swells at its brightest. */
+private const val SWELL = 0.04f
+
+/** How strong a held note's light is at its middle, and how far past the word it reaches. */
+private const val GLOW_ALPHA = 0.22f
+private val GLOW_SPREAD = 14.dp
+
+/** Backing vocals, under their line: this much of its size. */
+private const val BACKING_SIZE = 0.72f
+
+/** In a duet, the lane each side leaves clear on the far side. */
+private val DUET_LANE = 48.dp
 
 /** Ease in and out, soft at both ends, the curve iOS uses for its own scrolling transitions. */
 private val LyricEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)

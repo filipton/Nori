@@ -37,6 +37,10 @@ const GAMMA: f32 = 1000.0;
 pub const CHROMA_EVERY: usize = 8;
 const CHROMA_LO_HZ: f64 = 100.0;
 const CHROMA_HI_HZ: f64 = 2500.0;
+/// Resolution of the whole-song pitch profile the key is read from: 10 cents.
+pub const PITCH_SLOTS: usize = 120;
+/// Peaks below this are too coarsely resolved by the long FFT (5.4 Hz bins) to say where A is.
+const TUNING_LO_HZ: f64 = 250.0;
 /// Where an onset frame sits in time relative to the end of its window, in hops. Measured on click tracks
 /// (`beat_times_line_up_with_the_clicks`): log-compressed flux peaks as soon as a click enters the window.
 const FRAME_LAG_HOPS: f64 = 1.28;
@@ -62,6 +66,12 @@ pub struct Features {
     pub chroma: Vec<[f32; 12]>,
     pub chroma_t0: f64,
     pub chroma_step: f64,
+    /// The whole song's pitch-class magnitudes in 10-cent slots (slot `s` is `s / 10` semitones above C at
+    /// A = 440 Hz), summed over every chroma frame: what the key is read from once the tuning is known.
+    pub pitch: Vec<f64>,
+    /// Where the spectral peaks sit between semitones: magnitude-weighted sums of cos and sin of 2π times
+    /// the peak's distance from the nearest equal-tempered pitch. Their angle is the tuning.
+    pub tuning_cs: (f64, f64),
     /// 100 ms mean squares at the native rate, K-weighted and plain.
     pub blocks_k: Vec<f32>,
     pub blocks_raw: Vec<f32>,
@@ -100,6 +110,11 @@ pub struct Analyzer {
     prev_low: [f32; 8],
     level: [f32; BANDS],
     chroma_map: Vec<(u32, u8, f32)>,
+    /// Chroma bin -> 10-cent pitch-class slot.
+    pitch_map: Vec<(u32, u8)>,
+    /// Long-FFT bins searched for tuning peaks, and a scratch row of their magnitudes.
+    tune_bins: (usize, usize),
+    mags: Vec<f32>,
     meter: Meter,
     samples: u64,
     f: Features,
@@ -146,12 +161,14 @@ impl Analyzer {
 
         let cbin_hz = sr / cn as f64;
         let mut chroma_map = Vec::new();
+        let mut pitch_map = Vec::new();
         for i in 1..cn / 2 {
             let f = i as f64 * cbin_hz;
             if !(CHROMA_LO_HZ..=CHROMA_HI_HZ).contains(&f) {
                 continue;
             }
             let p = 69.0 + 12.0 * (f / 440.0).log2();
+            pitch_map.push((i as u32, ((p * 10.0).round() as i64).rem_euclid(PITCH_SLOTS as i64) as u8));
             let d = (p - p.round()).abs();
             let w = (1.0 - 2.0 * d).max(0.0);
             if w > 0.0 {
@@ -162,6 +179,7 @@ impl Analyzer {
         // Sized for the whole song, with room for a length that was a little off, so that nothing grows
         // (and reallocates) while it plays. Unknown, it is sized for a long song.
         let expected_ms = if expected_ms == 0 { UNKNOWN_LENGTH_MS } else { expected_ms + expected_ms / 20 + 10_000 };
+        let tune_bins = (((TUNING_LO_HZ / cbin_hz).ceil() as usize).max(2), ((CHROMA_HI_HZ / cbin_hz) as usize).min(cn / 2 - 2));
         let frames = (expected_ms as f64 / 1000.0 / HOP_S) as usize + 16;
         let blocks = (expected_ms / 100) as usize + 4;
         Analyzer {
@@ -193,6 +211,9 @@ impl Analyzer {
             prev_low: [0.0; 8],
             level: [0.0; BANDS],
             chroma_map,
+            pitch_map,
+            tune_bins,
+            mags: vec![0.0; cn / 2],
             meter: Meter::new(rate, blocks),
             samples: 0,
             f: Features {
@@ -208,6 +229,8 @@ impl Analyzer {
                 chroma: Vec::with_capacity(frames / CHROMA_EVERY + 2),
                 chroma_t0: 0.0,
                 chroma_step: (hop * CHROMA_EVERY) as f64 / sr,
+                pitch: vec![0.0; PITCH_SLOTS],
+                tuning_cs: (0.0, 0.0),
                 blocks_k: Vec::new(),
                 blocks_raw: Vec::new(),
                 duration_s: 0.0,
@@ -324,13 +347,49 @@ impl Analyzer {
             }
             Self::window_into(&self.ring, self.written, &self.cwin, &mut self.cbuf);
             self.cfft.process_with_scratch(&mut self.cbuf, &mut self.scratch);
+            let (lo, hi) = (self.pitch_map.first().map_or(0, |m| m.0 as usize), self.pitch_map.last().map_or(0, |m| m.0 as usize));
+            for i in lo.min(self.tune_bins.0 - 1)..=hi.max(self.tune_bins.1 + 1).min(self.mags.len() - 1) {
+                self.mags[i] = self.cbuf[i].norm() * self.camp_norm;
+            }
             let mut c = [0f32; 12];
             for &(bin, pc, w) in &self.chroma_map {
-                c[pc as usize] += w * self.cbuf[bin as usize].norm() * self.camp_norm;
+                c[pc as usize] += w * self.mags[bin as usize];
             }
             self.f.chroma.push(c);
+            for &(bin, slot) in &self.pitch_map {
+                self.f.pitch[slot as usize] += self.mags[bin as usize] as f64;
+            }
+            self.tuning_peaks();
         }
         self.hops += 1;
+    }
+
+    /// Adds this chroma frame's spectral peaks to the tuning estimate: each clear peak, its frequency refined
+    /// by a parabola through the log magnitudes, votes for how far above or below the equal-tempered grid it
+    /// sits, weighted by its magnitude.
+    fn tuning_peaks(&mut self) {
+        let (lo, hi) = self.tune_bins;
+        let m = &self.mags;
+        let floor = 0.05 * m[lo..=hi].iter().fold(0f32, |a, v| a.max(*v));
+        if floor <= 1e-7 {
+            return;
+        }
+        let cbin_hz = self.sr / self.cn as f64;
+        let (mut cs, mut sn) = (0.0, 0.0);
+        for i in lo..=hi {
+            if m[i] > floor && m[i] > m[i - 1] && m[i] >= m[i + 1] {
+                let (a, b, c) = ((m[i - 1] as f64).max(1e-12).ln(), (m[i] as f64).ln(), (m[i + 1] as f64).max(1e-12).ln());
+                let d = a - 2.0 * b + c;
+                let delta = if d.abs() < 1e-12 { 0.0 } else { (0.5 * (a - c) / d).clamp(-0.5, 0.5) };
+                let semis = 12.0 * ((i as f64 + delta) * cbin_hz / 440.0).log2();
+                let frac = semis - semis.round();
+                let w = m[i] as f64;
+                cs += w * (2.0 * std::f64::consts::PI * frac).cos();
+                sn += w * (2.0 * std::f64::consts::PI * frac).sin();
+            }
+        }
+        self.f.tuning_cs.0 += cs;
+        self.f.tuning_cs.1 += sn;
     }
 
     /// Everything measured so far. The analyser is left empty and can be fed again from the start.
@@ -351,6 +410,8 @@ impl Analyzer {
                 chroma: Vec::new(),
                 chroma_t0: 0.0,
                 chroma_step,
+                pitch: vec![0.0; PITCH_SLOTS],
+                tuning_cs: (0.0, 0.0),
                 blocks_k: Vec::new(),
                 blocks_raw: Vec::new(),
                 duration_s: 0.0,
@@ -372,5 +433,7 @@ impl Analyzer {
             v.clear();
         }
         self.f.chroma.clear();
+        self.f.pitch.iter_mut().for_each(|v| *v = 0.0);
+        self.f.tuning_cs = (0.0, 0.0);
     }
 }

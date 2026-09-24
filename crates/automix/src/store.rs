@@ -13,11 +13,12 @@ const COLUMNS: &str = "song_id, analysis_version, duration_ms, bpm, bpm_confiden
      downbeat_confidence, lufs, key, key_confidence, silence_start_ms, silence_end_ms, mixramp_start_ms, mixramp_end_ms, \
      intro_end_ms, outro_start_ms, outro_vocal, intro_vocal, outro_centroid, intro_centroid, analysed_ms, \
      outro_bpm, outro_bpm_confidence, outro_beat_offset_ms, outro_stability, outro_downbeat_phase, \
-     intro_bpm, intro_bpm_confidence, intro_beat_offset_ms, intro_stability, intro_downbeat_phase";
+     intro_bpm, intro_bpm_confidence, intro_beat_offset_ms, intro_stability, intro_downbeat_phase, beats_per_bar, \
+     drop_ms, drop_runup_vocal, drop_vocal, exit_ms, gap_ms, gap_end_ms, exit_vocal, drop_runup_tonal_db, intro_beats_per_bar, outro_beats_per_bar, intro_grid_source, outro_grid_source";
 
 pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
     c.prepare_cached(&format!(
-        "INSERT OR REPLACE INTO track_analysis(server, {COLUMNS}) VALUES(sid(), ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33)"
+        "INSERT OR REPLACE INTO track_analysis(server, {COLUMNS}) VALUES(sid(), ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,?37,?38,?39,?40,?41,?42,?43,?44,?45,?46)"
     ))?
     .execute(params![
         a.song_id,
@@ -52,7 +53,20 @@ pub fn put(c: &Connection, a: &TrackAnalysis) -> rusqlite::Result<()> {
         a.intro_bpm_confidence,
         a.intro_beat_offset_ms,
         a.intro_stability,
-        a.intro_downbeat_phase
+        a.intro_downbeat_phase,
+        a.beats_per_bar,
+        a.drop_ms,
+        a.drop_runup_vocal,
+        a.drop_vocal,
+        a.exit_ms,
+        a.gap_ms,
+        a.gap_end_ms,
+        a.exit_vocal,
+        a.drop_runup_tonal_db,
+        a.intro_beats_per_bar,
+        a.outro_beats_per_bar,
+        a.intro_grid_source,
+        a.outro_grid_source
     ])
     .map(|_| ())
 }
@@ -94,9 +108,46 @@ pub fn get(c: &Connection, song_id: &str) -> rusqlite::Result<Option<TrackAnalys
                 intro_beat_offset_ms: r.get(30).unwrap_or(0.0),
                 intro_stability: r.get(31).unwrap_or(0.0),
                 intro_downbeat_phase: r.get(32).unwrap_or(0),
+                beats_per_bar: r.get(33).unwrap_or(0),
+                drop_ms: r.get(34).unwrap_or(0),
+                drop_runup_vocal: r.get(35).unwrap_or(0.0),
+                drop_vocal: r.get(36).unwrap_or(0.0),
+                exit_ms: r.get(37).unwrap_or(0),
+                gap_ms: r.get(38).unwrap_or(0),
+                gap_end_ms: r.get(39).unwrap_or(0),
+                exit_vocal: r.get(40).unwrap_or(0.0),
+                drop_runup_tonal_db: r.get(41).unwrap_or(0.0),
+                intro_beats_per_bar: r.get(42).unwrap_or(0),
+                outro_beats_per_bar: r.get(43).unwrap_or(0),
+                intro_grid_source: r.get(44).unwrap_or(0),
+                outro_grid_source: r.get(45).unwrap_or(0),
             })
         })
         .optional()
+}
+
+/// Stores a fresh classical analysis without losing what Beat This! already found in the same file: its grids stay
+/// at the ends where it was sure, and where it was not, the row still says it has looked. A song measured again
+/// (a new analysis version, or the playback tap and the measurer both finishing it) does not need the model again.
+/// Returns the row as stored.
+pub fn put_measured(c: &Connection, mut a: TrackAnalysis) -> rusqlite::Result<TrackAnalysis> {
+    if let Some(old) = get(c, &a.song_id)? {
+        super::beats::carry(&old, &mut a);
+    }
+    put(c, &a)?;
+    Ok(a)
+}
+
+/// Which of `ids` have a current analysis with an end the beat model has not looked at yet, in the order given.
+/// Songs with no current analysis are left out: they need measuring first.
+pub fn neural_missing(c: &Connection, ids: &[String]) -> rusqlite::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for id in ids {
+        if get(c, id)?.is_some_and(|r| r.analysis_version >= ANALYSIS_VERSION && super::beats::needs_model(&r)) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// The ids with no row, or a row from an older analysis version, in the order given.

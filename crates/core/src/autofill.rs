@@ -1,7 +1,7 @@
 //! Refilling the queue as the client's calls: the songs or albums fetched from the server. When to fetch
 //! and what to ask for are nori-queue's.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::cache_policy::{Page, Read};
 use crate::client::Client;
@@ -104,26 +104,55 @@ impl Client {
     /// is passed over, so an evening moves on rather than playing the same record twice. A single is an
     /// album as far as the server is concerned, and stopping the evening on one track is not what
     /// "carry on with albums" means: the first record with a side to it wins, and a short one is only
-    /// taken if nothing else is on offer.
+    /// taken if nothing else is on offer. The records picked or played lately go to the back, so the
+    /// same single does not lead to the same album every time (see nori-queue's `rank`).
     async fn next_album(&self, seed: &Song, basis: i32, queued: &HashSet<&str>, played: &HashSet<String>) -> Vec<Song> {
         let candidates = self.album_candidates(seed, basis).await.unwrap_or_default();
+        let pool: Vec<String> = candidates.into_iter().filter(|a| seed.album_id.as_ref() != Some(a) && !played.contains(a)).collect();
+        let ranked = self.turns(Picked::Album, pool);
         let mut short = Vec::new();
-        for pick in candidates.into_iter().filter(|a| seed.album_id.as_ref() != Some(a) && !played.contains(a)).take(ALBUM_TRIES) {
+        let mut short_id = None;
+        for pick in ranked.into_iter().take(ALBUM_TRIES) {
             let songs: Vec<Song> = self
-                .songs(Read::AlbumSongs { id: pick })
+                .songs(Read::AlbumSongs { id: pick.clone() })
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|s| !queued.contains(s.id.as_str()) && !s.is_external)
                 .collect();
             if songs.len() >= ALBUM_MIN {
+                self.picked(Picked::Album, &[pick]);
                 return songs;
             }
             if songs.len() > short.len() {
                 short = songs;
+                short_id = Some(pick);
             }
         }
+        if let Some(id) = short_id {
+            self.picked(Picked::Album, &[id]);
+        }
         short
+    }
+
+    /// `candidates` ranked so that what was picked or played lately comes last; as they are when the
+    /// database will not say.
+    fn turns(&self, kind: Picked, candidates: Vec<String>) -> Vec<String> {
+        let c = self.core.db.lock();
+        let now = crate::db::now_ms();
+        let used = match kind {
+            Picked::Album => album_use(&c, now),
+            Picked::Songs => song_use(&c, now),
+        };
+        match used {
+            Ok(used) => rank(candidates, &used, now, seed_now()),
+            Err(_) => candidates,
+        }
+    }
+
+    /// Remembers what was just queued, so the next refill takes turns with it.
+    fn picked(&self, kind: Picked, ids: &[String]) {
+        let _ = note(&self.core.db.lock(), kind, ids, crate::db::now_ms());
     }
 }
 
@@ -150,13 +179,14 @@ impl Client {
             let played: HashSet<String> = queue::queue_albums(ids.clone()).into_iter().collect();
             self.next_album(&seed, basis, &queued, &played).await
         } else {
-            self.next_songs(&seed, basis)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|s| !queued.contains(s.id.as_str()) && !s.is_external)
-                .take(SONGS)
-                .collect()
+            // The songs picked or played lately go to the back, as the albums do; the similar and
+            // same-artist lists come back in the same order every time.
+            let offered: Vec<Song> = self.next_songs(&seed, basis).await.unwrap_or_default().into_iter().filter(|s| !queued.contains(s.id.as_str()) && !s.is_external).collect();
+            let order = self.turns(Picked::Songs, offered.iter().map(|s| s.id.clone()).collect());
+            let mut by_id: HashMap<String, Song> = offered.into_iter().map(|s| (s.id.clone(), s)).collect();
+            let fresh: Vec<Song> = order.into_iter().filter_map(|id| by_id.remove(&id)).take(SONGS).collect();
+            self.picked(Picked::Songs, &fresh.iter().map(|s| s.id.clone()).collect::<Vec<_>>());
+            fresh
         };
         // Kept for the queue they are about to join, so the platform does not hand them straight back.
         queue::queue_register(fresh.clone());
@@ -190,15 +220,35 @@ pub(crate) mod tests {
         queue::queue_register(vec![song("af-seed", "al0"), song("af-q", "al0")]);
         fake.answer(&songs_json(&[("af-q", "x"), ("s2", "x"), ("s1", "y")]));
         let _g = crate::playlist::tests::hold(&["af-seed", "af-q"], 0);
+        // s1 was queued by the last refill: it takes its turn after s2.
+        note(&c.core.db.lock(), Picked::Songs, &["s1".to_string()], crate::db::now_ms()).unwrap();
         let got = block(c.autofill_as(0, 0));
         assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2", "s1"]);
         assert!(fake.asked.lock()[0].0.contains("getSimilarSongs2"));
+        let used = song_use(&c.core.db.lock(), crate::db::now_ms()).unwrap();
+        assert!(used.contains_key("s1") && used.contains_key("s2"), "what was queued is remembered");
+    }
+
+    #[test]
+    fn an_album_picked_lately_waits_its_turn() {
+        let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
+        queue::queue_register(vec![song("af3-seed", "mine")]);
+        note(&c.core.db.lock(), Picked::Album, &["first".to_string()], crate::db::now_ms()).unwrap();
+        fake.answer(&songs_json(&[("x1", "first"), ("x2", "second")]));
+        fake.answer(&album_json("second", &["b1", "b2", "b3"]));
+        let _g = crate::playlist::tests::hold(&["af3-seed"], 0);
+        let got = block(c.autofill_as(ALBUMS, 0));
+        assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["b1", "b2", "b3"]);
+        let used = album_use(&c.core.db.lock(), crate::db::now_ms()).unwrap();
+        assert!(used["second"] >= used["first"], "the album queued is the one picked last");
     }
 
     #[test]
     fn an_album_prefers_one_with_a_side_to_it_and_skips_the_seeds() {
         let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
         queue::queue_register(vec![song("af2-seed", "mine")]);
+        // The full record was picked a while ago, so the single is tried first and passed over.
+        note(&c.core.db.lock(), Picked::Album, &["record".to_string()], crate::db::now_ms() - 1).unwrap();
         // Similar songs from the seed's own album, a single and a full record.
         fake.answer(&songs_json(&[("x1", "mine"), ("x2", "single"), ("x3", "record")]));
         fake.answer(&album_json("single", &["t1"]));

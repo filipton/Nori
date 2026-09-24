@@ -121,6 +121,10 @@ pub const REPLAN: u32 = 4;
 /// chain (`dsp::settings_changed`) follows them by itself; a player that keeps its own (nori-engine) is
 /// handed them. Only a change in which parts may run is [`APPLY_AUDIO`] as well.
 pub const SOUND: u32 = 8;
+/// The fades on play, pause and switches, or high quality output. The platform's own player reads them
+/// where it uses them; one that keeps its own copy (nori-engine) is handed them, or it went on with the
+/// ones it started with until the app was started again.
+pub const PLAYER: u32 = 16;
 
 /// What a change from `a` to `b` asks of the player.
 fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
@@ -133,6 +137,7 @@ fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
     let sound = (a.eq_enabled, a.mono, a.limiter, a.balance, a.crossfeed_db, a.eq_preamp_db, a.limiter_threshold_db, &a.eq_bands)
         != (b.eq_enabled, b.mono, b.limiter, b.balance, b.crossfeed_db, b.eq_preamp_db, b.limiter_threshold_db, &b.eq_bands);
     let gain = (a.replay_gain, a.preamp_db, a.untagged_gain_db) != (b.replay_gain, b.preamp_db, b.untagged_gain_db);
+    let player = (a.fade_ms, a.hi_res) != (b.fade_ms, b.hi_res);
     let plan = (
         a.auto_mix,
         a.crossfade_sec,
@@ -158,11 +163,15 @@ fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
         b.crossfade_keep_albums,
         b.replay_gain,
     );
-    (if audio { APPLY_AUDIO } else { 0 }) | (if gain { APPLY_GAIN } else { 0 }) | (if plan { REPLAN } else { 0 }) | (if sound { SOUND } else { 0 })
+    (if audio { APPLY_AUDIO } else { 0 })
+        | (if gain { APPLY_GAIN } else { 0 })
+        | (if plan { REPLAN } else { 0 })
+        | (if sound { SOUND } else { 0 })
+        | (if player { PLAYER } else { 0 })
 }
 
 /// The settings changed; kept now and written on the core's background thread. Returns what the
-/// platform's player has to apply again ([`APPLY_AUDIO`], [`APPLY_GAIN`], [`REPLAN`], [`SOUND`]); 0 for a change
+/// platform's player has to apply again ([`APPLY_AUDIO`], [`APPLY_GAIN`], [`REPLAN`], [`SOUND`], [`PLAYER`]); 0 for a change
 /// only screens care about.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_put(prefs: StoredPrefs) -> u32 {
@@ -312,6 +321,7 @@ pub fn settings_sound_tool(tool: SoundTool) -> Result<Option<SoundChange>, Sound
 /// What in the core follows the settings by itself, told at once.
 fn changed(prefs: &StoredPrefs) {
     nori_automix::planner::settings_changed(prefs.transition_prefs());
+    nori_automix::beat_model::switched(prefs.auto_mix_better_beats);
     crate::dsp::settings_changed(prefs);
 }
 
@@ -360,6 +370,9 @@ mod tests {
         assert_eq!(effects(&a, &StoredPrefs { replay_gain: 1, ..a.clone() }), APPLY_GAIN | REPLAN);
         assert_eq!(effects(&a, &StoredPrefs { crossfade_sec: 6, ..a.clone() }), APPLY_AUDIO | REPLAN);
         assert_eq!(effects(&a, &StoredPrefs { auto_mix_bass_swap: !a.auto_mix_bass_swap, ..a.clone() }), REPLAN);
+        // Read once when the player started, these went unheard until the app was started again.
+        assert_eq!(effects(&a, &StoredPrefs { fade_ms: a.fade_ms + 300, ..a.clone() }), PLAYER, "the fades");
+        assert_eq!(effects(&a, &StoredPrefs { hi_res: !a.hi_res, ..a.clone() }), PLAYER, "high quality output");
     }
 
     #[test]

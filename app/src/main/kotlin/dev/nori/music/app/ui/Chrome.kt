@@ -311,6 +311,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                 next = state.queue.getOrNull(state.nextIndex)?.takeIf { song != null },
                 same = { a, b -> a?.id == b?.id },
                 onPrevious = vm::previousItem, onNext = vm::next,
+                still = covered,
                 modifier = Modifier.weight(1f),
                 item = track,
             )
@@ -351,13 +352,16 @@ fun PageTint(palette: PagePalette?) {
  * in from the other edge, already drawn. Let go past a third of the way, or flicked, the neighbour
  * lands and [onNext] / [onPrevious] runs; it stays drawn in place of [current] until [current] is that
  * song too (the player answers a few frames later), so the old one never comes back for a frame.
- * [item]'s second argument is true for the one really showing. Nothing runs until a finger is down.
+ * [item]'s second argument is true for the one really showing. Nothing runs until a finger is down, or
+ * until [current] steps to a neighbour by itself, which slides the same way unless the row is [still]
+ * (out of sight).
  */
 @Composable
 internal fun <T> SwipeCarousel(
     current: T, previous: T?, next: T?, same: (T?, T?) -> Boolean,
     onPrevious: () -> Unit, onNext: () -> Unit,
     modifier: Modifier = Modifier,
+    still: Boolean = false,
     item: @Composable (T?, Boolean) -> Unit,
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -381,6 +385,28 @@ internal fun <T> SwipeCarousel(
             androidx.compose.runtime.snapshotFlow { same(currentNow, landed as T?) }.first { it }
         }
         landed = NONE
+    }
+    // A song that changes by itself (its end, a mix, the bar's own next button, the notification) comes
+    // in as a swipe brings it: the one it left goes out one side, the new one in from the other. As on
+    // the player's sleeve, decided while composing, so the new song is never drawn in place first; only
+    // for a step to a neighbour (the one left is then the neighbour, drawn where the slide starts).
+    val last = remember { Last<T>() }
+    val go = when {
+        !last.set || same(current, last.item) || current == null -> 0
+        AppMotion.reduce || still || landed !== NONE || moving?.isActive == true -> 0
+        same(previous, last.item) -> 1
+        same(next, last.item) -> -1
+        else -> 0
+    }
+    /** Where the row is while it slides by itself, in rows: 1 a whole row to the right, 0 in place. */
+    val natural = remember(current) { androidx.compose.animation.core.Animatable(go.toFloat()) }
+    val naturalNow by androidx.compose.runtime.rememberUpdatedState(natural)
+    androidx.compose.runtime.SideEffect {
+        if (!last.set || !same(current, last.item)) { last.item = current; last.set = true }
+    }
+    androidx.compose.runtime.LaunchedEffect(natural) {
+        // Counted in frames, as the sleeve's is: the new song's first frames can be slow ones.
+        if (natural.value != 0f) settleByFrames(natural, 560f)
     }
     Box(
         modifier.clipToBounds().pointerInput(Unit) {
@@ -419,7 +445,12 @@ internal fun <T> SwipeCarousel(
             // diagonal - which is the bar changing the song when it was asked to open.
             sidewaysDrag(
                 slop = 1.5f, ratio = 1.8f,
-                onDragStart = { tracker.resetTracking(); x = 0f; moving?.cancel() },
+                onDragStart = {
+                    tracker.resetTracking(); x = 0f; moving?.cancel()
+                    // A row still sliding in by itself is taken over where it is.
+                    val n = naturalNow.value
+                    if (n != 0f) { offset += n * size.width; scope.launch { naturalNow.snapTo(0f) } }
+                },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
             ) { change, d ->
@@ -434,10 +465,16 @@ internal fun <T> SwipeCarousel(
     ) {
         @Suppress("UNCHECKED_CAST")
         val showing = if (landed === NONE) current else landed as T?
-        Box(Modifier.graphicsLayer { translationX = offset }) { item(showing, landed === NONE) }
-        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
-        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
+        Box(Modifier.graphicsLayer { translationX = offset + natural.value * size.width }) { item(showing, landed === NONE) }
+        Box(Modifier.graphicsLayer { val o = offset + natural.value * size.width; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
+        Box(Modifier.graphicsLayer { val o = offset + natural.value * size.width; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
     }
 }
 
 private val NONE = Any()
+
+/** What a row of records was last composed with; written after each composition, read by the next. */
+private class Last<T> {
+    var item: T? = null
+    var set = false
+}

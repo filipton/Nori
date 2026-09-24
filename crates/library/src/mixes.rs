@@ -321,6 +321,7 @@ fn affinity(taste: f64, skips: u32) -> f64 {
     }
 }
 
+/// The SQL condition of a decade mix: the songs of one decade.
 pub fn decade_cond() -> &'static str {
     "json_extract(i.json,'$.year') BETWEEN ?1 AND ?2"
 }

@@ -6,7 +6,11 @@
 //!   to 0 dB over the last quarter of the transition;
 //! - the bass swap: both decks run through a 4th-order Linkwitz-Riley high-pass, and a raised-cosine crossfade
 //!   between dry and high-passed moves the lows from the outgoing to the incoming track over `bass_swap_len`;
-//! - the low-pass sweep on the outgoing deck, exponential in frequency, coefficients updated every 16 frames.
+//! - the low-pass sweep on the outgoing deck, exponential in frequency, coefficients updated every 16 frames;
+//! - the vocal duck on the incoming deck: a wide band-pass around the voice band subtracted from the deck, which is a
+//!   peaking cut whose depth can move sample by sample without touching the filter's state, held until the
+//!   outgoing song hands over and released over a raised cosine (with the high-pass ride on the outgoing deck
+//!   after the swap, this keeps two singers apart).
 //!
 //! Past the end of the transition the output is the incoming stream untouched, so a late call does no harm.
 //! The per-buffer call allocates nothing and may run in place (`dest` equal to either input).
@@ -46,8 +50,18 @@ pub mod param {
     pub const HP_END: usize = 19;
     pub const HP_FROM_HZ: usize = 20;
     pub const HP_TO_HZ: usize = 21;
-    pub const COUNT: usize = 22;
+    /// Vocal duck on the incoming deck: held until `VOX_UNTIL` (ms; -1 off), then released over `VOX_RELEASE` ms;
+    /// `VOX_DB` of cut at `VOX_HZ`, the centre of the voice band.
+    pub const VOX_UNTIL: usize = 22;
+    pub const VOX_RELEASE: usize = 23;
+    pub const VOX_DB: usize = 24;
+    pub const VOX_HZ: usize = 25;
+    pub const COUNT: usize = 26;
 }
+
+/// Width of the vocal duck: a band-pass of this Q around 1 kHz is 3 dB down at about 300 Hz and 3.3 kHz, the band
+/// a voice's body and presence live in.
+const VOX_Q: f64 = 0.35;
 
 /// The plan as the flat array the mixer takes.
 pub fn params(plan: &TransitionPlan) -> Vec<f32> {
@@ -74,6 +88,10 @@ pub fn params(plan: &TransitionPlan) -> Vec<f32> {
     p[param::HP_END] = plan.hp_end_ms as f32;
     p[param::HP_FROM_HZ] = plan.hp_from_hz;
     p[param::HP_TO_HZ] = plan.hp_to_hz;
+    p[param::VOX_UNTIL] = plan.vocal_duck_until_ms as f32;
+    p[param::VOX_RELEASE] = plan.vocal_duck_release_ms as f32;
+    p[param::VOX_DB] = plan.vocal_duck_db;
+    p[param::VOX_HZ] = plan.vocal_duck_hz;
     p
 }
 
@@ -126,6 +144,16 @@ impl Coef {
 
     fn high_pass(rate: f64, hz: f64) -> Self {
         Self::rbj(rate, hz, false)
+    }
+
+    /// RBJ band-pass with 0 dB at the centre: `x - d * band_pass(x)` is a peaking cut of `1 - d` there.
+    fn band_pass(rate: f64, hz: f64, q: f64) -> Self {
+        let hz = hz.clamp(10.0, rate * 0.45);
+        let w = 2.0 * std::f64::consts::PI * hz / rate;
+        let (s, c) = w.sin_cos();
+        let alpha = s / (2.0 * q.max(0.1));
+        let a0 = 1.0 + alpha;
+        Coef { b0: alpha / a0, b1: 0.0, b2: -alpha / a0, a1: -2.0 * c / a0, a2: (1.0 - alpha) / a0 }
     }
 
     /// Butterworth (Q = 1/√2) RBJ low- or high-pass.
@@ -194,6 +222,10 @@ pub struct Mixer {
     lp_entry: u64,
     /// Where the sweep's fade-in is measured from: the sweep's start, or a seek that landed inside it.
     lp_from: u64,
+    /// Vocal duck on the incoming deck: the release span, and how much of the band-pass is taken away before it.
+    duck: Option<(Span, f64)>,
+    duck_coef: Coef,
+    duck_state: [[f64; 2]; MAX_CHANNELS],
     /// Beat-synced echo on the outgoing deck: delay frames, feedback, wet gain, and the ring per channel.
     echo: Option<(usize, f64, f64)>,
     echo_buf: Vec<f64>,
@@ -225,6 +257,9 @@ impl Mixer {
             lp_state: [[[0.0; 2]; MAX_CHANNELS]; 2],
             lp_entry: 0,
             lp_from: 0,
+            duck: None,
+            duck_coef: Coef::default(),
+            duck_state: [[0.0; 2]; MAX_CHANNELS],
             echo: None,
             echo_buf: Vec::new(),
             echo_pos: 0,
@@ -273,6 +308,15 @@ impl Mixer {
         self.lp = (ls >= 0.0 && le >= ls && lf > 0.0 && lt > 0.0).then(|| (span(ls, le, self.len), lf.min(self.rate * 0.45), lt.min(self.rate * 0.45)));
         self.lp_entry = frames(LP_ENTRY_MS).max(1);
         self.lp_from = self.lp.map_or(0, |(s, _, _)| s.start);
+        let (vu, vr, vd, vh) = (get(param::VOX_UNTIL), get(param::VOX_RELEASE), get(param::VOX_DB), get(param::VOX_HZ));
+        self.duck = (vu >= 0.0 && vd < 0.0 && vh > 0.0).then(|| {
+            let end = frames(vu).min(self.len);
+            let start = end.saturating_sub(frames(vr.max(0.0)));
+            (Span { start, end }, 1.0 - 10f64.powf(vd.clamp(-30.0, 0.0) / 20.0))
+        });
+        if self.duck.is_some() {
+            self.duck_coef = Coef::band_pass(self.rate, vh, VOX_Q);
+        }
         // One outgoing beat of delay, capped at a second (about 1.5 MB float at 48 kHz stereo, reused across transitions).
         let (ed, ef, ew) = (get(param::ECHO_DELAY), p.get(param::ECHO_FB).copied().unwrap_or(0.5), p.get(param::ECHO_WET).copied().unwrap_or(-6.0));
         self.echo = (ed >= 1.0).then(|| {
@@ -290,6 +334,7 @@ impl Mixer {
         self.hp_state = [[[[0.0; 2]; MAX_CHANNELS]; 2]; 2];
         self.hp_sweep_state = [[[0.0; 2]; MAX_CHANNELS]; 2];
         self.lp_state = [[[0.0; 2]; MAX_CHANNELS]; 2];
+        self.duck_state = [[0.0; 2]; MAX_CHANNELS];
     }
 
     pub fn position(&self) -> u64 {
@@ -385,6 +430,17 @@ impl Mixer {
                 }
                 _ => 0.0,
             };
+            // How much of the incoming voice band is still held down: all of it until the release, none after.
+            let duck = match self.duck {
+                Some((span, depth)) if p < span.end => depth * (0.5 + 0.5 * (span.progress(p) * std::f64::consts::PI).cos()),
+                _ => 0.0,
+            };
+            if duck > 0.0 {
+                for c in 0..ch {
+                    let band = self.duck_coef.run(&mut self.duck_state[c], xi[c]);
+                    xi[c] -= duck * band;
+                }
+            }
             for c in 0..ch {
                 let mut o = xo[c];
                 if hp_wet > 0.0 {
@@ -475,6 +531,10 @@ mod tests {
             hp_end_ms: -1,
             hp_from_hz: 0.0,
             hp_to_hz: 0.0,
+            vocal_duck_until_ms: -1,
+            vocal_duck_release_ms: 0,
+            vocal_duck_db: 0.0,
+            vocal_duck_hz: 0.0,
             reason: String::new(),
         }
     }
@@ -655,6 +715,35 @@ mod tests {
     }
 
     #[test]
+    fn the_vocal_duck_holds_the_incoming_voice_band_down_until_the_swap() {
+        let mut p = plan();
+        // The incoming deck at full level throughout, so only the duck acts.
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (0, 0, 0, 0);
+        (p.vocal_duck_until_ms, p.vocal_duck_release_ms, p.vocal_duck_db, p.vocal_duck_hz) = (600, 100, -12.0, 1000.0);
+        let zeros = vec![0f32; 48000];
+        let mut y = vec![0f32; 48000];
+        for (hz, held) in [(1000.0, -12.0), (100.0, -0.6), (8000.0, -0.3)] {
+            let tone = sine(hz, 48000);
+            let mut m = Mixer::new(RATE as u32, 1);
+            m.configure(&params(&p));
+            m.process_f32(&zeros, &tone, &mut y);
+            let r = rms(&tone);
+            let db = |x: &[f32]| 20.0 * (rms(x) / r).log10();
+            assert!((db(&y[4800..24000]) - held).abs() < 1.0, "{hz} Hz held: {:.1} dB", db(&y[4800..24000]));
+            assert!(db(&y[30000..47000]).abs() < 0.2, "{hz} Hz released: {:.1} dB", db(&y[30000..47000]));
+            let jump = y.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+            assert!(jump <= 0.5 * 2.0 * std::f32::consts::PI * hz as f32 / 48000.0 * 1.2 + 1e-3, "{hz} Hz: no clicks ({jump})");
+        }
+        // Off: the deck passes untouched.
+        p.vocal_duck_until_ms = -1;
+        let tone = sine(1000.0, 48000);
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        m.process_f32(&zeros, &tone, &mut y);
+        assert_eq!(y, tone);
+    }
+
+    #[test]
     fn bad_parameters_fall_back_to_a_plain_fade() {
         let mut m = Mixer::new(44100, 2);
         m.configure(&[f32::NAN, 7.0]);
@@ -666,7 +755,7 @@ mod tests {
         assert_eq!(y, b);
     }
 
-    /// Mixer cost, 44.1 kHz stereo, everything on. `cargo test --release -p norimusic mixer_cost -- --ignored --nocapture`
+    /// Mixer cost, 44.1 kHz stereo, everything on. `cargo test --release -p nori-player mixer_cost -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn mixer_cost() {
@@ -674,6 +763,8 @@ mod tests {
         p.duration_ms = 30_000;
         (p.bass_swap_ms, p.bass_swap_len_ms) = (15_000, 500);
         (p.filter_start_ms, p.filter_end_ms, p.filter_from_hz, p.filter_to_hz) = (15_000, 30_000, 18_000.0, 300.0);
+        (p.hp_start_ms, p.hp_end_ms, p.hp_from_hz, p.hp_to_hz) = (15_000, 22_000, 200.0, 2_000.0);
+        (p.vocal_duck_until_ms, p.vocal_duck_release_ms, p.vocal_duck_db, p.vocal_duck_hz) = (15_000, 500, -18.0, 1_000.0);
         let mut m = Mixer::new(44100, 2);
         m.configure(&params(&p));
         let a: Vec<i16> = (0..44100 * 30 * 2).map(|i| ((i * 7919) % 20000) as i16 - 10000).collect();

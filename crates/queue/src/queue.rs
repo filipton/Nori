@@ -14,16 +14,19 @@ use parking_lot::Mutex;
 /// A song not asked for again within this long, and no longer in the queue, may be let go.
 const KEEP_MS: i64 = 60_000;
 
+/// The queued songs by id, each with when it was last asked for.
 pub struct Store {
     pub songs: HashMap<String, (Song, i64)>,
 }
 
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
 
+/// The queued songs, lent to `f`.
 pub fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
     f(STORE.lock().get_or_insert_with(|| Store { songs: HashMap::new() }))
 }
 
+/// The id prefix of a radio stream in the queue.
 pub const RADIO_PREFIX: &str = "radio:";
 
 /// Songs about to be queued. One call per list.

@@ -95,6 +95,25 @@ pub fn from_f32(samples: &[f32], enc: Encoding, out: &mut [u8]) {
     }
 }
 
+/// Scales interleaved samples in place by `gain` (0..1: nothing clips), rounding 16-bit ones to the
+/// nearest step.
+pub fn scale(bytes: &mut [u8], enc: Encoding, gain: f32) {
+    match enc {
+        Encoding::Pcm16 => {
+            for d in bytes.chunks_exact_mut(2) {
+                let v = i16::from_le_bytes([d[0], d[1]]) as f32 * gain;
+                d.copy_from_slice(&(v.round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+            }
+        }
+        Encoding::Float => {
+            for d in bytes.chunks_exact_mut(4) {
+                let v = f32::from_le_bytes([d[0], d[1], d[2], d[3]]) * gain;
+                d.copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+}
+
 /// Mixes `frames` frames of `outgoing` and `incoming` into `dest` (all the mixer's channel count and
 /// `enc`). `dest` may be the same memory as `outgoing`: the mix is written in place over what was held.
 ///
@@ -178,12 +197,25 @@ impl ByteStretcher {
         (used * w, made * w)
     }
 
-    /// Writes what is still inside the stretcher to `output`; returns bytes written.
+    /// Writes what is still inside the stretcher to `output`, as much as fits; returns bytes written.
+    /// The stretcher hands it over a block at a time: taking only the first block dropped the rest of
+    /// its delay line, and the song jumped ahead by that much where the stretch handed back to it.
     pub fn drain(&mut self, output: &mut [u8], enc: Encoding) -> usize {
-        let ch = self.ch;
-        let n = (output.len() / enc.width() / ch * ch).min(self.fout.len());
-        let m = self.s.drain(&mut self.fout[..n]);
-        from_f32(&self.fout[..m * ch], enc, &mut output[..m * ch * enc.width()]);
-        m * ch * enc.width()
+        let (ch, w) = (self.ch, enc.width());
+        let cap = output.len() / w / ch * ch;
+        let mut done = 0;
+        loop {
+            let n = (cap - done).min(self.fout.len());
+            if n == 0 {
+                break;
+            }
+            let m = self.s.drain(&mut self.fout[..n]) * ch;
+            from_f32(&self.fout[..m], enc, &mut output[done * w..(done + m) * w]);
+            done += m;
+            if m < n {
+                break;
+            }
+        }
+        done * w
     }
 }

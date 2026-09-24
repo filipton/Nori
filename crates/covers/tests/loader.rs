@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use nori_covers::{header, Alpha, Config, DecodeError, Decoder, Error, Image, Key, Loader, Paint};
-use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse};
+use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, TransportResponse};
 use parking_lot::{Condvar, Mutex};
 
 const PHOTO: &str = "http://s/rest/getCoverArt.view?u=a&t=b&s=c&id=al-1&size=320";
@@ -57,6 +57,10 @@ impl Transport for Server {
         Ok(TransportResponse { status: self.status, body: self.body.clone() })
     }
 
+    async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError> {
+        self.get(request.url, request.timeout_ms).await
+    }
+
     fn address_changed(&self) {}
 }
 
@@ -67,7 +71,7 @@ fn dir(name: &str) -> PathBuf {
 }
 
 fn config(dir: Option<PathBuf>, workers: usize) -> Config {
-    Config { dir, disk_bytes: 1 << 20, memory_bytes: 1 << 20, workers, alpha: Alpha::Straight, timeout_ms: 0 }
+    Config { dir, disk_bytes: 1 << 20, memory_bytes: 1 << 20, workers, alpha: Alpha::Straight, timeout_ms: 0, idle: Duration::from_secs(20) }
 }
 
 /// Waits for `n` answers, failing the test rather than hanging it.
@@ -347,4 +351,130 @@ fn a_cover_that_panics_is_its_own_error_and_every_cover_after_it_still_comes() {
     assert_eq!(loader.load(PHOTO, 10, 10), Ok((10, 10)));
     drop(loader);
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+/// A painter that counts the worker threads alive (each marks itself on its first cover, and is counted
+/// out when it ends) and how many times it was told to rest.
+struct Threads {
+    alive: Arc<AtomicUsize>,
+    rests: Arc<AtomicUsize>,
+}
+
+/// Counts its thread out of `alive` when the thread ends.
+struct Alive(Arc<AtomicUsize>);
+
+impl Drop for Alive {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+thread_local! {
+    static ALIVE: std::cell::RefCell<Option<Alive>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Paint for Threads {
+    type Picture = ();
+
+    fn paint(&self, _: &mut Decoder, _: &[u8], _: u32, _: u32) -> Result<(), DecodeError> {
+        ALIVE.with_borrow_mut(|a| {
+            if a.is_none() {
+                self.alive.fetch_add(1, Ordering::SeqCst);
+                *a = Some(Alive(self.alive.clone()));
+            }
+        });
+        Ok(())
+    }
+
+    fn bytes(_: &()) -> usize {
+        0
+    }
+
+    fn rest(&self) {
+        self.rests.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Waits for `n` of `count`, failing the test rather than hanging it.
+fn until(count: &AtomicUsize, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while count.load(Ordering::SeqCst) != n {
+        assert!(std::time::Instant::now() < deadline, "{} rather than {n}", count.load(Ordering::SeqCst));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Three covers at once, held at the server until all three workers have one: three threads.
+fn three_at_once(loader: &Loader<Threads>, server: &Server) {
+    server.hold();
+    let calls = server.calls();
+    let (tx, rx) = mpsc::channel();
+    let tickets: Vec<_> = (0..3u32)
+        .map(|i| {
+            let tx = tx.clone();
+            loader.request(&format!("http://s/{i}"), 8, 8, move |r| tx.send(r).unwrap())
+        })
+        .collect();
+    while server.calls() < calls + 3 {
+        std::thread::yield_now();
+    }
+    server.release();
+    for _ in 0..3 {
+        rx.recv_timeout(Duration::from_secs(10)).expect("an answer").unwrap();
+    }
+    drop(tickets);
+}
+
+#[test]
+fn a_resting_loader_ends_its_threads_and_the_next_cover_starts_one_again() {
+    let server = Server::new(200);
+    let (alive, rests) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(None, 3) }, server.clone(), Threads { alive: alive.clone(), rests: rests.clone() });
+    three_at_once(&loader, &server);
+    assert_eq!(alive.load(Ordering::SeqCst), 3);
+    loader.rest();
+    until(&alive, 0);
+    assert_eq!(rests.load(Ordering::SeqCst), 1);
+    loader.load("http://s/after", 8, 8).unwrap();
+    assert_eq!(alive.load(Ordering::SeqCst), 1);
+    // Idle for less than the loader's while: the thread stays, nothing rests.
+    loader.load("http://s/again", 8, 8).unwrap();
+    assert_eq!((alive.load(Ordering::SeqCst), rests.load(Ordering::SeqCst)), (1, 1));
+}
+
+#[test]
+fn a_loader_no_cover_is_asked_of_for_a_while_rests() {
+    let server = Server::new(200);
+    let (alive, rests) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let config = Config { memory_bytes: 0, idle: Duration::from_millis(200), ..config(None, 3) };
+    let loader = Loader::with_paint(config, server.clone(), Threads { alive: alive.clone(), rests: rests.clone() });
+    three_at_once(&loader, &server);
+    // Covers asked for closer together than that keep the threads.
+    for i in 0..5 {
+        std::thread::sleep(Duration::from_millis(50));
+        loader.load(&format!("http://s/soon-{i}"), 8, 8).unwrap();
+    }
+    assert_eq!((alive.load(Ordering::SeqCst), rests.load(Ordering::SeqCst)), (3, 0));
+    until(&alive, 0);
+    assert_eq!(rests.load(Ordering::SeqCst), 1);
+    loader.load("http://s/after", 8, 8).unwrap();
+    assert_eq!(alive.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn out_of_sight_the_loader_rests_and_a_cover_asked_for_then_keeps_no_thread() {
+    let server = Server::new(200);
+    let (alive, rests) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(None, 3) }, server.clone(), Threads { alive: alive.clone(), rests: rests.clone() });
+    three_at_once(&loader, &server);
+    loader.show(false);
+    until(&alive, 0);
+    assert_eq!(rests.load(Ordering::SeqCst), 1);
+    // A notification's cover while the screen is off: its thread ends with it, rather than waiting.
+    loader.load("http://s/notification", 8, 8).unwrap();
+    until(&alive, 0);
+    loader.show(true);
+    loader.load("http://s/shown", 8, 8).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!((alive.load(Ordering::SeqCst), rests.load(Ordering::SeqCst)), (1, 1));
 }

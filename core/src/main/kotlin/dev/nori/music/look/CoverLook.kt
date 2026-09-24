@@ -7,7 +7,7 @@ import dalvik.annotation.optimization.FastNative
  * How a page looks, worked out in Rust (crates/look) so every app built on it dresses the same record
  * the same way: a cover's colours and everything dressed in them - the theme's roles, the plates behind
  * the buttons, the chrome, the status bar, the gradients' stops - as one table of ints, looked up and
- * never recomputed. See crates/core/src/look.rs and crates/look/src/dress.rs, whose indices these are.
+ * never recomputed. See crates/lyrics/src/look.rs and crates/look/src/dress.rs, whose indices these are.
  */
 object CoverLook {
     init { System.loadLibrary("norimusic") }

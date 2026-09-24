@@ -105,6 +105,7 @@ pub fn record(c: &mut Connection, song: &Song, started_ms: i64, heard_ms: i64, t
     Ok(true)
 }
 
+/// A `plays` row as the history lists it; none when its song no longer reads.
 pub fn entry(json: String, started_ms: i64, heard_ms: i64, completed: bool, skipped: bool) -> Option<HistoryEntry> {
     Some(HistoryEntry { song: serde_json::from_str(&json).ok()?, started_ms, heard_ms, completed, skipped })
 }
@@ -128,6 +129,8 @@ fn ranked(map: HashMap<String, TopEntry>, top: usize) -> (u32, Vec<TopEntry>) {
     (n, l)
 }
 
+/// The listening statistics of the plays between `from_ms` and `to_ms`, with the `top` songs, artists
+/// and albums.
 pub fn summary(c: &Connection, from_ms: i64, to_ms: i64, top: u32) -> rusqlite::Result<ListeningStats> {
     let top = top as usize;
     let mut out = ListeningStats { plays_per_hour: vec![0; 24], plays_per_weekday: vec![0; 7], ..Default::default() };

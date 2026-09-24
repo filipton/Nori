@@ -1,0 +1,958 @@
+//! The lyrics services, one small function each: one to three requests through the core's `Transport`,
+//! made when the lyrics are opened (never ahead of time), sending only the artist, title, album and
+//! length, and the answer read by formats.rs, json.rs or html.rs. Word timings are taken only from
+//! services that really time words; nothing here spreads a line over its words. Which to ask, and whose
+//! answer is shown, are race.rs's.
+//!
+//! None of these requests could be tried from where they were written: the addresses, parameters and
+//! answer shapes are each service's own documentation or what other open-source clients were seen
+//! sending in September 2026. A service that changes comes out here as a failure or a miss, never as
+//! somebody else's words: every answer that names a song is matched on its title, artist and length.
+
+use std::collections::HashSet;
+use std::time::Instant;
+
+use futures_util::lock::Mutex as AsyncMutex;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use nori_model::{alog, Lyrics, Song};
+use nori_net::transport::{Exchange, Transport};
+use nori_settings::lyrics_sources::{LyricsLookup, LyricsService};
+use parking_lot::Mutex;
+use serde_json::{json, Map, Value};
+
+use crate::lrclib::{self, clean, form_encode, DURATION_SLACK_S};
+use crate::{formats, html, json as answers, lyrics};
+
+/// A service's answer. `Failed` (no network, a refusal, an answer of a shape not known, too slow) is
+/// never remembered as `Missing`, so the song is asked again another time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup {
+    Found(Lyrics),
+    Missing,
+    Failed,
+}
+
+/// One request may take this long before the service counts as down for this song...
+const REQUEST_MS: u32 = 6_000;
+/// ...except PaxSenix's keyed routes, which ask Spotify or Musixmatch themselves before answering; its
+/// own clients wait fifteen seconds.
+const PAXSENIX_REQUEST_MS: u32 = 15_000;
+/// A request is not started with less than this left of its service's time.
+const LEAST_MS: u64 = 250;
+
+/// How long one service may take over one song, all its requests together.
+pub fn deadline_ms(service: LyricsService) -> u64 {
+    match service {
+        LyricsService::PaxsenixSpotify | LyricsService::PaxsenixMusixmatch => 2 * PAXSENIX_REQUEST_MS as u64,
+        _ => 12_000,
+    }
+}
+
+/// Why a request did not bring an answer to read.
+#[derive(Debug)]
+enum Fail {
+    /// The service answered with this error status.
+    Status(u16),
+    /// It could not be reached (no network, a name that does not resolve, a refused connection).
+    Unreachable,
+    /// The service's time was up.
+    Late,
+    /// It answered, but not in a shape this code knows.
+    Shape(String),
+}
+
+type Asked<T> = Result<T, Fail>;
+
+fn shape(what: &str) -> Fail {
+    Fail::Shape(what.to_string())
+}
+
+/// `v` form-encoded, as every query string here wants it.
+fn enc(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() * 3);
+    form_encode(&mut out, v);
+    out
+}
+
+/// What the services of one lookup share: the song's YouTube video, found once for the three keyed on
+/// it.
+#[derive(Default)]
+pub struct Shared {
+    youtube: AsyncMutex<Option<Option<String>>>,
+}
+
+/// One service asking about one song: the platform's transport, the keys, and the time it has left.
+pub struct Ask<'a> {
+    transport: &'a dyn Transport,
+    lookup: &'a LyricsLookup,
+    shared: &'a Shared,
+    started: Instant,
+    budget_ms: u64,
+}
+
+impl<'a> Ask<'a> {
+    pub fn new(transport: &'a dyn Transport, lookup: &'a LyricsLookup, shared: &'a Shared, service: LyricsService) -> Self {
+        Ask { transport, lookup, shared, started: Instant::now(), budget_ms: deadline_ms(service) }
+    }
+
+    /// One request, answered with whatever status came: `headers` beyond the app's User-Agent, a JSON
+    /// body POSTed when there is one, and no longer than `request_ms` or the service's time left.
+    async fn fetch(&self, url: &str, headers: &[(&str, &str)], json: Option<String>, request_ms: u32) -> Asked<(u16, String)> {
+        let left = self.budget_ms.saturating_sub(self.started.elapsed().as_millis() as u64);
+        if left < LEAST_MS {
+            return Err(Fail::Late);
+        }
+        let request = Exchange {
+            url: url.to_string(),
+            headers: headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            json,
+            timeout_ms: (request_ms as u64).min(left) as u32,
+        };
+        let r = self.transport.send(request).await.map_err(|_| Fail::Unreachable)?;
+        Ok((r.status, String::from_utf8_lossy(&r.body).into_owned()))
+    }
+
+    /// A GET whose error statuses are failures: a service's "404, no such song" is then told apart from
+    /// its "503, try later", which must not be remembered as an answer.
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Asked<String> {
+        self.strict(url, headers, None, REQUEST_MS).await
+    }
+
+    async fn strict(&self, url: &str, headers: &[(&str, &str)], json: Option<String>, request_ms: u32) -> Asked<String> {
+        let (status, body) = self.fetch(url, headers, json, request_ms).await?;
+        if !(200..300).contains(&status) {
+            return Err(Fail::Status(status));
+        }
+        Ok(body)
+    }
+
+    async fn get_json(&self, url: &str, headers: &[(&str, &str)]) -> Asked<Value> {
+        parse(&self.get(url, headers).await?)
+    }
+}
+
+fn parse(body: &str) -> Asked<Value> {
+    serde_json::from_str(body.trim_start_matches('\u{feff}')).map_err(|e| Fail::Shape(e.to_string()))
+}
+
+/// A service's lookup, whatever went wrong sorted: a 404 is "no such song", anything else a failure.
+fn settle(service: LyricsService, r: Asked<Lookup>) -> Lookup {
+    match r {
+        Ok(l) => l,
+        Err(Fail::Status(404)) => Lookup::Missing,
+        Err(e) => {
+            let why = match e {
+                Fail::Status(status) => format!("HTTP {status}"),
+                Fail::Unreachable => "unreachable".into(),
+                Fail::Late => "too slow".into(),
+                Fail::Shape(what) => what,
+            };
+            alog::info(&format!("{} lyrics failed: {why}", service.name()));
+            Lookup::Failed
+        }
+    }
+}
+
+/// Lyrics found, or a miss when there are no lines.
+fn found(l: Lyrics) -> Lookup {
+    if l.lines.is_empty() {
+        Lookup::Missing
+    } else {
+        Lookup::Found(l)
+    }
+}
+
+// ---- matching ------------------------------------------------------------------------------------------
+
+/// A field as text: a string, or a number written out; empty when missing.
+fn s<'v>(o: &'v Value, k: &str) -> std::borrow::Cow<'v, str> {
+    match o.get(k) {
+        Some(Value::String(v)) => std::borrow::Cow::Borrowed(v),
+        Some(Value::Number(n)) => std::borrow::Cow::Owned(n.to_string()),
+        _ => std::borrow::Cow::Borrowed(""),
+    }
+}
+
+/// A field with text in it: none when missing, blank or the word "null".
+fn text<'v>(o: &'v Value, k: &str) -> Option<&'v str> {
+    o.get(k).and_then(Value::as_str).filter(|t| !t.trim().is_empty() && *t != "null")
+}
+
+/// A number field, as a number or a string of one; 0 when missing.
+fn num(o: &Value, k: &str) -> f64 {
+    match o.get(k) {
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        Some(Value::String(v)) => v.trim().parse().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+fn truthy(o: &Value, k: &str) -> bool {
+    match o.get(k) {
+        Some(Value::Bool(b)) => *b,
+        Some(Value::String(v)) => v.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+/// Whether a length a service reports is this song's, within four seconds, so a remix or a live take is
+/// not shown. Seconds, or milliseconds when the number is that large; unknown on either side passes.
+fn same_length(reported: f64, song: &Song) -> bool {
+    if reported.is_nan() || reported <= 0.0 || song.duration == 0 {
+        return true;
+    }
+    let seconds = if reported > 10_000.0 { reported / 1000.0 } else { reported };
+    (seconds - song.duration as f64).abs() <= DURATION_SLACK_S
+}
+
+/// How far a reported length (seconds, or milliseconds when that large) is from the song's.
+fn off(reported: f64, song: &Song) -> f64 {
+    let seconds = if reported > 10_000.0 { reported / 1000.0 } else { reported };
+    (seconds - song.duration as f64).abs()
+}
+
+/// Lower case, letters and digits only, one space between words. Marks that ride on a letter stay with it.
+fn norm(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    let mut gap = false;
+    for c in v.chars().flat_map(char::to_lowercase) {
+        let mark = matches!(c, '\u{300}'..='\u{36f}' | '\u{3099}'..='\u{309a}');
+        if c.is_alphanumeric() || mark {
+            if gap && !out.is_empty() {
+                out.push(' ');
+            }
+            gap = false;
+            out.push(c);
+        } else {
+            gap = true;
+        }
+    }
+    out
+}
+
+/// Whether two names are the same song's or artist's, loosely: one contains the other once case and
+/// punctuation are gone ("Creep" and "Creep (Acoustic)" do, which the length check then separates).
+fn alike(a: &str, b: &str) -> bool {
+    let (x, y) = (norm(a), norm(b));
+    !x.is_empty() && !y.is_empty() && (x.contains(&y) || y.contains(&x))
+}
+
+/// The `name` of every object in the array `k` (a song's artists).
+fn names(o: &Value, k: &str) -> Vec<String> {
+    o.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.get("name")?.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+fn list<'v>(o: &'v Value, k: &str) -> Option<&'v Vec<Value>> {
+    o.get(k).and_then(Value::as_array)
+}
+
+/// Each once, in the order first seen.
+fn distinct<T: Clone + Eq + std::hash::Hash>(v: impl IntoIterator<Item = T>) -> Vec<T> {
+    let mut seen = HashSet::new();
+    v.into_iter().filter(|x| seen.insert(x.clone())).collect()
+}
+
+// ---- asking ---------------------------------------------------------------------------------------------
+
+/// Asks `service` about `song`.
+pub async fn ask(service: LyricsService, a: &Ask<'_>, song: &Song) -> Lookup {
+    let keys = a.lookup;
+    let r = match service {
+        LyricsService::Lrclib => return lrclib(a, song).await,
+        LyricsService::Binilyrics => bini_lyrics(a, song).await,
+        LyricsService::BetterLyrics => better_lyrics(a, song, "/getLyrics", &keys.better_lyrics_key).await,
+        LyricsService::Portato => better_lyrics(a, song, "/qq/getLyrics", &keys.better_lyrics_key).await,
+        LyricsService::Paxsenix => paxsenix(a, song).await,
+        LyricsService::PaxsenixSpotify => paxsenix_spotify(a, song, &keys.paxsenix_key).await,
+        LyricsService::PaxsenixMusixmatch => paxsenix_musixmatch(a, song, &keys.paxsenix_key).await,
+        LyricsService::LyricsPlus => return lyrics_plus(a, song).await,
+        LyricsService::Simpmusic => simpmusic(a, song).await,
+        LyricsService::Unison => unison(a, song).await,
+        LyricsService::Netease => netease(a, song).await,
+        LyricsService::Kugou => kugou(a, song).await,
+        LyricsService::YoutubeCaptions => youtube_captions(a, song).await,
+        LyricsService::Megalobiz => megalobiz(a, song).await,
+        LyricsService::YoutubeMusic => youtube_music(a, song).await,
+        LyricsService::Genius => genius(a, song).await,
+    };
+    settle(service, r)
+}
+
+/// LRCLIB: open, run by volunteers, with a documented API. Line timing, and word timing where a
+/// contributor timed words. The exact lookup first (LRCLIB matches the length within a couple of seconds
+/// itself); a synced hit there is the answer. Otherwise a search, ranked by timing (word, line, none)
+/// and then by how close the length is: the first hit is often a remix or a live take.
+async fn lrclib(a: &Ask<'_>, song: &Song) -> Lookup {
+    let title = clean(&song.title);
+    // LRCLIB answers "not found" as a 404 with a JSON body, which is an answer, not a failure.
+    let exact = match a.fetch(&lrclib::get_url(song, &title), &[], None, REQUEST_MS).await.and_then(|(_, b)| parse(&b)) {
+        Ok(Value::Object(o)) => o,
+        Ok(_) => return settle(LyricsService::Lrclib, Err(shape("not an object"))),
+        Err(e) => return settle(LyricsService::Lrclib, Err(e)),
+    };
+    let exact_hit = if exact.contains_key("statusCode") { None } else { lrclib::pick(&exact) };
+    if let Some(hit) = exact_hit.as_ref().filter(|h| h.synced) {
+        return Lookup::Found(hit.clone());
+    }
+    let hits = match a.fetch(&lrclib::search_url(song, &title), &[], None, REQUEST_MS).await.and_then(|(_, b)| parse(&b)) {
+        Ok(Value::Array(v)) => v,
+        other => {
+            if let Some(hit) = exact_hit {
+                return Lookup::Found(hit);
+            }
+            return settle(LyricsService::Lrclib, other.and(Err(shape("not an array"))));
+        }
+    };
+    let distance = |o: &Map<String, Value>| (lrclib::number(o, "duration") - song.duration as f64).abs();
+    let mut best: Vec<(Lyrics, f64)> = hits
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|o| distance(o) <= DURATION_SLACK_S || song.duration == 0)
+        .filter_map(|o| lrclib::pick(o).map(|l| (l, distance(o))))
+        .collect();
+    best.sort_by(|x, y| formats::timing(&y.0).cmp(&formats::timing(&x.0)).then(x.1.total_cmp(&y.1)));
+    let best = best.into_iter().next().map(|(l, _)| l);
+    match (best, exact_hit) {
+        (Some(b), None) => Lookup::Found(b),
+        (Some(b), Some(_)) if b.synced => Lookup::Found(b),
+        (_, Some(e)) => Lookup::Found(e),
+        (None, None) => Lookup::Missing,
+    }
+}
+
+/// Unison: an open database of lyrics written and timed by listeners, from the makers of the Better
+/// Lyrics extension. Reading needs no key; the data is ODbL, which asks for the credit line to name it.
+/// One request, which Unison matches on the length (within two seconds) itself. An entry says what it
+/// is: Apple-style TTML (word by word), LRC (by line, or by word with inline tags) or plain text.
+async fn unison(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let mut url = format!("https://unison.boidu.dev/lyrics?song={}&artist={}", enc(&clean(&song.title)), enc(&song.artist));
+    if !song.album.trim().is_empty() {
+        url.push_str(&format!("&album={}", enc(&song.album)));
+    }
+    if song.duration > 0 {
+        url.push_str(&format!("&duration={}", song.duration));
+    }
+    let o = a.get_json(&url, &[]).await?;
+    // An answer without the flag is not one this code knows how to read: a failure, not a miss.
+    if o.get("success").is_none() {
+        return Err(shape("no success flag"));
+    }
+    let Some(d) = o.get("data").filter(|d| d.is_object()) else { return Ok(Lookup::Missing) };
+    let Some(words) = text(d, "lyrics") else { return Ok(Lookup::Missing) };
+    if !truthy(&o, "success") || !same_length(num(d, "duration"), song) {
+        return Ok(Lookup::Missing);
+    }
+    Ok(found(if s(d, "format").eq_ignore_ascii_case("ttml") { formats::from_ttml(words) } else { lyrics::from_lrc(words) }))
+}
+
+/// NetEase's web API answers its own site; without the Referer some of its endpoints refuse.
+const NETEASE: [(&str, &str); 1] = [("Referer", "https://music.163.com/")];
+
+/// NetEase Cloud Music: a Chinese streaming service whose catalogue holds most Western and Asian pop, a
+/// good part of it timed word by word (its YRC format). Unofficial: the endpoints its web player uses,
+/// asked without an account or key, which NetEase can change or close at any time. A search, then the
+/// words of the closest match that is the same song and artist within four seconds (the second closest
+/// if the first has none). NetEase is known to refuse some addresses outside China ("-460"): a failure.
+async fn netease(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let search = format!("https://music.163.com/api/search/get?s={}&type=1&limit=10&offset=0", enc(&format!("{title} {}", song.artist)));
+    let o = a.get_json(&search, &NETEASE).await?;
+    // Refusals come back as 200 with a code of their own.
+    let code = num(&o, "code");
+    if code != 0.0 && code != 200.0 {
+        return Err(Fail::Shape(format!("code {code}")));
+    }
+    let Some(songs) = o.get("result").and_then(|r| list(r, "songs")) else { return Ok(Lookup::Missing) };
+    let mut hits: Vec<&Value> = songs
+        .iter()
+        .filter(|x| same_length(num(x, "duration"), song) && alike(&s(x, "name"), &title) && names(x, "artists").iter().any(|n| alike(n, &song.artist)))
+        .collect();
+    hits.sort_by(|x, y| off(num(x, "duration"), song).total_cmp(&off(num(y, "duration"), song)));
+    for id in hits.iter().map(|x| num(x, "id") as i64).filter(|id| *id > 0).take(2) {
+        let url = format!("https://music.163.com/api/song/lyric/v1?id={id}&cp=false&lv=0&kv=0&tv=0&rv=0&yv=0&ytv=0&yrv=0");
+        let l = a.get_json(&url, &NETEASE).await?;
+        if truthy(&l, "pureMusic") || truthy(&l, "nolyric") {
+            continue;
+        }
+        let part = |k: &str| l.get(k).and_then(|p| text(p, "lyric")).unwrap_or_default().to_string();
+        let words = formats::from_netease(&part("yrc"), &part("lrc"), &song.title);
+        if !words.lines.is_empty() {
+            return Ok(Lookup::Found(words));
+        }
+    }
+    Ok(Lookup::Missing)
+}
+
+/// KuGou: a Chinese streaming service with a deep catalogue of Chinese, Japanese and Korean music and
+/// plenty of Western pop, timed word by word in its KRC format. Unofficial, like NetEase: the endpoints
+/// its desktop player uses, without an account or key. A search by artist, title and length, then the
+/// closest candidate's KRC, which comes lightly encrypted with a key every KuGou player shares.
+async fn kugou(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let search = format!(
+        "https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword={}&duration={}",
+        enc(&format!("{} - {title}", song.artist)),
+        song.duration as u64 * 1000
+    );
+    let o = a.get_json(&search, &[]).await?;
+    let status = num(&o, "status");
+    if status != 0.0 && status != 200.0 {
+        return Err(Fail::Shape(format!("status {status}")));
+    }
+    let Some(candidates) = list(&o, "candidates") else { return Ok(Lookup::Missing) };
+    // Its lengths are in milliseconds. A candidate that names no song or singer is judged on length alone.
+    let best = candidates
+        .iter()
+        .filter(|x| {
+            same_length(num(x, "duration"), song)
+                && (s(x, "song").trim().is_empty() || alike(&s(x, "song"), &title))
+                && (s(x, "singer").trim().is_empty() || alike(&s(x, "singer"), &song.artist))
+        })
+        .min_by(|x, y| off(num(x, "duration"), song).total_cmp(&off(num(y, "duration"), song)));
+    let Some(best) = best else { return Ok(Lookup::Missing) };
+    let (id, key) = (s(best, "id"), s(best, "accesskey"));
+    if id.is_empty() || key.is_empty() {
+        return Ok(Lookup::Missing);
+    }
+    let url = format!("https://lyrics.kugou.com/download?ver=1&client=pc&fmt=krc&charset=utf8&id={}&accesskey={}", enc(&id), enc(&key));
+    let file = a.get_json(&url, &[]).await?;
+    let status = num(&file, "status");
+    if status != 0.0 && status != 200.0 {
+        return Err(Fail::Shape(format!("status {status}")));
+    }
+    let Some(content) = text(&file, "content") else { return Ok(Lookup::Missing) };
+    // Content that is not a KRC file is a failure, asked again next time.
+    Ok(found(formats::from_krc(content, &song.title).map_err(Fail::Shape)?))
+}
+
+/// BiniLyrics: Apple Music's lyrics, syllable by syllable as TTML, kept on a volunteer's site. Grey: the
+/// words and timings are Apple's, served by someone else without a key. A search by title, artist, album
+/// and length, then the matched document from its storage host.
+async fn bini_lyrics(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let mut url = format!("https://lyrics-api.binimum.org/?track={}&artist={}", enc(&title), enc(&song.artist));
+    if !song.album.trim().is_empty() {
+        url.push_str(&format!("&album={}", enc(&song.album)));
+    }
+    if song.duration > 0 {
+        url.push_str(&format!("&duration={}", song.duration));
+    }
+    let o = a.get_json(&url, &[]).await?;
+    // A miss is a 404 or an empty list; no list at all is an answer this code does not know.
+    let results = list(&o, "results").ok_or_else(|| shape("no results"))?;
+    let link = results
+        .iter()
+        .filter(|x| same_length(num(x, "duration"), song) && (s(x, "track_name").trim().is_empty() || alike(&s(x, "track_name"), &title)))
+        .find_map(|x| text(x, "lyricsUrl").filter(|u| u.starts_with("https://")));
+    let Some(link) = link else { return Ok(Lookup::Missing) };
+    Ok(found(formats::from_ttml(&a.get(link, &[]).await?)))
+}
+
+/// BetterLyrics' documented address first, then the one its extension long used; tried in turn only
+/// when one cannot be reached at all.
+const BETTER_LYRICS_HOSTS: [&str; 2] = ["https://api.betterlyrics.org", "https://lyrics-api.boidu.dev"];
+
+/// BetterLyrics, the backend of the Better Lyrics extension: Apple Music's lyrics as TTML, syllable by
+/// syllable (`/getLyrics`), or QQ Music's as QRC, word by word (`/qq/getLyrics`, "Portato"), matched on
+/// title, artist, album and length. What it has stored answers anyone; a song it has not needs a key
+/// (`X-API-Key`), and without one that answer is a 401, which here is a miss like any other (remembered
+/// under another name once a key is given, see race.rs).
+async fn better_lyrics(a: &Ask<'_>, song: &Song, path: &str, key: &str) -> Asked<Lookup> {
+    let mut query = format!("s={}&a={}", enc(&clean(&song.title)), enc(&song.artist));
+    if !song.album.trim().is_empty() {
+        query.push_str(&format!("&al={}", enc(&song.album)));
+    }
+    if song.duration > 0 {
+        query.push_str(&format!("&d={}", song.duration));
+    }
+    let headers: Vec<(&str, &str)> = if key.is_empty() { Vec::new() } else { vec![("X-API-Key", key)] };
+    let mut answer = Err(Fail::Unreachable);
+    for host in BETTER_LYRICS_HOSTS {
+        answer = a.get(&format!("{host}{path}?{query}"), &headers).await;
+        if !matches!(answer, Err(Fail::Unreachable)) {
+            break;
+        }
+    }
+    match answer {
+        Err(Fail::Status(401)) if key.is_empty() => Ok(Lookup::Missing),
+        other => Ok(found(answers::from_provider(&other?, &song.title))),
+    }
+}
+
+/// PaxSenix without a key: Apple Music's lyrics, syllable by syllable, asked for by the song's Apple
+/// Music id. The id comes from the public iTunes Search API (the same catalogue and the same ids),
+/// matched on title, artist and length within four seconds; then PaxSenix's public lyrics host is asked.
+async fn paxsenix(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let search = format!("https://itunes.apple.com/search?term={}&media=music&entity=song&limit=10&country=us", enc(&format!("{} {title}", song.artist)));
+    let o = a.get_json(&search, &[]).await?;
+    let results = list(&o, "results").ok_or_else(|| shape("no results"))?;
+    let mut hits: Vec<&Value> = results
+        .iter()
+        .filter(|x| same_length(num(x, "trackTimeMillis"), song) && alike(&s(x, "trackName"), &title) && alike(&s(x, "artistName"), &song.artist))
+        .collect();
+    hits.sort_by(|x, y| off(num(x, "trackTimeMillis"), song).total_cmp(&off(num(y, "trackTimeMillis"), song)));
+    for id in distinct(hits.iter().map(|x| num(x, "trackId") as i64).filter(|id| *id > 0)).into_iter().take(2) {
+        let body = match a.get(&format!("https://lyrics.paxsenix.org/apple-music/lyrics?id={id}&ttml=true"), &[]).await {
+            Err(Fail::Status(404)) => continue,
+            other => other?,
+        };
+        let words = answers::from_provider(&body, &song.title);
+        if !words.lines.is_empty() {
+            return Ok(Lookup::Found(words));
+        }
+    }
+    Ok(Lookup::Missing)
+}
+
+const PAXSENIX_API: &str = "https://api.paxsenix.org";
+
+/// PaxSenix's key as it wants it, pasted with "Bearer " in front or not.
+fn bearer(key: &str) -> String {
+    format!("Bearer {}", key.trim().trim_start_matches("Bearer ").trim())
+}
+
+/// PaxSenix with the user's own key: Spotify's lyrics (by line, now and then by word) for the Spotify
+/// track its search finds, matched on title, artist and, where it gives one, length. PaxSenix passes
+/// Spotify's answer on in more than one shape, so it goes through the reader for any provider.
+async fn paxsenix_spotify(a: &Ask<'_>, song: &Song, key: &str) -> Asked<Lookup> {
+    if key.is_empty() {
+        return Err(shape("no key"));
+    }
+    let auth = bearer(key);
+    let headers = [("Authorization", auth.as_str()), ("Accept", "application/json")];
+    let title = clean(&song.title);
+    let search = a.strict(&format!("{PAXSENIX_API}/spotify/search?q={}", enc(&format!("{title} {}", song.artist))), &headers, None, PAXSENIX_REQUEST_MS).await?;
+    let mut tracks: Vec<answers::FoundTrack> = answers::found_tracks(&search)
+        .into_iter()
+        .filter(|t| alike(&t.title, &title) && (t.artist.trim().is_empty() || alike(&t.artist, &song.artist)) && same_length(t.duration_ms as f64, song))
+        .collect();
+    tracks.sort_by(|x, y| {
+        let d = |t: &answers::FoundTrack| if t.duration_ms > 0 { off(t.duration_ms as f64, song) } else { 5.0 };
+        d(x).total_cmp(&d(y))
+    });
+    for id in distinct(tracks.into_iter().map(|t| t.id)).into_iter().take(2) {
+        let body = a.strict(&format!("{PAXSENIX_API}/lyrics/spotify?id={}", enc(&id)), &headers, None, PAXSENIX_REQUEST_MS).await?;
+        let words = answers::from_provider(&body, &song.title);
+        if !words.lines.is_empty() {
+            return Ok(Lookup::Found(words));
+        }
+    }
+    Ok(Lookup::Missing)
+}
+
+/// PaxSenix with the user's own key: Musixmatch's lyrics, word by word where Musixmatch has them, by
+/// title, artist and length in one request, read by the reader for any provider.
+async fn paxsenix_musixmatch(a: &Ask<'_>, song: &Song, key: &str) -> Asked<Lookup> {
+    if key.is_empty() {
+        return Err(shape("no key"));
+    }
+    let auth = bearer(key);
+    let headers = [("Authorization", auth.as_str()), ("Accept", "application/json")];
+    let mut url = format!("{PAXSENIX_API}/lyrics/musixmatch?t={}&a={}", enc(&clean(&song.title)), enc(&song.artist));
+    if song.duration > 0 {
+        url.push_str(&format!("&d={}", song.duration));
+    }
+    Ok(found(answers::from_provider(&a.strict(&url, &headers, None, PAXSENIX_REQUEST_MS).await?, &song.title)))
+}
+
+/// LyricsPlus runs on volunteers' servers, any of which may be down or out of its free allowance at a
+/// given moment. The list other clients of it carried in September 2026.
+const LYRICS_PLUS_HOSTS: [&str; 6] = [
+    "https://lyricsplus.prjktla.my.id",
+    "https://lyricsplus.atomix.one",
+    "https://lyricsplus.binimum.org",
+    "https://lyricsplus.prjktla.workers.dev",
+    "https://lyricsplus-seven.vercel.app",
+    "https://lyrics-plus-backend.vercel.app",
+];
+
+/// The LyricsPlus server that answered last, asked alone first next time.
+static LYRICS_PLUS_HOST: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// LyricsPlus, the backend of the YouLy+ extension: Apple Music's lyrics syllable by syllable, and other
+/// catalogues' where Apple has none, from volunteers' servers. The server that answered last is asked
+/// alone; when it has nothing or cannot be reached, the others are asked together and the first real
+/// answer wins (the rest are dropped, which cancels them). "Not found" counts only when at least two
+/// servers say so and none has the song, since one server's miss can be its own trouble reaching the
+/// catalogues.
+async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
+    let mut query = format!("title={}&artist={}", enc(&clean(&song.title)), enc(&song.artist));
+    if song.duration > 0 {
+        query.push_str(&format!("&duration={}", song.duration));
+    }
+    if !song.album.trim().is_empty() {
+        query.push_str(&format!("&album={}", enc(&song.album)));
+    }
+    let mut misses = 0;
+    let first = *LYRICS_PLUS_HOST.lock();
+    if let Some(host) = first {
+        match lyrics_plus_from(a, host, &query).await {
+            Lookup::Found(l) => return Lookup::Found(l),
+            Lookup::Missing => misses += 1,
+            Lookup::Failed => {}
+        }
+    }
+    let query = query.as_str();
+    let mut asking: FuturesUnordered<_> =
+        LYRICS_PLUS_HOSTS.into_iter().filter(|h| Some(*h) != first).map(|host| async move { (host, lyrics_plus_from(a, host, query).await) }).collect();
+    while let Some((host, answer)) = asking.next().await {
+        match answer {
+            Lookup::Found(l) => {
+                *LYRICS_PLUS_HOST.lock() = Some(host);
+                return Lookup::Found(l);
+            }
+            Lookup::Missing => misses += 1,
+            Lookup::Failed => {}
+        }
+    }
+    if misses >= 2 {
+        Lookup::Missing
+    } else {
+        alog::info("LYRICS_PLUS lyrics failed: no server answered");
+        Lookup::Failed
+    }
+}
+
+async fn lyrics_plus_from(a: &Ask<'_>, host: &str, query: &str) -> Lookup {
+    match a.get(&format!("{host}/v2/lyrics/get?{query}"), &[]).await {
+        // A server that has gone answers with somebody's web page, not with JSON: that is not a miss.
+        Ok(body) if !body.trim_start().starts_with('{') => Lookup::Failed,
+        Ok(body) => found(answers::from_lyricsplus(&body)),
+        Err(Fail::Status(404)) => Lookup::Missing,
+        Err(_) => Lookup::Failed,
+    }
+}
+
+/// YouTube Music's player API, as its web player calls it, without an account. The client version is the
+/// one open-source clients of 2026 fall back on when they cannot read the current one.
+const YOUTUBE_MUSIC: &str = "https://music.youtube.com/youtubei/v1";
+const YOUTUBE_MUSIC_VERSION: &str = "1.20250101.01.00";
+/// The search filter YouTube Music's own "Songs" chip sends: catalogue songs, not videos or uploads.
+const YOUTUBE_SONGS: &str = "EgWKAQIIAWoKEAkQChAFEAMQBA==";
+
+/// One YouTube Music player API call, as its web player makes it without an account.
+async fn youtube(a: &Ask<'_>, endpoint: &str, mut body: Value) -> Asked<String> {
+    body["context"] = json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": YOUTUBE_MUSIC_VERSION, "hl": "en", "gl": "US" } });
+    let headers = [
+        ("Origin", "https://music.youtube.com"),
+        ("Referer", "https://music.youtube.com/"),
+        ("X-YouTube-Client-Name", "67"),
+        ("X-YouTube-Client-Version", YOUTUBE_MUSIC_VERSION),
+    ];
+    a.strict(&format!("{YOUTUBE_MUSIC}/{endpoint}?prettyPrint=false"), &headers, Some(body.to_string()), REQUEST_MS).await
+}
+
+/// Songs already matched on YouTube Music (the video id, or none), the last few only, so the next song's
+/// lookup and a song played again do not search again.
+static YOUTUBE_IDS: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+const YOUTUBE_KEPT: usize = 32;
+
+/// This song's video on YouTube Music, for the three services keyed on one (SimpMusic, the captions, the
+/// lyrics tab): a search with the Songs filter, and of the results with the same title and artist within
+/// four seconds, the closest in length. Found once per song and shared, so the three do not search three
+/// times; a search that failed is not remembered.
+async fn youtube_id(a: &Ask<'_>, song: &Song) -> Asked<Option<String>> {
+    let mut mine = a.shared.youtube.lock().await;
+    if let Some(known) = mine.as_ref() {
+        return Ok(known.clone());
+    }
+    let key = format!("{}\n{}\n{}", song.artist, song.title, song.duration);
+    if let Some((_, id)) = YOUTUBE_IDS.lock().iter().find(|(k, _)| *k == key) {
+        *mine = Some(id.clone());
+        return Ok(id.clone());
+    }
+    let title = clean(&song.title);
+    let answer = youtube(a, "search", json!({ "query": format!("{} {title}", song.artist), "params": YOUTUBE_SONGS })).await?;
+    let id = answers::youtube_songs(&answer)
+        .into_iter()
+        .filter(|t| alike(&t.title, &title) && (t.artist.trim().is_empty() || alike(&t.artist, &song.artist)) && same_length(t.duration_ms as f64, song))
+        .min_by(|x, y| off(x.duration_ms as f64, song).total_cmp(&off(y.duration_ms as f64, song)))
+        .map(|t| t.id);
+    let mut kept = YOUTUBE_IDS.lock();
+    if kept.len() >= YOUTUBE_KEPT {
+        kept.remove(0);
+    }
+    kept.push((key, id.clone()));
+    *mine = Some(id.clone());
+    Ok(id)
+}
+
+/// SimpMusic's lyrics database, keyed on the song's YouTube video: rich sync (word by word, served
+/// HTML-escaped) where its listeners timed words, else lyrics timed by line, else plain words; of the
+/// entries for the video, the one within four seconds of the song. Some regions are refused outright (a
+/// 403), which shows as a failure.
+async fn simpmusic(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let Some(id) = youtube_id(a, song).await? else { return Ok(Lookup::Missing) };
+    let o = a.get_json(&format!("https://api-lyrics.simpmusic.org/v1/{}", enc(&id)), &[]).await?;
+    let Some(entries) = list(&o, "data").filter(|_| truthy(&o, "success")) else { return Ok(Lookup::Missing) };
+    let entry = entries
+        .iter()
+        .filter(|e| same_length(num(e, "duration"), song))
+        .min_by(|x, y| (num(x, "duration") - song.duration as f64).abs().total_cmp(&(num(y, "duration") - song.duration as f64).abs()));
+    let Some(entry) = entry else { return Ok(Lookup::Missing) };
+    let best = ["richSyncLyrics", "syncedLyrics", "plainLyrics"]
+        .iter()
+        .filter_map(|k| text(entry, k))
+        .map(html::from_escaped_lrc)
+        .filter(|l| !l.lines.is_empty())
+        .max_by_key(formats::timing);
+    Ok(best.map_or(Lookup::Missing, Lookup::Found))
+}
+
+/// A byte string in standard base64, padded.
+fn base64(bytes: &[u8]) -> String {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk.iter().enumerate().fold(0u32, |acc, (i, b)| acc | (u32::from(*b) << (16 - 8 * i)));
+        for k in 0..4 {
+            out.push(if k <= chunk.len() { ABC[(n >> (18 - 6 * k) & 63) as usize] as char } else { '=' });
+        }
+    }
+    out
+}
+
+/// The captions of the song's YouTube video, a line at a time, from YouTube Music's transcript call.
+/// They time the video, which for a catalogue song is its audio. Captions are often a speech
+/// recogniser's, so this ranks low.
+async fn youtube_captions(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let Some(id) = youtube_id(a, song).await? else { return Ok(Lookup::Missing) };
+    // get_transcript takes the video as a one-field protobuf message (field 1, the id), in base64.
+    let mut message = vec![0x0a, id.len() as u8];
+    message.extend_from_slice(id.as_bytes());
+    match youtube(a, "get_transcript", json!({ "params": base64(&message) })).await {
+        // A video without a transcript is refused (400, "precondition failed") rather than answered empty.
+        Err(Fail::Status(400)) => Ok(Lookup::Missing),
+        other => Ok(found(answers::from_youtube_captions(&other?))),
+    }
+}
+
+/// The words YouTube Music shows on the song's Lyrics tab, not timed. The tab's page is found from the
+/// `next` call its player makes when a song starts, then read.
+async fn youtube_music(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let Some(id) = youtube_id(a, song).await? else { return Ok(Lookup::Missing) };
+    let next = youtube(a, "next", json!({ "videoId": id, "isAudioOnly": true })).await?;
+    let Some(page) = answers::youtube_lyrics_page(&next) else { return Ok(Lookup::Missing) };
+    let mut request = json!({ "browseId": page.browse_id });
+    if let Some(params) = page.params {
+        request["params"] = Value::String(params);
+    }
+    Ok(found(answers::from_youtube_music(&youtube(a, "browse", request).await?)))
+}
+
+/// Megalobiz: LRC files its users made, timed by line, shown on its pages. A search by artist and title,
+/// then the first two result pages that name the song (the artist's first); a page gives no length, so
+/// its last line must at least come before the song ends.
+async fn megalobiz(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let search = a.get(&format!("https://www.megalobiz.com/searchall?qry={}", enc(&format!("{} {title}", song.artist))), &[]).await?;
+    for link in html::megalobiz_links(&search, &title, &song.artist).into_iter().take(2) {
+        let words = html::from_megalobiz(&a.get(&format!("https://www.megalobiz.com{link}"), &[]).await?);
+        let Some(last) = words.lines.last().map(|l| l.start_ms) else { continue };
+        if song.duration == 0 || last <= song.duration as i64 * 1000 + 4_000 {
+            return Ok(Lookup::Found(words));
+        }
+    }
+    Ok(Lookup::Missing)
+}
+
+/// Genius: the biggest catalogue of words, not timed, asked last and only when no service has timed
+/// lyrics. Its site search (no key), the first song result with the same title and artist that is not a
+/// translation or an instrumental, then the words on that song's page.
+async fn genius(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
+    let title = clean(&song.title);
+    let o = a.get_json(&format!("https://genius.com/api/search/multi?q={}", enc(&format!("{} {title}", song.artist))), &[]).await?;
+    let sections = o.get("response").and_then(|r| list(r, "sections")).ok_or_else(|| shape("no sections"))?;
+    let url = sections
+        .iter()
+        .filter(|x| s(x, "type") == "song")
+        .flat_map(|x| list(x, "hits").into_iter().flatten())
+        .filter_map(|h| h.get("result"))
+        .filter(|r| alike(&s(r, "title"), &title) && alike(&s(r, "artist_names"), &song.artist) && !truthy(r, "instrumental") && !s(r, "path").to_lowercase().contains("translation"))
+        .find_map(|r| text(r, "url").filter(|u| u.starts_with("https://genius.com/")));
+    let Some(url) = url else { return Ok(Lookup::Missing) };
+    Ok(found(html::from_genius(&a.get(url, &[]).await?)))
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    use nori_net::transport::{TransportError, TransportResponse};
+
+    /// Answers by address, and remembers every request.
+    #[derive(Default)]
+    pub(crate) struct Web {
+        pub(crate) pages: Mutex<Vec<(String, u16, String)>>,
+        pub(crate) sent: Mutex<Vec<Exchange>>,
+    }
+
+    impl Web {
+        pub(crate) fn answer(&self, starts: &str, status: u16, body: &str) {
+            self.pages.lock().push((starts.to_string(), status, body.to_string()));
+        }
+        pub(crate) fn asked(&self) -> Vec<String> {
+            self.sent.lock().iter().map(|e| e.url.clone()).collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for Web {
+        async fn get(&self, url: String, timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+            self.send(Exchange { url, timeout_ms, ..Default::default() }).await
+        }
+        async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError> {
+            self.sent.lock().push(request.clone());
+            let pages = self.pages.lock();
+            match pages.iter().find(|(p, _, _)| request.url.starts_with(p.as_str())) {
+                Some((_, status, body)) => Ok(TransportResponse { status: *status, body: body.as_bytes().to_vec() }),
+                None => Err(TransportError::Failed { kind: nori_net::transport::FailureKind::Connect, detail: None }),
+            }
+        }
+        fn address_changed(&self) {}
+    }
+
+    /// The fake answers at once, so a future here never waits.
+    pub(crate) fn block<F: Future>(f: F) -> F::Output {
+        let mut f = pin!(f);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
+    }
+
+    pub(crate) fn song() -> Song {
+        Song { id: "1".into(), title: "Glass Harbour (feat. Someone)".into(), artist: "The Lanterns".into(), album: "Low Tide".into(), duration: 239, ..Default::default() }
+    }
+
+    fn keys() -> LyricsLookup {
+        LyricsLookup { services: Vec::new(), prefer_words: true, paxsenix_key: String::new(), better_lyrics_key: String::new() }
+    }
+
+    fn asking(web: &Web, service: LyricsService) -> Lookup {
+        let (k, shared) = (keys(), Shared::default());
+        let a = Ask::new(web, &k, &shared, service);
+        block(ask(service, &a, &song()))
+    }
+
+    #[test]
+    fn names_match_loosely_and_lengths_closely() {
+        assert!(alike("Creep", "Creep (Acoustic)") && alike("AC/DC", "ac dc") && !alike("", "x"));
+        assert!(alike("Beyoncé", "BEYONCÉ") && !alike("Paper", "Boats"));
+        let s = Song { duration: 200, ..Default::default() };
+        assert!(same_length(203.0, &s) && same_length(203_500.0, &s) && !same_length(205.0, &s));
+        assert!(same_length(0.0, &s) && same_length(f64::NAN, &s), "unknown passes");
+        assert_eq!(base64(b"hello"), "aGVsbG8=");
+        assert_eq!(bearer("Bearer  k "), "Bearer k");
+    }
+
+    #[test]
+    fn unison_reads_ttml_and_lrc_and_says_a_miss_from_a_failure() {
+        let web = Web::default();
+        let ttml = include_str!("../testdata/apple.ttml");
+        web.answer("https://unison.boidu.dev/lyrics?song=Glass+Harbour&artist=The+Lanterns&album=Low+Tide&duration=239", 200, &json!({"success": true, "data": {"lyrics": ttml, "format": "ttml", "duration": 239}}).to_string());
+        let Lookup::Found(l) = asking(&web, LyricsService::Unison) else { panic!("found") };
+        assert!(l.word_timed);
+        let web = Web::default();
+        web.answer("https://unison.boidu.dev/", 200, r#"{"success": false, "data": null}"#);
+        assert_eq!(asking(&web, LyricsService::Unison), Lookup::Missing);
+        let web = Web::default();
+        web.answer("https://unison.boidu.dev/", 200, r#"{"something": "else"}"#);
+        assert_eq!(asking(&web, LyricsService::Unison), Lookup::Failed, "a shape not known is a failure");
+        let web = Web::default();
+        web.answer("https://unison.boidu.dev/", 503, "busy");
+        assert_eq!(asking(&web, LyricsService::Unison), Lookup::Failed);
+        let web = Web::default();
+        web.answer("https://unison.boidu.dev/", 404, "");
+        assert_eq!(asking(&web, LyricsService::Unison), Lookup::Missing);
+    }
+
+    #[test]
+    fn netease_matches_the_song_then_reads_its_yrc_with_its_referer() {
+        let web = Web::default();
+        let found = json!({"code": 200, "result": {"songs": [
+            {"id": 7, "name": "Glass Harbour (Live)", "duration": 300_000, "artists": [{"name": "The Lanterns"}]},
+            {"id": 8, "name": "Glass Harbour", "duration": 239_500, "artists": [{"name": "The Lanterns"}]}]}});
+        web.answer("https://music.163.com/api/search/get", 200, &found.to_string());
+        let yrc = include_str!("../testdata/netease.yrc");
+        web.answer("https://music.163.com/api/song/lyric/v1?id=8", 200, &json!({"yrc": {"lyric": yrc}, "lrc": {"lyric": ""}}).to_string());
+        let Lookup::Found(l) = asking(&web, LyricsService::Netease) else { panic!("found") };
+        assert!(l.word_timed);
+        let sent = web.sent.lock();
+        assert!(sent.iter().all(|e| e.headers.get("Referer").map(String::as_str) == Some("https://music.163.com/")));
+        assert!(!sent.iter().any(|e| e.url.contains("id=7")), "a live take is another length");
+        drop(sent);
+        let web = Web::default();
+        web.answer("https://music.163.com/api/search/get", 200, r#"{"code": -460, "message": "Cheating"}"#);
+        assert_eq!(asking(&web, LyricsService::Netease), Lookup::Failed, "a refusal is not a miss");
+    }
+
+    #[test]
+    fn better_lyrics_without_a_key_takes_a_401_as_a_miss_and_moves_host_only_when_unreachable() {
+        let web = Web::default();
+        web.answer("https://api.betterlyrics.org/getLyrics", 401, "");
+        assert_eq!(asking(&web, LyricsService::BetterLyrics), Lookup::Missing);
+        assert_eq!(web.asked().len(), 1, "an answer, even an error, is the service's answer");
+        let web = Web::default();
+        let ttml = include_str!("../testdata/apple.ttml");
+        web.answer("https://lyrics-api.boidu.dev/getLyrics", 200, &json!({"ttml": ttml, "score": 0.9}).to_string());
+        let Lookup::Found(l) = asking(&web, LyricsService::BetterLyrics) else { panic!("found on the second host") };
+        assert!(l.word_timed);
+        assert_eq!(web.asked().len(), 2);
+    }
+
+    #[test]
+    fn lrclib_takes_a_word_timed_search_hit_over_a_line_timed_one() {
+        let web = Web::default();
+        web.answer("https://lrclib.net/api/get", 404, r#"{"statusCode":404,"message":"not found"}"#);
+        let file = include_str!("../testdata/lrclib.lyricsfile.yaml");
+        let hits = json!([
+            {"duration": 240, "syncedLyrics": "[00:01.00]by line"},
+            {"duration": 238, "syncedLyrics": "[00:01.00]from lrc", "lyricsfile": file},
+            {"duration": 300, "syncedLyrics": "[00:01.00]too long"}]);
+        web.answer("https://lrclib.net/api/search", 200, &hits.to_string());
+        let Lookup::Found(l) = asking(&web, LyricsService::Lrclib) else { panic!("found") };
+        assert!(l.word_timed);
+        assert!(web.asked()[0].contains("track_name=Glass+Harbour&"), "the title cleaned");
+        let web = Web::default();
+        assert_eq!(asking(&web, LyricsService::Lrclib), Lookup::Failed, "unreachable");
+    }
+
+    #[test]
+    fn youtube_services_share_one_search_per_song() {
+        let web = Web::default();
+        web.answer("https://music.youtube.com/youtubei/v1/search", 200, include_str!("../testdata/youtube-search.json"));
+        web.answer("https://music.youtube.com/youtubei/v1/get_transcript", 400, "");
+        web.answer("https://api-lyrics.simpmusic.org/v1/AbCdEfGhIjK", 200, &json!({"success": true, "data": [{"duration": 239, "syncedLyrics": "[00:01.00]It&#x27;s here"}]}).to_string());
+        let (k, shared) = (keys(), Shared::default());
+        let s = Song { title: "Glass Harbour".into(), ..song() };
+        let caption = block(ask(LyricsService::YoutubeCaptions, &Ask::new(&web, &k, &shared, LyricsService::YoutubeCaptions), &s));
+        assert_eq!(caption, Lookup::Missing, "no transcript");
+        let Lookup::Found(l) = block(ask(LyricsService::Simpmusic, &Ask::new(&web, &k, &shared, LyricsService::Simpmusic), &s)) else { panic!("found") };
+        assert_eq!(l.lines[0].text, "It's here");
+        assert_eq!(web.asked().iter().filter(|u| u.contains("/search")).count(), 1);
+        let body: Value = serde_json::from_str(web.sent.lock()[0].json.as_deref().unwrap()).unwrap();
+        assert_eq!(body["context"]["client"]["clientName"], "WEB_REMIX");
+    }
+
+    #[test]
+    fn a_key_that_is_not_there_is_a_failure_and_a_key_goes_as_a_bearer() {
+        let web = Web::default();
+        assert_eq!(asking(&web, LyricsService::PaxsenixMusixmatch), Lookup::Failed);
+        assert!(web.asked().is_empty());
+        let web = Web::default();
+        web.answer("https://api.paxsenix.org/lyrics/musixmatch", 200, include_str!("../testdata/musixmatch-richsync.json"));
+        let k = LyricsLookup { paxsenix_key: "abc".into(), ..keys() };
+        let shared = Shared::default();
+        let got = block(ask(LyricsService::PaxsenixMusixmatch, &Ask::new(&web, &k, &shared, LyricsService::PaxsenixMusixmatch), &song()));
+        assert!(matches!(got, Lookup::Found(l) if l.word_timed));
+        assert_eq!(web.sent.lock()[0].headers["Authorization"], "Bearer abc");
+        assert_eq!(web.sent.lock()[0].timeout_ms, PAXSENIX_REQUEST_MS);
+    }
+}

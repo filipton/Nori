@@ -3,6 +3,10 @@ name = "nori-core"
 version.workspace = true
 edition.workspace = true
 
+# The top of the core: the Core and Client objects a platform holds, their calls into each domain crate,
+# and every domain crate re-exported under the paths a client uses (nori_core::playlist, ::settings_store,
+# ...). What the core does lives in the crates below it; see AGENTS.md for which crate holds what.
+
 [lib]
 crate-type = ["lib"]
 name = "nori_core"
@@ -11,24 +15,22 @@ name = "nori_core"
 default = ["ffi"]
 # The uniffi scaffolding the Android app's Kotlin bindings are generated from. A Rust client links the
 # core without it.
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi", "nori-lyrics/ffi", "nori-devices/ffi", "nori-queue/ffi", "nori-transfers/ffi"]
+# The optional neural beat tracker (nori-player's `neural-beats`) and the download of its model. nori-engine's
+# feature of the same name turns it on; without it nothing of tract is built.
+neural-beats = ["nori-player/neural-beats", "dep:sha2"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi", "nori-lyrics/ffi", "nori-devices/ffi", "nori-queue/ffi", "nori-transfers/ffi", "nori-perf/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
-md-5 = "0.11"
-thiserror = "2"
 parking_lot = "0.12"
-# The platform's HTTP transport is an async foreign trait (uniffi generates it through async-trait).
-async-trait = "0.1"
 # The local year (this year's albums) from the C library's time zone.
 libc = "0.2"
 # How music is played - the sound chain and AutoMix - lives in the shared player crate.
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
-nori-text = { path = "../text" }
 nori-model = { path = "../model" }
 nori-db = { path = "../db" }
 nori-words = { path = "../words" }
@@ -40,6 +42,11 @@ nori-lyrics = { path = "../lyrics" }
 nori-devices = { path = "../devices" }
 nori-queue = { path = "../queue" }
 nori-transfers = { path = "../transfers" }
+nori-perf = { path = "../perf" }
+# The beat model's file is checked against its pinned SHA-256.
+sha2 = { version = "0.11", optional = true }
 
 [dev-dependencies]
 nori-player = { path = "../player", features = ["synth"] }
+# The tests' fake transport implements the async Transport trait.
+async-trait = "0.1"

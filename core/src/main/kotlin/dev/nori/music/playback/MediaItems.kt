@@ -25,7 +25,7 @@ fun songUri(id: String): Uri = Uri.Builder().scheme(SONG_SCHEME).authority("song
  * What the player itself carries for a song: its id, and what the system's notification and lock screen
  * show. Everything else about it (ReplayGain, the transition planner's window, the queue as the app
  * lists it, the queue saved for next time) the core keeps by id - see [toMediaItems], which hands the
- * songs to it, and crates/core/src/queue.rs.
+ * songs to it, and crates/queue/src/queue.rs.
  */
 fun Song.toMediaItem(coverUrl: String?): MediaItem = MediaItem.Builder()
     .setMediaId(id)

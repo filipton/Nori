@@ -270,6 +270,11 @@ pub struct TransitionEngine<C: Clone> {
     /// and the output below follows it.
     pub lock_rate: bool,
 
+    /// The volume the buffers arriving now are heard at (their song's ReplayGain), and the one the next
+    /// buffer taken whole starts at; see [`TransitionEngine::set_gain`].
+    gain: f32,
+    next_gain: f32,
+
     queue: VecDeque<Chunk>,
     pool: Vec<Vec<u8>>,
 
@@ -337,6 +342,8 @@ impl<C: Clone> TransitionEngine<C> {
             staged: VecDeque::new(),
             mix_source_id: None,
             lock_rate: true,
+            gain: 1.0,
+            next_gain: 1.0,
             queue: VecDeque::new(),
             pool: Vec::new(),
             heard: Heard { until_us: i64::MAX, audible_us: i64::MAX, next_rate: 1.0, ..Default::default() },
@@ -471,6 +478,12 @@ impl<C: Clone> TransitionEngine<C> {
         self.resampler.is_some()
     }
 
+    /// Whether the buffers arriving now are made over into one of the engine's own (converted, or at a
+    /// song's volume) rather than handed down as the platform gave them.
+    fn copying(&self) -> bool {
+        self.converting() || self.gain != 1.0
+    }
+
     /// The staged format of `id` (its buffers flow now): arm it, or drop the converter when it is
     /// already at the pinned format. Anything staged for another id waits its turn.
     fn arm_staged_for<H: Host>(&mut self, host: &mut H, id: Option<String>) {
@@ -515,6 +528,15 @@ impl<C: Clone> TransitionEngine<C> {
         self.offset_us = offset_us;
     }
 
+    /// The volume the song whose buffers come next is heard at, 0..1: its ReplayGain, told before its
+    /// first buffer. Each song's samples are scaled as they arrive, before anything is held or mixed,
+    /// so a mix is made of two songs each at its own level. One volume for the whole output cannot be
+    /// right while two songs sound at once: wherever it changed, the whole mix jumped by the difference.
+    /// The analyser still hears the song as it is. At 1 nothing is copied or scaled.
+    pub fn set_gain(&mut self, gain: f32) {
+        self.next_gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
+    }
+
     // ---- the audio path ----
 
     /// One decoded buffer at `pts_us`. Returns whether all of it was taken, and how many bytes were:
@@ -533,12 +555,34 @@ impl<C: Clone> TransitionEngine<C> {
             return (false, 0);
         }
         let native = self.conv_in.unwrap_or(out);
+        // A new volume starts with a buffer of its own: the rest of one the output took only part of
+        // goes down as the first part did.
+        if !self.input_owed {
+            self.gain = self.next_gain;
+        }
+        let scaled = (self.gain != 1.0).then(|| {
+            let mut b = self.copy_of(buffer);
+            crate::pcm::scale(&mut b, native.encoding, self.gain);
+            b
+        });
+        let taken = self.route(down, host, buffer, scaled.as_deref().unwrap_or(buffer), pts_us, out, native);
+        if let Some(b) = scaled {
+            self.recycle(b);
+        }
+        taken
+    }
+
+    /// Where a buffer goes in each phase: `raw` as the song has it, for the analyser, and `input`, the
+    /// same at the song's volume, for the ear.
+    #[allow(clippy::too_many_arguments)]
+    fn route<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, raw: &[u8], input: &[u8], pts_us: i64, out: Format, native: Format) -> (bool, usize) {
+        let buffer = input;
         match self.phase {
             Phase::Pass => {
                 // Converted audio lives in a buffer the next call reuses: anything kept is copied.
                 // The stretcher works in the native domain, so it always sees the native buffer.
-                if self.converting() || self.stretch.is_some() {
-                    self.feed_analysis(host, buffer, native);
+                if self.copying() || self.stretch.is_some() {
+                    self.feed_analysis(host, raw, native);
                 }
                 if self.stretch.is_some() {
                     self.stretch_out(host, buffer, pts_us);
@@ -565,7 +609,7 @@ impl<C: Clone> TransitionEngine<C> {
                 }
             }
             Phase::Hold => {
-                self.feed_analysis(host, buffer, native);
+                self.feed_analysis(host, raw, native);
                 if self.converting() {
                     if let Some(b) = self.converted(host, buffer) {
                         self.hold(&b, out);
@@ -576,7 +620,7 @@ impl<C: Clone> TransitionEngine<C> {
                 }
             }
             Phase::Mix => {
-                self.feed_analysis(host, buffer, native);
+                self.feed_analysis(host, raw, native);
                 self.mix(host, buffer, pts_us, out);
             }
         }
@@ -588,7 +632,7 @@ impl<C: Clone> TransitionEngine<C> {
     /// planned start of a transition - the head through and the rest into the hold. `Some` is the
     /// answer to give the caller now; `None` means the buffer was taken in whole.
     fn pass_or_hold<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, buf: &[u8], whole: usize, pts_us: i64, out: Format) -> Option<(bool, usize)> {
-        if self.input_owed && !self.converting() {
+        if self.input_owed && !self.copying() {
             return Some(self.pass(down, host, buf, whole, pts_us, false));
         }
         if self.playing_id.is_none() {
@@ -610,13 +654,13 @@ impl<C: Clone> TransitionEngine<C> {
         // Past the planned region there is nothing to hold any more.
         let skip_transition = p.is_some_and(|(_, duration_us)| start_frame < -duration_us * out.rate as i64 / 1_000_000);
         if start_frame >= frames || skip_transition {
-            return Some(self.pass(down, host, buf, whole, pts_us, self.converting()));
+            return Some(self.pass(down, host, buf, whole, pts_us, self.copying()));
         }
         // Cloned only here, once per transition: every other buffer reads the plan in place.
         let p = self.plan.clone().expect("a plan exists past this point");
         let late = start_frame < 0;
         let before = start_frame.max(0) as usize * fb;
-        if !self.converting() {
+        if !self.copying() {
             self.feed_analysis(host, buf, out);
         }
         if before > 0 {
@@ -1055,8 +1099,10 @@ impl<C: Clone> TransitionEngine<C> {
     fn finish_stretch(&mut self, buf: &mut Vec<u8>, produced: usize, fmt: Format) -> usize {
         let more = match self.stretch.as_mut() {
             Some(s) => {
-                if buf.len() < produced + 65536 {
-                    buf.resize(produced + 65536, 0);
+                // Room for all it still holds: its delay line and the block in hand.
+                let room = (s.latency_frames() + 4 * crate::automix::stretch::BLOCK) * fmt.frame_bytes();
+                if buf.len() < produced + room {
+                    buf.resize(produced + room, 0);
                 }
                 s.drain(&mut buf[produced..], fmt.encoding)
             }

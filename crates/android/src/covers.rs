@@ -9,6 +9,11 @@
 //! the app before). With `hardware`, the picture is decoded into a software Bitmap kept for the next
 //! cover and copied to the GPU, which is what the screens draw: the upload happens here, on a loader
 //! thread, not on the first frame that draws it.
+//!
+//! What a loader thread keeps between covers goes when the loader rests (20 s without a cover asked for,
+//! the app out of sight, memory short; see nori-covers' loader): the thread itself, with whatever the
+//! graphics driver keeps for each thread that has copied a Bitmap to the GPU (4.5 MB on the emulator's),
+//! and here the kept software Bitmaps and the colours' buffers.
 // Bitmaps are only there on Android; elsewhere the doors build and refuse every Bitmap.
 #![cfg_attr(not(target_os = "android"), allow(dead_code, unused_variables))]
 
@@ -23,7 +28,7 @@ use jni::objects::{GlobalRef, JClass, JIntArray, JMethodID, JObject, JStaticMeth
 use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jboolean, jint, jlong};
 use jni::{JNIEnv, JavaVM};
-use nori_core::transport::{FailureKind, Transport, TransportError, TransportResponse};
+use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, TransportResponse};
 use nori_covers::{Alpha, Config, DecodeError, Decoder, Loader, Paint, Target, Ticket};
 use parking_lot::Mutex;
 
@@ -38,6 +43,8 @@ pub(crate) static CLASS: Class = Class {
         native!(c"cancel", c"(J)V", cancel),
         native!(c"warm", c"(JLjava/lang/String;)V", warm),
         native!(c"clear", c"(J)V", clear),
+        native!(c"rest", c"(J)V", rest),
+        native!(c"show", c"(JZ)V", show),
         native!(c"colours", c"(JLjava/lang/String;IZ[ILandroid/graphics/Bitmap;[I)I", colours),
         native!(c"decodeFile", c"(Ljava/lang/String;Landroid/graphics/Bitmap;Z)I", decode_file),
     ],
@@ -196,6 +203,17 @@ impl Paint for Bitmaps {
     fn bytes(picture: &Drawn) -> usize {
         picture.bytes
     }
+
+    fn rest(&self) {
+        let kept = std::mem::take(&mut *self.idle.lock());
+        COLOURS.lock().clear();
+        let (Some(java), false) = (JAVA.get(), kept.is_empty()) else { return };
+        let Some(mut env) = crate::attached(&java.vm) else { return };
+        for mut scratch in kept {
+            scratch.recycle(&mut env, java);
+        }
+        cleared(&mut env);
+    }
 }
 
 /// A new mutable software Bitmap.
@@ -285,6 +303,8 @@ fn draw(env: &JNIEnv, decoder: &mut Decoder, rgba: &mut Vec<u8>, bytes: &[u8], b
         let (width, height, stride) = (b.width, b.height, b.stride);
         decoder.set_idct_scaling(idct);
         if b.rgb565 {
+            // Exactly this picture's rows, not twice the largest one's.
+            rgba.reserve_exact((width * height * 4).saturating_sub(rgba.len()));
             rgba.resize(width * height * 4, 0);
             decoder.decode_into(bytes, Target { px: rgba, width, height, stride: width * 4 }, Alpha::Premultiplied).map_err(Fail::Decode)?;
             pack_565(rgba, width, height, b.pixels_mut(), stride);
@@ -333,6 +353,13 @@ impl Transport for Platform {
             return Err(TransportError::Failed { kind: FailureKind::Other, detail: Some("no transport for covers".into()) });
         };
         t.get(url, timeout_ms).await
+    }
+
+    async fn send(&self, request: Exchange) -> Result<TransportResponse, TransportError> {
+        let Some(t) = nori_core::covers::cover_transport(Duration::from_secs(30)) else {
+            return Err(TransportError::Failed { kind: FailureKind::Other, detail: Some("no transport for covers".into()) });
+        };
+        t.send(request).await
     }
 
     fn address_changed(&self) {}
@@ -407,6 +434,23 @@ extern "system" fn warm(mut env: JNIEnv, _: JClass, h: jlong, url: JString) {
     }
 }
 
+/// Lets go of what the loader keeps for covers to come (`Loader::rest`): its threads end once they have
+/// nothing to do, and the kept Bitmaps and buffers go. For memory running short; the next cover starts a
+/// thread again.
+extern "system" fn rest(_: JNIEnv, _: JClass, h: jlong) {
+    if let Some(loader) = loader(h) {
+        loader.rest();
+    }
+}
+
+/// Whether any of the app's screens is in sight (`Loader::show`): out of sight the loader rests, and
+/// keeps no thread waiting for the next cover.
+extern "system" fn show(_: JNIEnv, _: JClass, h: jlong, shown: jboolean) {
+    if let Some(loader) = loader(h) {
+        loader.show(shown != 0);
+    }
+}
+
 /// Deletes every cover on the disk. Disk work: off the main thread.
 extern "system" fn clear(_: JNIEnv, _: JClass, h: jlong) {
     if let Some(d) = loader(h).and_then(Loader::disk) {
@@ -452,11 +496,13 @@ extern "system" fn colours(mut env: JNIEnv, _: JClass, h: jlong, url: JString, s
         // The whole picture, shrunk to fit: a page takes its colours from the cover's own bottom rows.
         let k = (side.max(1) as f64 / head.width.max(head.height) as f64).min(1.0);
         let (w, h) = (((head.width as f64 * k).round() as usize).max(1), ((head.height as f64 * k).round() as usize).max(1));
+        c.rgba.reserve_exact((w * h * 4).saturating_sub(c.rgba.len()));
         c.rgba.resize(w * h * 4, 0);
         if c.decoder.decode_into(&c.bytes, Target { px: &mut c.rgba, width: w, height: h, stride: w * 4 }, Alpha::Straight).is_err() {
             return 0;
         }
         c.argb.clear();
+        c.argb.reserve_exact(w * h);
         c.argb.extend(c.rgba.chunks_exact(4).map(|p| u32::from(p[3]) << 24 | u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])));
         let mut answer = 0;
         if !out.is_null() {

@@ -36,8 +36,10 @@ pub(crate) static LYRICS: Class = Class {
     methods: &[
         native!(c"destroy", c"(J)V", lyrics_destroy),
         native!(c"sweeps", c"(J)Z", lyrics_sweeps),
-        native!(c"at", c"(JJZZ)J", lyrics_at),
+        native!(c"at", c"(JJZZZ)J", lyrics_at),
         native!(c"shown", c"(J)J", lyrics_shown),
+        native!(c"shownMs", c"(J)J", lyrics_shown_ms),
+        native!(c"backingSung", c"(J)F", lyrics_backing_sung),
         native!(c"tap", c"(JI)J", lyrics_tap),
         native!(c"nudge", c"(JI)J", lyrics_nudge),
         native!(c"kept", c"(JJ)J", lyrics_kept),
@@ -318,8 +320,18 @@ extern "system" fn lyrics_sweeps(h: jlong) -> jboolean {
 
 /// The per-frame question, `LyricClock::advance` packed by `Step::pack`. A freed handle answers
 /// "nothing lit, never ask again".
-extern "system" fn lyrics_at(h: jlong, position_ms: jlong, sweep: jboolean, force: jboolean) -> jlong {
-    clock(h).map_or(0, |c| c.advance(position_ms, sweep != 0, force != 0).pack())
+extern "system" fn lyrics_at(h: jlong, position_ms: jlong, sweep: jboolean, lively: jboolean, force: jboolean) -> jlong {
+    clock(h).map_or(0, |c| c.advance(position_ms, sweep != 0, lively != 0, force != 0).pack())
+}
+
+/// The moment on screen, for the words' rise and glow, drawn in Kotlin.
+extern "system" fn lyrics_shown_ms(h: jlong) -> jlong {
+    clock(h).map_or(0, |c| c.shown_ms())
+}
+
+/// How far into the lit line's backing vocals the singing is, at the moment on screen.
+extern "system" fn lyrics_backing_sung(h: jlong) -> jfloat {
+    clock(h).map_or(0.0, |c| c.backing_sung())
 }
 
 /// What is on screen now, packed by `Frame::pack`.

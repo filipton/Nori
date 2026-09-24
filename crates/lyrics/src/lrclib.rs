@@ -1,36 +1,17 @@
-//! Lyrics from outside the server, for songs it has none (or only unsynced ones) for. LRCLIB is an open,
-//! community-run database of synced lyrics with a documented API, which is why it is the one built in.
-//! Each lookup is one or two small requests made when the lyrics are opened, never ahead of time, and
-//! the answer is kept in the response cache so a song is looked up once.
+//! LRCLIB, an open, community-run database of synced lyrics with a documented API: its addresses, how
+//! titles are cleaned before they are asked for (the other services clean them the same way), and which
+//! lyrics in one of its records are worth taking. It is asked like every other service (services.rs).
 
 use std::borrow::Cow;
 
-use nori_model::{alog, Lyrics, Song};
+use nori_model::{Lyrics, Song};
 use serde_json::{Map, Value};
 
-use crate::lyrics;
+use crate::{formats, lyrics};
 
 const BASE: &str = "https://lrclib.net/api";
-/// A miss is asked again after a week: someone may have added the song since.
-pub const MISS_KEPT_MS: i64 = 7 * 24 * 3_600_000;
 /// Search hits further than this from the song's length are another recording.
 pub const DURATION_SLACK_S: f64 = 4.0;
-
-/// Lyrics to show after the server's own, and where they came from.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct LyricsPick {
-    pub lyrics: Lyrics,
-    /// From LRCLIB; otherwise this is the server's empty answer, shown once nothing better came.
-    pub lrclib: bool,
-}
-
-/// A provider's answer. `Failed` (no network, server error) must never be remembered as `Missing`.
-pub enum Lookup {
-    Found(Lyrics),
-    Missing,
-    Failed,
-}
 
 // ---- matching titles the way providers write them -------------------------------------------------------
 
@@ -143,7 +124,7 @@ pub fn clean(title: &str) -> String {
 }
 
 /// `application/x-www-form-urlencoded`, as LRCLIB's query string wants it.
-fn form_encode(out: &mut String, v: &str) {
+pub fn form_encode(out: &mut String, v: &str) {
     for b in v.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => out.push(b as char),
@@ -158,6 +139,7 @@ fn form_encode(out: &mut String, v: &str) {
     }
 }
 
+/// LRCLIB's exact lookup of `song` by its cleaned `title`.
 pub fn get_url(song: &Song, title: &str) -> String {
     let mut u = format!("{BASE}/get?artist_name=");
     form_encode(&mut u, &song.artist);
@@ -169,6 +151,7 @@ pub fn get_url(song: &Song, title: &str) -> String {
     u
 }
 
+/// LRCLIB's search for `song` by its cleaned `title`, for when the exact lookup finds nothing.
 pub fn search_url(song: &Song, title: &str) -> String {
     let mut u = format!("{BASE}/search?track_name=");
     form_encode(&mut u, title);
@@ -197,6 +180,7 @@ fn flag(o: &Map<String, Value>, k: &str) -> bool {
     }
 }
 
+/// A number field of an answer; 0 when it is missing or not a number.
 pub fn number(o: &Map<String, Value>, k: &str) -> f64 {
     match o.get(k) {
         Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
@@ -209,53 +193,30 @@ fn blank(s: &str) -> bool {
     s.chars().all(|c| matches!(c, '\t'..='\r' | '\x1c'..='\x1f') || separator(c))
 }
 
-/// The lyrics in one LRCLIB record: none for an instrumental, synced ones over plain ones.
+/// The lyrics in one LRCLIB record: none for an instrumental, the finest timed of what it has. LRCLIB
+/// keeps word timing only in the record's lyricsfile (open YAML, contributed with LRCGET's editor); its
+/// LRC fields are made from it a line at a time. So the lyricsfile wins when it times words, and the LRC
+/// otherwise, synced over plain.
 pub fn pick(o: &Map<String, Value>) -> Option<Lyrics> {
     if flag(o, "instrumental") {
         return None;
     }
     let usable = |k| Some(text(o, k)).filter(|t| !blank(t) && t != "null");
-    let chosen = usable("syncedLyrics").or_else(|| usable("plainLyrics"))?;
-    Some(lyrics::from_lrc(&chosen)).filter(|l| !l.lines.is_empty())
-}
-
-pub fn json(body: &[u8]) -> Result<Value, String> {
-    serde_json::from_str(&String::from_utf8_lossy(body)).map_err(|e| e.to_string())
-}
-
-pub fn failed(what: &str, why: &str) -> Lookup {
-    alog::info(&format!("lrclib {what} failed: {why}"));
-    Lookup::Failed
-}
-
-/// Back to LRC text for the cache; it is parsed again when read. Centiseconds round half up, as the
-/// cache has always been written.
-pub fn to_lrc(l: &Lyrics) -> String {
-    let mut out = String::new();
-    for (i, line) in l.lines.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        if line.start_ms >= 0 {
-            let cs = (line.start_ms % 60_000 + 5) / 10;
-            out.push_str(&format!("[{:02}:{:02}.{:02}]", line.start_ms / 60_000, cs / 100, cs % 100));
-        }
-        out.push_str(&line.text);
+    let file = usable("lyricsfile").map(|t| formats::from_lyricsfile(&t)).filter(|l| !l.lines.is_empty());
+    if file.as_ref().is_some_and(|f| f.word_timed) {
+        return file;
     }
-    out
-}
-
-/// LRCLIB is asked only with third-party lookups on and its own switch on too.
-pub fn lrclib_allowed(p: &nori_settings::settings::StoredPrefs) -> bool {
-    p.third_party_lookups && p.lyrics_lrclib
+    let lrc = usable("syncedLyrics").or_else(|| usable("plainLyrics")).map(|t| lyrics::from_lrc(&t)).filter(|l| !l.lines.is_empty());
+    match (lrc, file) {
+        (Some(l), Some(f)) if formats::timing(&f) > formats::timing(&l) => Some(f),
+        (Some(l), _) => Some(l),
+        (None, f) => f,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    use nori_model::LyricLine;
-    
 
     #[test]
     fn titles_lose_credits_and_version_notes() {
@@ -284,13 +245,6 @@ mod tests {
     }
 
     #[test]
-    fn lrc_is_written_with_centiseconds_rounded_half_up() {
-        let line = |start_ms, text: &str| LyricLine { start_ms, text: text.into(), ..Default::default() };
-        let l = Lyrics { synced: true, word_timed: false, lines: vec![line(5_200, "a"), line(65_125, "b"), line(3_599_995, "c"), line(-1, "plain")], key: 0 };
-        assert_eq!(to_lrc(&l), "[00:05.20]a\n[01:05.13]b\n[59:60.00]c\nplain");
-    }
-
-    #[test]
     fn records_pick_synced_then_plain_and_skip_instrumentals() {
         let o = |j: &str| serde_json::from_str::<Value>(j).unwrap().as_object().unwrap().clone();
         assert!(pick(&o(r#"{"instrumental":true,"syncedLyrics":"[00:01.00]x"}"#)).is_none());
@@ -301,10 +255,16 @@ mod tests {
     }
 
     #[test]
-    fn lrclib_needs_both_switches() {
-        let p = |third_party_lookups, lyrics_lrclib| nori_settings::settings::StoredPrefs { third_party_lookups, lyrics_lrclib, ..Default::default() };
-        assert!(lrclib_allowed(&p(true, true)));
-        assert!(!lrclib_allowed(&p(true, false)));
-        assert!(!lrclib_allowed(&p(false, true)));
+    fn a_word_timed_lyricsfile_beats_the_lrc_beside_it() {
+        let o = |j: &str| serde_json::from_str::<Value>(j).unwrap().as_object().unwrap().clone();
+        let file = "version: '1.0'\nmetadata: {title: t, artist: a}\nlines:\n  - {text: hi there, start_ms: 1000, words: [{text: 'hi ', start_ms: 1000, end_ms: 1400}, {text: there, start_ms: 1400, end_ms: 2000}]}\n";
+        let both = serde_json::json!({"syncedLyrics": "[00:01.00]hi there", "lyricsfile": file}).to_string();
+        assert!(pick(&o(&both)).unwrap().word_timed);
+        // A lyricsfile timed by line only is no better than the LRC made from it.
+        let lined = serde_json::json!({"syncedLyrics": "[00:01.00]from lrc", "lyricsfile": "version: '1.0'\nmetadata: {title: t, artist: a}\nlines:\n  - {text: from file, start_ms: 1000}\n"}).to_string();
+        assert_eq!(pick(&o(&lined)).unwrap().lines[0].text, "from lrc");
+        // Plain words only, and a lyricsfile that times them: the file.
+        let plain = serde_json::json!({"plainLyrics": "words", "lyricsfile": "version: '1.0'\nmetadata: {title: t, artist: a}\nlines:\n  - {text: timed, start_ms: 1000}\n"}).to_string();
+        assert!(pick(&o(&plain)).unwrap().synced);
     }
 }

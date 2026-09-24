@@ -28,7 +28,9 @@ class TestBridge : BroadcastReceiver() {
             """"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},"error":"${st.error.orEmpty()}",""" +
             """"dspActive":${dev.nori.music.playback.Equalizer.inChain},""" +
             """"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
-            """"sinkBytes":${dev.nori.music.playback.TransitionSink.bytesWritten}}"""
+            """"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},""" +
+            """"offloaded":${dev.nori.music.playback.PlaybackService.rustPlayer?.offloaded ?: false},""" +
+            """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten}}"""
     }
 
     private fun watchStates() {

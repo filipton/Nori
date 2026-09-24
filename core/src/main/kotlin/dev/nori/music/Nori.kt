@@ -86,6 +86,8 @@ class Nori private constructor(private val context: Context) {
     val downloads = Downloads(context, ::core, lazySources, settings)
     val dac = BitPerfect(context)
     val outputs = Outputs(context)
+    /** A player for the moving cover; the screen's view model makes one when it first shows one. */
+    fun motionPlayer(onGone: (String) -> Unit) = dev.nori.music.playback.MotionPlayer(context, http, sources, onGone)
     /** Each output device's own sound; built when the playback service first sees a device. */
     val deviceSound by lazy { dev.nori.music.playback.DeviceSound(settings, { core }, { http }) }
     val player = PlayerConnection(context, this)

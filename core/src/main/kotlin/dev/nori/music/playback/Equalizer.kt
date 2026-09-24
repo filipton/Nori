@@ -9,7 +9,7 @@ import dalvik.annotation.optimization.FastNative
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** The Rust side of the equalizer; see crates/core/src/dsp.rs. */
+/** The Rust side of the equalizer; see crates/settings/src/dsp.rs. */
 object Dsp {
     init { System.loadLibrary("norimusic") }
 
@@ -32,7 +32,7 @@ object Dsp {
 
 /**
  * The sample-domain chain: pre-amp, parametric equalizer, crossfeed, balance, mono, limiter. The chain
- * follows the settings in the core by itself (crates/core/src/dsp.rs): a change reaches the next buffer.
+ * follows the settings in the core by itself (crates/settings/src/dsp.rs): a change reaches the next buffer.
  * While [enabled] is false the processor reports itself inactive and media3 leaves it out of the
  * chain entirely, which is what lets playback stay offloaded. The service keeps [enabled] true on
  * every PCM path (even with a flat curve) so toggling EQ or moving a band is live — no sink

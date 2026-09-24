@@ -280,9 +280,11 @@ fn reduction(width: usize, height: usize, tw: usize, th: usize) -> usize {
     [8, 4, 2].into_iter().find(|&k| s >= k as f64).unwrap_or(1)
 }
 
-/// `len` bytes of a kept buffer, grown to hold them.
+/// `len` bytes of a kept buffer, grown to hold exactly them: grown by doubling, it would be kept at up to
+/// twice the largest picture decoded.
 fn grow(v: &mut Vec<u8>, len: usize) -> &mut [u8] {
     if v.len() < len {
+        v.reserve_exact(len - v.len());
         v.resize(len, 0);
     }
     &mut v[..len]

@@ -44,18 +44,20 @@ CREATE TABLE IF NOT EXISTS plays(rowid INTEGER PRIMARY KEY, server TEXT NOT NULL
 CREATE INDEX IF NOT EXISTS plays_started ON plays(server, started_ms);
 CREATE TABLE IF NOT EXISTS song_stats(server TEXT NOT NULL, song_id TEXT NOT NULL, plays INTEGER NOT NULL DEFAULT 0, skips INTEGER NOT NULL DEFAULT 0, last_played_ms INTEGER NOT NULL DEFAULT 0, heard_ms_total INTEGER NOT NULL DEFAULT 0, taste REAL NOT NULL DEFAULT 0, PRIMARY KEY(server, song_id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS mix_excluded(server TEXT NOT NULL, song_id TEXT NOT NULL, PRIMARY KEY(server, song_id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS autofill_picks(server TEXT NOT NULL, kind INTEGER NOT NULL, id TEXT NOT NULL, picked_ms INTEGER NOT NULL, PRIMARY KEY(server, kind, id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS smart_playlists(server TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, json TEXT NOT NULL, updated_ms INTEGER NOT NULL, PRIMARY KEY(server, id)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS items_genre ON items(server, json_extract(json,'$.genre') COLLATE NOCASE) WHERE kind=2;
 CREATE INDEX IF NOT EXISTS items_artist ON items(server, json_extract(json,'$.artistId')) WHERE kind=2;
 CREATE INDEX IF NOT EXISTS items_year ON items(server, json_extract(json,'$.year')) WHERE kind=2;
 CREATE INDEX IF NOT EXISTS items_starred ON items(server, json_extract(json,'$.starred')) WHERE kind=2 AND json_extract(json,'$.starred')=1;
 CREATE INDEX IF NOT EXISTS items_rated ON items(server, json_extract(json,'$.userRating')) WHERE kind=2 AND json_extract(json,'$.userRating')>=4;
-CREATE TABLE IF NOT EXISTS track_analysis(server TEXT NOT NULL, song_id TEXT NOT NULL, analysis_version INTEGER NOT NULL, duration_ms INTEGER NOT NULL, bpm REAL NOT NULL, bpm_confidence REAL NOT NULL, beat_offset_ms REAL NOT NULL, stability REAL NOT NULL, downbeat_phase INTEGER NOT NULL, downbeat_confidence REAL NOT NULL, lufs REAL NOT NULL, key INTEGER NOT NULL, key_confidence REAL NOT NULL, silence_start_ms INTEGER NOT NULL, silence_end_ms INTEGER NOT NULL, mixramp_start_ms INTEGER NOT NULL, mixramp_end_ms INTEGER NOT NULL, intro_end_ms INTEGER NOT NULL, outro_start_ms INTEGER NOT NULL, outro_vocal REAL NOT NULL, intro_vocal REAL NOT NULL, outro_centroid REAL NOT NULL, intro_centroid REAL NOT NULL, outro_bpm REAL NOT NULL, outro_bpm_confidence REAL NOT NULL, outro_beat_offset_ms REAL NOT NULL, outro_stability REAL NOT NULL, outro_downbeat_phase INTEGER NOT NULL, intro_bpm REAL NOT NULL, intro_bpm_confidence REAL NOT NULL, intro_beat_offset_ms REAL NOT NULL, intro_stability REAL NOT NULL, intro_downbeat_phase INTEGER NOT NULL, analysed_ms INTEGER NOT NULL, PRIMARY KEY(server, song_id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS track_analysis(server TEXT NOT NULL, song_id TEXT NOT NULL, analysis_version INTEGER NOT NULL, duration_ms INTEGER NOT NULL, bpm REAL NOT NULL, bpm_confidence REAL NOT NULL, beat_offset_ms REAL NOT NULL, stability REAL NOT NULL, downbeat_phase INTEGER NOT NULL, downbeat_confidence REAL NOT NULL, lufs REAL NOT NULL, key INTEGER NOT NULL, key_confidence REAL NOT NULL, silence_start_ms INTEGER NOT NULL, silence_end_ms INTEGER NOT NULL, mixramp_start_ms INTEGER NOT NULL, mixramp_end_ms INTEGER NOT NULL, intro_end_ms INTEGER NOT NULL, outro_start_ms INTEGER NOT NULL, outro_vocal REAL NOT NULL, intro_vocal REAL NOT NULL, outro_centroid REAL NOT NULL, intro_centroid REAL NOT NULL, outro_bpm REAL NOT NULL, outro_bpm_confidence REAL NOT NULL, outro_beat_offset_ms REAL NOT NULL, outro_stability REAL NOT NULL, outro_downbeat_phase INTEGER NOT NULL, intro_bpm REAL NOT NULL, intro_bpm_confidence REAL NOT NULL, intro_beat_offset_ms REAL NOT NULL, intro_stability REAL NOT NULL, intro_downbeat_phase INTEGER NOT NULL, beats_per_bar INTEGER NOT NULL DEFAULT 0, drop_ms INTEGER NOT NULL DEFAULT 0, drop_runup_vocal REAL NOT NULL DEFAULT 0, drop_vocal REAL NOT NULL DEFAULT 0, exit_ms INTEGER NOT NULL DEFAULT 0, gap_ms INTEGER NOT NULL DEFAULT 0, gap_end_ms INTEGER NOT NULL DEFAULT 0, exit_vocal REAL NOT NULL DEFAULT 0, drop_runup_tonal_db REAL NOT NULL DEFAULT 0, intro_beats_per_bar INTEGER NOT NULL DEFAULT 0, outro_beats_per_bar INTEGER NOT NULL DEFAULT 0, intro_grid_source INTEGER NOT NULL DEFAULT 0, outro_grid_source INTEGER NOT NULL DEFAULT 0, analysed_ms INTEGER NOT NULL, PRIMARY KEY(server, song_id)) WITHOUT ROWID;
 ";
 
 /// The tables that belong to one server: what goes when its profile is removed.
-const SERVER_TABLES: [&str; 11] =
-    ["items", "cache", "kv", "pending", "downloads", "searches", "plays", "song_stats", "mix_excluded", "smart_playlists", "track_analysis"];
+const SERVER_TABLES: [&str; 12] = [
+    "items", "cache", "kv", "pending", "downloads", "searches", "plays", "song_stats", "mix_excluded", "autofill_picks", "smart_playlists", "track_analysis",
+];
 
 /// The app's database, opened for `server`'s rows.
 pub fn open(path: &str, server: &str) -> rusqlite::Result<Connection> {
@@ -65,8 +67,19 @@ pub fn open(path: &str, server: &str) -> rusqlite::Result<Connection> {
     c.create_scalar_function("sid", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC, move |_| {
         Ok(sid.clone())
     })?;
+    drop_old_analysis(&c)?;
     c.execute_batch(SCHEMA)?;
     Ok(c)
+}
+
+/// Song analyses are a cache: an older table layout is not carried over but dropped, and the songs are
+/// measured again as they come up. The last column the layout gained says whether it is current.
+fn drop_old_analysis(c: &Connection) -> rusqlite::Result<()> {
+    let have: Vec<String> = c.prepare("PRAGMA table_info(track_analysis)")?.query_map([], |r| r.get(1))?.collect::<rusqlite::Result<_>>()?;
+    if !have.is_empty() && !have.iter().any(|h| h == "outro_grid_source") {
+        c.execute_batch("DROP TABLE track_analysis")?;
+    }
+    Ok(())
 }
 
 /// The app's database for what is the app's alone (the settings and the app's own values), with no server.
@@ -228,6 +241,23 @@ mod tests {
     fn song(c: &mut Connection, id: &str, title: &str) {
         let s: Song = serde_json::from_str(&format!(r#"{{"id":"{id}","title":"{title}"}}"#)).unwrap();
         index(c, &[], &[], &[s]).unwrap();
+    }
+
+    #[test]
+    fn an_analysis_table_of_an_older_layout_is_made_again_not_carried_over() {
+        let dir = std::env::temp_dir().join(format!("nori-db-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db").to_string_lossy().into_owned();
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("CREATE TABLE track_analysis(server TEXT NOT NULL, song_id TEXT NOT NULL, bpm REAL NOT NULL, PRIMARY KEY(server, song_id)) WITHOUT ROWID; INSERT INTO track_analysis VALUES('s','a',120);").unwrap();
+        }
+        let c = open(&path, "s").unwrap();
+        let cols: Vec<String> = c.prepare("PRAGMA table_info(track_analysis)").unwrap().query_map([], |r| r.get::<_, String>(1)).unwrap().map(|c| c.unwrap()).collect();
+        assert!(cols.iter().any(|c| c == "outro_grid_source"), "the current layout");
+        let rows: i64 = c.query_row("SELECT count(*) FROM track_analysis", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "nothing carried over: the songs are measured again");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

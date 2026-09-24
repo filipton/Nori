@@ -11,6 +11,9 @@ name = "nori_player"
 [features]
 # Synthetic tracks with a known tempo and structure, and the simulated player in `sim`, for tests.
 synth = []
+# The optional neural beat tracker, Beat This! through tract (automix/neural.rs, docs/research/analysis.md).
+# Without it nothing of tract is compiled or linked; nori-engine's feature of the same name turns it on.
+neural-beats = ["dep:tract-onnx"]
 
 [dependencies]
 parking_lot = "0.12"
@@ -18,6 +21,10 @@ nori-text = { path = "../text" }
 # AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
 rustfft = "6"
 signalsmith-stretch = "0.1"
+# The neural beat tracker's runtime: tract, a pure-Rust ONNX runtime (MIT/Apache-2.0). Its default
+# "transformers" feature is what runs the model's attention as flash attention (a fifth of the memory);
+# neural.rs keeps that on the calling thread, so rayon's pool, which comes with it, is never started.
+tract-onnx = { version = "0.23", optional = true }
 # Decoding: pure Rust codecs only (no containers - the platform's extractor hands in packets).
 symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "flac", "aac", "vorbis", "alac", "pcm"] }
 # Opus, which symphonia does not decode: a pure Rust port of libopus (BSD-3).

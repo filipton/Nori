@@ -236,17 +236,20 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
                     // Whichever player plays: the Rust one answers from its own engine and output.
                     dev.nori.music.playback.PlaybackService.rustPlayer.let { r ->
-                        """"engine":"${if (r != null) "rust" else "exo"}","mixing":${r?.mixing ?: dev.nori.music.playback.TransitionSink.mixing},"""
+                        """"engine":"${if (r != null) "rust" else "exo"}","mixing":${r?.mixing ?: dev.nori.music.playback.TransitionSink.mixing},"offloaded":${r?.offloaded ?: false},"""
                     } +
                     """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.transfers.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.transfers.downloadSpeedEta()[1]},""" +
                     """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten},""" +
+                    // Moving covers: how many video players exist (nought whenever the switch is off) and
+                    // the video the open player found for this album, if any.
+                    """"motionPlayers":${dev.nori.music.playback.MotionPlayer.live},"motionVideo":"${player2.motionVideo.value.orEmpty()}",""" +
                     // Everything the app's Java side has allocated since it started, for allocation checks.
                     """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
                     dev.nori.music.Nori.get(context).dac.state.value.let { d ->
                         """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
                             """"dacBlocked":"${d.blockedBy.orEmpty()}","dacTrack":"${d.track.orEmpty()}","""
                     } +
-                    (actions.lastLyrics ?: (player2.lyrics.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
+                    (actions.lastLyrics ?: (player2.lyrics.value.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
                         """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
                             """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""
                     }.orEmpty() +
@@ -286,6 +289,14 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             LocalPlayerMenu provides { menuSong = it; menuFromPlayer = true },
         ) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
+            // The tab the page on screen belongs to, which is the one that stays lit, as Apple's does: a
+            // settings group, or an album opened from Home, is still inside that tab. Lit only on the tab
+            // roots themselves, the icon went out the moment anything was opened. There is one back stack
+            // and a tab tap rebuilds it from the start, so the page's tab is the last root shown.
+            var lastTab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("home") }
+            val onTab = route?.takeIf { r -> tabs.any { it.route == r } }
+            LaunchedEffect(onTab) { if (onTab != null) lastTab = onTab }
+            val tabRoute = onTab ?: lastTab
             // This session's star changes, so every heart prefers them over the snapshot it painted with.
             val marks by actions.starMarks.collectAsStateWithLifecycle()
             // The chrome floats over the page rather than ending it: the page fills the window, its colour
@@ -356,7 +367,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
               // The tab bar is over the player, not under it: as the player rises it slides down off the
               // screen instead of vanishing under the sheet in one frame. See BottomChrome.
-              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab, chromeLook) { tabsHeight = it } }
+              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(tabRoute, tabs, nav::tab, chromeLook) { tabsHeight = it } }
               // Top: less in the way of the now-playing bar; swipe or the X dismisses.
               SnackbarHost(
                   snackbar,

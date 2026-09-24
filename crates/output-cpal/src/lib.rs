@@ -108,7 +108,7 @@ impl AudioOutput for CpalOutput {
             return Err(format!("the device only takes {format:?} samples"));
         }
         let config = StreamConfig { channels: chosen.channels(), sample_rate: chosen.sample_rate(), buffer_size: BufferSize::Default };
-        let got = OutputFormat { rate: config.sample_rate, channels: config.channels as usize };
+        let got = OutputFormat { rate: config.sample_rate, channels: config.channels as usize, bits: 0 };
         if let (Some(w), Some(d)) = (&self.watch, described(&device)) {
             w(d);
         }

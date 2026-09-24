@@ -2,6 +2,10 @@
 
 Labels used: **[verified]** = stated by a cited source; **[inferred]** = my reasoning or estimate, not confirmed by a source.
 
+The song analysis underneath (beats, bars, tempo, key, sections, vocals: methods, licences, what runs on a phone,
+and how Nori's analysis measures against a synthetic test set) has its own document, `analysis.md`. Where the
+two disagree on the analysis, `analysis.md` is the later one.
+
 ## 1. What Apple's AutoMix does
 
 **Apple's own wording.** Apple's WWDC25 services release says AutoMix uses AI "to analyze audio features" and "crafts unique transitions between songs with time stretching and beat matching" ([Apple Newsroom](https://www.apple.com/newsroom/2025/06/apple-services-deliver-powerful-features-and-intelligent-updates-to-users-this-fall/), [MusicTech](https://musictech.com/news/gear/apple-music-automix-ai/)). Press coverage adds that it looks at tempo and key ([MacRumors](https://www.macrumors.com/how-to/ios-enable-automix-feature-apple-music/)). No WWDC technical session covers the DSP.
@@ -169,7 +173,11 @@ Beat times are not stored. The grid is rebuilt as `offset + n·60/bpm`. For trac
 | Echo-out for clashes | simple fade fallback | yes | no | **yes** |
 | Camelot-aware length | inferred (key+tempo) | yes (bars 4–32) | no | **yes (≤1 long, 2 short, ≥4 echo)** |
 | Loudness match | yes (catalogue) | yes | MixRamp / RG | **LUFS when RG off** |
-| Max skip bound | criticised (≤1 min) | n/a (edit) | n/a | **15 s hard cap** |
+| Max skip bound | criticised (≤1 min) | n/a (edit) | n/a | **15 s of music, hard cap; silence free** |
+| Enter the next song on its drop | not documented | yes (manual cues) | no | **yes** (section 7) |
+| Leave before a dead ending or hidden track | criticised for false endings | manual | no | **yes, within the cap** |
+| Two singers kept apart | unknown | EQ lanes | no | **vocal duck + high-pass ride** |
+| Phrase-matched start and swap | phrase-aligned (inferred) | yes | no | **yes** |
 | Album-in-order gapless | yes | n/a | yes | **yes** |
 | Works on self-hosted library | **no** (catalogue only) | yes (files) | yes | **yes** |
 | Hi-res / USB DAC path | blocked on hi-res | n/a | varies | **offload-aware** |
@@ -180,3 +188,196 @@ Beat times are not stored. The grid is rebuilt as `offset + n·60/bpm`. For trac
 | DJ filter-open (HPF) | soft in iOS 27 | yes | no | **yes** (Camelot stretch pairs) |
 
 **Verdict.** For a library player that respects queue order, we match or beat Apple on self-hosted music: on-device analysis, bass swap, clash echo-out, MixRamp fallback, hard skip cap, Camelot-scaled length/filters, LUFS match, tag-BPM octave correction, and outro loop remix when the ending is too short for the target overlap. Still behind Apple’s catalogue intro looping (needs a second decode source) and DJ.Studio’s playlist reordering — deliberate non-goals for a queue-respecting library client.
+
+## 7. Entering on the drop, leaving before a dead ending, two singers (2026-09)
+
+The owner compared AutoMix with BitChord's and asked for three things: enter the next song on its drop, let the
+outgoing song's exit be an interior point when its ending is not worth playing, and keep two singers apart with
+filters rather than rerouting to an echo-out. Beside them, this section surveys how the other automatic mixers and
+DJ practice handle transitions, and says which of those ideas were built.
+
+Hosts other than GitHub could not be opened from here (Spotify, Mixxx's site, Algoriddim, DJ.Studio, most blogs).
+Where a page could not be read, the fact below comes from the search engine's excerpt of it and is marked
+**[excerpt]**; **[read]** means the page or file itself was read. BitChord (GPL-3.0) and Orchard (AGPL-3.0 from
+4.0; releases up to 3.x were MIT) were read for facts only; no code was taken.
+
+### 7.1 What others do
+
+- **Apple Music AutoMix.** iOS 27 remixes intros and outros so tempos align, and repeats parts of them to bridge
+  two songs ([MacRumors](https://www.macrumors.com/2026/06/09/apple-music-gains-automix-upgrades-and-more-in-ios-27/),
+  [RouteNote](https://routenote.com/blog/apple-music-automix-upgrade/)) **[excerpt]**. The complaints are about
+  where it cuts: starting the mix early enough to chop the last 30 s of a song, starting the next one 49 s in (a
+  Taylor Swift example that skipped a first verse), and being caught out by false endings
+  ([TechRadar](https://www.techradar.com/audio/apple-music/apple-music-fans-are-obsessed-with-automix-in-ios-26-but-one-big-flaw-could-be-its-downfall))
+  **[excerpt]**.
+- **Spotify Automix and Mix.** Automix trims intros and outros and aligns tempo within limits; Mix (beta, 2025)
+  shows waveform, BPM and key and offers presets: **Fade** (a crossfade with the bass swapped around the midpoint),
+  **Rise** (an overlap with the bass swap at the end, low-pass in and high-pass out) and **Blend** (a smooth
+  three-band EQ fade), each editable as volume, EQ and effect curves
+  ([Spotify](https://newsroom.spotify.com/2025-08-19/mix-your-favorite-playlists-seamlessly-by-adding-your-own-transitions/),
+  [Yahoo Tech](https://tech.yahoo.com/audio/articles/spotifys-mixing-feature-lets-dj-093000572.html)) **[excerpt]**.
+- **djay Automix AI.** Finds "the best intro and outro sections" and rhythmic patterns, automates EQs and filters,
+  and with Neural Mix splits the songs into stems during a transition (a reverb on the outgoing vocal, say);
+  transition types include Dissolve, Riser and Echo
+  ([MusicTech](https://musictech.com/news/gear/algoriddim-free-dj-software-djay-pro-ai-automix-and-neural-mix/),
+  [DJ Mag](https://djmag.com/news/new-djay-ai-ios-adds-improved-ai-mixing)) **[excerpt]**.
+- **Mixxx Auto DJ.** Uses intro and outro cues (set by silence detection, editable). *Full Intro + Outro*, the
+  default, starts the next track during the outro so that **the end of the intro lines up with the end of the
+  outro**; *Fade At Outro Start* lines up their starts and cuts the rest of a longer outro; the crossfade is the
+  shorter of the two sections
+  ([Mixxx manual source](https://github.com/mixxxdj/manual/blob/2.4/source/chapters/djing_with_mixxx.rst),
+  [wiki](https://github.com/mixxxdj/mixxx/wiki/Auto%20DJ%20Cues)) **[read]**.
+- **rekordbox.** Phrase analysis labels Intro, Up, Down, Chorus, Verse, Bridge and Outro according to a track's
+  "mood"; its Automix uses beat position, BPM and key
+  ([Phrase Edit guide](https://cdn.rekordbox.com/files/20200312172204/rekordbox5.1.0_Phrase_Edit_operation_guide_EN.pdf))
+  **[excerpt]**. Serato's Autoplay plays tracks back to back with no crossfade
+  ([Serato](https://support.serato.com/hc/en-us/articles/202304934-Can-Serato-DJ-auto-mix-my-songs)) and Engine DJ
+  users are still asking for an auto-mix
+  ([Engine DJ community](https://community.enginedj.com/t/auto-mix-needed-for-engine-dj-stand-alone-controllers/55157))
+  **[excerpt]**.
+- **DJ.Studio.** Transition presets are volume, EQ and effect curves (slow crossfades, mid-band blends, filter
+  sweeps, instant bass swaps); lengths are set in bars; Harmonize uses the Camelot wheel and lets the user choose
+  how tempo is carried across ([help](https://help.dj.studio/en/articles/7878402-harmonize-previously-automix))
+  **[excerpt]**.
+- **Mixed In Key.** Scores energy 1 to 10 from the content (hi-hat patterns, noise risers), not the tempo, and
+  advises mixing within one level for a steady set
+  ([Mixed In Key](https://mixedinkey.com/harmonic-mixing-guide/sorting-playlists-by-energy-level/)) **[excerpt]**.
+- **Plexamp Sweet Fades.** MPD's MixRamp on EBU R128 loudness (section 2)
+  ([music-assistant discussion](https://github.com/orgs/music-assistant/discussions/3929)) **[read]**.
+- **Orchard.** "Beat-matched, phrase-aligned AutoMix transitions with 3-phase volume curves, progressive filter
+  sweeps, downbeat quantization, and bass swaps", on-device beat analysis on mobile, BPM from GetSongBPM
+  ([README](https://github.com/SFG5453/Orchard)) **[read]**.
+- **BitChord** (read-only clone, `playback/smart/*`, `native/analyzer/*`) **[read]**. Entry candidates are scored:
+  a "main drop" (weight 0.5), an "intro drop" (0.4), the audible start (0.15) and phrase lines (0.1), plus 0.1 on a
+  downbeat, minus 0.2 for a cold open (under four beats of run-up) and plus up to 0.2 for an instrumental run-up
+  over the 16 beats before. Its "main drop" is simply 32 beats after the first downbeat when that is inside the
+  first 40 % of the song, its intro drop the first 8-bar line capped at 36 s. Exits are an "energy cliff" (a late
+  silence, backtracked to where the level fell), the outro start or the end of the content, under a 12 s budget of
+  skipped music in which silence (below a tenth of the loud level) is free. Two voices are handled by filter rides
+  scaled by how much they overlap: the outgoing song low-passed towards 1.6 kHz, the incoming one high-passed from
+  700 Hz (520 to 950 Hz in a beat-matched blend) and opened by 45 to 70 % of the mix.
+- **DJ practice.** A phrase is eight bars (32 beats) and sections change on phrase lines; the incoming track starts
+  on beat one of a phrase and its intro is laid over the outgoing outro so that both turn together
+  ([Native Instruments](https://blog.native-instruments.com/phrase-mixing/),
+  [Wikipedia](https://en.wikipedia.org/wiki/Phrasing_(DJ))) **[excerpt]**. Voices sit between about 200 Hz and
+  4 kHz; to stop two clashing, cut the incoming track's mids during the blend and swap them over as the tracks
+  change hands ([Digital DJ Pool](https://digitaldjpool.com/blog/dj-eq-mixing-for-beginners/),
+  [Home DJ Studio](https://homedjstudio.com/dj-eqing/)) **[excerpt]**. Key clashes matter only where melodic parts
+  overlap; percussive intros and outros are key-neutral
+  ([Pioneer DJ](https://blog.pioneerdj.com/djtips/how-do-djs-approach-harmonic-mixing/),
+  [Digital DJ Pool](https://digitaldjpool.com/blog/harmonic-mixing-camelot-wheel/),
+  [OpenKeyScan](https://www.openkeyscan.com/harmonic-mixing-for-house-music)) **[excerpt]**. And for energy: do not
+  mix from a high-intensity section into an intro, which drops the floor
+  ([DJ.Studio](https://dj.studio/blog/anatomy-great-dj-mix-structure-energy-flow-transition-logic)) **[excerpt]**.
+
+### 7.2 What was built
+
+All of it is in nori-player's `automix` (`plan.rs`, `structure.rs`, `loudness.rs`, `mixer.rs`), which every
+platform shares; nothing outside it changed but the stored rows' columns. `ANALYSIS_VERSION` is 8, so rows are
+measured again as songs play.
+
+1. **Enter on the drop.** The analysis finds where the arrangement arrives (`drop_point`): the first four-bar line
+   in the opening (40 % of the song, 75 s at most) where the four bars after it reach the body of the song - within
+   2 to 3 dB of its median bar in level, low end and chord energy - and the bars before lacked one of them by 3 dB.
+   A drum intro has the level but not the chords, a pad the chords but not the low end, so neither is the drop; the
+   full band arriving is. It stores the voice share of the eight bars before and after. The planner then searches
+   (`drop_aligned`): every landing of the incoming song (the drop, the end of its intro, its four-bar lines, its
+   first downbeat) against every downbeat of the outgoing song's last sixteen bars, with run-ups of sixteen bars
+   down to none and a tail of a beat to four bars after the swap. The swap is where the landing meets the downbeat,
+   so the drop, the bass swap (now over the sixteenth before the line, so the drop's first kick has all its low
+   end) and both songs' section change coincide - Mixxx's *Full Intro + Outro*, Spotify's *Rise*. Windows that
+   skip more than 15 s of music of either song are never considered; the rest are scored on the landing (drop 4,
+   intro end 3, phrase line 1, straight in 0), skipped music (0.06 per second of an instrumental end, 0.15 of a
+   sung one), the incoming intro left on its own after the mix (0.1 per second: the energy hole), the run-up laid
+   under the outgoing song, a phrase line of the outgoing song, and a sung run-up under a sung ending. When the
+   outgoing song has too few bars for the run-up and they are not sung, its last four or eight are read round (the
+   iOS 27 outro remix, now a candidate in the search rather than a separate path; a sung loop is Apple's "broken
+   record"). *Limits:* a drop further in than 15 s plus the longest run-up the mix length allows is out of reach (a
+   16-bar drum intro under a 16 s mix); the drop is only as good as the grid (none without one, one bar off on a
+   half-time grid).
+2. **Leave before a dead ending.** The analysis finds the last silence of 6 s or more inside the music
+   (`last_gap`) and a closing breakdown (`breakdown`): the earliest bar line in the last 24 s where the level falls
+   6 dB below the four bars before, the beat goes with it (6 dB of low end or a third of the onsets) and no bar
+   comes back within 3 dB - a pad coda, a breakdown the song never returns from, a fade-out. The exit is that
+   breakdown, or the gap when the music after it is 15 s or less (a short hidden track). The planner's `Ending`
+   charges only music against the cap - the gap and the silence at either end of a file are free - and aims the
+   swap at the exit, so the incoming drop lands where the outgoing energy leaves, the breakdown falls away under
+   it for up to four bars and the rest (within the cap) is not played. The same rule applies to echo-outs,
+   one-grid fades and MixRamp fades. *Limits:* a hidden track longer than 15 s is music, so it is played, and the
+   silence before it with it; a false ending with more than 15 s of song after it is not an exit; the sink drops
+   the skipped remainder by decoding through it (see `docs/handoff.md`).
+3. **Two singers.** The mixer has a vocal duck on the incoming deck: a band-pass around 1 kHz (Q 0.35, 3 dB down
+   near 300 Hz and 3.3 kHz) subtracted in proportion, which is a peaking cut whose depth can move sample by sample
+   without touching the filter's state, so it releases without a click and leaves the deck untouched, bit for bit,
+   when off. The plan holds the incoming voice band 18 dB down at 1 kHz (about 6 dB at 500 Hz and 2 kHz) while
+   the outgoing song still leads, releasing it over the beat before the swap, and after the swap rides a high-pass
+   on the outgoing deck from 200 Hz to 2 kHz over the first half of what is left, so its voice thins to breath
+   while it falls away - the DJ's mid swap, with the song taking over always the clear one. Each half only where
+   both sing then. A pair whose voices overlap now gets this beat-matched mix; it echoes out only when no mix fits
+   or the filters are off. A plain fade holds the incoming voice down through its first half. One band-pass per
+   channel on the incoming deck while the duck is on: the mixer with every effect on costs 2.3 ms of CPU per second
+   of audio (0.23 % of one core) on the desktop measured. *Limit:* it triggers on what the analysis calls sung, and
+   the voice-band share cannot tell the synthetic singing (0.28 to 0.37) from an unsung band (0.20 to 0.34) or pads
+   (0.8) - `analysis.md`'s open problem. The harness therefore also runs with the voices taken from the truth.
+
+Chosen from the survey:
+
+4. **A drum intro is laid under any key.** Key clashes need two melodic parts; the analysis stores the chord energy
+   of the run-up to the drop (its most chordal four bars, a beatless opening included), and a run-up at least 3 dB
+   below the song's chords is exempt from the Camelot and timbre caps on length, which then hold only after the
+   swap, where both songs are whole.
+5. **Phrase-matched starts.** Run-ups of whole four-bar phrases are preferred, so the mix starts on a phrase line
+   of both songs as well as swapping on one.
+6. **Loudness through the mix, measured.** Apple is criticised for volume spikes; the harness now renders each
+   transition through the real mixer and compares its loudest 3 s with either song's own. It stays within +0.8 LU
+   (+1.5 LU with 32 s mixes), so the gain law was left as it is.
+
+Left out: reordering the queue by key or energy (a library player keeps the queue; DJ.Studio's Harmonize does
+this), stem separation (djay's Neural Mix; battery and model licences, `analysis.md`), a riser (Spotify's Rise
+low-passes the incoming song into the drop; a matter of taste the harness cannot score, and the drop landing on
+the swap already makes the arrival the event), an intro loop (needs a second decoder on the incoming song), a
+separate energy score in Mixed In Key's manner (with a fixed order it could only change the transition, and the
+drop landing already avoids mixing a full song into a bare intro), and keeping a vocal pickup before the incoming
+song's first downbeat (the synthetic songs have none to test it on).
+
+### 7.3 How it was measured
+
+`eval.rs` gained a transition harness. Fifteen pairs of synthetic songs (twelve new songs: drum intros longer than
+a mix, a pad-drums-drop build, codas, a sung coda over keys, hidden tracks after 37 s of silence with 4 and 16 bars
+of music after it, silence at the ends of the files, singing to the very end and from the first bar; plus pairs
+from the analysis corpus) are rendered, analysed as the app would, planned with the app's settings and scored
+against the truth: where the incoming drop lands against the swap, the swap on the outgoing song's bars and phrase
+lines, music skipped, silence heard, the run-up laid over a dead ending, two voices competing (both sounding and
+neither 10 dB under the other across 500 Hz to 2 kHz, measured by running the real mixer with tones on one deck at
+a time), and loudness. `landmark_eval` scores the drop and exit detection on all 29 songs.
+
+```sh
+cargo test --release -p nori-player transition_eval -- --ignored --nocapture
+cargo test --release -p nori-player landmark_eval -- --ignored --nocapture
+NORI_EVAL_VERBOSE=1 NORI_EVAL_ONLY=hidden,coda cargo test ...   # the plan's reason per pair; a subset
+```
+
+Before is the planner and mixer as they were, scored by the same harness **[measured]**:
+
+| Default settings (16 s at most), 15 pairs | Before | After |
+|---|---|---|
+| Incoming drops the swap lands on | 4 of 14 | 8 (10 with 32 s mixes, against 5) |
+| Incoming intro left on its own after the mix | 90.2 s | 54.6 s (32 s mixes: 88.7 to 42.0) |
+| Swaps on a downbeat / a phrase line of the outgoing song | 10 / 4 of 11 | 12 / 12 of 12 |
+| Mixes starting on a phrase line | 4 of 11 | 10 of 12 (12 with 32 s mixes) |
+| Music skipped, outgoing / incoming | 48.7 / 1.8 s | 58.8 / 39.9 s (none over the cap) |
+| Silence heard before the mix | 58.5 s | 37.5 s (all of it the hidden track too long to leave) |
+| Run-up laid over a dead ending (a coda, a gap, silence) | 18.4 s | 0 |
+| Voices competing, the analysis's own vocal gate | 14.5 of 23.1 s sung together | 12.1 of 21.1 s |
+| Voices competing, voices from the truth | 2.1 of 3.6 s (three echo-outs) | 5.3 of 21.1 s (12.7 without the separation; one echo-out) |
+| Louder than either song | +0.3 LU mean, +1.1 at most | +0.4, +0.8 |
+
+Landmarks over the 29 songs: drops 14 of 16 found within a beat, one false alarm (the one-drop, read at double
+tempo); exits 3 of 3, no false alarms. The analysis corpus's own numbers (section 3 of `analysis.md`) are
+unchanged, and the analysis costs 57.9 ms per minute of audio against 57.3.
+
+What the numbers do not show, and what must be listened to on a phone: whether landing the drop on the swap and
+letting the outgoing song go a beat after it sounds like a DJ or like a jump on real records; whether the 18 dB
+vocal duck and the high-pass ride sound like two singers handing over or like a filter; whether skipping up to
+15 s of an instrumental intro is noticed; whether leaving on a closing breakdown or before a short hidden track is
+welcome or feels like a song cut short.

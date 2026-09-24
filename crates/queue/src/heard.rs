@@ -79,7 +79,7 @@ pub fn shown_index<'a>(heard: Option<usize>, reread: bool, ids_before: &[&'a str
     (ids_now.get(at).copied() != playing).then_some(at)
 }
 
-/// The tracker, and the revision of the core's queue it was last given (crates/core/src/playlist.rs).
+/// The tracker, and the revision of the core's queue it was last given (crates/queue/src/playlist.rs).
 pub struct HeardClock {
     t: HeardTracker,
     rev: u64,

@@ -10,6 +10,16 @@ const PRIOR_BPM: f64 = 120.0;
 const PRIOR_OCTAVES: f64 = 1.0;
 /// Autocorrelation taper, seconds: the same bias towards short lags that averaging 8 s local autocorrelations gives.
 const AC_WINDOW_S: f64 = 8.0;
+/// How far out the autocorrelation is measured for the metrical comb, seconds: a 4/4 bar down to 57 BPM.
+const COMB_S: f64 = 4.2;
+/// A rival tempo scoring this share of the winner's starts to cost confidence; at `RIVAL_ALL` (a tie) it costs all
+/// of it. Only a near tie counts. In any groove with eighths, sixteenths or triplets, lags of 3/4, 5/4, 3/2 or 2/3
+/// of the beat are multiples of the subdivision and score 85 to 95 % of the beat's own, so a rival counted from 80 %
+/// took the trust from right, steady grids of syncopated rock and dance music (0.88 to 0.12 on a real song) and
+/// never refused a wrong one: a grid at such a ratio to the music cannot hold still, and its stability refuses it
+/// anyway (no wrong grid passed the planner's gates in 1,700 synthetic windows, with the rival counted or not).
+const RIVAL_FROM: f64 = 0.95;
+const RIVAL_ALL: f64 = 1.0;
 /// Ellis / librosa tightness: how hard the DP holds to the period.
 const TIGHTNESS: f64 = 100.0;
 
@@ -112,11 +122,10 @@ pub fn estimate(onset: &[f32], fps: f64, t0: f64) -> Tempo {
     let inv = (1.0 / var.sqrt()) as f32;
     env.iter_mut().for_each(|v| *v *= inv);
 
-    let mut ac = vec![0f64; tau_hi + 3];
-    for (tau, a) in ac.iter_mut().enumerate().take(tau_hi + 3).skip(tau_lo.saturating_sub(1)) {
-        if tau >= n {
-            break;
-        }
+    // The autocorrelation, out to a bar at the slowest tempos the comb below reads.
+    let ac_hi = ((COMB_S * fps).ceil() as usize).max(tau_hi + 3).min(n - 1);
+    let mut ac = vec![0f64; ac_hi + 1];
+    for (tau, a) in ac.iter_mut().enumerate().skip(tau_lo.saturating_sub(1)) {
         let s: f32 = env[..n - tau].iter().zip(&env[tau..]).map(|(x, y)| x * y).sum();
         *a = s as f64 / n as f64;
     }
@@ -127,27 +136,59 @@ pub fn estimate(onset: &[f32], fps: f64, t0: f64) -> Tempo {
         let z = (bpm / PRIOR_BPM).log2() / PRIOR_OCTAVES;
         (1.0 - tau / window).max(0.0) * (-0.5 * z * z).exp()
     };
-    let score: Vec<f64> = (0..ac.len()).map(|t| if t < tau_lo || t > tau_hi { 0.0 } else { ac[t].max(0.0) * weight(t as f64) }).collect();
+    // The autocorrelation at any lag, by linear interpolation; nothing past what was measured.
+    let ac_at = |t: f64| -> f64 {
+        if t < 0.0 || t > ac_hi as f64 {
+            return 0.0;
+        }
+        let i = t.floor() as usize;
+        let f = t - i as f64;
+        let hi = (i + 1).min(ac_hi);
+        (ac[i] * (1.0 - f) + ac[hi] * f).max(0.0)
+    };
+    // A beat is only a beat if the bar is periodic too, so every lag is scored with its multiples two and four
+    // (or three and six) beats on - a comb over the metre rather than one peak. Scored alone, the strongest
+    // single lag wins, and in a swung or syncopated groove that is often five quarters or a beat and a half:
+    // neither half nor double the tempo, so no octave folding repairs it (a real jazz track read 102 BPM
+    // for 130 that way).
+    // The k-th multiple of a lag known to half a frame is known to k/2 frames: its strongest value there.
+    let ac_near = |t: f64, k: f64| -> f64 {
+        let r = 0.5 * k;
+        let (a, b) = ((t * k - r).floor().max(0.0) as usize, ((t * k + r).ceil() as usize).min(ac_hi));
+        if a > b {
+            return 0.0;
+        }
+        ac[a..=b].iter().fold(0f64, |m, v| m.max(*v))
+    };
+    let comb = |t: f64| -> f64 {
+        if t < tau_lo as f64 || t > tau_hi as f64 {
+            return 0.0;
+        }
+        let one = ac_at(t);
+        let duple = one + 0.5 * ac_near(t, 2.0).max(ac_near(t, 4.0));
+        let triple = one + 0.5 * ac_near(t, 3.0).max(ac_near(t, 6.0));
+        duple.max(triple) * weight(t)
+    };
+    let score: Vec<f64> = (0..=tau_hi + 1).map(|t| comb(t as f64)).collect();
     let best = (tau_lo..=tau_hi).max_by(|a, b| score[*a].total_cmp(&score[*b])).unwrap_or(tau_lo);
-    if score[best] <= 0.0 {
+    if score[best] <= 0.0 || ac[best] <= 0.0 {
         return Tempo::default();
     }
     let tau = best as f64 + parabolic(score[best - 1], score[best], score[best + 1]);
     let raw_bpm = 60.0 * fps / tau;
     let pulse = ac[best] / ac0.max(1e-12);
 
-    // Octave alternatives, read off the same curve by linear interpolation.
-    let at = |t: f64| -> f64 {
-        if t < tau_lo as f64 || t > tau_hi as f64 {
-            return 0.0;
-        }
-        let i = t.floor() as usize;
-        let f = t - i as f64;
-        let hi = (i + 1).min(ac.len() - 1);
-        (ac[i] * (1.0 - f) + ac[hi] * f).max(0.0) * weight(t)
-    };
-    let (half, double) = (at(tau * 2.0), at(tau / 2.0));
+    // Octave alternatives, scored the same way.
+    let (half, double) = (comb(tau * 2.0), comb(tau / 2.0));
     let (alt_bpm, alt_raw) = if half >= double { (raw_bpm / 2.0, half) } else { (raw_bpm * 2.0, double) };
+    // The strongest rival that is not an octave (or a third) of the winner: a groove that reads as well at three
+    // quarters or two thirds of the tempo is a coin flip, and a coin flip must not be trusted.
+    let related = |t: f64| [0.25, 1.0 / 3.0, 0.5, 1.0, 2.0, 3.0, 4.0].iter().any(|k| (t / (tau * k) - 1.0).abs() < 0.06);
+    let rival = (tau_lo + 1..tau_hi)
+        .filter(|&t| score[t] > score[t - 1] && score[t] >= score[t + 1] && !related(t as f64))
+        .map(|t| score[t])
+        .fold(0.0, f64::max)
+        / score[best];
 
     // Beat tracking on the plain (non-negative) envelope.
     let std = (onset.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / n as f64).sqrt().max(1e-9);
@@ -184,7 +225,8 @@ pub fn estimate(onset: &[f32], fps: f64, t0: f64) -> Tempo {
     let align = if mean_all > 0.0 { mean_beats / mean_all } else { 0.0 };
     let pulse_c = ((pulse - 0.05) / 0.25).clamp(0.0, 1.0);
     let align_c = ((align - 1.3) / 1.2).clamp(0.0, 1.0);
-    t.confidence = (0.5 * (pulse_c + align_c)) as f32;
+    let rival_c = 1.0 - ((rival - RIVAL_FROM) / (RIVAL_ALL - RIVAL_FROM)).clamp(0.0, 1.0);
+    t.confidence = (0.5 * (pulse_c + align_c) * rival_c) as f32;
     t.beats = beats;
     t
 }
@@ -282,7 +324,7 @@ const DRIFT_ZERO_PCT: f64 = 3.0;
 /// the allowance shrank with the beat), while what really spoils a beat-matched mix - the tempo moving
 /// under it - was never looked at. Milliseconds are what the ear hears, so the spread is judged in them;
 /// the drift is judged by fitting each half on its own.
-fn stability(beats: &[f64], period: f64, rms: f64) -> f32 {
+pub(super) fn stability(beats: &[f64], period: f64, rms: f64) -> f32 {
     let jitter = 1.0 - (rms / 1.4826 * 1000.0) / JITTER_ZERO_MS;
     let half = beats.len() / 2;
     let drift = if half >= 8 {

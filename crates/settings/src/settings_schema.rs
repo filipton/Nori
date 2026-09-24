@@ -7,9 +7,12 @@
 
 use std::sync::{Arc, OnceLock};
 
+use nori_automix::beat_model;
 use nori_library::pages::TextIndex;
 use nori_model::MusicFolder;
+use nori_player::automix::beats;
 
+use crate::lyrics_sources::{self, LyricsService};
 use crate::settings::{kotlin_float, label, quality_name, AUTO_FILL_BASIS_LABELS, AUTO_FILL_KIND_LABELS, SavedQuality, SettingChange, StoredPrefs};
 
 /// A settings group: its own page, so the root of Settings is a few rows instead of eighty. The icon
@@ -45,7 +48,7 @@ fn group_title(id: &str) -> Option<&'static str> {
 /// matched by its own title, so the entry here and the row on the page cannot drift apart in wording -
 /// only in existence, which a missing result makes obvious. The hints are the rows' own descriptions,
 /// plus the jargon someone might type (ReplayGain, AMOLED).
-const INDEX: [(&str, &str, &str); 71] = [
+const INDEX: [(&str, &str, &str); 93] = [
     ("playing", "Crossfade", "One song fades into the next"),
     ("playing", "AutoMix", "Blends songs like a DJ, matching the beat"),
     ("playing", "Longest mix", ""),
@@ -55,6 +58,8 @@ const INDEX: [(&str, &str, &str); 71] = [
     ("playing", "Swap the bass", "The new song's bass replaces the old one's"),
     ("playing", "Muffle the ending", "The outgoing song fades out muffled"),
     ("playing", "Echo out clashes", "Overlapping vocals end in an echo instead"),
+    ("playing", "Better beat detection", "A neural beat tracker for AutoMix, downloaded once (Beat This!)"),
+    ("playing", "Download over mobile data", "For the beat model; otherwise it waits for Wi-Fi"),
     ("playing", "Measured songs", "Tempo and beats, measured on this phone"),
     ("playing", "Keep albums gapless", "No mixing between songs of the same album"),
     ("playing", "Fade on play and pause", "A short fade when you play, pause, seek or skip"),
@@ -62,7 +67,6 @@ const INDEX: [(&str, &str, &str); 71] = [
     ("playing", "Pitch", ""),
     ("playing", "Skip silence", "Cuts quiet gaps in and between songs"),
     ("playing", "Previous goes back a song", "Instead of restarting the current one"),
-    ("playing", "Mix up artists when shuffling", "Avoids the same artist or album twice in a row"),
     ("playing", "Skip explicit songs", "Songs your server marks explicit"),
     ("playing", "Keep playing when the queue ends", "Adds more music automatically"),
     ("playing", "Carry on with", "Songs, or a whole album at a time"),
@@ -84,6 +88,8 @@ const INDEX: [(&str, &str, &str); 71] = [
     ("look", "Wallpaper colours", "Material You. Accent colour from your wallpaper"),
     ("look", "Colours from the cover", "Pages take their colours from the artwork"),
     ("look", "Blur the bottom of the cover", "The player's artwork softens into the page"),
+    ("look", "Moving covers", "Animated album art in the player, when Apple Music has it. Sends the artist and album name"),
+    ("look", "Moving covers on mobile data", "Each one is a few megabytes"),
     ("look", "Confirm favourites", "A short message when you favourite or unfavourite something"),
     ("look", "Text and button size", ""),
     ("look", "Less movement", "Shorter, simpler animations"),
@@ -92,7 +98,26 @@ const INDEX: [(&str, &str, &str); 71] = [
     ("lyrics", "Text size", ""),
     ("lyrics", "Show translations", "When your server has them"),
     ("lyrics", "Keep the screen on", "While lyrics are shown and music plays"),
-    ("lyrics", "Find missing lyrics online", "Asks LRCLIB. Sends the artist and song name"),
+    ("lyrics", "Find missing lyrics online", "Asks the lyrics services below. Sends the artist, song and album name"),
+    ("lyrics", "Prefer word-by-word lyrics", "Keeps looking past lyrics timed line by line"),
+    ("lyrics", "BiniLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics", "BetterLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics", "PaxSenix", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics", "LyricsPlus", "Lyrics service. YouLy+, syllable by syllable"),
+    ("lyrics", "BetterLyrics Portato", "Lyrics service. QQ Music, word by word"),
+    ("lyrics", "PaxSenix: Musixmatch", "Lyrics service. Word by word, with a key"),
+    ("lyrics", "SimpMusic", "Lyrics service. Timed by listeners, matched on YouTube"),
+    ("lyrics", "Unison", "Lyrics service. Open, written and timed by listeners, word by word"),
+    ("lyrics", "NetEase Cloud Music", "Lyrics service. Word by word, strong on Chinese music"),
+    ("lyrics", "KuGou", "Lyrics service. Word by word, Chinese, Japanese and Korean music"),
+    ("lyrics", "LRCLIB", "Lyrics service. Open, run by volunteers"),
+    ("lyrics", "PaxSenix: Spotify", "Lyrics service. Spotify's lyrics, with a key"),
+    ("lyrics", "YouTube captions", "Lyrics service. Timed line by line"),
+    ("lyrics", "Megalobiz", "Lyrics service. Timed line by line"),
+    ("lyrics", "YouTube Music", "Lyrics service. Not timed"),
+    ("lyrics", "Genius", "Lyrics service. Not timed"),
+    ("lyrics", "PaxSenix key", "For its Spotify and Musixmatch lyrics"),
+    ("lyrics", "BetterLyrics key", "Finds lyrics it has not stored yet"),
     ("library", "Tapping a song", ""),
     ("library", "Swipe right", ""),
     ("library", "Swipe left", ""),
@@ -101,7 +126,7 @@ const INDEX: [(&str, &str, &str); 71] = [
     ("library", "Keep listening history", "Stored on this phone. Powers mixes and stats"),
     ("library", "Tell the server what you play", "Scrobbling. Sends your plays to your server"),
     ("library", "Count a play after", ""),
-    ("library", "Look things up online", "Update checks and missing lyrics. Sends the artist and song name"),
+    ("library", "Look things up online", "Update checks, missing lyrics and moving covers. Sends the artist, song and album name"),
     ("data", "Quality on Wi-Fi", ""),
     ("data", "Quality on mobile data", ""),
     ("data", "Quality for downloads", ""),
@@ -144,12 +169,16 @@ pub struct SettingsHit {
     pub detail: String,
 }
 
+/// Rows only a build with the beat model's runtime has.
+const BEAT_MODEL_ROWS: [&str; 2] = ["Better beat detection", "Download over mobile data"];
+
 fn search(query: &str) -> Vec<SettingsHit> {
     static TEXT: OnceLock<Arc<TextIndex>> = OnceLock::new();
     let text = TEXT.get_or_init(|| TextIndex::new(INDEX.iter().map(|(_, t, h)| vec![t.to_string(), h.to_string()]).collect()));
     // Titles first, then anything whose explanation mentions it: "oled" finds AMOLED black.
     text.ranked(query.trim().to_string())
         .into_iter()
+        .filter(|i| beats::AVAILABLE || !BEAT_MODEL_ROWS.contains(&INDEX[*i as usize].1))
         .map(|i| {
             let (group, title, hint) = INDEX[i as usize];
             let page = group_title(group).unwrap_or_default();
@@ -199,6 +228,13 @@ pub enum SettingRow {
     /// A saved server: its name, a line about it, and whether it is the one in use.
     Server { id: String, label: String, detail: String, active: bool },
     Button { title: String, action: String },
+    /// One of a ranked list of sources (the lyrics services): switched by [`setting_set`] with `name`,
+    /// and, while `on`, held and dragged to move it past its neighbours, each place one `lyricsMove` of
+    /// `id` by -1 or 1.
+    Ranked { key: String, name: String, id: String, title: String, detail: String, on: bool },
+    /// Text typed in (a service's key): `value` is what is stored, shown hidden when `secret`, and a new
+    /// one goes back through [`setting_set`] with `name`.
+    Text { key: String, name: String, title: String, detail: String, value: String, secret: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -353,6 +389,14 @@ fn playing(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
         between.push(toggle("autoMixBassSwap", "Swap the bass", "The new song's bass replaces the old one's.", p.auto_mix_bass_swap, live));
         between.push(toggle("autoMixFilters", "Muffle the ending", "The outgoing song fades out muffled.", p.auto_mix_filters, live));
         between.push(toggle("autoMixEchoOut", "Echo out clashes", "Overlapping vocals end in an echo instead.", p.auto_mix_echo_out, live));
+        // Only in a build that carries the beat model's runtime.
+        if beats::AVAILABLE {
+            let on = p.auto_mix_better_beats;
+            between.push(toggle("autoMixBetterBeats", "Better beat detection", &beat_model::detail(on), on, live));
+            if on && beat_model::ready().is_none() {
+                between.push(toggle("autoMixBeatsMobileData", "Download over mobile data", "Otherwise it waits for Wi-Fi.", p.auto_mix_beats_mobile_data, live));
+            }
+        }
         between.push(action("Measured songs", format!("{} songs measured for tempo and beats.", f.analysed), "Measure again", f.analysed > 0, "measure-again"));
     }
     between.push(toggle("crossfadeKeepAlbums", "Keep albums gapless", "No mixing between songs of the same album.", p.crossfade_keep_albums, live));
@@ -368,7 +412,6 @@ fn playing(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     ];
 
     let mut queue = vec![
-        toggle("weightedShuffle", "Mix up artists when shuffling", "Avoids the same artist or album twice in a row.", p.weighted_shuffle, true),
         toggle("skipExplicit", "Skip explicit songs", "Songs your server marks explicit.", p.skip_explicit, true),
         toggle("autoFill", "Keep playing when the queue ends", "Adds more music automatically.", p.auto_fill, true),
     ];
@@ -481,6 +524,14 @@ fn look(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     if f.cover_blur {
         cover.push(toggle("softSleeve", "Blur the bottom of the cover", "The player's artwork softens into the page.", p.soft_sleeve, true));
     }
+    // Under the switch for looking things up at all (Library), and turns it on with it, as finding lyrics
+    // online does.
+    let moving = p.motion_artwork && p.third_party_lookups;
+    let about = if moving && p.reduce_motion { "Still while Less movement is on." } else { "Animated album art in the player, when Apple Music has it. Sends the artist and album name." };
+    cover.push(toggle("motionArtwork", "Moving covers", about, moving, true));
+    if moving {
+        cover.push(toggle("motionArtworkMobile", "Moving covers on mobile data", "Each one is a few megabytes.", !p.motion_artwork_wifi_only, true));
+    }
     let messages = vec![toggle("favouriteNotice", "Confirm favourites", "A short message when you favourite or unfavourite something.", p.favourite_notice, true)];
     let mut size = vec![
         floats("uiScale", "Text and button size", p.ui_scale, &[(0.0, "Automatic"), (0.9, "Smaller"), (1.0, "Same as the phone"), (1.1, "Larger")], true),
@@ -501,14 +552,56 @@ fn lyrics(p: &StoredPrefs) -> Vec<SettingsSection> {
     ];
     // The switch for looking things up at all lives in Library, but somebody looking for lyrics looks
     // here, so the lyrics half of it is offered here too and turns the other one on with it.
-    let source = vec![toggle(
-        "lyricsLrclib",
+    let online = p.lyrics_online && p.third_party_lookups;
+    let mut sources = vec![toggle(
+        "lyricsOnline",
         "Find missing lyrics online",
-        "Asks LRCLIB. Sends the artist and song name.",
-        p.lyrics_lrclib && p.third_party_lookups,
+        "When your server has no timed lyrics. Sends the artist, song and album name to the services below.",
+        online,
         true,
     )];
-    vec![section("Display", display), section("Source", source)]
+    if !online {
+        return vec![section("Display", display), section("Sources", sources)];
+    }
+    sources.push(toggle("lyricsPreferWords", "Prefer word-by-word lyrics", "Keeps looking past lyrics timed line by line.", p.lyrics_prefer_words, true));
+    let service = |s: LyricsService, on: bool| SettingRow::Ranked {
+        key: setting_key(s.title()),
+        name: format!("lyricsService:{}", s.name()),
+        id: s.name().into(),
+        title: s.title().into(),
+        detail: s.about().into(),
+        on,
+    };
+    let asked: Vec<LyricsService> = lyrics_sources::switched_on(p);
+    let mut ranked: Vec<SettingRow> = asked.iter().map(|s| service(*s, true)).collect();
+    ranked.push(SettingRow::Note {
+        text: "Asked together, the top ones first; hold one to move it. Lyrics timed word by word are taken first, whoever has them, then lyrics timed by line, and your server's own timed lyrics always come before all of these. The unofficial ones use other apps' lyrics without asking them, so they stay off until you turn them on.".into(),
+    });
+    let others: Vec<SettingRow> = p.lyrics_order.iter().filter_map(|n| LyricsService::named(n)).filter(|s| !asked.contains(s)).map(|s| service(s, false)).collect();
+    let keys = vec![
+        SettingRow::Text {
+            key: setting_key("PaxSenix key"),
+            name: "paxSenixKey".into(),
+            title: "PaxSenix key".into(),
+            detail: "Your own key, for its Spotify and Musixmatch lyrics.".into(),
+            value: p.paxsenix_key.clone(),
+            secret: true,
+        },
+        SettingRow::Text {
+            key: setting_key("BetterLyrics key"),
+            name: "betterLyricsKey".into(),
+            title: "BetterLyrics key".into(),
+            detail: "Without one it answers only for songs it has already stored.".into(),
+            value: p.better_lyrics_key.clone(),
+            secret: true,
+        },
+    ];
+    let mut out = vec![section("Display", display), section("Sources", sources), section("Asked", ranked)];
+    if !others.is_empty() {
+        out.push(section("Not asked", others));
+    }
+    out.push(section("Keys", keys));
+    out
 }
 
 fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
@@ -542,7 +635,7 @@ fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     let online = vec![toggle(
         "thirdPartyLookups",
         "Look things up online",
-        "Update checks and missing lyrics. Sends the artist and song name.",
+        "Update checks, missing lyrics and moving covers. Sends the artist, song and album name.",
         p.third_party_lookups,
         true,
     )];
@@ -665,7 +758,7 @@ pub struct Credit {
 
 /// The core's own credits, for the licences page of any app built on it. A line here is added in the
 /// same commit that adds the dependency. Where a crate offers MIT or Apache-2.0, the MIT text is shown.
-const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 14] = [
+const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 18] = [
     ("uniffi", "Generates the Kotlin bindings to the core and the JNI calls under them", "Mozilla Foundation", "MPL-2.0", Some("MPL-2.0")),
     ("rusqlite", "The library index, full-text search and caches", "Copyright (c) 2014 The rusqlite developers", "MIT", Some("MIT")),
     ("SQLite", "The database itself, bundled into the core", "D. Richard Hipp and the SQLite developers, dedicated to the public domain", "Public domain", None),
@@ -704,6 +797,16 @@ const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 14] = [
         "MIT or Apache-2.0",
         Some("MIT"),
     ),
+    ("yaml-rust2", "Reading LRCLIB's word-timed lyrics", "Copyright (c) 2015 Chen Yuheng; Copyright (c) 2023 Ethiraric", "MIT or Apache-2.0", Some("MIT")),
+    ("roxmltree", "Reading word-timed lyrics written as TTML", "Copyright (c) 2018 Yevhenii Reizner", "MIT or Apache-2.0", Some("MIT")),
+    (
+        "miniz_oxide",
+        "Unpacking KuGou's word-timed lyrics",
+        "Copyright 2013-2014 RAD Game Tools and Valve Software; Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC",
+        "MIT, Zlib or Apache-2.0",
+        Some("MIT"),
+    ),
+    ("futures-util", "Asking the lyrics services together", "Copyright (c) 2016 Alex Crichton; Copyright (c) 2017 The Tokio Authors", "MIT or Apache-2.0", Some("MIT")),
 ];
 
 /// The Android app's own libraries, credited here with every other word it says. A line here is added
@@ -723,12 +826,37 @@ const ANDROID_CREDITS: [(&str, &str, &str, &str, Option<&str>); 6] = [
     ),
 ];
 
-/// The typeface and the data the app fetches from third parties (the core asks AutoEQ and LRCLIB, so
-/// any app on it credits them).
-const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 3] = [
+/// The typeface and the data the app fetches from third parties (the core asks AutoEQ and the lyrics
+/// services, so any app on it credits them).
+const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 16] = [
     ("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", Some("OFL-1.1")),
     ("AutoEQ", "Headphone correction curves, fetched when you ask for them", "Copyright (c) 2018 Jaakko Pasanen", "MIT", Some("MIT")),
-    ("LRCLIB", "Synced lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", None),
+    ("LRCLIB", "Timed lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", None),
+    (
+        "Unison",
+        "Lyrics written and timed by listeners, asked only when switched on",
+        "Lyrics from Unison (https://unison.boidu.dev), under the Open Database License (ODbL-1.0); lyrics belong to their authors",
+        "ODbL-1.0",
+        None,
+    ),
+    ("BiniLyrics", "Lyrics timed syllable by syllable, asked only when switched on", "binimum.org, a volunteer's copy of Apple Music's lyrics; lyrics belong to their authors", "Service", None),
+    ("BetterLyrics", "Lyrics timed syllable by syllable, and QQ Music's word by word, asked only when switched on", "betterlyrics.org; lyrics belong to their authors", "Service", None),
+    (
+        "PaxSenix",
+        "Apple Music's, Spotify's and Musixmatch's lyrics, asked only when switched on (the last two with your own key)",
+        "paxsenix.org, with songs found through Apple's iTunes Search API; lyrics belong to their authors",
+        "Service",
+        None,
+    ),
+    ("LyricsPlus", "Lyrics timed syllable by syllable, asked only when switched on", "The YouLy+ project's volunteer servers; lyrics belong to their authors", "Service", None),
+    ("NetEase Cloud Music", "Lyrics, often timed word by word, asked only when switched on", "music.163.com; lyrics belong to their authors", "Service", None),
+    ("KuGou", "Lyrics, often timed word by word, asked only when switched on", "kugou.com; lyrics belong to their authors", "Service", None),
+    ("SimpMusic", "Lyrics timed by listeners, asked only when switched on", "simpmusic.org; lyrics belong to their authors", "Service", None),
+    ("YouTube Music", "Captions and lyrics of a song's YouTube upload, asked only when switched on", "Google LLC; lyrics belong to their authors", "Service", None),
+    ("Megalobiz", "Lyrics timed line by line by its users, asked only when switched on", "megalobiz.com; lyrics belong to their authors", "Service", None),
+    ("Genius", "Untimed lyrics, asked last and only when switched on", "genius.com; lyrics belong to their authors", "Service", None),
+    ("iTunes Search API", "Finding a song's Apple Music id for PaxSenix, asked only when switched on", "Apple Inc.", "Service", None),
+    ("Apple Music", "Moving album covers, asked only when switched on", "Apple Inc.; the artwork belongs to its artists and labels", "Service", None),
 ];
 
 // ---- the doors ----
@@ -812,6 +940,7 @@ mod tests {
                 SettingRow::Palette { .. } => Some("palette".into()),
                 SettingRow::Server { label, detail, .. } => Some(format!("server: {label} ({detail})")),
                 SettingRow::Button { title, .. } => Some(format!("button: {title}")),
+                SettingRow::Ranked { title, .. } | SettingRow::Text { title, .. } => Some(title),
             })
             .collect()
     }
@@ -837,7 +966,7 @@ mod tests {
     #[test]
     fn the_core_credits_what_it_is_built_from() {
         let c = core_credits();
-        assert_eq!(c.len(), 14);
+        assert_eq!(c.len(), 18);
         assert_eq!((c[0].name.as_str(), c[0].licence.as_str(), c[0].file.as_deref()), ("uniffi", "MPL-2.0", Some("MPL-2.0")));
         assert_eq!((c[2].name.as_str(), c[2].file.as_deref()), ("SQLite", None));
         assert_eq!(c[12].name, "AndroidX Palette, ported");
@@ -880,19 +1009,31 @@ mod tests {
         assert!(speed.iter().position(|h| h.title == "Biggest speed change") < speed.iter().position(|h| h.title == "Match the beat"));
         assert!(search("  ").is_empty());
         // Every entry points at a row its page has (or a row the platform draws itself).
-        let p = StoredPrefs { auto_mix: true, replay_gain: 1, amoled: true, ..StoredPrefs::default() };
+        let p = StoredPrefs { auto_mix: true, replay_gain: 1, amoled: true, third_party_lookups: true, motion_artwork: true, ..StoredPrefs::default() };
         let active = SavedServer { id: "a".into(), alt_url: "https://b".into(), ..SavedServer::default() };
         let p = StoredPrefs { servers: vec![active], active_server_id: "a".into(), ..p };
         let two = vec![MusicFolder { id: "1".into(), name: "A".into() }, MusicFolder { id: "2".into(), name: "B".into() }];
         let f = SettingsFacts { wallpaper_colours: true, cover_blur: true, folders: two, ..SettingsFacts::default() };
         for (group, title, _) in INDEX {
-            if group == "about" {
+            if group == "about" || BEAT_MODEL_ROWS.contains(&title) {
                 continue;
             }
             // The crossfade gives way to AutoMix, so it is looked for with AutoMix off.
             let plain = StoredPrefs { auto_mix: false, ..p.clone() };
             assert!(titles(&p, &f, group).iter().chain(titles(&plain, &f, group).iter()).any(|t| t == title), "{group}: {title}");
         }
+    }
+
+    #[test]
+    fn better_beat_detection_is_only_offered_by_a_build_with_the_model() {
+        let on = StoredPrefs { auto_mix: true, auto_mix_better_beats: true, ..StoredPrefs::default() };
+        let t = titles(&on, &SettingsFacts::default(), "playing");
+        assert_eq!(t.iter().any(|t| t == "Better beat detection"), beats::AVAILABLE);
+        // Asked for and not on the device yet: whether it may come over mobile data.
+        assert_eq!(t.iter().any(|t| t == "Download over mobile data"), beats::AVAILABLE);
+        assert_eq!(search("beat detection").iter().any(|h| h.title == "Better beat detection"), beats::AVAILABLE);
+        let off = titles(&StoredPrefs { auto_mix_better_beats: false, ..on }, &SettingsFacts::default(), "playing");
+        assert!(!off.iter().any(|t| t == "Download over mobile data"));
     }
 
     #[test]
@@ -1028,7 +1169,7 @@ mod tests {
             SettingRow::Toggle { on, name, .. } => (on, name),
             r => panic!("{r:?}"),
         };
-        assert_eq!(lrc(&d), (false, "lyricsLrclib".to_string()), "lyrics online needs the lookups switch too");
+        assert_eq!(lrc(&d), (false, "lyricsOnline".to_string()), "lyrics online needs the lookups switch too");
         assert!(lrc(&StoredPrefs { third_party_lookups: true, ..d.clone() }).0);
         match rows(&d, &f, "look").into_iter().find(|r| matches!(r, SettingRow::Palette { .. })).unwrap() {
             SettingRow::Palette { colours, chosen, .. } => assert_eq!((colours.len(), colours[0], chosen), (8, 0xFF6750A4, 0xFF6750A4)),
@@ -1113,5 +1254,40 @@ mod tests {
         }
         let alone = StoredPrefs { active_server_id: "a".into(), ..p };
         assert_eq!(titles(&alone, &f, "servers").len(), 3, "no second address and one folder: no section for this server");
+    }
+
+    #[test]
+    fn the_lyrics_services_are_ranked_rows_under_their_switch() {
+        let f = SettingsFacts::default();
+        let d = StoredPrefs::default();
+        let ranked = |p: &StoredPrefs| -> Vec<(String, bool)> {
+            rows(p, &f, "lyrics").into_iter().filter_map(|r| match r {
+                SettingRow::Ranked { id, on, .. } => Some((id, on)),
+                _ => None,
+            }).collect()
+        };
+        assert!(ranked(&d).is_empty(), "nothing to rank while lookups are off");
+        let on = StoredPrefs { third_party_lookups: true, ..d.clone() };
+        let r = ranked(&on);
+        assert_eq!(r.len(), 16);
+        assert_eq!(r[..2], [("UNISON".to_string(), true), ("LRCLIB".to_string(), true)], "the ones asked first, in their order");
+        assert!(r[2..].iter().all(|(_, on)| !on));
+        assert!(titles(&on, &f, "lyrics").contains(&"PaxSenix key".to_string()));
+    }
+
+    #[test]
+    fn moving_covers_are_off_and_need_the_lookups_switch() {
+        let f = SettingsFacts::default();
+        let d = StoredPrefs::default();
+        let moving = |p: &StoredPrefs| match find(p, &f, "look", "moving-covers") {
+            SettingRow::Toggle { on, .. } => on,
+            r => panic!("{r:?}"),
+        };
+        assert!(!moving(&d) && !titles(&d, &f, "look").contains(&"Moving covers on mobile data".to_string()));
+        assert!(!moving(&StoredPrefs { motion_artwork: true, ..d.clone() }), "not without looking things up");
+        let on = set_by_name(&d, "motionArtwork", "true").unwrap().prefs;
+        assert!(on.third_party_lookups && moving(&on), "switching it on switches looking things up on");
+        assert!(on.motion_artwork_wifi_only, "Wi-Fi only out of the box");
+        assert!(!set_by_name(&on, "motionArtworkMobile", "true").unwrap().prefs.motion_artwork_wifi_only);
     }
 }

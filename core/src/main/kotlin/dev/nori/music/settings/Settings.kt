@@ -189,6 +189,10 @@ data class Prefs(
     val autoMixEchoOut: Boolean,
     /** Off: tempo is matched by changing speed and pitch together (cheaper, and within 2 % inaudible). */
     val autoMixKeepPitch: Boolean,
+    /** "Better beat detection": the core's measurer runs Beat This! over the songs coming up (only in a build with it). */
+    val autoMixBetterBeats: Boolean,
+    /** The beat model may be downloaded over mobile data; otherwise it waits for Wi-Fi. */
+    val autoMixBeatsMobileData: Boolean,
     val speed: Float,
     val skipSilence: Boolean,
     /** A play counts once this much of the track was heard (or four minutes, whichever comes first). */
@@ -197,7 +201,7 @@ data class Prefs(
     // ---- optional subsystems; one that is off is never initialised and costs nothing ----
     /** Keeps a local play history and a taste score per song; feeds mixes, smart playlists and the year in review. */
     val tasteModel: Boolean,
-    /** Third-party lookups: lyrics from LRCLIB, the AutoEQ headphone list, update checks. */
+    /** Third-party lookups: lyrics from the lyrics services, the AutoEQ headphone list, update checks. */
     val thirdPartyLookups: Boolean,
     /** Apply the profile bound to an output device when that device becomes the active one. */
     val profilePerOutput: Boolean,
@@ -206,12 +210,17 @@ data class Prefs(
      * remember it for the device, instead of asking first. Off asks. Fetches one small preset per new device.
      */
     val autoEqAuto: Boolean,
-    /** "Shuffle" spreads artists and albums apart instead of being purely random. */
-    val weightedShuffle: Boolean,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
     val lyricsSweep: Boolean,
     /** The bottom of the player's cover goes blurred before it melts into the page. One blur pass per frame while the cover moves. */
     val softSleeve: Boolean,
+    /**
+     * Moving covers: an album's motion artwork from Apple Music plays in the player's sleeve, where it has
+     * one. Needs [thirdPartyLookups]. Off by default; off, nothing of it is built.
+     */
+    val motionArtwork: Boolean,
+    /** Moving covers only on unmetered networks: each is a few megabytes. */
+    val motionArtworkWifiOnly: Boolean,
     /** A short message when something is favourited or unfavourited. The heart itself always changes. */
     val favouriteNotice: Boolean,
     val lyricsKeepScreenOn: Boolean,
@@ -219,10 +228,20 @@ data class Prefs(
     /** 0 small, 1 medium, 2 large. */
     val lyricsSize: Int,
     /**
-     * Ask LRCLIB when the server has no synced lyrics. Needs [thirdPartyLookups]. Off means only the
-     * server's lyrics (octo-fiesta already asks LRCLIB itself for tracks it serves from a provider).
+     * Look lyrics up online when the server has no timed ones. Needs [thirdPartyLookups]. Off means only
+     * the server's lyrics (octo-fiesta already asks LRCLIB itself for tracks it serves from a provider).
      */
-    val lyricsLrclib: Boolean,
+    val lyricsOnline: Boolean,
+    /** Every lyrics service by name, in the order they rank; which to ask is the core's (`lyrics_sources`). */
+    val lyricsOrder: List<String>,
+    /** The lyrics services switched on, by name: the open ones out of the box. */
+    val lyricsOn: List<String>,
+    /** Keep asking past lyrics timed line by line for lyrics timed word by word. */
+    val lyricsPreferWords: Boolean,
+    /** The user's own PaxSenix key; empty for none. */
+    val paxsenixKey: String,
+    /** A BetterLyrics key; empty for none. */
+    val betterLyricsKey: String,
     // ---- look ----
     val theme: ThemeMode,
     /** Pure black backgrounds in dark mode: OLED pixels are off, which saves power as well as looking right. */
@@ -340,10 +359,13 @@ fun Prefs.stored() = StoredPrefs(
     crossfeedDb = crossfeedDb, balance = balance, mono = mono, limiter = limiter, limiterThresholdDb = limiterThresholdDb, crossfadeSec = crossfadeSec,
     autoMix = autoMix, autoMixMaxS = autoMixMaxS, autoMixBeatMatch = autoMixBeatMatch, autoMixMaxTempoPct = autoMixMaxTempoPct,
     autoMixBassSwap = autoMixBassSwap, autoMixFilters = autoMixFilters, autoMixEchoOut = autoMixEchoOut, autoMixKeepPitch = autoMixKeepPitch,
+    autoMixBetterBeats = autoMixBetterBeats, autoMixBeatsMobileData = autoMixBeatsMobileData,
     speed = speed, skipSilence = skipSilence, scrobblePercent = scrobblePercent, liveSearchDelayMs = liveSearchDelayMs, tasteModel = tasteModel,
-    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto, weightedShuffle = weightedShuffle,
-    lyricsSweep = lyricsSweep, softSleeve = softSleeve, favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
-    lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = theme.ordinal, amoled = amoled,
+    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto,
+    lyricsSweep = lyricsSweep, softSleeve = softSleeve, motionArtwork = motionArtwork, motionArtworkWifiOnly = motionArtworkWifiOnly,
+    favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
+    lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsOnline = lyricsOnline, lyricsOrder = lyricsOrder, lyricsOn = lyricsOn,
+    lyricsPreferWords = lyricsPreferWords, paxsenixKey = paxsenixKey, betterLyricsKey = betterLyricsKey, theme = theme.ordinal, amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = tapAction.ordinal, swipeRight = swipeRight.ordinal,
     swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
@@ -361,10 +383,13 @@ fun StoredPrefs.prefs() = Prefs(
     crossfeedDb = crossfeedDb, balance = balance, mono = mono, limiter = limiter, limiterThresholdDb = limiterThresholdDb, crossfadeSec = crossfadeSec,
     autoMix = autoMix, autoMixMaxS = autoMixMaxS, autoMixBeatMatch = autoMixBeatMatch, autoMixMaxTempoPct = autoMixMaxTempoPct,
     autoMixBassSwap = autoMixBassSwap, autoMixFilters = autoMixFilters, autoMixEchoOut = autoMixEchoOut, autoMixKeepPitch = autoMixKeepPitch,
+    autoMixBetterBeats = autoMixBetterBeats, autoMixBeatsMobileData = autoMixBeatsMobileData,
     speed = speed, skipSilence = skipSilence, scrobblePercent = scrobblePercent, liveSearchDelayMs = liveSearchDelayMs, tasteModel = tasteModel,
-    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto, weightedShuffle = weightedShuffle,
-    lyricsSweep = lyricsSweep, softSleeve = softSleeve, favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
-    lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsLrclib = lyricsLrclib, theme = ThemeMode.entries[theme], amoled = amoled,
+    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto,
+    lyricsSweep = lyricsSweep, softSleeve = softSleeve, motionArtwork = motionArtwork, motionArtworkWifiOnly = motionArtworkWifiOnly,
+    favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
+    lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsOnline = lyricsOnline, lyricsOrder = lyricsOrder, lyricsOn = lyricsOn,
+    lyricsPreferWords = lyricsPreferWords, paxsenixKey = paxsenixKey, betterLyricsKey = betterLyricsKey, theme = ThemeMode.entries[theme], amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = TapAction.entries[tapAction], swipeRight = SwipeAction.entries[swipeRight],
     swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,

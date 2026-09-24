@@ -10,6 +10,12 @@ edition.workspace = true
 crate-type = ["cdylib"]
 name = "norimusic"
 
+[features]
+# "Better beat detection" (nori-engine's feature): Beat This! through tract in the measurer. Off in the app's
+# builds (core/build.gradle.kts, `-PrustFeatures=neural-beats` turns it on): tract makes this library about
+# 14.5 MB bigger for arm64, which every install would carry for a switch that is off by default.
+neural-beats = ["nori-engine/neural-beats"]
+
 [dependencies]
 nori-core = { path = "../core" }
 # Every crate whose exports the scaffolding covers, each with its uniffi records on.
@@ -24,6 +30,7 @@ nori-lyrics = { path = "../lyrics", features = ["ffi"] }
 nori-devices = { path = "../devices", features = ["ffi"] }
 nori-queue = { path = "../queue", features = ["ffi"] }
 nori-transfers = { path = "../transfers", features = ["ffi"] }
+nori-perf = { path = "../perf", features = ["ffi"] }
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
 nori-covers = { path = "../covers" }

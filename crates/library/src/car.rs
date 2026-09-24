@@ -27,10 +27,12 @@ pub const ROOT: &str = "root";
 /// How large a cover a car draws a folder with.
 pub const ART: u32 = 300;
 
+/// A folder with no subtitle and no cover.
 pub fn folder(id: &str, title: &str) -> BrowseFolder {
     BrowseFolder { id: id.into(), title: title.into(), subtitle: None, art: None }
 }
 
+/// The folders at the tree's root, in the order a car lists them.
 pub fn root() -> Vec<BrowseFolder> {
     vec![
         folder("albums:recent", "Recently played"),

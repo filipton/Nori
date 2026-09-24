@@ -51,7 +51,7 @@ struct Hand(Arc<parking_lot::Mutex<Option<Feed>>>, u32);
 
 impl AudioOutput for Hand {
     fn open(&mut self, want: OutputFormat) -> Result<OutputFormat, String> {
-        Ok(OutputFormat { rate: self.1, channels: want.channels })
+        Ok(OutputFormat { rate: self.1, channels: want.channels, bits: 0 })
     }
     fn start(&mut self, feed: Feed) -> Result<(), String> {
         *self.0.lock() = Some(feed);

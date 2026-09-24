@@ -71,6 +71,7 @@ enum Kind {
     Flag,
 }
 
+/// What a rule looks at.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Field {
     Title,
@@ -235,6 +236,7 @@ impl Rule {
     }
 }
 
+/// A definition's rule tree: a rule, or a group of them joined by all or any.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Group { all: bool, rules: Vec<Node> },
@@ -472,6 +474,7 @@ fn definition(text: &str) -> Parsed<Def> {
     Ok(Def { root, sort, limit: cap("limit")?.map(|n| n.min(u32::MAX as i64) as u32), limit_ms: cap("limitMs")? })
 }
 
+/// A definition read from its JSON; an error says what is wrong with it.
 pub fn parse(text: &str) -> Result<Def> {
     definition(text).map_err(|reason| CoreError::Parse { reason: format!("smart playlist: {reason}") })
 }
@@ -639,6 +642,7 @@ fn string(f: Field, r: &Row) -> &str {
     }
 }
 
+/// Whether `row` passes the tree `n`: the last word where SQL was relaxed.
 pub fn matches(n: &Node, row: &Row, env: &Env) -> bool {
     let r = match n {
         Node::Group { all: true, rules } => return rules.iter().all(|n| matches(n, row, env)),
@@ -698,6 +702,7 @@ pub fn matches(n: &Node, row: &Row, env: &Env) -> bool {
 
 // ---- evaluation --------------------------------------------------------------
 
+/// The index row `rowid` with its play statistics, as the rules read it.
 pub fn load(c: &Connection, rowid: i64) -> rusqlite::Result<Option<Row>> {
     let mut st = c.prepare_cached(
         "SELECT i.json, coalesce(s.plays,0), coalesce(s.skips,0), coalesce(s.last_played_ms,0), EXISTS(SELECT 1 FROM mix_excluded e WHERE e.server=i.server AND e.song_id=i.id)

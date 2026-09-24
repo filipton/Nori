@@ -39,11 +39,20 @@ pub struct HeardTracker {
 
 #[derive(Debug, Default)]
 struct Ear {
-    /// The song the page was carried onto, where in it, and when that was.
-    carry: Option<(String, i64, i64)>,
+    /// The song the page was carried onto, where in it, when that was, and the song the player was on.
+    carry: Option<(String, i64, i64, Option<String>)>,
     consumed: Option<String>,
     before: Option<String>,
+    /// The transition the ear has been taken through, by its takeover point in the old song and the
+    /// point it enters the new one (µs): once over it, the ear stays over it. Numbers, not the song's id,
+    /// so that asking allocates nothing; a mix let go of forgets it.
+    crossed: Option<(i64, i64)>,
 }
+
+/// How long after the engine lets a mix go the page may still be carried on the song it moved to while
+/// the player catches up. The two are a few milliseconds apart; a seek back into the old song a moment
+/// later is the player's word again.
+const CARRY_GRACE_MS: i64 = 1_000;
 
 /// Points `slot` at `id`, copying it only when it names another song.
 fn set_to(slot: &mut Option<String>, id: Option<&str>) {
@@ -153,34 +162,53 @@ pub fn shown_duration_ms(heard_s: Option<i64>, player_ms: i64, tagged_ms: i64) -
 }
 
 impl Ear {
+    /// Whether the ear has already been taken over the takeover point `until_us` into `next`. The
+    /// reading moves on between the engine's readings at one times, and a fresh reading can land a few
+    /// milliseconds behind where that had got (an output's clock is read in steps, and corrected): the
+    /// page must not go back to the song it has just left for the moment in between, which is the old
+    /// cover flashing up after the new one.
+    fn over(&self, h: &Heard, until_us: i64) -> bool {
+        self.crossed == Some((until_us, h.next_from_us))
+    }
+
     fn at(&mut self, q: &[(String, i64)], h: &Heard, p: PlayerNow) -> Seen {
         let next = h.next_id.as_deref();
         let result: Option<(&str, i64)> = if let Some(id) = h.id.as_deref() {
             let since = if p.playing { p.now_ms - h.at_ms } else { 0 };
             let ms = h.us / 1000 + since;
             let until = h.until_us / 1000;
-            if ms < until {
-                Some((id, ms.clamp(0, duration(q, id))))
-            } else {
+            match next {
                 // The mix is audible: from here the next song is heard, at the point the mix entered it,
                 // never the old one's last seconds jumped through.
-                next.map(|n| (n, into_next(q, h, ms - until)))
+                Some(n) if ms >= until || self.over(h, h.until_us) => Some((n, into_next(q, h, (ms - until).max(0)))),
+                Some(_) => Some((id, ms.clamp(0, duration(q, id)))),
+                None if ms < until => Some((id, ms.clamp(0, duration(q, id)))),
+                None => None,
             }
         } else if let (Some(n), Some(on)) = (next, p.on) {
             // The next song arrived at once, so the player was never ahead of the ear and its clock is
             // the truth - but past the point the mix is heard, the truth is the next song.
             let until = h.audible_us / 1000;
-            (Some(on) == h.from_id.as_deref() && Some(n) != self.consumed.as_deref() && p.position_ms >= until)
-                .then(|| (n, into_next(q, h, p.position_ms - until)))
+            (Some(on) == h.from_id.as_deref() && Some(n) != self.consumed.as_deref() && (p.position_ms >= until || self.over(h, h.audible_us)))
+                .then(|| (n, into_next(q, h, (p.position_ms - until).max(0))))
         } else {
             None
         };
+        match (result, next) {
+            (Some((shown, _)), Some(n)) if shown == n => {
+                self.crossed = Some((if h.id.is_some() { h.until_us } else { h.audible_us }, h.next_from_us));
+            }
+            (_, None) => self.crossed = None,
+            _ => {}
+        }
         // Once the page is on the next song it stays there until the player has left the old one: the
         // engine letting go and the player moving on are not the same moment, and in between the page
-        // would fall back to the player's word - the old song - and flash its cover back.
+        // would fall back to the player's word - the old song - and flash its cover back. The engine
+        // forgets which song the mix left as it lets go, so the carry remembers it itself.
         let shown: Option<(&str, i64)> = result.or_else(|| {
-            let (held, ms, at) = self.carry.as_ref()?;
-            (p.on == h.from_id.as_deref() && Some(held.as_str()) != self.consumed.as_deref()).then(|| {
+            let (held, ms, at, from) = self.carry.as_ref()?;
+            let left = p.on == h.from_id.as_deref() || h.from_id.is_none() && p.on == from.as_deref() && p.now_ms - at < CARRY_GRACE_MS;
+            (left && Some(held.as_str()) != self.consumed.as_deref()).then(|| {
                 let since = if p.playing { p.now_ms - at } else { 0 };
                 (held.as_str(), (ms + since).clamp(0, duration(q, held)))
             })
@@ -196,8 +224,11 @@ impl Ear {
         }
         if carrying {
             match &mut self.carry {
-                Some((id, ms, at)) if Some(id.as_str()) == next => (*ms, *at) = (shown_ms, p.now_ms),
-                c => *c = next.map(|id| (id.to_string(), shown_ms, p.now_ms)),
+                Some((id, ms, at, from)) if Some(id.as_str()) == next => {
+                    (*ms, *at) = (shown_ms, p.now_ms);
+                    set_to(from, p.on);
+                }
+                c => *c = next.map(|id| (id.to_string(), shown_ms, p.now_ms, p.on.map(str::to_string))),
             }
         }
         // The player has reached the next song: this mix is done with, whatever the engine still holds.
@@ -296,6 +327,49 @@ mod tests {
         let s = t.at(&Heard { id: None, ..holding(0, 0) }, now(2_100, "b", 8_100));
         assert_eq!((s.index, s.ms), (None, 8_100), "the player's own position");
         assert!(s.changed);
+    }
+
+    #[test]
+    fn a_reading_behind_the_takeover_does_not_take_the_page_back() {
+        let mut t = tracker();
+        // Run on from a reading at 193.9 s, the page crosses into b at 194 s.
+        assert_eq!(t.at(&holding(193_900_000, 0), now(150, "b", 0)).seen(), Some((B, 5_050)));
+        // The next reading, taken a little later, finds the ending 30 ms short of the takeover (an
+        // output's clock read in steps, or corrected): the page stays on b, at the point it entered.
+        let s = t.at(&holding(193_970_000, 200), now(200, "b", 0));
+        assert_eq!(s.seen(), Some((B, 5_000)));
+        assert!(!s.changed, "no second change of song");
+        // And moves on with it from there.
+        assert_eq!(t.at(&holding(193_970_000, 200), now(300, "b", 0)).seen(), Some((B, 5_070)));
+    }
+
+    #[test]
+    fn a_player_clock_behind_the_takeover_does_not_take_the_page_back() {
+        let mut t = tracker();
+        let direct = Heard { id: None, ..holding(0, 0) };
+        assert_eq!(t.at(&direct, now(0, "a", 194_010)).seen(), Some((B, 5_010)));
+        let s = t.at(&direct, now(16, "a", 193_990));
+        assert_eq!(s.seen(), Some((B, 5_000)), "the player's clock stepped back 20 ms: still b");
+        assert!(!s.changed);
+    }
+
+    #[test]
+    fn a_mix_let_go_of_entirely_still_does_not_flash_the_old_song() {
+        let mut t = tracker();
+        let direct = Heard { id: None, ..holding(0, 0) };
+        assert_eq!(t.at(&direct, now(0, "a", 196_000)).seen(), Some((B, 7_000)));
+        // The engine lets go of the mix and forgets which song it left, a moment before the player
+        // moves on: the page stays on b.
+        let released = Heard { next_id: None, from_id: None, ..direct.clone() };
+        let s = t.at(&released, now(40, "a", 196_040));
+        assert_eq!(s.seen(), Some((B, 7_040)));
+        assert!(!s.changed);
+        let s = t.at(&released, now(60, "b", 7_060));
+        assert_eq!((s.index, s.ms), (None, 7_060), "the player's own word once it is on b");
+        // Not for long, though: a player still on a a second later has been sent back there.
+        let mut t = tracker();
+        t.at(&direct, now(0, "a", 196_000));
+        assert_eq!(t.at(&released, now(1_500, "a", 10_000)).seen(), None);
     }
 
     #[test]

@@ -50,6 +50,46 @@ lines=$(field lyricLines); source=$(field lyricsSource); synced=$(field lyricsSy
 echo "     $lines lines from $source (synced=$synced, wordTimed=$(field lyricsWordTimed))"
 check "lyrics arrive for a well-known song" test "${lines:-0}" -gt 0
 check "sweeping only claimed for real word timing" bash -c '[ "$('"$app"' state | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get(\"lyricsWordTimed\",False) or not d.get(\"lyricsSynced\",False) or True)")" = "True" ]'
+# Each lyrics service on its own, for the same song. Reported rather than checked: a service may
+# simply not have it, and when the server has timed lyrics of its own no service is asked at all (the
+# source then reads SERVER). A service that times words shows wordTimed=True; one that answers with
+# source SERVER and 0 lines while the server has none is worth a look in logcat (tag nori), where a
+# failing service logs "<NAME> lyrics failed: <why>". The two PaxSenix routes that need a key are
+# skipped (SERVER) unless one is set in Settings -> Lyrics. A service's answer is kept in the response
+# cache and a failure is not asked again for half an hour, so a second run reads what the first found:
+# clear the app's data to ask them all again.
+"$app" set lyricsOnline true >/dev/null
+answered=0
+services="binilyrics better_lyrics paxsenix lyrics_plus portato paxsenix_musixmatch simpmusic unison netease kugou lrclib paxsenix_spotify youtube_captions megalobiz youtube_music genius"
+for s in $services; do
+  "$app" set lyricsSources "$s" >/dev/null
+  "$app" do lyrics >/dev/null; sleep 12
+  src=$(field lyricsSource)
+  echo "     $s: $(field lyricLines) lines from $src (synced=$(field lyricsSynced), wordTimed=$(field lyricsWordTimed))"
+  [ "$src" != "SERVER" ] && answered=$((answered+1))
+done
+echo "     $answered of $(echo $services | wc -w) services answered"
+# As they come out of the box: only the open ones, LRCLIB and Unison; the rest are off until switched on.
+"$app" set lyricsSources default >/dev/null
+"$app" do lyrics >/dev/null; sleep 20
+echo "     out of the box: $(field lyricLines) lines from $(field lyricsSource) (wordTimed=$(field lyricsWordTimed))"
+# With looking things up off, which is the default, no service is asked: the server's own words or none.
+"$app" set thirdPartyLookups false >/dev/null
+"$app" do lyrics >/dev/null; sleep 6
+check "lookups off: only the server's lyrics" test "$(field lyricsSource)" = SERVER
+
+echo "-- moving covers"
+# Off, which is the default, opening the player builds nothing: no video player and no lookup.
+"$app" set motionArtwork false >/dev/null; "$app" open player >/dev/null; sleep 4
+check "switched off, the open player makes no video player" test "$(field motionPlayers)" = 0
+# On, over any network. Whether an album has one is Apple's to say, and a test server's generated
+# music has none, so a video found is reported here rather than required.
+"$app" set motionArtwork true >/dev/null; "$app" set motionArtworkWifiOnly false >/dev/null; sleep 8
+echo "     video for this album: '$(field motionVideo)', players: $(field motionPlayers)"
+"$app" open home >/dev/null; sleep 3
+check "put away, the video player is let go" test "$(field motionPlayers)" = 0
+"$app" set motionArtwork false >/dev/null; "$app" set motionArtworkWifiOnly true >/dev/null
+"$app" set thirdPartyLookups true >/dev/null
 
 echo "-- favourites, and does the server agree"
 # Long enough to still be playing when the offline check looks, twenty lines further down. A random

@@ -13,6 +13,9 @@
 -keep class dev.nori.music.playback.RustBridge { *; }
 -keep class dev.nori.music.playback.RustBody { *; }
 
+# The measurer asks where a song is and says it measured one, by name (crates/android/src/measure.rs).
+-keep class dev.nori.music.playback.MeasureBridge { *; }
+
 # The cover loader calls each request back by name from its own threads (crates/android/src/covers.rs):
 # the waiter interface's done, and the done of every class that implements it.
 -keep interface dev.nori.music.look.CoverPixels$Waiter { *; }

@@ -21,7 +21,7 @@ import kotlinx.coroutines.withContext
 
 /**
  * Which sound each output device gets. The decisions are nori-player's (crates/player/src/device.rs) and
- * the steps the core's (crates/core/src/profiles.rs): each step is one call that reads the settings,
+ * the steps the core's (crates/devices/src/profiles.rs): each step is one call that reads the settings,
  * looks up, saves and binds profiles, keeps the sound from before a device took over and the devices
  * never to be offered a curve, and answers with a [DeviceEffect]. This fetches AutoEQ presets, applies
  * the effects and raises the notices. A device can be given a saved profile, a flat sound, an AutoEQ

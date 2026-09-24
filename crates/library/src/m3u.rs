@@ -128,6 +128,7 @@ fn closest(mut l: Vec<Song>, duration_s: i32) -> Option<Song> {
     l.into_iter().next()
 }
 
+/// The indexed song an M3U entry names, if the index has one.
 pub fn resolve(c: &Connection, e: &M3uEntry) -> rusqlite::Result<Option<Song>> {
     if e.title.trim().is_empty() {
         return Ok(None);

@@ -16,10 +16,13 @@ pub fn lyrics_clock(lyrics: nori_model::Lyrics, position_ms: i64) -> i64 {
 }
 
 fn timed(l: &nori_model::LyricLine) -> Line {
+    let word = |w: &nori_model::LyricWord| Word { start_ms: w.start_ms, end_ms: w.end_ms, start: w.start, end: w.end };
     Line {
         start_ms: l.start_ms,
         len: l.text.encode_utf16().count() as u32,
-        words: l.words.iter().map(|w| Word { start_ms: w.start_ms, end_ms: w.end_ms, start: w.start, end: w.end }).collect(),
+        words: l.words.iter().map(word).collect(),
+        backing_len: l.backing.encode_utf16().count() as u32,
+        backing: l.backing_words.iter().map(word).collect(),
     }
 }
 
@@ -91,12 +94,12 @@ use nori_model::Lyrics;
 
     #[test]
     fn a_clock_from_the_cores_lyrics_counts_utf16_and_frees() {
-        let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, background: false };
+        let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, ..Default::default() };
         let h = lyrics_clock(Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0 }, 0);
         let c = unsafe { clock(h) }.unwrap();
         assert!(!c.timing().sweeps());
         // A line without words is all lit once reached: seven UTF-16 units, the note being two.
-        let s = Step::unpack(c.advance(1500, true, true).pack());
+        let s = Step::unpack(c.advance(1500, true, false, true).pack());
         assert_eq!((s.frame.active, s.frame.sung, s.redraw), (0, 7.0, true));
         unsafe { free_clock(h) };
         assert!(unsafe { clock(0) }.is_none());
@@ -104,12 +107,12 @@ use nori_model::Lyrics;
 
     #[test]
     fn lyrics_read_are_kept_for_a_clock_by_key() {
-        let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, background: false };
+        let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, ..Default::default() };
         let mut l = Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0 };
         keep(&mut l);
         assert_ne!(l.key, 0);
         let h = kept_clock(l.key, 0);
-        let s = Step::unpack(unsafe { clock(h) }.unwrap().advance(1500, true, true).pack());
+        let s = Step::unpack(unsafe { clock(h) }.unwrap().advance(1500, true, false, true).pack());
         assert_eq!((s.frame.active, s.frame.sung), (0, 7.0));
         unsafe { free_clock(h) };
         let first = l.key;

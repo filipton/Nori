@@ -233,6 +233,13 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
     return onDrawBehind {
         // Rounded edges rather than rounded heights, so the three bands abut exactly with no row of page
         // colour showing between them.
+        //
+        // And the two plain bands each run one row on under the sleeve's, which is drawn last. Abutting is
+        // exact only on whole pixels: while the sheet rises it sits at a fraction of a pixel, each band's
+        // edge is anti-aliased, and two part-covered edges in the same row let the page under the sheet
+        // show through - a hairline across the screen at the sleeve's bottom that came and went with the
+        // fraction, half way up. The extra rows are one source row stretched, so they cost the picture
+        // nothing, and on whole pixels the sleeve's band covers them.
         fun band(srcY: Int, srcH: Int, y0: Int, y1: Int) {
             if (y1 <= y0) return
             drawImage(
@@ -242,9 +249,10 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
                 filterQuality = FilterQuality.Low,
             )
         }
-        band(0, 1, 0, top)
-        band(0, WASH_ROWS, top, bottom.toInt())
-        band(WASH_ROWS - 1, 1, bottom.toInt(), endY.toInt())
+        val bottomRow = bottom.toInt()
+        band(0, 1, 0, if (top > 0) top + 1 else 0)
+        band(WASH_ROWS - 1, 1, if (bottomRow > top) bottomRow - 1 else bottomRow, endY.toInt())
+        band(0, WASH_ROWS, top, bottomRow)
         if (floor != null) drawRect(floor, topLeft = floorTop, size = floorSize)
     }
 }
@@ -776,7 +784,9 @@ fun reduceMotion(): Boolean {
  * asked this app to animate regardless of the rest of the phone.
  */
 object AppMotion : androidx.compose.ui.MotionDurationScale {
-    @Volatile var force = false
+    // On until the settings say otherwise, as they do by default: the first frames, composed before App
+    // has read them, would otherwise run at Android's scale and finish on the spot.
+    @Volatile var force = true
 
     /**
      * The user's reduce-motion answer, for code that must not look it up per call - a cover in a grid

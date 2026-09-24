@@ -76,6 +76,31 @@ pub fn audio_policy(p: &AudioPrefs, o: &OutputState) -> AudioPolicy {
     }
 }
 
+/// Why [`audio_policy`] keeps the audio chip from decoding, in words for a report: the first of its
+/// conditions that says no, none when offload may run.
+pub fn offload_blocked(p: &AudioPrefs, o: &OutputState) -> Option<&'static str> {
+    let untouched = o.hi_res || o.bit_perfect;
+    Some(if !p.offload {
+        "offload is off in the settings"
+    } else if p.dsp && !untouched {
+        "the equalizer or another sound setting is on"
+    } else if o.usb {
+        "something USB is attached, which the audio chip cannot reach"
+    } else if o.offload_refused {
+        "the offloaded track failed, so offload is given up until the player starts again"
+    } else if p.crossfade_s != 0 {
+        "a crossfade is set"
+    } else if p.auto_mix {
+        "AutoMix is on"
+    } else if p.skip_silence {
+        "silence skipping is on"
+    } else if p.speed != 1.0 || p.pitch != 1.0 {
+        "the speed or pitch is changed"
+    } else {
+        return None;
+    })
+}
+
 /// How ReplayGain picks between a track's and its album's gain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GainMode {
@@ -172,6 +197,32 @@ mod tests {
             let a = audio_policy(&p, &o);
             assert!(a.untouched && !a.processing && a.transitions_off && !a.lock_rate && !a.skip_silence && !a.processor_in_chain, "{o:?}");
         }
+    }
+
+    #[test]
+    fn the_reason_offload_stands_down_is_the_policy_s_own() {
+        let o = OutputState::default();
+        assert_eq!(offload_blocked(&prefs(), &o), None);
+        assert!(audio_policy(&prefs(), &o).offload);
+        let cases: [(AudioPrefs, OutputState, &str); 8] = [
+            (AudioPrefs { offload: false, ..prefs() }, o, "offload is off"),
+            (AudioPrefs { dsp: true, ..prefs() }, o, "equalizer"),
+            (prefs(), OutputState { usb: true, ..o }, "USB"),
+            (prefs(), OutputState { offload_refused: true, ..o }, "failed"),
+            (AudioPrefs { crossfade_s: 4, ..prefs() }, o, "crossfade"),
+            (AudioPrefs { auto_mix: true, ..prefs() }, o, "AutoMix"),
+            (AudioPrefs { skip_silence: true, ..prefs() }, o, "silence"),
+            (AudioPrefs { speed: 1.5, ..prefs() }, o, "speed"),
+        ];
+        for (p, out, words) in cases {
+            assert!(!audio_policy(&p, &out).offload, "{words}");
+            let why = offload_blocked(&p, &out).unwrap_or_default();
+            assert!(why.contains(words), "{why}");
+        }
+        // Nothing touches the samples of a bit-perfect output: its equalizer does not stand in the way.
+        let bit_perfect = OutputState { bit_perfect: true, ..o };
+        assert_eq!(offload_blocked(&AudioPrefs { dsp: true, ..prefs() }, &bit_perfect), None);
+        assert!(audio_policy(&AudioPrefs { dsp: true, ..prefs() }, &bit_perfect).offload);
     }
 
     #[test]

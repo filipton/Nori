@@ -26,6 +26,14 @@
 //!
 //! Paused, or at the end, it sleeps until the engine says something.
 //!
+//! While the equalizer is tuned the engine keeps its ring shallow (`nori_engine::output::SHALLOW_US`) and
+//! says so ([`AudioOutput::shallow`]), just before the flush that goes with it: at that flush the track is
+//! opened again at [`SHALLOW_TRACK_US`], and topped up once per half of that, so a band moved is heard
+//! within a quarter of a second (the ring's and the track's together); at the flush that ends it, it is
+//! opened at its deep size again. The writer runs at audio priority, as ExoPlayer's playback thread does:
+//! with the equalizer screen drawing at 120 frames a second, a thread at the normal priority is woken
+//! late often enough for a shallow track to run dry.
+//!
 //! A sound server may give a smaller buffer than asked, or say it gave the size asked and take less. The
 //! writer is timed by what the track holds, never by what is pulled for it, and a track that refuses a
 //! write it had room for is counted as the size it held then: a small track is topped up once per half of
@@ -35,8 +43,9 @@
 //! With seconds of music inside the track, what the ring does to samples as they are pulled is heard
 //! seconds later. So the fades run at the track's volume (the engine hands them over through
 //! `AudioOutput::ramp`), and a flush empties the track as well as the ring (`AudioOutput::flush`, with
-//! `Feed::flushed` saying which pull holds the new music). ReplayGain stays in the ring: it changes on
-//! the first sample of a song, which is where the pull puts it.
+//! `Feed::flushed` saying which pull holds the new music). ReplayGain is on each song's samples before
+//! they reach the ring (`TransitionEngine::set_gain`); a change of the settings scales what the ring
+//! still holds, and the seconds already in the track play out as they were.
 //!
 //! No JNI here: the AudioTrack is a [`Sink`], so the tests below run the whole thing on a simulated
 //! track and a virtual clock. `player.rs` has the real one.
@@ -58,6 +67,9 @@ pub(crate) const LOW_US: i64 = 1_000_000;
 /// down past its own low mark and wakes the engine at the same moment: the engine has no timer of its
 /// own for it (`AudioOutput::bursts`).
 pub(crate) const TRACK_US: i64 = BUFFER_US + LOW_US + 500_000;
+/// How much the track holds while the equalizer is tuned: topped up at half of it, it keeps between 80
+/// and 160 ms, which with the ring's 40 to 80 ms before it is what a band moved takes to be heard.
+pub(crate) const SHALLOW_TRACK_US: i64 = 160_000;
 /// The samples moved per write, in bytes.
 pub(crate) const CHUNK_BYTES: usize = 128 * 1024;
 /// How often the track is filled while it is being filled after a start or a flush.
@@ -252,6 +264,13 @@ pub(crate) struct Control {
     pub playing: bool,
     pub ramp: Option<(Option<f32>, f32, i64)>,
     pub stop: bool,
+    /// The track is to be shallow ([`SHALLOW_TRACK_US`]) from the next flush on.
+    pub shallow: bool,
+}
+
+/// The frames a track is asked for: its deep size, or the shallow one while the equalizer is tuned.
+pub(crate) fn track_frames(rate: u32, shallow: bool) -> u64 {
+    (rate as i64 * if shallow { SHALLOW_TRACK_US } else { TRACK_US } / 1_000_000) as u64
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +300,8 @@ pub(crate) struct Writer<R: Ring> {
     channels: usize,
     rate: u32,
     float: bool,
+    /// 24-bit samples, packed: a song of more than 16 bits played as it is (bit-perfect).
+    packed: bool,
     /// What the track holds: the buffer it gave, or less once it has refused a write with room left.
     capacity: u64,
     /// The track is topped up again when this much is left in it: [`LOW_US`], or half of a buffer too
@@ -301,11 +322,15 @@ pub(crate) struct Writer<R: Ring> {
     settled: usize,
     /// How long the next look waits while the ring has nothing to give.
     starved_ms: u64,
+    /// The track was opened shallow, and whether the engine wants it so from the next flush on.
+    shallow: bool,
+    wants_shallow: bool,
 }
 
 impl<R: Ring> Writer<R> {
     pub(crate) fn new(ring: R, opened: Opened, reopen: Reopen, format: OutputFormat, float: bool, clock: Arc<Clock>, bytes: Arc<AtomicU64>) -> Writer<R> {
         let rate = format.rate;
+        let shallow = reopen.frames < track_frames(rate, false);
         clock.update(|c| *c = Counts { rate, ..Counts::default() });
         said_small(opened.frames, reopen.frames, rate);
         Writer {
@@ -322,6 +347,7 @@ impl<R: Ring> Writer<R> {
             channels: format.channels,
             rate,
             float,
+            packed: packed24(format, float),
             capacity: opened.frames.max(1),
             low: low_mark(opened.frames, rate),
             starts_full: opened.starts_full,
@@ -334,11 +360,13 @@ impl<R: Ring> Writer<R> {
             started_ns: 0,
             settled: SETTLE_MS.len(),
             starved_ms: FILL_TICK_MS,
+            shallow,
+            wants_shallow: shallow,
         }
     }
 
     fn frame_bytes(&self) -> usize {
-        self.channels * if self.float { 4 } else { 2 }
+        self.channels * sample_bytes(self.float, self.packed)
     }
 
     /// The track holds `frames` from now on, and is topped up at the low mark that goes with it.
@@ -354,6 +382,7 @@ impl<R: Ring> Writer<R> {
             return None;
         }
         let now_ms = now_ns / 1_000_000;
+        self.wants_shallow = c.shallow;
         let mut wake: Option<u64> = None;
         let mut at = |ms: u64| wake = Some(wake.map_or(ms, |w| w.min(ms)));
         if let Some((from, to, ms)) = c.ramp.take() {
@@ -392,7 +421,17 @@ impl<R: Ring> Writer<R> {
         // A flush shows in the next pull, even one that takes nothing: the track follows it at once.
         self.ring.pull(&mut []);
         if self.ring.flushed() {
-            self.restart(now_ns);
+            if self.shallow != self.wants_shallow {
+                // Nothing the track holds is wanted any more: the moment to open it at the other size.
+                let frames = track_frames(self.rate, self.wants_shallow);
+                log(if self.wants_shallow { "opened shallow for the equalizer" } else { "opened deep again" });
+                self.reopen(now_ns, frames);
+                if self.dead {
+                    return None;
+                }
+            } else {
+                self.restart(now_ns);
+            }
         }
         if !self.playing {
             return wake;
@@ -499,8 +538,14 @@ impl<R: Ring> Writer<R> {
         if !self.filling && fill > self.low {
             return Some(ms(fill - self.low, self.rate) + 1);
         }
-        let wait = self.starved_ms;
+        let mut wait = self.starved_ms;
         self.starved_ms = (self.starved_ms * 2).min(STARVED_MAX_MS);
+        if fill > 0 {
+            // Never past half of what the track still holds. A ring kept shallower than the track (the
+            // equalizer tuned) never fills it, so filling never ends; backing off to a second while each
+            // look moved half a second in, the track ran dry about once a second.
+            wait = wait.min((ms(fill, self.rate) / 2).max(FILL_TICK_MS));
+        }
         Some(wait)
     }
 
@@ -508,7 +553,8 @@ impl<R: Ring> Writer<R> {
     /// full.
     fn top_up(&mut self, now_ns: i64) -> bool {
         let fb = self.frame_bytes();
-        let chunk_frames = CHUNK_BYTES / fb;
+        // 24-bit samples are pulled as floats and packed in place, so a chunk is what the floats fit.
+        let chunk_frames = CHUNK_BYTES / if self.packed { self.channels * 4 } else { fb };
         loop {
             if self.staged.1 > 0 && !self.write_staged(now_ns) {
                 return true;
@@ -527,6 +573,11 @@ impl<R: Ring> Writer<R> {
             let samples = n * self.channels;
             let got = if self.float {
                 self.ring.pull(&mut self.sink.staging()[..samples])
+            } else if self.packed {
+                let staging = self.sink.staging();
+                let got = self.ring.pull(&mut staging[..samples]);
+                pack24(staging, got * self.channels);
+                got
             } else {
                 let staging = self.sink.staging();
                 // SAFETY: the staging memory is f32s, so it is aligned for i16 and twice as many of them
@@ -591,8 +642,16 @@ impl<R: Ring> Writer<R> {
     /// not open is the engine's to hear of.
     fn revive(&mut self, now_ns: i64, code: i32) {
         log(&format!("the AudioTrack failed a write ({code}): opening another"));
+        self.reopen(now_ns, self.asked);
+    }
+
+    /// Another track in place of this one, asked for `frames`, empty and started as after a flush; one
+    /// that will not open is the engine's to hear of.
+    fn reopen(&mut self, now_ns: i64, frames: u64) {
         self.sink.release();
-        let opened = self.opener.lock().open(self.format, self.float, self.asked);
+        self.asked = frames;
+        self.shallow = frames < track_frames(self.rate, false);
+        let opened = self.opener.lock().open(self.format, self.float, frames);
         match opened {
             Ok(o) => {
                 self.sink = o.sink;
@@ -681,7 +740,7 @@ impl AudioOutput for TrackOutput {
 
     /// The song's own rate as it is (a DAC asked for bit-perfect gets exactly that), in mono or stereo.
     fn open(&mut self, want: OutputFormat) -> Result<OutputFormat, String> {
-        let f = OutputFormat { rate: want.rate.clamp(8_000, 192_000), channels: want.channels.clamp(1, 2) };
+        let f = OutputFormat { rate: want.rate.clamp(8_000, 192_000), channels: want.channels.clamp(1, 2), bits: want.bits };
         self.format = Some(f);
         Ok(f)
     }
@@ -689,9 +748,13 @@ impl AudioOutput for TrackOutput {
     fn start(&mut self, feed: Feed) -> Result<(), String> {
         let format = self.format.ok_or("the output was not opened")?;
         self.close();
-        let frames = (format.rate as i64 * TRACK_US / 1_000_000) as u64;
+        // The engine's thread, which starts the output, decodes what the track is fed: it takes the
+        // writer's priority too.
+        audio_priority("the engine");
+        let shallow = self.shared.control.lock().shallow;
+        let frames = track_frames(format.rate, shallow);
         let opened = self.opener.lock().open(format, self.float, frames).inspect_err(|e| log(&format!("the AudioTrack would not open: {e}")))?;
-        *self.shared.control.lock() = Control::default();
+        *self.shared.control.lock() = Control { shallow, ..Control::default() };
         *self.shared.failure.lock() = None;
         let reopen = Reopen { opener: self.opener.clone(), frames, failure: self.shared.failure.clone() };
         let writer = Writer::new(feed, opened, reopen, format, self.float, self.shared.clock.clone(), self.shared.bytes.clone());
@@ -720,6 +783,11 @@ impl AudioOutput for TrackOutput {
         true
     }
 
+    /// The setting as it is now: the next track is opened for it.
+    fn float(&mut self, on: bool) {
+        self.float = on;
+    }
+
     fn flush(&mut self) {
         self.shared.tell(|_| {});
     }
@@ -727,6 +795,11 @@ impl AudioOutput for TrackOutput {
     fn ramp(&mut self, from: Option<f32>, target: f32, ms: i64) -> bool {
         self.shared.tell(|c| c.ramp = Some((from, target, ms)));
         true
+    }
+
+    /// The track is opened at the other size at the flush that follows.
+    fn shallow(&mut self, on: bool) {
+        self.shared.tell(|c| c.shallow = on);
     }
 
     /// Seconds of music sit in the track after the ring has run empty: the end is when it has played them.
@@ -763,6 +836,40 @@ fn log(message: &str) {
     nori_core::alog::info(&format!("rust track: {message}"));
 }
 
+/// Whether a track for `format` takes 24-bit samples, packed: a song of more than 16 bits handed over as
+/// it is (bit-perfect, `OutputFormat::bits`), when the setting does not ask for float.
+pub(crate) fn packed24(format: OutputFormat, float: bool) -> bool {
+    !float && format.bits > 16
+}
+
+/// Bytes one sample takes in the track.
+pub(crate) fn sample_bytes(float: bool, packed: bool) -> usize {
+    if float {
+        4
+    } else if packed {
+        3
+    } else {
+        2
+    }
+}
+
+/// The first `samples` floats of `staging` as 24-bit samples, three bytes each, packed from its start in
+/// place: each is read before anything is written over it, as the bytes written trail those read. A
+/// song's own 24 bits come back exactly (the ring carries them as floats, which hold 24 bits).
+fn pack24(staging: &mut [f32], samples: usize) {
+    let samples = samples.min(staging.len());
+    let floats = staging.as_mut_ptr();
+    let bytes = floats as *mut u8;
+    for k in 0..samples {
+        // SAFETY: k is inside the staging memory; float k is read before its bytes (and any after them)
+        // are written over, since sample k's bytes go to 3k..3k + 3, at or before 4k.
+        let v = unsafe { floats.add(k).read() };
+        let b = ((v * 8_388_608.0).round().clamp(-8_388_608.0, 8_388_607.0) as i32).to_le_bytes();
+        // SAFETY: 3k + 3 <= 4k + 4, inside the staging memory.
+        unsafe { std::ptr::copy_nonoverlapping(b.as_ptr(), bytes.add(k * 3), 3) };
+    }
+}
+
 /// The low mark for a track of `frames`: [`LOW_US`], or half of a track too small for that, so the
 /// writer wakes once per half of what it holds and never more often than the buffer demands.
 fn low_mark(frames: u64, rate: u32) -> u64 {
@@ -778,11 +885,23 @@ fn said_small(frames: u64, asked: u64, rate: u32) {
     }
 }
 
+/// The calling thread at Android's `THREAD_PRIORITY_AUDIO`, as `Process.setThreadPriority` sets it (a
+/// nice value, which an app may lower this far).
+fn audio_priority(who: &str) {
+    const THREAD_PRIORITY_AUDIO: libc::c_int = -16;
+    // SAFETY: plain system calls on the calling thread.
+    let set = unsafe { libc::setpriority(libc::PRIO_PROCESS as _, libc::gettid() as _, THREAD_PRIORITY_AUDIO) };
+    if set != 0 {
+        log(&format!("{who}'s thread kept its priority: {}", std::io::Error::last_os_error()));
+    }
+}
+
 fn run<R: Ring>(mut w: Writer<R>, shared: Arc<Shared>) {
+    audio_priority("the writer");
     loop {
         let mut c = {
             let mut g = shared.control.lock();
-            Control { playing: g.playing, ramp: g.ramp.take(), stop: g.stop }
+            Control { playing: g.playing, ramp: g.ramp.take(), stop: g.stop, shallow: g.shallow }
         };
         if c.stop {
             log("released");
@@ -908,8 +1027,39 @@ mod tests {
         }
     }
 
-    /// The engine's ring, simulated: the engine decodes a whole burst into it the moment a pull runs it
-    /// down to its low mark, as `nori_engine`'s does, until `left` frames of music have been decoded.
+    /// A small generator of numbers that look random, the same every run.
+    struct Dice(u64);
+
+    impl Dice {
+        /// A number from 0 to `max`.
+        fn roll(&mut self, max: i64) -> i64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            if max <= 0 {
+                0
+            } else {
+                (self.0 % (max as u64 + 1)) as i64
+            }
+        }
+    }
+
+    /// How the simulated engine keeps the ring filled when it is not in bursts.
+    #[derive(Clone, Copy)]
+    enum Engine {
+        /// A whole burst decoded the moment a pull runs the ring down to its low mark, as the engine does
+        /// while music plays.
+        Bursts,
+        /// The ring topped up to `cap` frames, woken by the pull that runs it down to half of that, and
+        /// up to `late` ns after it: the engine while the equalizer is tuned.
+        Shallow { cap: usize, late: i64 },
+        /// The ring topped up to `cap` frames every `every` ns, whatever the pulls do: the engine before
+        /// it knew its ring was shallow, on its 200 ms timer.
+        Timer { cap: usize, every: i64 },
+    }
+
+    /// The engine's ring, simulated: filled as `engine` says, until `left` frames of music have been
+    /// decoded.
     struct FakeRing {
         available: usize,
         left: u64,
@@ -919,30 +1069,71 @@ mod tests {
         flushed: bool,
         value: f32,
         engine_woken: u32,
+        engine: Engine,
+        /// When the engine fills the ring next, if it is due to.
+        due: Option<i64>,
+        now: Arc<AtomicU64>,
+        dice: Dice,
     }
 
     impl FakeRing {
-        fn new(music_s: u64) -> FakeRing {
+        fn new(music_s: u64, now: Arc<AtomicU64>) -> FakeRing {
             let low = (RATE as i64 * (RING_LOW_US - 250_000) / 1_000_000) as usize;
             // A burst is ten seconds counted from the ear, which moves on while it is decoded: a little more.
             let burst = (RATE as i64 * (BUFFER_US + 200_000) / 1_000_000) as usize;
-            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5, engine_woken: 0 };
+            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5, engine_woken: 0, engine: Engine::Bursts, due: None, now, dice: Dice(7) };
             r.refill();
             r
         }
 
+        /// From now on the engine fills it as `engine` says, starting now.
+        fn kept(&mut self, engine: Engine) {
+            self.engine = engine;
+            match engine {
+                Engine::Bursts => {
+                    self.low = (RATE as i64 * (RING_LOW_US - 250_000) / 1_000_000) as usize;
+                    self.due = None;
+                }
+                Engine::Shallow { cap, .. } => {
+                    self.low = cap / 2;
+                    self.due = None;
+                }
+                Engine::Timer { every, .. } => self.due = Some(self.now.load(Ordering::Relaxed) as i64 + every),
+            }
+        }
+
         fn refill(&mut self) {
-            let n = (self.burst as u64).min(self.left) as usize;
+            let want = match self.engine {
+                Engine::Bursts => self.burst,
+                Engine::Shallow { cap, .. } | Engine::Timer { cap, .. } => cap.saturating_sub(self.available),
+            };
+            let n = (want as u64).min(self.left) as usize;
             self.left -= n as u64;
             self.available += n;
             self.refills += 1;
+        }
+
+        /// The engine's turn, when it was due.
+        fn turn(&mut self, now: i64) {
+            self.due = None;
+            self.refill();
+            if let Engine::Timer { every, .. } = self.engine {
+                self.due = Some(now + every);
+            }
         }
 
         fn take(&mut self, frames: usize) -> usize {
             let n = frames.min(self.available);
             self.available -= n;
             if self.available <= self.low && self.left > 0 {
-                self.refill();
+                match self.engine {
+                    Engine::Bursts => self.refill(),
+                    Engine::Shallow { late, .. } if self.due.is_none() => {
+                        let now = self.now.load(Ordering::Relaxed) as i64;
+                        self.due = Some(now + self.dice.roll(late));
+                    }
+                    _ => {}
+                }
             }
             n
         }
@@ -984,6 +1175,16 @@ mod tests {
         }
     }
 
+    /// The sound server's mixer, reading the track `period` ns at a time, each read up to `late` ns
+    /// after it was due: the jittery consumer a busy phone is.
+    struct Mixer {
+        period: i64,
+        late: i64,
+        due: i64,
+        next: i64,
+        dice: Dice,
+    }
+
     struct Sim {
         writer: Writer<Arc<Mutex<FakeRing>>>,
         ring: Arc<Mutex<FakeRing>>,
@@ -994,6 +1195,12 @@ mod tests {
         wakes: u32,
         next: Option<i64>,
         failure: Arc<Mutex<Option<String>>>,
+        /// The writer's thread is woken up to this many ns after it asked to be (a busy phone).
+        late: i64,
+        dice: Dice,
+        mixer: Option<Mixer>,
+        /// The most music between the ring's writing end and the ear, as the simulation went, frames.
+        deepest: u64,
     }
 
     /// Opens the simulated track again, empty, as a new AudioTrack in place of a dead one.
@@ -1024,45 +1231,74 @@ mod tests {
 
         /// A track that says it holds `said_us` of music and holds `holds_us`, whatever was asked of it.
         fn granted(music_s: u64, float: bool, starts_full: bool, said_us: i64, holds_us: i64) -> Sim {
-            let ring = Arc::new(Mutex::new(FakeRing::new(music_s)));
+            Sim::asked(music_s, float, starts_full, said_us, holds_us, TRACK_US)
+        }
+
+        /// [`Sim::granted`], the track having been asked for `asked_us`.
+        fn asked(music_s: u64, float: bool, starts_full: bool, said_us: i64, holds_us: i64, asked_us: i64) -> Sim {
+            let now = Arc::new(AtomicU64::new(1_000 * MS as u64));
+            let ring = Arc::new(Mutex::new(FakeRing::new(music_s, now.clone())));
             let capacity = (RATE as i64 * said_us / 1_000_000) as u64;
             let holds = (RATE as i64 * holds_us / 1_000_000) as u64;
             let track = Arc::new(Mutex::new(Track { capacity: holds, starts_full, volume: 1.0, ..Track::default() }));
-            let now = Arc::new(AtomicU64::new(1_000 * MS as u64));
             let sink = FakeSink { track: track.clone(), staging: vec![0.0; CHUNK_BYTES / 4], float, now: now.clone() };
             let clock = Arc::new(Clock::default());
-            let format = OutputFormat { rate: RATE, channels: 2 };
+            let format = OutputFormat { rate: RATE, channels: 2, bits: 0 };
             let opened = Opened { sink: Box::new(sink), frames: capacity, starts_full };
             let opener = FakeOpener { track: track.clone(), float, now: now.clone() };
             let failure = Arc::new(Mutex::new(None));
-            let asked = (RATE as i64 * TRACK_US / 1_000_000) as u64;
+            let asked = (RATE as i64 * asked_us / 1_000_000) as u64;
             let reopen = Reopen { opener: Arc::new(Mutex::new(Box::new(opener))), frames: asked, failure: failure.clone() };
             let writer = Writer::new(ring.clone(), opened, reopen, format, float, clock.clone(), Arc::new(AtomicU64::new(0)));
-            Sim { writer, ring, track, clock, now, control: Control::default(), wakes: 0, next: Some(0), failure }
+            let control = Control { shallow: asked < track_frames(RATE, false), ..Control::default() };
+            Sim { writer, ring, track, clock, now, control, wakes: 0, next: Some(0), failure, late: 0, dice: Dice(11), mixer: None, deepest: 0 }
         }
 
         fn now(&self) -> i64 {
             self.now.load(Ordering::Relaxed) as i64
         }
 
+        /// The track is read by a mixer `period_ms` at a time, each read up to `late_ms` late.
+        fn mixed(&mut self, period_ms: i64, late_ms: i64) {
+            let at = self.now() + period_ms * MS;
+            self.mixer = Some(Mixer { period: period_ms * MS, late: late_ms * MS, due: at, next: at, dice: Dice(5) });
+        }
+
         /// The writer wakes now.
         fn wake(&mut self) {
             self.wakes += 1;
             let now = self.now();
-            self.next = self.writer.step(now, &mut self.control).map(|ms| now + ms as i64 * MS);
+            let late = self.dice.roll(self.late);
+            self.next = self.writer.step(now, &mut self.control).map(|ms| now + ms as i64 * MS + late);
         }
 
-        /// Runs the virtual clock for `ms`, the writer waking whenever it asked to.
+        /// Runs the virtual clock for `ms`, the writer waking whenever it asked to, the engine filling the
+        /// ring when it is due to, and the mixer reading the track.
         fn run(&mut self, ms: i64) {
             let end = self.now() + ms * MS;
             loop {
-                let to = self.next.map_or(end, |n| n.min(end));
+                let due = self.ring.lock().due;
+                let mix = self.mixer.as_ref().map(|m| m.next);
+                let to = [self.next, due, mix, Some(end)].into_iter().flatten().min().expect("the end at least");
                 let step = (to - self.now()).max(0);
-                self.track.lock().advance((step as u128 * RATE as u128 / 1_000_000_000) as u64);
+                if self.mixer.is_none() {
+                    self.track.lock().advance((step as u128 * RATE as u128 / 1_000_000_000) as u64);
+                }
                 self.now.store(to as u64, Ordering::Relaxed);
+                if let Some(m) = self.mixer.as_mut().filter(|m| m.next == to) {
+                    self.track.lock().advance((m.period as u128 * RATE as u128 / 1_000_000_000) as u64);
+                    m.due += m.period;
+                    m.next = m.due + m.dice.roll(m.late);
+                }
+                if due == Some(to) {
+                    self.ring.lock().turn(to);
+                }
                 if self.next.is_some_and(|n| n <= to) {
                     self.wake();
-                } else {
+                }
+                let held = self.ring.lock().available as u64 + self.track.lock().buffered;
+                self.deepest = self.deepest.max(held);
+                if to >= end {
                     break;
                 }
             }
@@ -1117,6 +1353,23 @@ mod tests {
         let wakes = s.wakes - wakes;
         assert_eq!(s.track.lock().underruns, 0, "never runs dry");
         assert!(wakes <= 600, "about once per quarter of a second once its size is known: {wakes} wakes in two minutes");
+    }
+
+    #[test]
+    fn a_song_s_24_bit_samples_are_packed_in_place_bit_for_bit() {
+        let values = [0i32, 1, -1, 8_388_607, -8_388_608, 123_456, -654_321, 42];
+        let mut staging: Vec<f32> = values.iter().map(|&v| v as f32 / 8_388_608.0).collect();
+        staging.resize(16, 0.0);
+        pack24(&mut staging, values.len());
+        // SAFETY: the floats' memory, read as bytes, inside its length.
+        let bytes = unsafe { std::slice::from_raw_parts(staging.as_ptr() as *const u8, values.len() * 3) };
+        for (k, &v) in values.iter().enumerate() {
+            let b = &bytes[k * 3..k * 3 + 3];
+            assert_eq!(i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8, v, "sample {k}");
+        }
+        assert_eq!(sample_bytes(false, packed24(OutputFormat { rate: 96_000, channels: 2, bits: 24 }, false)), 3);
+        assert_eq!(sample_bytes(true, packed24(OutputFormat { rate: 96_000, channels: 2, bits: 24 }, true)), 4, "float asked for: float");
+        assert!(!packed24(OutputFormat { rate: 44_100, channels: 2, bits: 16 }, false));
     }
 
     #[test]
@@ -1231,6 +1484,85 @@ mod tests {
         assert!((10..=13).contains(&ticks), "{ticks} wakes for a 160 ms fade");
         let next = s.next.unwrap() - s.now();
         assert!(next > 5_000 * MS, "and none after it");
+    }
+
+    #[test]
+    fn a_ring_kept_shallower_than_the_track_never_lets_it_run_dry() {
+        // The phone's report: the equalizer screen's shallow buffer reached the engine's ring at a song's
+        // start, and from there the ring held half a second, topped up on the engine's 200 ms timer, while
+        // the track was the deep one. Filling the track after that flush never ended, and the writer
+        // backed off to a second between looks while each moved half a second in: a gap about once a
+        // second.
+        let mut s = Sim::new(600, false, false);
+        s.ring.lock().kept(Engine::Timer { cap: RATE as usize / 2, every: 200 * MS });
+        s.ring.lock().flush(0.25);
+        s.late = 20 * MS;
+        s.play();
+        s.run(60_000);
+        assert_eq!(s.track.lock().underruns, 0, "never runs dry");
+    }
+
+    #[test]
+    fn tuned_the_track_is_opened_shallow_and_never_runs_dry_for_a_late_writer_and_a_jittery_mixer() {
+        let mut s = Sim::new(600, false, false);
+        // A mixer reading 20 ms at a time, up to 8 ms late; a writer woken up to 30 ms late.
+        s.mixed(20, 8);
+        s.late = 30 * MS;
+        s.play();
+        s.run(15_000);
+        // The equalizer screen: the engine keeps its ring shallow, says so, and makes the music again where
+        // the ear is (a flush), waking up to 15 ms late whenever the ring runs down to half.
+        let cap = (RATE as i64 * nori_engine::output::SHALLOW_US / 1_000_000) as usize;
+        s.control.shallow = true;
+        {
+            let mut r = s.ring.lock();
+            r.kept(Engine::Shallow { cap, late: 15 * MS });
+            r.flush(0.25);
+        }
+        s.wake();
+        {
+            let t = s.track.lock();
+            assert_eq!((t.reopened, t.capacity), (1, track_frames(RATE, true)), "opened again, shallow, at the flush");
+        }
+        let (wakes, underruns) = (s.wakes, s.track.lock().underruns);
+        s.deepest = 0;
+        s.run(60_000);
+        assert_eq!(s.track.lock().underruns, underruns, "never runs dry");
+        let ms = s.deepest * 1000 / RATE as u64;
+        assert!(ms <= 250, "a band moved is heard {ms} ms later at most");
+        let wakes = s.wakes - wakes;
+        assert!(wakes <= 60 * 16, "about once per 80 ms: {wakes} wakes in a minute");
+        // The screen closed: deep again at the flush that comes with it, and in bursts.
+        s.control.shallow = false;
+        {
+            let mut r = s.ring.lock();
+            r.kept(Engine::Bursts);
+            r.flush(0.5);
+        }
+        s.wake();
+        {
+            let t = s.track.lock();
+            assert_eq!((t.reopened, t.capacity), (2, track_frames(RATE, false)), "opened deep again");
+        }
+        s.run(5_000);
+        let wakes = s.wakes;
+        s.run(60_000);
+        assert_eq!(s.track.lock().underruns, underruns);
+        assert!(s.wakes - wakes <= 8, "back to a wake every ten seconds or so: {}", s.wakes - wakes);
+    }
+
+    #[test]
+    fn a_shallow_change_waits_for_the_flush_that_comes_with_it() {
+        let mut s = Sim::new(600, false, false);
+        s.play();
+        s.run(3_000);
+        // Told before the flush: what the track holds still plays until the flush says it is not wanted.
+        s.control.shallow = true;
+        s.wake();
+        assert_eq!(s.track.lock().reopened, 0);
+        s.ring.lock().flush(0.25);
+        s.wake();
+        assert_eq!(s.track.lock().reopened, 1);
     }
 
     /// An AudioTrack playing on the real clock, keeping every sample written since its last flush.

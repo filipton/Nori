@@ -11,6 +11,13 @@
 //! on the thread that asks, not even opening the cache (its directory is read by the first worker), so a
 //! GUI can ask from its own thread.
 //!
+//! A worker keeps its buffers from cover to cover while covers come, and lets them go with its thread
+//! once the loader rests: when no cover has been asked for in a while ([`Config::idle`]), when no screen
+//! shows covers ([`Loader::show`]), or when the client is short of memory ([`Loader::rest`]). Only the
+//! first waits: the last worker to run out of work waits that long for the next cover, and only while a
+//! screen shows covers (the phone is awake then). Out of sight, a worker ends as soon as it runs out of
+//! work, so nothing waits and nothing wakes.
+//!
 //! What a cover is decoded into is the client's ([`Paint`]): RGBA rows ([`Rgba`]), or a platform's own
 //! picture made at the right size and decoded straight into (Android's Bitmaps, crates/android).
 
@@ -24,6 +31,7 @@ use std::pin::pin;
 use std::sync::{mpsc, Arc, OnceLock};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, Thread};
+use std::time::Duration;
 
 use nori_core::covers::is_provider_cover;
 use nori_core::transport::{FailureKind, Transport, TransportError};
@@ -47,6 +55,8 @@ pub struct Config {
     pub alpha: Alpha,
     /// A fetch gives up after this long; 0 is the transport's own timeouts.
     pub timeout_ms: u32,
+    /// A loader on screen whose workers have all waited this long for a cover rests ([`Loader::rest`]).
+    pub idle: Duration,
 }
 
 impl Config {
@@ -61,6 +71,7 @@ impl Config {
             workers: thread::available_parallelism().map_or(2, |n| n.get().clamp(2, 4)),
             alpha: Alpha::Straight,
             timeout_ms: 0,
+            idle: IDLE,
         }
     }
 }
@@ -110,6 +121,10 @@ pub trait Paint: Send + Sync + 'static {
 
     /// How many bytes the picture holds, for the memory cache's limit.
     fn bytes(picture: &Self::Picture) -> usize;
+
+    /// Lets go of whatever is kept between covers, for a loader that rests (see [`Loader::rest`]). Called
+    /// outside the loader's lock, possibly while other covers are painted.
+    fn rest(&self) {}
 }
 
 /// RGBA rows at exactly the size asked for, for a client that draws them itself.
@@ -138,6 +153,10 @@ type Done<P> = Box<dyn FnOnce(Result<P, Error>) + Send>;
 /// The size a warm-up is filed under: no view is that big, so it never shares a flight with one.
 const WARM: u32 = u32::MAX;
 
+/// How long a loader's workers wait for the next cover before the loader rests ([`Config::idle`]): long
+/// past the gaps between a scrolling list's covers, so a list scrolled on keeps its threads and buffers.
+const IDLE: Duration = Duration::from_secs(20);
+
 /// One cover at one size on its way, and who waits for it.
 struct Flight<P> {
     url: String,
@@ -151,15 +170,31 @@ struct Jobs<P> {
     flights: HashMap<Sized, Flight<P>>,
     /// Flights not started yet, newest last. A cancelled one stays here until a worker skips it.
     queue: Vec<Sized>,
+    /// Worker threads running, and how many of them wait for work.
     workers: usize,
     idle: usize,
+    /// Which rest this is: a worker started before the last one ends when it finds nothing to do.
+    generation: u64,
+    /// Workers started since the last rest, which count against the limit.
+    current: usize,
+    /// No screen shows covers ([`Loader::show`]).
+    hidden: bool,
     next_id: u64,
     closed: bool,
 }
 
 impl<P> Default for Jobs<P> {
     fn default() -> Jobs<P> {
-        Jobs { flights: HashMap::new(), queue: Vec::new(), workers: 0, idle: 0, next_id: 0, closed: false }
+        Jobs { flights: HashMap::new(), queue: Vec::new(), workers: 0, idle: 0, generation: 0, current: 0, hidden: false, next_id: 0, closed: false }
+    }
+}
+
+impl<P> Jobs<P> {
+    /// Asks every worker running to end once it has nothing to do, and answers whether there was any.
+    fn retire(&mut self) -> bool {
+        self.generation += 1;
+        self.current = 0;
+        self.workers > 0
     }
 }
 
@@ -175,6 +210,7 @@ struct Inner<P: Paint> {
     workers: usize,
     paint: P,
     timeout_ms: u32,
+    idle: Duration,
 }
 
 pub struct Loader<P: Paint = Rgba> {
@@ -248,6 +284,7 @@ impl<P: Paint> Loader<P> {
             workers: config.workers.max(1),
             paint,
             timeout_ms: config.timeout_ms,
+            idle: config.idle,
         };
         Loader { inner: Arc::new(inner) }
     }
@@ -327,6 +364,33 @@ impl<P: Paint> Loader<P> {
         self.inner.memory.clear();
     }
 
+    /// Lets go of what the loader keeps for covers to come, for a client short of memory: every worker
+    /// ends as soon as it has nothing to do, with its decoder's buffers and whatever the platform keeps
+    /// per thread, and the painter lets go of its own ([`Paint::rest`]). The next request starts a worker
+    /// again. Decoded covers in memory stay.
+    pub fn rest(&self) {
+        if self.inner.jobs.lock().retire() {
+            self.inner.work.notify_all();
+        }
+        self.inner.paint.rest();
+    }
+
+    /// Whether a screen shows this loader's covers (at first, one does). Out of sight the loader rests,
+    /// and a worker started for a cover asked for then (a notification's) ends as soon as it runs out of
+    /// work: nobody scrolls, and a worker that waited would hold its buffers, or wake to let them go.
+    pub fn show(&self, shown: bool) {
+        let mut jobs = self.inner.jobs.lock();
+        jobs.hidden = !shown;
+        if !shown {
+            let any = jobs.retire();
+            drop(jobs);
+            if any {
+                self.inner.work.notify_all();
+            }
+            self.inner.paint.rest();
+        }
+    }
+
     /// The disk cache, opened now if no worker has yet: this reads its directory.
     pub fn disk(&self) -> Option<&DiskCache> {
         self.inner.disk()
@@ -390,12 +454,17 @@ impl Worker {
     }
 }
 
-/// Counts a worker out however its thread ends, so the next request starts another in its place.
-struct Leaving<'a, P: Paint>(&'a Inner<P>);
+/// Counts a worker (started in the rest `.1`) out however its thread ends, so the next request starts
+/// another in its place.
+struct Leaving<'a, P: Paint>(&'a Inner<P>, u64);
 
 impl<P: Paint> Drop for Leaving<'_, P> {
     fn drop(&mut self) {
-        self.0.jobs.lock().workers -= 1;
+        let mut jobs = self.0.jobs.lock();
+        jobs.workers -= 1;
+        if jobs.generation == self.1 {
+            jobs.current -= 1;
+        }
     }
 }
 
@@ -417,23 +486,33 @@ impl<P: Paint> Inner<P> {
         } else {
             jobs.queue.insert(0, key);
         }
-        if jobs.idle == 0 && jobs.workers < self.workers {
+        // Only workers started since the last rest count against the limit: the others end.
+        if jobs.idle == 0 && jobs.current < self.workers {
             jobs.workers += 1;
-            let inner = self.clone();
-            thread::Builder::new().name("nori-covers".into()).spawn(move || inner.work()).expect("a thread for covers");
+            jobs.current += 1;
+            let (inner, generation) = (self.clone(), jobs.generation);
+            thread::Builder::new().name("nori-covers".into()).spawn(move || inner.work(generation)).expect("a thread for covers");
         } else {
             self.work.notify_one();
         }
     }
 
-    fn work(self: Arc<Self>) {
-        let _leaving = Leaving(&self);
+    fn work(self: Arc<Self>, generation: u64) {
+        let _leaving = Leaving(&self, generation);
         let mut w = Worker::new();
         loop {
             let (key, url, warm) = {
                 let mut jobs = self.jobs.lock();
                 loop {
                     if jobs.closed {
+                        return;
+                    }
+                    // A worker from before the last rest leaves what is queued to those started since, and
+                    // takes it only when there are none (the client said rest while covers were queued).
+                    if jobs.generation != generation && jobs.current > 0 {
+                        if !jobs.queue.is_empty() {
+                            self.work.notify_one();
+                        }
                         return;
                     }
                     if let Some(key) = jobs.queue.pop() {
@@ -445,9 +524,26 @@ impl<P: Paint> Inner<P> {
                             _ => continue,
                         }
                     }
+                    if jobs.generation != generation || jobs.hidden {
+                        return;
+                    }
                     jobs.idle += 1;
-                    self.work.wait(&mut jobs);
+                    // The last worker to run out of work waits only so long: if no cover has come for any
+                    // worker by then, the loader rests.
+                    let timed_out = if jobs.idle == jobs.workers {
+                        self.work.wait_for(&mut jobs, self.idle).timed_out()
+                    } else {
+                        self.work.wait(&mut jobs);
+                        false
+                    };
                     jobs.idle -= 1;
+                    if timed_out && jobs.idle + 1 == jobs.workers && jobs.queue.is_empty() && jobs.generation == generation {
+                        jobs.retire();
+                        drop(jobs);
+                        self.work.notify_all();
+                        self.paint.rest();
+                        return;
+                    }
                 }
             };
             // One broken file must not stop every cover after it: a panic is this cover's error, and its

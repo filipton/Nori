@@ -12,6 +12,7 @@ import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheEvictor
 import androidx.media3.datasource.cache.CacheSpan
+import androidx.media3.datasource.cache.ContentMetadata
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -24,7 +25,7 @@ import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Quality
 import java.io.File
 
-/** The stream cache's keys and their order of use, kept in the core (crates/core/src/stream_cache.rs). */
+/** The stream cache's keys and their order of use, kept in the core (crates/transfers/src/stream_cache.rs). */
 internal object StreamCacheJni {
     init { System.loadLibrary("norimusic") }
     @JvmStatic @FastNative external fun touch(key: String)
@@ -44,10 +45,17 @@ internal object StreamCacheJni {
  * reports each use and, only when the cache is over its limit, drops whole resources in the order the
  * core names them. The core knows the keys, so they are handed over once rather than on every trim.
  */
-class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
+class ResizableEvictor(
+    @Volatile var maxBytes: Long,
+    /** A piece of a song was written: [MediaSources] looks whether the song is whole now. */
+    private val added: (Cache, String) -> Unit = { _, _ -> },
+) : CacheEvictor {
     override fun onCacheInitialized() {}
     override fun onStartFile(cache: Cache, key: String, position: Long, length: Long) = touch(cache, key)
-    override fun onSpanAdded(cache: Cache, span: CacheSpan) = touch(cache, span.key!!)
+    override fun onSpanAdded(cache: Cache, span: CacheSpan) {
+        touch(cache, span.key!!)
+        added(cache, span.key!!)
+    }
     override fun onSpanRemoved(cache: Cache, span: CacheSpan) {}
     override fun onSpanTouched(cache: Cache, oldSpan: CacheSpan, newSpan: CacheSpan) = touch(cache, newSpan.key!!)
     override fun requiresCacheSpanTouches() = true
@@ -99,12 +107,46 @@ class ResizableEvictor(@Volatile var maxBytes: Long) : CacheEvictor {
 class MediaSources(context: Context, private val clientOf: () -> Client, private val http: Http, private val settings: Settings) {
     private val client get() = clientOf()
     val database = StandaloneDatabaseProvider(context)
-    val streamEvictor = ResizableEvictor(settings.value.cacheMb * 1024L * 1024L)
+    val streamEvictor = ResizableEvictor(settings.value.cacheMb * 1024L * 1024L, ::added)
     val streamCache = SimpleCache(File(context.cacheDir, "stream"), streamEvictor, database)
-    val downloadCache = SimpleCache(File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads"), NoOpCacheEvictor(), database)
+    val downloadCache = SimpleCache(File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads"), Arrivals(::added), database)
+
+    private val motionDir = File(context.cacheDir, "motion")
+
+    /**
+     * Moving covers (MotionPlayer): each loop is played from here after its first pass, so the video is
+     * fetched once rather than once a loop. Built the first time one plays - never while they are
+     * switched off - and least recently played first out past 64 MB, a dozen or so albums.
+     */
+    val motionCache: Cache by lazy { SimpleCache(motionDir, androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor(64L * 1024 * 1024), database) }
+
+    /**
+     * Told when a song has become whole in either cache, on the thread that wrote its last piece (AutoMix's
+     * measuring ahead, which only measures a song once it is all on the device). Null while nobody asks.
+     */
+    @Volatile var onWhole: (() -> Unit)? = null
+
+    private fun added(cache: Cache, key: String) {
+        val tell = onWhole ?: return
+        if (isWhole(cache, key)) tell()
+    }
+
+    /** A download cache keeps everything, and says when a piece of a song was written. */
+    private class Arrivals(private val added: (Cache, String) -> Unit) : CacheEvictor by NoOpCacheEvictor() {
+        override fun onSpanAdded(cache: Cache, span: CacheSpan) = added(cache, span.key!!)
+    }
 
     /** Whether [id]'s download is complete, from the core's memory of its downloads table. */
     fun isDownloaded(id: String): Boolean = DownloadsJni.held(id) == DownloadsJni.DONE
+
+    /**
+     * The stream cache's copy of [id] (a whole one first) by its key, and whether it is whole; none. For the
+     * perf build's timeline, which says where a song played from; asked once a song.
+     */
+    fun streamCopy(id: String): Pair<String, Boolean>? {
+        val keys = streamCache.keys.filter { it.startsWith("$id:") }
+        return keys.firstOrNull { isWhole(streamCache, it) }?.let { it to true } ?: keys.firstOrNull()?.let { it to false }
+    }
 
     val network: DataSource.Factory = OkHttpDataSource.Factory(http.streamFactory)
 
@@ -163,6 +205,18 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
         return source to source.open(DataSpec.Builder().setUri(Uri.parse(url)).setKey(key).setPosition(from).build())
     }
 
+    /**
+     * A radio station's stream at [url], straight from the network (a live stream is never cached), with
+     * the station's announcements asked for: the source, and the bytes of music between two announcements
+     * as the station answers (`icy-metaint`; 0 when it sends none).
+     */
+    fun openLive(url: String): Pair<DataSource, Int> {
+        val source = network.createDataSource()
+        source.open(DataSpec.Builder().setUri(Uri.parse(url)).setHttpRequestHeaders(mapOf("Icy-MetaData" to "1")).build())
+        val every = source.responseHeaders.entries.firstOrNull { it.key.equals("icy-metaint", ignoreCase = true) }?.value?.firstOrNull()?.trim()?.toIntOrNull()
+        return source to (every ?: 0)
+    }
+
     /** The key [resolve] would give a song that is not downloaded, without building its URL. */
     fun streamKey(id: String): String = settings.value.let { client.streamKey(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
 
@@ -205,6 +259,21 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     fun clearStream() {
         for (key in runCatching { streamCache.keys }.getOrDefault(emptySet())) runCatching { streamCache.removeResource(key) }
         streamEvictor.forget()
+    }
+
+    companion object {
+        /**
+         * How much may be missing at the end of a song for it to count as whole: tags after the audio. The
+         * player stops reading an MP3 where its frames end, so the ID3v1 tag after them (128 bytes) is never
+         * fetched, and a song streamed through the player was never whole in the cache.
+         */
+        const val TAIL = 16 * 1024L
+
+        /** Whether [cache] holds [key] from its first byte to its end, but perhaps a [TAIL]. */
+        fun isWhole(cache: Cache, key: String): Boolean {
+            val length = ContentMetadata.getContentLength(cache.getContentMetadata(key))
+            return length > 0 && cache.getCachedLength(key, 0, length) >= length - TAIL
+        }
     }
 
     /**

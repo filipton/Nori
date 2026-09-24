@@ -138,6 +138,17 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         settingSet(name, value)?.let(::apply)
     }
 
+    /**
+     * A ranked row (a lyrics service) held and dragged [by] one place up (-1) or down (1) past its
+     * neighbour; whether it had one to pass. The ranking itself is the core's (`lyricsMove`).
+     */
+    fun moveRanked(id: String, by: Int): Boolean {
+        val change = settingSet("lyricsMove", "$id:$by") ?: return false
+        val moved = change.prefs.lyricsOrder != nori.settings.value.lyricsOrder
+        apply(change)
+        return moved
+    }
+
     private fun apply(change: SettingChange) {
         // The active server's own settings go through the server's update, which connects it again.
         if (change.server) {

@@ -49,6 +49,15 @@ pub struct Stage {
     pub colour_fade_ms: i32,
     /// How long the lyrics stay where a finger left them.
     pub lyrics_reading_ms: i64,
+    /// A sung word's rise takes at least this long, its settling back this long once it is done, and a
+    /// note held `lyrics_held_ms` or more glows, fading over `lyrics_glow_fade_ms` after it ends. The
+    /// clock draws every frame while any of it moves (`nori_look::lyrics::MOTION_TAIL_MS`).
+    pub lyrics_rise_min_ms: i64,
+    pub lyrics_settle_ms: i64,
+    pub lyrics_held_ms: i64,
+    pub lyrics_glow_fade_ms: i64,
+    /// How lit the unsung words of the line being filled are (`nori_look::lyrics::UNSUNG`).
+    pub lyrics_unsung: f32,
     /// Data that arrives within this long of a page opening was never waited for: it snaps in.
     pub quick_load_ms: i64,
     /// How often the limiter's meter is read while the equalizer is on screen: quick enough to follow a
@@ -75,6 +84,11 @@ pub fn stage() -> Stage {
         colour_wait_ms: 1_200,
         colour_fade_ms: 420,
         lyrics_reading_ms: nori_look::lyrics::READING_MS,
+        lyrics_rise_min_ms: nori_look::lyrics::RISE_MIN_MS,
+        lyrics_settle_ms: nori_look::lyrics::SETTLE_MS,
+        lyrics_held_ms: nori_look::lyrics::HELD_MS,
+        lyrics_glow_fade_ms: nori_look::lyrics::GLOW_FADE_MS,
+        lyrics_unsung: nori_look::lyrics::UNSUNG,
         quick_load_ms: 300,
         meter_ms: 120,
     }

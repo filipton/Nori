@@ -7,6 +7,7 @@ mod chain;
 mod common;
 mod controls;
 mod crossfade;
+mod gain;
 mod gapless;
 mod golden;
 mod output;

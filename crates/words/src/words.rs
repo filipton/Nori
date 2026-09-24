@@ -219,20 +219,49 @@ pub fn words_bar_line(error: Option<String>, artist: Option<String>) -> String {
     error.or(artist).unwrap_or_else(|| "Radio".into())
 }
 
-/// Where lyrics came from, for the credit line under them.
+/// Where lyrics came from, for the credit line under them: the server, or the lyrics service that
+/// answered (nori-settings' `LyricsService`, one for one).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum LyricsOrigin {
     Server,
+    Binilyrics,
+    BetterLyrics,
+    Paxsenix,
+    LyricsPlus,
+    Portato,
+    PaxsenixMusixmatch,
+    Simpmusic,
+    Unison,
+    Netease,
+    Kugou,
     Lrclib,
+    PaxsenixSpotify,
+    YoutubeCaptions,
+    Megalobiz,
+    YoutubeMusic,
+    Genius,
 }
 
-/// A lyrics source's name: "your server", "LRCLIB".
+/// A lyrics source's name as the credit gives it: "your server", "LRCLIB". A service that relays
+/// another catalogue is named for itself, which is who answered; Unison's data asks to be credited by name.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_lyrics_origin(origin: LyricsOrigin) -> String {
     match origin {
         LyricsOrigin::Server => "your server",
+        LyricsOrigin::Binilyrics => "BiniLyrics",
+        LyricsOrigin::BetterLyrics | LyricsOrigin::Portato => "BetterLyrics",
+        LyricsOrigin::Paxsenix | LyricsOrigin::PaxsenixMusixmatch | LyricsOrigin::PaxsenixSpotify => "PaxSenix",
+        LyricsOrigin::LyricsPlus => "LyricsPlus",
+        LyricsOrigin::Simpmusic => "SimpMusic",
+        LyricsOrigin::Unison => "Unison",
+        LyricsOrigin::Netease => "NetEase",
+        LyricsOrigin::Kugou => "KuGou",
         LyricsOrigin::Lrclib => "LRCLIB",
+        LyricsOrigin::YoutubeCaptions => "YouTube",
+        LyricsOrigin::Megalobiz => "Megalobiz",
+        LyricsOrigin::YoutubeMusic => "YouTube Music",
+        LyricsOrigin::Genius => "Genius",
     }
     .into()
 }
@@ -870,6 +899,13 @@ pub struct PerfWords {
     pub covers: String,
     /// A benchmark under way.
     pub running: String,
+    /// The app's own log and crashes, folded away until asked for.
+    pub log: String,
+    pub show_log: String,
+    pub hide_log: String,
+    pub log_note: String,
+    /// A stretch's events, unfolded.
+    pub hide_events: String,
 }
 
 /// The Performance page's fixed words ([`PerfWords`]), in one call.
@@ -890,7 +926,18 @@ pub fn words_perf() -> PerfWords {
         calls: w("Calls"),
         covers: w("Covers"),
         running: w("running..."),
+        log: w("Log"),
+        show_log: w("Show the log"),
+        hide_log: w("Hide the log"),
+        log_note: w("The app's own recent log and any crash, read when shown. The shared report ends with them."),
+        hide_events: w("Hide events"),
     }
+}
+
+/// The button that unfolds a stretch's events: "3 events".
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn words_perf_events(count: u32) -> String {
+    if count == 1 { "1 event".into() } else { format!("{count} events") }
 }
 
 /// A benchmark that stopped with `error`.
@@ -1054,6 +1101,8 @@ mod tests {
         assert_eq!(words_lyrics_credit(LyricsOrigin::Lrclib, true).as_deref(), Some("LRCLIB"));
         assert_eq!(words_lyrics_credit(LyricsOrigin::Lrclib, false).as_deref(), Some("LRCLIB · not timed"));
         assert_eq!(words_lyrics_origin(LyricsOrigin::Server), "your server");
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Portato, true).as_deref(), Some("BetterLyrics"));
+        assert_eq!(words_lyrics_credit(LyricsOrigin::Genius, false).as_deref(), Some("Genius · not timed"));
     }
 
     #[test]

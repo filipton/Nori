@@ -52,6 +52,19 @@ object CoverPixels {
     /** The cover at [url] onto the disk, not decoded, behind every view's request. */
     @JvmStatic external fun warm(loader: Long, url: String)
 
+    /**
+     * Lets go of what the loader keeps for covers to come: its threads end once they have nothing to do,
+     * with their buffers and the software Bitmaps kept for GPU copies. For memory running short; the next
+     * cover starts a thread again.
+     */
+    @JvmStatic external fun rest(loader: Long)
+
+    /**
+     * Whether any of the app's screens is in sight. Out of sight the loader rests (as [rest]) and keeps
+     * no thread waiting for the next cover; in sight, it rests after 20 s without one.
+     */
+    @JvmStatic external fun show(loader: Long, shown: Boolean)
+
     /** Deletes every cover on the disk. Off the main thread. */
     @JvmStatic external fun clear(loader: Long)
 

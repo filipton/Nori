@@ -145,6 +145,29 @@ pub fn silence_trim(blocks_raw: &[f32]) -> (i64, i64) {
     }
 }
 
+/// The last silence of at least `min_ms` inside the music - after its first audible block and before its last one -
+/// as (start, end) ms: the gap before a hidden track. `None` when there is none.
+pub fn last_gap(blocks_raw: &[f32], min_ms: i64) -> Option<(i64, i64)> {
+    let loud = |v: &f32| db(*v as f64) > SILENCE_DB;
+    let (first, last) = (blocks_raw.iter().position(loud)?, blocks_raw.iter().rposition(loud)?);
+    let min_blocks = (min_ms / BLOCK_MS).max(1) as usize;
+    let mut j = last;
+    while j > first {
+        if loud(&blocks_raw[j]) {
+            j -= 1;
+            continue;
+        }
+        let end = j + 1;
+        while j > first && !loud(&blocks_raw[j]) {
+            j -= 1;
+        }
+        if end - (j + 1) >= min_blocks {
+            return Some(((j + 1) as i64 * BLOCK_MS, end as i64 * BLOCK_MS));
+        }
+    }
+    None
+}
+
 /// MixRamp points, ms: the centre of the first 400 ms window at or above `lufs + MIXRAMP_DB`, and the centre of the
 /// last one. `None` for silence.
 pub fn mixramp(blocks_k: &[f32], lufs: f64) -> Option<(i64, i64)> {
@@ -193,6 +216,22 @@ mod tests {
         assert_eq!(integrated(&m.blocks_k), -70.0);
         assert_eq!(silence_trim(&m.blocks_raw), (0, 0));
         assert_eq!(mixramp(&m.blocks_k, -70.0), None);
+    }
+
+    #[test]
+    fn the_last_long_gap_is_found() {
+        let rate = 8000.0;
+        let mut x = sine(440.0, 0.5, 10.0, rate);
+        x.extend(vec![0f32; (rate * 2.0) as usize]); // a 2 s rest
+        x.extend(sine(440.0, 0.5, 5.0, rate));
+        x.extend(vec![0f32; (rate * 8.0) as usize]); // an 8 s gap
+        x.extend(sine(440.0, 0.5, 3.0, rate));
+        x.extend(vec![0f32; (rate * 4.0) as usize]); // trailing silence is not inside the music
+        let m = meter(&x, rate);
+        assert_eq!(last_gap(&m.blocks_raw, 6000), Some((17_000, 25_000)));
+        assert_eq!(last_gap(&m.blocks_raw, 1000), Some((17_000, 25_000)), "the last one, not the first");
+        assert_eq!(last_gap(&m.blocks_raw, 9000), None);
+        assert_eq!(last_gap(&[], 6000), None);
     }
 
     #[test]

@@ -1,4 +1,6 @@
 [bindings.kotlin]
+# Each crate of the core has a Kotlin package of its own under nori-core's: the generator writes one file per
+# crate, named after its package.
 package_name = "dev.nori.music.ffi.settings"
 cdylib_name = "norimusic"
 android = true

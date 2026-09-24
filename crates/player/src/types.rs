@@ -36,7 +36,7 @@ pub struct NamedPreset {
 
 /// What AutoMix knows about one track, from `automix::analysis`. One row in `track_analysis`.
 /// Times are milliseconds from the start of the file. The beat grid is not stored beat by beat: beat `n` sits at
-/// `beat_offset_ms + n * 60000 / bpm`, and beats with `n % 4 == downbeat_phase` start a bar.
+/// `beat_offset_ms + n * 60000 / bpm`, and beats with `n % beats_per_bar == downbeat_phase` start a bar.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TrackAnalysis {
     pub song_id: String,
@@ -53,9 +53,12 @@ pub struct TrackAnalysis {
     /// 0..1: whether one constant grid can stand for the beats - the lower of how tightly they sit on it
     /// (median spread, 14 ms or less to pass) and how little the tempo moves between halves (1.2 %).
     pub stability: f32,
-    /// 0..3: which grid beats start a bar (assumes 4/4).
+    /// 0..beats_per_bar-1: which grid beats start a bar.
     pub downbeat_phase: i32,
     pub downbeat_confidence: f32,
+    /// 4, or 3 for a waltz; 0 (a row from before metres were measured) means 4. The same for the intro and
+    /// outro grids.
+    pub beats_per_bar: i32,
     /// Integrated loudness of the mono downmix, BS.1770 K-weighting and gating. -70 for silence.
     pub lufs: f32,
     /// Camelot code: 1..12 = 1A..12A (minor), 13..24 = 1B..12B (major), 0 = unknown.
@@ -94,6 +97,35 @@ pub struct TrackAnalysis {
     pub intro_beat_offset_ms: f64,
     pub intro_stability: f32,
     pub intro_downbeat_phase: i32,
+    /// Where the arrangement arrives - the first four-bar line in the opening where the level, the low end and the
+    /// chords all reach the body of the song - and the voice-band share over the eight bars before it (the run-up
+    /// a mix lays under the outgoing song) and after it. 0 when the song starts full or has no usable grid.
+    pub drop_ms: i64,
+    pub drop_runup_vocal: f32,
+    pub drop_vocal: f32,
+    /// Where the ending stops being worth playing: the start of a closing breakdown (the level and the beat fall
+    /// away for good in the last 24 s), or of the long silence before a hidden track whose music after it is short
+    /// enough to leave. 0 when the song should play to its end.
+    pub exit_ms: i64,
+    /// The last silence of 6 s or more inside the music, start and end; 0 when there is none. Silence costs
+    /// nothing against the skip cap, music after it does.
+    pub gap_ms: i64,
+    pub gap_end_ms: i64,
+    /// Voice-band share over the eight bars before the exit (or the end of the music): what a mix's run-up lies
+    /// under.
+    pub exit_vocal: f32,
+    /// Chord (tonal) energy of the run-up to the drop (its most chordal four bars) against the body of the song,
+    /// dB: a drum intro reads far below (a key clash cannot happen over it), a pad or a sung intro near 0.
+    pub drop_runup_tonal_db: f32,
+    /// Beats in a bar of the intro and outro grids when that end was read on its own (Beat This! reads each end's
+    /// metre); 0 means `beats_per_bar`.
+    pub intro_beats_per_bar: i32,
+    pub outro_beats_per_bar: i32,
+    /// Where the intro and outro grids come from: `automix::beats::GRID_CLASSICAL` (the classical tracker, not yet
+    /// seen by the model), `GRID_CHECKED` (the classical grid, kept because Beat This! was not sure enough to
+    /// replace it) or `GRID_NEURAL` (Beat This!). A later run of the model picks up the ends below `GRID_CHECKED`.
+    pub intro_grid_source: i32,
+    pub outro_grid_source: i32,
     /// Wall-clock time of the analysis, ms since the epoch.
     pub analysed_ms: i64,
 }
@@ -219,6 +251,12 @@ pub struct TransitionPlan {
     pub hp_end_ms: i64,
     pub hp_from_hz: f32,
     pub hp_to_hz: f32,
+    /// Relative. When both songs sing over the run-up, the incoming song's voice band (`vocal_duck_hz` at the
+    /// centre) is held `vocal_duck_db` down until here, released over `vocal_duck_release_ms` before it; -1 when off.
+    pub vocal_duck_until_ms: i64,
+    pub vocal_duck_release_ms: i64,
+    pub vocal_duck_db: f32,
+    pub vocal_duck_hz: f32,
     /// Why this plan, for logs.
     pub reason: String,
 }

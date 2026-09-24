@@ -10,6 +10,10 @@
 //! symphonia's readers hand each packet over in a buffer of their own (`FormatReader::next_packet`
 //! returns it boxed, and has no way to read into one kept), so reading allocates once a packet. That
 //! happens only while the engine fills the output in a burst; decoding allocates nothing.
+//!
+//! A song can also be read as its packets alone, undecoded ([`Demuxed::load_packets`]), for an output
+//! that decodes them itself (audio offload): what they are, the encoder's delay and padding as that
+//! output takes them, and each packet with the frames of music it stands for.
 
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
@@ -93,6 +97,54 @@ fn put(v: f32, to: Encoding, out: &mut Vec<u8>) {
 enum Inner {
     Coded(Decoder),
     Pcm(Pcm),
+    /// Read as packets, not decoded.
+    Raw,
+}
+
+/// A compression an output may decode itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coding {
+    Mp3,
+    /// AAC Low Complexity.
+    Aac,
+    Opus,
+}
+
+impl Coding {
+    /// Its name, as a report says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Coding::Mp3 => "MP3",
+            Coding::Aac => "AAC-LC",
+            Coding::Opus => "Opus",
+        }
+    }
+}
+
+/// A compressed stream as an output that decodes it is asked about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Coded {
+    pub coding: Coding,
+    pub rate: u32,
+    pub channels: usize,
+}
+
+/// A song read as packets: what they are, and how the output that decodes them cuts the encoder's delay
+/// and padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodedSong {
+    pub coded: Coded,
+    /// Bits a second, as the song's bytes and length say (0 unknown): what sizes a track for it.
+    pub bitrate: u32,
+    /// Frames the decoder makes that are cut from the start and from the end, as media3 hands them to an
+    /// offloaded AudioTrack: an MP3's LAME numbers, an MP4's edit list. An Opus stream's pre-skip is in
+    /// its header, which the output reads.
+    pub delay: u32,
+    pub padding: u32,
+    /// The codec's own header: an Opus stream's `OpusHead`.
+    pub setup: Option<Box<[u8]>>,
+    /// Where the first packet read starts in the song, frames: after a seek, the packet it landed in.
+    pub from_frame: i64,
 }
 
 fn codec_of(id: AudioCodecId) -> Option<Codec> {
@@ -131,13 +183,23 @@ struct Stream {
     /// An MP4's encoder delay and where its music ends, in frames of what the decoder makes, as the
     /// file's `iTunSMPB` or edit list says (symphonia's reader reads neither): cut as media3 cuts them.
     mp4: Option<(i64, i64)>,
+    /// Bits per sample as the file stores them (0 unknown or not stored that way).
+    bits: u32,
+    /// What the song's compression is called, for a report of why it plays where it does.
+    compression: &'static str,
+    /// Read as packets: what they are, and the frames of music the last one stands for.
+    coded: Option<CodedSong>,
+    packet_frames: u64,
+    first_packet: bool,
 }
 
 impl Stream {
     /// `whole`: every byte of `source` is here, so the MP4 boxes that hold the gapless numbers can be
-    /// read wherever they are without waiting for the network.
-    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool) -> Result<Stream, String> {
+    /// read wherever they are without waiting for the network. `packets`: read undecoded, for an output
+    /// that decodes them itself.
+    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, packets: bool) -> Result<Stream, String> {
         let gapless = if whole { crate::mp4::gapless(&mut source).ok().flatten() } else { None };
+        let byte_len = source.byte_len();
         source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let source = past_id3(source).map_err(|e| e.to_string())?;
         let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
@@ -157,19 +219,57 @@ impl Stream {
         let codec = codec_of(params.codec);
         let delay_known = track.delay.is_some();
         let inner = match (codec, Pcm::of(params.codec)) {
+            _ if packets => Inner::Raw,
             (Some(c), _) => Inner::Coded(Decoder::new(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
             (None, Some(p)) => Inner::Pcm(p),
             _ => return Err(format!("{:?} is not decoded here", params.codec)),
         };
+        let (track_delay, track_padding) = (track.delay, track.padding);
+        let setup = params.extra_data.clone();
+        let bits = params.bits_per_sample.or(params.bits_per_coded_sample).unwrap_or(0);
         // The gapless numbers are in the track's timescale: taken when it counts in frames, as audio
         // tracks do.
         let per_frame = track.time_base.is_some_and(|t| t.numer.get() == 1 && t.denom.get() == rate);
         let mp4 = gapless.filter(|_| per_frame && codec.is_some()).map(|g| (g.delay as i64, g.frames.map_or(i64::MAX, |f| (g.delay + f) as i64)));
+        let mp4_total = gapless.map_or(0, |g| g.total as i64);
         let frames = match mp4 {
             Some((delay, end)) if end < i64::MAX => Some(end - delay),
             _ => track.num_frames.map(|n| n as i64),
         };
         let duration_us = frames.map(|n| n * 1_000_000 / rate as i64).or(duration_ms.map(|d| d * 1000)).unwrap_or(0);
+        let coded = packets.then(|| coding(codec, setup.as_deref())).flatten().map(|coding| {
+            let bitrate = match byte_len {
+                Some(b) if duration_us > 0 => (b as i128 * 8_000_000 / duration_us as i128).min(u32::MAX as i128) as u32,
+                _ => 0,
+            };
+            let (delay, padding) = match (coding, mp4) {
+                // An MP4's numbers are in what the decoder makes, which is how media3 hands them over.
+                (_, Some((delay, end))) => (delay as u32, if end < i64::MAX { (mp4_total - end).max(0) as u32 } else { 0 }),
+                // symphonia counts the MP3 decoder's own 529 frames into the delay and out of the padding;
+                // media3 hands the LAME tag's numbers over as they are.
+                (Coding::Mp3, None) => match track_delay {
+                    Some(d) => (d.saturating_sub(MP3_DECODER_DELAY as u32), track_padding.unwrap_or(0) + MP3_DECODER_DELAY as u32),
+                    None => (0, 0),
+                },
+                // The pre-skip is in the stream's header, which the output reads itself.
+                (Coding::Opus, None) => (0, track_padding.unwrap_or(0)),
+                (Coding::Aac, None) => (track_delay.unwrap_or(0), track_padding.unwrap_or(0)),
+            };
+            CodedSong { coded: Coded { coding, rate, channels }, bitrate, delay, padding, setup: setup.clone(), from_frame: 0 }
+        });
+        let compression = match (codec, Pcm::of(params.codec)) {
+            (Some(Codec::Aac), _) => match coding(codec, setup.as_deref()) {
+                Some(_) => "AAC-LC",
+                None => "HE-AAC",
+            },
+            (Some(Codec::Mp3), _) => "MP3",
+            (Some(Codec::Flac), _) => "FLAC",
+            (Some(Codec::Vorbis), _) => "Vorbis",
+            (Some(Codec::Alac), _) => "ALAC",
+            (Some(Codec::Opus), _) => "Opus",
+            (None, Some(_)) => "PCM",
+            (None, None) => "an unknown compression",
+        };
         let max_frames = codec.map_or(8192, Codec::max_frames);
         let id = track.id;
         let width = encoding.width();
@@ -188,9 +288,19 @@ impl Stream {
             ended: false,
             primed: false,
             mp4,
+            bits,
+            compression,
+            coded,
+            packet_frames: 0,
+            first_packet: true,
         };
         if from_ms > 0 {
             d.seek(from_ms)?;
+        }
+        if packets {
+            // The first packet says where the reading starts after a seek.
+            d.primed = d.next_packet();
+            return Ok(d);
         }
         // The first packet says for certain what comes out (an AAC stream's real rate, say).
         d.primed = d.next();
@@ -237,6 +347,47 @@ impl Stream {
         pts - origin + self.dropped_after_reset()
     }
 
+    /// The next packet of the song as it is into `buf`, and the frames of music it stands for; false at
+    /// the end of the song.
+    fn next_packet(&mut self) -> bool {
+        loop {
+            let packet = match self.reader.next_packet() {
+                Ok(Some(p)) => p,
+                Ok(None) | Err(_) => {
+                    self.ended = true;
+                    return false;
+                }
+            };
+            if packet.track_id != self.track || packet.data.is_empty() {
+                continue;
+            }
+            let (pts, dur) = (packet.pts.get(), packet.dur.get() as i64);
+            // What of it is heard: an MP4's stamps and lengths count its delay and padding in; elsewhere
+            // the packet's trims say it (symphonia 0.6.1 leaves them inside its length, as `dur` builds it).
+            let (start, frames) = match self.mp4 {
+                Some((delay, end)) => {
+                    let (from, to) = (pts.max(delay), (pts + dur).min(end));
+                    (from - delay, (to - from).max(0))
+                }
+                None => {
+                    let (trim_start, trim_end) = (packet.trim_start.get() as i64, packet.trim_end.get() as i64);
+                    (pts + trim_start, (dur - trim_start - trim_end).max(0))
+                }
+            };
+            self.buf.clear();
+            self.buf.extend_from_slice(&packet.data);
+            self.packet_frames = frames as u64;
+            if std::mem::take(&mut self.first_packet) {
+                if let Some(c) = self.coded.as_mut() {
+                    c.from_frame = start.max(0);
+                }
+            }
+            self.frame = Some(start + frames);
+            self.at_us = start.max(0) * 1_000_000 / self.format.rate as i64;
+            return true;
+        }
+    }
+
     /// Decodes the next packet with anything in it into `buf`; false at the end of the song.
     fn next(&mut self) -> bool {
         let (ch, enc) = (self.format.channels, self.format.encoding);
@@ -268,6 +419,7 @@ impl Stream {
                     Err(_) => continue,
                 },
                 Inner::Pcm(p) => (&[], Some((*p, p.width())), ch),
+                Inner::Raw => return false,
             };
             let n = match pcm {
                 Some((_, w)) => packet.data.len() / (w * ch),
@@ -354,17 +506,19 @@ impl Stream {
     }
 }
 
-/// Decodes the song in the file at `path` from its start to its end, as it plays (delay and padding
-/// cut), handing each buffer over as float samples with the rate and channels: for measuring a song
-/// ahead of time. False when it could not be read to its end.
-pub(crate) fn decode_whole(path: &std::path::Path, hint: Option<&str>, mut each: impl FnMut(u32, usize, &[f32])) -> Result<bool, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-    let mut s = Stream::open(Box::new(file), hint, 0, None, Encoding::Float, true)?;
+/// Decodes the song in `source`, every byte of it on the disk, from its start to its end, as it plays
+/// (delay and padding cut), handing each buffer over as float samples with the rate and channels: for
+/// measuring a song ahead of time. `each` answers whether to go on. False when it was not read to its
+/// end, or was stopped.
+pub(crate) fn decode_whole(source: Box<dyn MediaSource>, hint: Option<&str>, mut each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
+    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, true, false)?;
     let mut floats: Vec<f32> = Vec::new();
     while s.fill() {
         floats.clear();
         floats.extend(s.buffer().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
-        each(s.format.rate, s.format.channels, &floats);
+        if !each(s.format.rate, s.format.channels, &floats) {
+            return Ok(false);
+        }
     }
     Ok(s.ended)
 }
@@ -445,6 +599,17 @@ impl MediaSource for After {
     }
 }
 
+/// Which of the compressions an output may decode itself `codec` is, by its setup: AAC only as Low
+/// Complexity (object type 2), which is all `AudioFormat.ENCODING_AAC_LC` promises.
+fn coding(codec: Option<Codec>, setup: Option<&[u8]>) -> Option<Coding> {
+    match codec? {
+        Codec::Mp3 => Some(Coding::Mp3),
+        Codec::Aac if setup.and_then(|s| s.first()).is_some_and(|b| b >> 3 == 2) => Some(Coding::Aac),
+        Codec::Opus => Some(Coding::Opus),
+        _ => None,
+    }
+}
+
 /// Whether a song's hint names an MP4 container.
 fn mp4_like(hint: &str) -> bool {
     matches!(hint.to_ascii_lowercase().as_str(), "m4a" | "m4b" | "mp4" | "aac" | "alac" | "audio/mp4" | "audio/x-m4a" | "audio/aac")
@@ -474,16 +639,65 @@ impl Demuxed {
     /// to `encoding`. `duration_ms` is the song's tagged length, for a container that does not say its
     /// own. For bytes that are all here (a file): nothing is waited for.
     pub fn open(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding) -> Result<Demuxed, String> {
-        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true)?;
+        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true, false)?;
         Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
+    }
+
+    /// [`Demuxed::open`], read as packets and not decoded ([`Demuxed::packet`]).
+    pub fn open_packets(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>) -> Result<Demuxed, String> {
+        let s = Stream::open(source, hint, from_ms, duration_ms, Encoding::Pcm16, true, true)?;
+        Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
+    }
+
+    /// [`Demuxed::load`], read as packets and not decoded ([`Demuxed::packet`]).
+    pub fn load_packets(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>) -> Demuxed {
+        Demuxed::start(loader, engine, hint, from_ms, duration_ms, Encoding::Pcm16, true)
+    }
+
+    /// What the packets are and how the output cuts them, once the song is open; none when it is read
+    /// decoded, or is in a compression no output decodes itself.
+    pub fn coded(&self) -> Option<&CodedSong> {
+        self.stream().and_then(|s| s.coded.as_ref())
+    }
+
+    /// What the song's compression is called (MP3, FLAC, HE-AAC, ...), once it is open.
+    pub fn compression(&self) -> Option<&'static str> {
+        self.stream().map(|s| s.compression)
+    }
+
+    /// The next packet into [`Reading::buffer`], with the frames of music it stands for
+    /// ([`Demuxed::packet_frames`]); false at the end of the song. Asked only once it is ready.
+    pub fn packet(&mut self) -> bool {
+        match &mut self.state {
+            State::Open(s) if s.primed => {
+                s.primed = false;
+                true
+            }
+            State::Open(s) if !s.ended => s.next_packet(),
+            _ => false,
+        }
+    }
+
+    /// The frames of music the last packet stands for.
+    pub fn packet_frames(&self) -> u64 {
+        self.stream().map_or(0, |s| s.packet_frames)
+    }
+
+    /// The song's bytes, while a loader holds them: a live stream's announcements are read there.
+    pub fn loader(&self) -> Option<&Arc<Loader>> {
+        self.loader.as_ref().map(|(l, _)| l)
     }
 
     /// The song `loader` is fetching, read from `from_ms`. Unless all of it is here already it is opened
     /// on a thread of its own, since opening reads bytes that may still be on their way; `engine` is
     /// woken when it is open, and again whenever it waited for bytes.
     pub fn load(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding) -> Demuxed {
+        Demuxed::start(loader, engine, hint, from_ms, duration_ms, encoding, false)
+    }
+
+    fn start(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, packets: bool) -> Demuxed {
         if loader.complete() {
-            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true) {
+            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true, packets) {
                 Ok(s) => State::Open(Box::new(s)),
                 Err(why) => State::Failed(PlaybackError::Other, why),
             };
@@ -495,7 +709,7 @@ impl Demuxed {
             // An MP4's gapless numbers may sit at its very end: it is read once all of it is here (a
             // song that fits one burst, as most do), rather than fetched from the end and again.
             let whole = hint.as_deref().is_some_and(mp4_like) && l.wait_whole();
-            let opened = Stream::open(Box::new(l.reader()), hint.as_deref(), from_ms, duration_ms, encoding, whole);
+            let opened = Stream::open(Box::new(l.reader()), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets);
             let mut done = o.done.lock();
             done.0 = Some(opened);
             if let Some(t) = done.1.take() {
@@ -579,5 +793,9 @@ impl Reading for Demuxed {
 
     fn at_us(&self) -> i64 {
         self.stream().map_or(0, Stream::at_us)
+    }
+
+    fn bits(&self) -> u32 {
+        self.stream().map_or(0, |s| s.bits)
     }
 }

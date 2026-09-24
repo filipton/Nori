@@ -4,7 +4,7 @@ import dalvik.annotation.optimization.CriticalNative
 import dalvik.annotation.optimization.FastNative
 import java.nio.ByteBuffer
 
-/** The Rust side of AutoMix: crates/core/src/automix. Every buffer argument is a direct ByteBuffer; sizes are in bytes. */
+/** The Rust side of AutoMix: crates/automix. Every buffer argument is a direct ByteBuffer; sizes are in bytes. */
 internal object AutoMixAnalyzer {
     init { System.loadLibrary("norimusic") }
     @JvmStatic @CriticalNative external fun create(sampleRate: Int, channels: Int, expectedMs: Long): Long
@@ -54,7 +54,7 @@ internal object TransitionEngineJni {
     @JvmStatic external fun reset(h: Long, sink: TransitionSink, nowMs: Long)
 }
 
-/** Which song the ear is on during a mix; see crates/core/src/heard.rs. */
+/** Which song the ear is on during a mix; see crates/queue/src/heard.rs. */
 internal object HeardJni {
     init { System.loadLibrary("norimusic") }
 

@@ -12,6 +12,9 @@ use std::io::{self, Read, Seek, SeekFrom};
 pub struct Gapless {
     pub delay: u64,
     pub frames: Option<u64>,
+    /// Every frame the track's samples make, delay and padding with them (its `mdhd` length): what an
+    /// output that decodes the packets itself works the padding out from.
+    pub total: u64,
 }
 
 /// A box: its type and where its contents are.
@@ -137,8 +140,9 @@ pub fn gapless(r: &mut (impl Read + Seek)) -> io::Result<Option<Gapless>> {
     let moov = children(r, moov.body, moov.end)?;
     if let Some((delay, padding)) = itunes(r, &moov)? {
         // The comment's padding is counted against the samples the file holds.
-        let frames = audio_track(r, &moov)?.and_then(|t| t.duration.checked_sub(delay + padding));
-        return Ok(Some(Gapless { delay, frames }));
+        let total = audio_track(r, &moov)?.map_or(0, |t| t.duration);
+        let frames = total.checked_sub(delay + padding);
+        return Ok(Some(Gapless { delay, frames, total }));
     }
     let Some(track) = audio_track(r, &moov)? else { return Ok(None) };
     let Some((segment, media_time)) = track.edit.filter(|e| e.1 >= 0) else { return Ok(None) };
@@ -150,7 +154,7 @@ pub fn gapless(r: &mut (impl Read + Seek)) -> io::Result<Option<Gapless>> {
     if end > track.duration || (start == 0 && end == track.duration) {
         return Ok(None);
     }
-    Ok(Some(Gapless { delay: start, frames: Some(end - start) }))
+    Ok(Some(Gapless { delay: start, frames: Some(end - start), total: track.duration }))
 }
 
 struct Track {
@@ -222,7 +226,7 @@ mod tests {
     fn the_edit_list_says_where_the_music_starts_and_ends() {
         // 2.2 s (in the movie's milliseconds) from frame 1024 on.
         let g = gapless(&mut Cursor::new(file(Some((2200, 1024)), None))).unwrap();
-        assert_eq!(g, Some(Gapless { delay: 1024, frames: Some(97_020) }));
+        assert_eq!(g, Some(Gapless { delay: 1024, frames: Some(97_020), total: 102_400 }));
         assert_eq!(gapless(&mut Cursor::new(file(None, None))).unwrap(), None, "no edit, nothing to cut");
         assert_eq!(gapless(&mut Cursor::new(b"ID3 not an mp4 at all".to_vec())).unwrap(), None);
     }
@@ -231,7 +235,7 @@ mod tests {
     fn itunes_comment_wins_over_the_edit_list() {
         let c = " 00000000 00000840 000001CA 00000000000186A0 00000000 00000000";
         let g = gapless(&mut Cursor::new(file(Some((2200, 1024)), Some(c)))).unwrap();
-        assert_eq!(g, Some(Gapless { delay: 0x840, frames: Some(102_400 - 0x840 - 0x1CA) }));
+        assert_eq!(g, Some(Gapless { delay: 0x840, frames: Some(102_400 - 0x840 - 0x1CA), total: 102_400 }));
         assert_eq!(smpb(" 00000000 00000840 000001CA 0000000000059E36"), Some((2112, 458)));
     }
 }

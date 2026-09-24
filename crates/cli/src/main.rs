@@ -344,6 +344,10 @@ fn main() {
                 Event::Output { name } => println!("output: {name}"),
                 Event::Stopped => println!("stopped"),
                 Event::Buffering(on) => println!("{}", if on { "buffering" } else { "playing again" }),
+                Event::Looped { index, .. } => println!("again: {}", shown.title(index)),
+                Event::Title(t) => println!("on air: {t}"),
+                // The terminal client has no downloads to bridge with: the error run's rules stop it.
+                Event::Bridge => println!("stopped: the network is gone"),
             }
         }
     });

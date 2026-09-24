@@ -561,7 +561,7 @@ impl DerefMut for Sink<AudioTrack> {
 }
 
 /// The app around the engine: the transition planner over the window of songs coming up, the store of
-/// measurements, and the log - as `crates/core/src/automix/planner.rs` does it.
+/// measurements, and the log - as `crates/automix/src/planner.rs` does it.
 pub struct App {
     pub prefs: TransitionPrefs,
     pub transitions_off: bool,

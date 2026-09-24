@@ -19,6 +19,7 @@ static LIST: Mutex<Playlist> = Mutex::new(Playlist::new());
 /// The planner's window as it was last handed over, so it is handed over only when it changes.
 static WINDOW: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
 
+/// The queue, lent to `f` to read.
 pub fn with<R>(f: impl FnOnce(&Playlist) -> R) -> R {
     f(&LIST.lock())
 }
@@ -66,6 +67,7 @@ pub struct QueueEdit {
     pub shuffled: bool,
 }
 
+/// An edit of the queue that splices `songs` in where `f` says, as the platform is told of it.
 pub fn edit_splice(f: impl FnOnce(&mut Playlist) -> Option<Splice>, songs: Vec<Song>) -> Option<QueueEdit> {
     let mut p = LIST.lock();
     let s = f(&mut p)?;

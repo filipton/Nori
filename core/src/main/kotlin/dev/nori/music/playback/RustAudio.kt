@@ -17,7 +17,7 @@ import dalvik.annotation.optimization.CriticalNative
 import dalvik.annotation.optimization.FastNative
 import java.nio.ByteBuffer
 
-/** The decoder in the core (crates/core/src/decoder.rs over nori_player::decode). */
+/** The decoder in the core (crates/settings/src/decoder.rs over nori_player::decode). */
 internal object RustDecoderJni {
     init { System.loadLibrary("norimusic") }
 

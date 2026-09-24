@@ -124,6 +124,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Crossfade with real overlap | x | fade-out only | | yes | |
 | Crossfade: separate in/out length, curves, "mix only", off for albums in order | x | | | part | part: off inside albums |
 | A scrub into the mix stays on the song to hear the ending, and the mix still fires | | | | yes | |
+| AutoMix "Better beat detection": a neural beat tracker (Beat This!, MIT) reads each song's first and last half minute | | | | yes | done in the core: off by default, 5 MB model downloaded once, runs in the measurer on the song playing and the next; only in a build with `neural-beats`, which the app's builds leave out (docs/research/analysis.md) |
 | Smart fades (waveform-analysed fade points) | x | | | | ask (cost: decode-ahead analysis per track) |
 | Fade on play / pause / seek / skip | x | x | | yes | done |
 | Speed | x | x | x | yes | |
@@ -248,12 +249,77 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Server synced + plain lyrics, tap to seek | x | x | x | yes | |
 | Word-by-word (karaoke) cues from OpenSubsonic enhanced lyrics | x | stub | x | yes | done: server cues, inline LRC tags, or estimated per line; swept in the draw phase at 30 fps, only while visible; switchable |
 | Translations | x | | | yes | done |
-| LRCLIB / LyricsPlus fallback providers, ordered | | x | x | via octo-fiesta | ask (privacy: sends artist+title to a third party) |
+| Lyrics services for songs the server has none for, ranked, each switchable | | x | x | yes | done: sixteen services under "Look things up online" (off by default); LRCLIB and Unison on under it, the other fourteen off until switched on; asked together a few at a time, best-ranked answer wins; see "Lyrics services" below |
 | Offset adjust; keep screen on; text size / alignment | x | x | x | yes | done (alignment: no) |
 | Lyrics cached with downloads | x | x | x | | add |
 | Share lyrics as image / text | | | x | | add (text); image: skip |
 | Lyric line under artwork / over cover | x | x | | | skip: UI rewrite |
 | Lyrics over Bluetooth (AVRCP title field) | x | gone | | | ask (cost: a metadata update per line while playing) |
+
+### Lyrics services (2026-09-24)
+
+Sixteen services, ranked out of the box from the best down (Apple Music's catalogue timed syllable by
+syllable, then the others that time words, then those that time lines, then untimed words), each with a
+switch and a one-line description in Settings → Lyrics, held and dragged to reorder. All sit under "Find
+missing lyrics online", which sits under "Look things up online", which is off out of the box. Under it,
+only the two open databases, LRCLIB and Unison, are on; the rest use other companies' lyrics without
+asking them, or pages never meant for an app, so they stay off until switched on (the two PaxSenix routes
+also need the user's own key and are skipped quietly without one). They are asked only when the lyrics
+are opened, never for provider (`ext-`) songs, and never when the server has timed lyrics of its own.
+Each answer the service reports a length for must be within four seconds of the song's. Word timings are
+used only where the format really carries them.
+
+All of it is Rust (docs/clients.md): the service table and the user's ranking in nori-settings
+(`lyrics_sources.rs`), the requests, matching and answers in nori-lyrics (`services.rs`, through the
+core's `Transport`, which now carries a third party's headers and a JSON body), the formats with their
+tests and fixtures (`formats.rs`, `json.rs`, `html.rs`, `testdata/`), the ranking and racing
+(`race.rs`), the answers kept in the app's database (the core's response cache, per service and song).
+Kotlin shows what the core hands it (`Library.lyricsFor`) and draws the settings rows.
+
+**None of the requests could be tried from the machine this was written on.** The request and answer
+shapes come from BitChord's code of 2026-09-20, Better Lyrics' own OpenAPI description of 2026-09-24 and
+other open-source clients. `tools/feature-e2e.sh` asks each service on its own and prints what it
+answered: that run on a phone is the real check.
+
+| # | Service | Timing | Default | Needs | Notes |
+|---|---|---|---|---|---|
+| 1 | BiniLyrics | syllable (Apple Music's TTML) | off | - | Apple's lyrics from a volunteer's copy |
+| 2 | BetterLyrics | syllable (Apple Music's TTML) | off | a key only for songs it has not stored | asked without a key, where a 401 counts as a miss; a key (`X-API-Key`, field in Settings) lets it fetch the rest, and a miss is asked again once one is given. Tries `api.betterlyrics.org`, then the older `lyrics-api.boidu.dev` if the first cannot be reached |
+| 3 | PaxSenix | syllable (Apple Music's) | off | - | the Apple Music id comes from the public iTunes Search API, then `lyrics.paxsenix.org` is asked for it |
+| 4 | LyricsPlus (YouLy+) | syllable, word or line, as its answer says | off | - | six volunteer servers: the one that answered last is asked alone, the rest together only when it has nothing |
+| 5 | BetterLyrics Portato | word (QQ Music's QRC) | off | as BetterLyrics | how QQ Music is reached: Portato hands the QRC over decrypted |
+| 6 | PaxSenix: Musixmatch | word where Musixmatch has it, else line | off | PaxSenix key | skipped until a key is set |
+| 7 | SimpMusic | word (rich sync), line, plain | off | the song's YouTube video | the video is found with one YouTube Music search (Songs filter, matched on title, artist and length), shared with the two YouTube services and kept for the last few songs |
+| 8 | Unison | word (TTML or tagged LRC), line, plain | on | - | open data (ODbL), credited as asked |
+| 9 | NetEase Cloud Music | word (YRC), line | off | - | can refuse addresses outside China ("-460"), which is a failure, not a miss |
+| 10 | KuGou | word (KRC) | off | - | KRC decrypted and inflated in Rust |
+| 11 | LRCLIB | line; word where a `lyricsfile` is published | on | - | |
+| 12 | PaxSenix: Spotify | line | off | PaxSenix key | skipped until a key is set |
+| 13 | YouTube captions | line | off | the song's YouTube video | speech-recognition word offsets are not used as word timing |
+| 14 | Megalobiz | line (LRC shown on its pages) | off | - | only result links that name the song are followed, the artist's first, and the last line must come before the song ends |
+| 15 | YouTube Music | plain (the Lyrics tab) | off | the song's YouTube video | |
+| 16 | Genius | plain | off | - | asked last, only when no service has timed lyrics |
+| - | Musixmatch directly | word, line | - | - | not added: it needs Musixmatch's own private signing key, taken from their web player; use PaxSenix: Musixmatch with your own key instead |
+| - | Spotify directly | word, line | - | - | not added: needs the user's Spotify login; its lyrics come through PaxSenix instead |
+| - | BetterLyrics' KuGou route | line | - | - | not added: KuGou is asked directly with word timing |
+
+How a lookup runs (nori-lyrics `race.rs`): what each service answered before is read first (a hit is
+kept for good, a miss is asked again after a week; the cache is per service and song, in the app's one
+database), so a song played again asks nobody. The rest are asked together, best-ranked first, six at a
+time, on no thread of their own (one future, polled by the caller); each request may take 6 s (PaxSenix's
+keyed routes 15 s, as its own clients allow) and each service 12 s in all (30 s for those two). A finer
+answer goes on screen as soon as it arrives; a swap between two answers timed alike waits until the end.
+The lookup stops, dropping (and so cancelling) whatever is still out, as soon as no service still to
+answer could beat the answer in hand, and leaving the lyrics cancels it all. A failed or too slow service
+is never remembered as a miss, but it is not asked about the same song again for half an hour, and a
+service that fails three songs in a row rests for ten minutes, so a service that is down is not hammered.
+With "Prefer word-by-word lyrics" on (the default) a word-timed answer beats a line-timed one whoever has
+it, so a line-timed answer from high up is shown at once but the lookup keeps going for words; off, the
+best-ranked timed answer wins as soon as everything above it has answered. Untimed words (YouTube Music,
+Genius) are asked only once every service that could time something has answered without.
+
+Translations that NetEase and KuGou carry are Chinese translations and are not used; the server's own
+translations still are.
 
 ## Casting and remote
 
@@ -319,8 +385,11 @@ The owner asked for these explicitly.
   disk-cached, "add to library" (star makes octo-fiesta download it).
 - Automatic synced lyrics for songs without an LRC -> done: server first, then LRCLIB (synced preferred, duration-matched,
   hits kept, misses retried weekly, failures never cached). LyricsPlus mirrors (Navic's karaoke source) were all
-  down on 2026-09-18, so not shipped; the provider layer takes more sources.
+  down on 2026-09-18, so not shipped. Since 2026-09-24 sixteen services, word-timed where they have it, ranked,
+  asked together and switchable in Settings → Lyrics (see "Lyrics services" above).
 - Apple Music AutoMix-style transitions with BPM/beat matching -> **done** (on-device analysis, Camelot-aware length/filters, outro loop remix, bass swap, echo-out, LUFS match; see docs/research/automix.md).
+  down on 2026-09-18, so not shipped; the provider layer takes more sources.
+- Apple Music AutoMix-style transitions with BPM/beat matching -> **done** (on-device analysis, Camelot-aware length/filters, outro loop remix, bass swap, echo-out, LUFS match; see docs/research/automix.md). Optional neural beats ("Better beat detection", Beat This! small through tract, off by default, in builds with the `neural-beats` feature) -> **done** (docs/research/analysis.md).
 - Material You, AMOLED, adjustable -> done: wallpaper colours, accent colours, theme mode, true-black mode.
 - The owner's friend: "take it from Apple, the album cover spills into the page; but no forced liquid glass" -> done:
   album, artist and playlist pages open with the cover edge to edge under the status bar, melting into a colour taken
@@ -328,6 +397,40 @@ The owner asked for these explicitly.
   and with AMOLED on it melts into black instead.
 - Gestures -> done: swipe the mini player to skip, up to open; swipe the player header or artwork down to close;
   swipe the artwork to skip.
+
+## Player artwork
+
+| Feature | S | M | N | nori | Plan |
+|---|---|---|---|---|---|
+| Moving album covers in the player (Apple Music's motion artwork) | | | | yes | done: Settings, Look; behind the lookups switch, off by default, Wi-Fi only by default; see below |
+| Spotify Canvas (a looping clip per song) | | | | | skip: needs the listener's Spotify login; see below |
+
+**Moving covers.** Apple Music has a short looping video of the cover for some albums, mostly recent
+ones from the larger labels, and plays it in the full-bleed sleeve. Nori plays the same video in the
+same place, over the still cover and cropped the same way, only while the player is open and at rest
+and the screen is on, and never with reduced motion. It is found in three requests to Apple, all made by
+the core (`crates/core/src/motion.rs`, through the client's transport): the public iTunes Search API
+for the album's catalogue id, then the catalogue itself for that album's video, read with the token
+Apple's own web player gives every visitor, which is taken from the player's scripts and looked for again
+when it is refused. The artist and the album name are what leave the phone. A video is a few megabytes,
+hence Wi-Fi only unless allowed, and each is kept in a 64 MB cache so that the loop is fetched once. The
+answer is remembered per album in the app's database: a video for good, "none" asked again after a week,
+a failed request not at all. Playing it is Android's (`MotionPlayer`, its own muted ExoPlayer with the
+HLS module). **Unverified**: none of these requests could be tried where this was written, and Apple
+documents none of them for this use; their shapes are what other clients were seen sending in 2026. If
+Apple changes them, nothing breaks: no cover moves. Costs nothing switched off (no lookup, no player, no
+listener, no surface); switched on, a hardware video decode and a redraw of the sleeve per video frame
+while it plays, and nothing at all with the player closed or the screen off.
+
+**Why Spotify Canvas is not there.** Spotify has no public API for Canvas. The clips come from an
+internal endpoint of Spotify's own apps (`spclient.wg.spotify.com/canvaz-cache`, protobuf), which
+answers only an access token made from a signed-in listener's session cookie (`sp_dc`). Since 2025
+making that token also needs a one-time code worked out from a secret hidden in Spotify's web player,
+and the clients that still manage it load the web player in a hidden WebView with the listener's cookie
+and pose as Spotify's iOS app. That is asking people for their login to another service and working
+round a protection Spotify put there on purpose, which this app does not do. Apple's route needs
+neither: the search API is public, and the catalogue token is the one Apple's web player hands to anyone
+who opens it, signed in or not.
 
 ## Look and feel
 

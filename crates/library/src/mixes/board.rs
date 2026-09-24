@@ -59,6 +59,7 @@ pub const MIXES: [Spec; 5] = [
     Spec { id: "top", kind: Kind::Top, title: "Your top songs", weekly: false, colour: 0xFFE0_662B },
 ];
 
+/// The mix `id` names; none for an id this build does not know.
 pub fn spec_of(id: &str) -> Option<&'static Spec> {
     MIXES.iter().find(|s| s.id == id)
 }
@@ -140,6 +141,7 @@ pub struct MixSheet {
     pub caption: String,
 }
 
+/// A mix page's line under its title; empty with no songs.
 pub fn caption(songs: &[Song]) -> String {
     if songs.is_empty() { String::new() } else { nori_words::fmt::list_caption(songs, false) }
 }
@@ -184,6 +186,7 @@ pub struct Drawn {
     pub generation: i64,
 }
 
+/// One core's "For you" row: each mix's draw and the favourites handed over.
 #[derive(Default)]
 pub struct Board {
     pub drawn: HashMap<&'static str, Drawn>,

@@ -16,6 +16,12 @@ Linked into the Rust core (crates/core)
     Rust binding Copyright 2024 Colin Marc, MIT
   zune-jpeg, jpeg-decoder, png, image-webp, gif (cover art, crates/covers) — MIT (dual-licensed MIT or
     Apache-2.0; zune-jpeg also Zlib)
+  yaml-rust2, roxmltree, miniz_oxide, futures-util (lyrics, crates/lyrics) — MIT (dual-licensed MIT or
+    Apache-2.0; miniz_oxide also Zlib)
+  tract — Sonos, Inc. and the tract contributors, MIT or Apache-2.0; with the crates it builds on
+    (ndarray, prost, nom, half, num-*, smallvec and others), each MIT, Apache-2.0 or both, some also
+    offered under the Unlicense, BSD-2-Clause or BlueOak-1.0.0. Runs the beat model; only in a build
+    with the `neural-beats` feature, and used only with "Better beat detection" on.
 
 Android libraries
   AndroidX (Media3, Compose, Material 3, Palette, Navigation, Lifecycle, Activity, Core), Material
@@ -23,7 +29,25 @@ Android libraries
 
 Fetched only when asked for, not bundled
   AutoEQ headphone curves — Copyright (c) 2018 Jaakko Pasanen, MIT
+  Beat This! beat model (small0 checkpoint, as ONNX) — Copyright (c) 2024 Institute of Computational
+    Perception, JKU Linz, Austria, MIT (code and weights); downloaded when "Better beat detection" is
+    switched on
   LRCLIB lyrics — lrclib.net; lyrics belong to their authors
+  Unison lyrics — Lyrics from Unison (https://unison.boidu.dev), ODbL-1.0; lyrics belong to their authors
+  NetEase Cloud Music lyrics — music.163.com; lyrics belong to their authors
+  KuGou lyrics — kugou.com; lyrics belong to their authors
+  BiniLyrics lyrics — binimum.org; lyrics belong to their authors
+  BetterLyrics lyrics (with QQ Music's through its Portato route) — betterlyrics.org; lyrics belong to
+    their authors
+  PaxSenix lyrics (Apple Music's; Spotify's and Musixmatch's with the user's own key) — paxsenix.org,
+    songs found through Apple's iTunes Search API; lyrics belong to their authors
+  LyricsPlus lyrics — the YouLy+ project's volunteer servers; lyrics belong to their authors
+  SimpMusic lyrics — simpmusic.org; lyrics belong to their authors
+  YouTube captions and YouTube Music lyrics — Google LLC; lyrics belong to their authors
+  Megalobiz lyrics — megalobiz.com; lyrics belong to their authors
+  Genius lyrics — genius.com; lyrics belong to their authors
+  Moving album covers — Apple Music (the iTunes Search API and Apple's catalogue); the artwork
+    belongs to its artists and labels
 
 Every entry, with its copyright holder and the full licence text, is in the app under
 Settings -> About -> Licences. The texts themselves are in app/src/main/assets/licences/.

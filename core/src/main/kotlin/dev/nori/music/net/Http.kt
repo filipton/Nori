@@ -7,6 +7,7 @@ import dev.nori.music.ffi.model.CoreException
 import dev.nori.music.ffi.net.FailureKind
 import dev.nori.music.ffi.net.getFailed
 import dev.nori.music.ffi.net.NetException
+import dev.nori.music.ffi.net.Exchange
 import dev.nori.music.ffi.net.RequestPolicy
 import dev.nori.music.ffi.net.Transport
 import dev.nori.music.ffi.net.TransportException
@@ -23,8 +24,10 @@ import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.File
 import java.io.IOException
@@ -40,6 +43,8 @@ import kotlin.coroutines.resumeWithException
 
 /** The words come from the core; read once, when the first one is thrown. */
 private val meteredText by lazy { describeError(Trouble.Network(FailureKind.METERED), "") }
+
+private val JSON = "application/json".toMediaType()
 
 /** The server is only allowed on unmetered networks and this is not one. */
 class MeteredNetworkException : IOException(meteredText)
@@ -65,6 +70,9 @@ class Http(private val context: Context) {
      * the core has been told, when the profile changes, so an answer from the old one is never read.
      */
     @Volatile private var policies = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, RequestPolicy>>()
+
+    /** The audio's stall timeout (see [Stalls]), shared by every stream client. Starts no thread until a song streams. */
+    private val stalls = Stalls(policy.streamReadTimeoutMs.toLong())
 
     @Volatile var api: OkHttpClient = build(null)
         private set
@@ -94,8 +102,12 @@ class Http(private val context: Context) {
         }
     }
 
+    /**
+     * The audio's client: no read timeout, since OkHttp would arm its watchdog around every read of a song's
+     * body, a network packet at a time; a stalled connection is found by [Stalls] instead.
+     */
     private fun streamClient(api: OkHttpClient) =
-        api.newBuilder().dispatcher(streamDispatcher).readTimeout(policy.streamReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS).build()
+        api.newBuilder().dispatcher(streamDispatcher).readTimeout(0, TimeUnit.MILLISECONDS).addInterceptor(stalls).build()
 
     private fun build(p: ServerProfile?): OkHttpClient {
         val b = OkHttpClient.Builder()
@@ -152,9 +164,22 @@ class Http(private val context: Context) {
     }
 
     /** The status and the whole body. Cancelling the coroutine cancels the call, which is what makes live search cheap. */
-    suspend fun exchange(url: String, timeoutMs: Long = 0): TransportResponse = suspendCancellableCoroutine { cont ->
+    suspend fun exchange(url: String, timeoutMs: Long = 0): TransportResponse = exchange(Request.Builder().url(url).build(), timeoutMs)
+
+    /**
+     * [exchange] with a third party's own headers, and a JSON body POSTed when there is one: the core's
+     * [Exchange], which says what to send; this only carries the bytes.
+     */
+    suspend fun exchange(e: Exchange): TransportResponse {
+        val request = Request.Builder().url(e.url)
+        for ((name, value) in e.headers) request.header(name, value)
+        e.json?.let { request.post(it.toRequestBody(JSON)) }
+        return exchange(request.build(), e.timeoutMs.toLong())
+    }
+
+    private suspend fun exchange(request: Request, timeoutMs: Long): TransportResponse = suspendCancellableCoroutine { cont ->
         val client = if (timeoutMs > 0) api.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build() else api
-        val call = client.newCall(Request.Builder().url(url).build())
+        val call = client.newCall(request)
         cont.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -186,6 +211,14 @@ class Http(private val context: Context) {
     fun transport(onAddressChanged: () -> Unit): Transport = object : Transport {
         override suspend fun get(url: String, timeoutMs: UInt): TransportResponse = try {
             exchange(url, timeoutMs.toLong())
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw TransportException.Failed(failureKind(e), e.message)
+        }
+
+        override suspend fun send(request: Exchange): TransportResponse = try {
+            exchange(request)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

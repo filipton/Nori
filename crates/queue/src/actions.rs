@@ -60,19 +60,20 @@ pub enum ShufflePlan {
     Order { order: Vec<u32> },
 }
 
-/// Spreads artists and albums apart unless the user prefers a plain random order (weighted shuffle off
-/// in the settings).
+/// Spreads artists and albums apart, so a shuffle never plays the same artist or record twice in a row
+/// when it can help it. It used to be a switch, which read as fighting "Carry on with" the same artist
+/// right under it; the two answer different questions (the order of what was shuffled, and what comes
+/// after the queue), and nobody wants two songs off one record back to back in a shuffle.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn shuffle_plan(songs: Vec<Song>) -> ShufflePlan {
-    let weighted = nori_settings::settings_store::with_prefs(|p| p.weighted_shuffle).unwrap_or(true);
-    plan_shuffle(songs, weighted, seed_now())
+    plan_shuffle(songs, seed_now())
 }
 
-/// Two songs cannot be spread, so they get the plain shuffle too.
-fn plan_shuffle(songs: Vec<Song>, weighted: bool, seed: u64) -> ShufflePlan {
+/// Two songs cannot be spread, so they get the plain shuffle.
+fn plan_shuffle(songs: Vec<Song>, seed: u64) -> ShufflePlan {
     if songs.is_empty() {
         ShufflePlan::Empty
-    } else if weighted && songs.len() > 2 {
+    } else if songs.len() > 2 {
         ShufflePlan::Order { order: mixes::weighted_shuffle_order(&songs, seed).into_iter().map(|i| i as u32).collect() }
     } else {
         ShufflePlan::PlayerShuffle
@@ -161,10 +162,9 @@ mod tests {
     #[test]
     fn shuffle_spreads_only_what_can_be_spread() {
         let l: Vec<Song> = (0..6).map(|i| song(&i.to_string(), "t", &format!("A{}", i % 2), "b", "", 0)).collect();
-        assert_eq!(plan_shuffle(vec![], true, 1), ShufflePlan::Empty);
-        assert_eq!(plan_shuffle(l[..2].to_vec(), true, 1), ShufflePlan::PlayerShuffle);
-        assert_eq!(plan_shuffle(l.clone(), false, 1), ShufflePlan::PlayerShuffle);
-        let ShufflePlan::Order { order } = plan_shuffle(l.clone(), true, 9) else { panic!("spread") };
+        assert_eq!(plan_shuffle(vec![], 1), ShufflePlan::Empty);
+        assert_eq!(plan_shuffle(l[..2].to_vec(), 1), ShufflePlan::PlayerShuffle);
+        let ShufflePlan::Order { order } = plan_shuffle(l.clone(), 9) else { panic!("spread") };
         assert_eq!(order.iter().map(|&i| l[i as usize].clone()).collect::<Vec<_>>(), mixes::weighted_shuffle(l, 9));
     }
 

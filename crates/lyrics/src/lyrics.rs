@@ -51,7 +51,7 @@ pub struct Structured {
     agents: Vec<Agent>,
 }
 
-fn utf16_at(text: &str, byte: usize) -> u32 {
+pub(crate) fn utf16_at(text: &str, byte: usize) -> u32 {
     let mut b = byte.min(text.len());
     while !text.is_char_boundary(b) {
         b -= 1;
@@ -208,7 +208,7 @@ pub fn build(mut all: Vec<Structured>) -> Lyrics {
             }
         };
         let translated = translation.as_ref().and_then(|t| t.line.iter().find(|x| synced && x.start == l.start).or_else(|| (!synced).then(|| t.line.get(i)).flatten())).map(|x| x.value.clone()).filter(|v| !v.trim().is_empty());
-        lines.push(LyricLine { start_ms: start, end_ms: if synced { end } else { -1 }, text, words, translation: translated, background: bg });
+        lines.push(LyricLine { start_ms: start, end_ms: if synced { end } else { -1 }, text, words, translation: translated, background: bg, ..Default::default() });
     }
     Lyrics { synced, word_timed, lines, key: 0 }
 }

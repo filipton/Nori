@@ -42,7 +42,7 @@ import java.nio.ByteBuffer
  * tested there against a simulated output. This class is the media3 side of it: it forwards each
  * AudioSink call to the engine, and the engine calls back into it for the real output below (`down*`)
  * and to nudge the UI when the heard song changes (`hostHeardChanged`). Plans, analyses and the log
- * are the core's own (crates/core/src/automix/planner.rs). Those callbacks are reached by name from
+ * are the core's own (crates/automix/src/planner.rs). Those callbacks are reached by name from
  * native code.
  */
 @UnstableApi

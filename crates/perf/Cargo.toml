@@ -1,0 +1,28 @@
+[package]
+name = "nori-perf"
+version.workspace = true
+edition.workspace = true
+
+# What the perf build measures, stretch by stretch, kept and summed for its page and its report.
+[lib]
+name = "nori_perf"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-library/ffi", "nori-settings/ffi", "nori-devices/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+nori-model = { path = "../model" }
+# The local day a stretch falls on.
+nori-library = { path = "../library" }
+# The stretches are kept beside the settings, which a report states.
+nori-settings = { path = "../settings" }
+# The audio output's line names the output device's kind.
+nori-devices = { path = "../devices" }
+nori-player = { path = "../player" }
+nori-text = { path = "../text" }

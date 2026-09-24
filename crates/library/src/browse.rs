@@ -4,6 +4,7 @@
 
 use nori_model::{HistoryEntry, ListeningStats, Playlist, Song};
 
+/// A day, in milliseconds.
 pub const DAY_MS: i64 = 86_400_000;
 
 /// Albums per page of the album grid (a server request each).

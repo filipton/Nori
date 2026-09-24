@@ -7,7 +7,7 @@ import android.os.Handler
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
-import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.common.Player
 import dev.nori.music.ffi.queue.QueueEdit
 import dev.nori.music.ffi.net.Failure
 import dev.nori.music.ffi.net.failureNetworkish
@@ -18,14 +18,14 @@ import dev.nori.music.net.failureKind
  * full downloads until the network is back, then return to the parked queue. Off by default; when off
  * this object never registers a network callback and costs nothing.
  *
- * Which downloads, where they go and what comes back is the core's (crates/core/src/bridge.rs over its
+ * Which downloads, where they go and what comes back is the core's (crates/queue/src/bridge.rs over its
  * queue, nori_player::playlist): this watches the network, and the service makes each change the core
  * made to its player ([apply]).
  */
 @androidx.media3.common.util.UnstableApi
 class OfflineBridge(
     context: Context,
-    private val player: ExoPlayer,
+    private val player: Player,
     private val core: () -> dev.nori.music.ffi.Core,
     private val main: Handler,
     private val apply: (QueueEdit) -> Unit,
@@ -34,8 +34,13 @@ class OfflineBridge(
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     /** Network failure while playing: a downloaded song still queued plays, else a bridge starts. */
-    fun onPlaybackError(error: PlaybackException): Boolean {
-        if (!error.isNetworkish()) return false
+    fun onPlaybackError(error: PlaybackException): Boolean = error.isNetworkish() && take()
+
+    /**
+     * A song the network would not bring (the Rust player says so itself, the core having said the failure
+     * is the bridge's): a downloaded song still queued plays, else a bridge starts. Whether it took over.
+     */
+    fun take(): Boolean {
         val next = runCatching { core().bridgeNextDownloaded() }.getOrDefault(-1)
         if (next >= 0) {
             player.seekTo(next, C.TIME_UNSET)
@@ -99,7 +104,7 @@ class OfflineBridge(
 /**
  * Network / unreachable server, not a bad file or a refused audio sink. The platform only reads its own
  * error codes and exceptions into kinds; which of them mean the network is the core's
- * (crates/core/src/transport.rs failure_networkish).
+ * (crates/net/src/transport.rs failure_networkish).
  */
 fun PlaybackException.isNetworkish(): Boolean {
     val status = when (errorCode) {

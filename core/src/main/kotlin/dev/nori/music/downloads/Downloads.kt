@@ -97,7 +97,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * lately. A pending song with no mark is waiting its turn. It changes when a download changes phase,
      * never with its progress, which each mark carries in a flow of its own - so a list watching this
      * map is not redrawn per percent. The phases and the bookkeeping are the core's
-     * (crates/core/src/transfers.rs); this mirrors them for the screens.
+     * (crates/transfers/src/transfers.rs); this mirrors them for the screens.
      */
     val marks: StateFlow<Map<String, DownloadMark>> = _marks
 
@@ -448,7 +448,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 }
 
-/** The core's side of the downloads; see crates/core/src/transfers.rs. */
+/** The core's side of the downloads; see crates/transfers/src/transfers.rs. */
 internal object DownloadsJni {
     init { System.loadLibrary("norimusic") }
 
@@ -480,7 +480,7 @@ internal object DownloadsJni {
 }
 
 /**
- * The downloads screen's lines, in the core's words (crates/core/src/transfers.rs). A running row's line
+ * The downloads screen's lines, in the core's words (crates/transfers/src/transfers.rs). A running row's line
  * is asked whenever its ring moves and the summary once a second, so they come over JNI, written in a
  * buffer the core keeps.
  */

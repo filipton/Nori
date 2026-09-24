@@ -2,7 +2,11 @@ package dev.nori.music.app.perf
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -12,11 +16,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Image
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material3.Icon
@@ -26,9 +32,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import dev.nori.music.app.ui.Hairline
 import dev.nori.music.app.ui.LocalChromeInset
@@ -37,11 +48,14 @@ import dev.nori.music.app.ui.PillButton
 import dev.nori.music.app.ui.SectionHeader
 import dev.nori.music.app.ui.Space
 import dev.nori.music.app.ui.say
+import dev.nori.music.ffi.perf.PerfFigures
+import dev.nori.music.ffi.words.PerfWords
 
 /**
- * The Performance page: the states added up, the frames, the stretches themselves, and the buttons.
- * Opening it reads the counters once, so the stretch under way is on it too; nothing on it updates by itself.
- * What each row says is the core's (perf_log.rs `perf_page`, `words_perf`).
+ * The Performance page: the states added up, the frames, the stretches themselves with their events
+ * folded under them, the buttons, and the app's log folded away at the end. Opening it reads the counters
+ * once, so the stretch under way is on it too; nothing on it updates by itself, and the log is read only
+ * when it is unfolded. What each row says is the core's (perf_log.rs `perf_page`, `perf_log_text`, `words_perf`).
  */
 @Composable
 internal fun PerfPage(recorder: Recorder) {
@@ -83,8 +97,8 @@ private fun Recorded(shown: Shown, calls: String, covers: String, recorder: Reco
         page.frames?.let { Figures(it.title, it.detail) } ?: Note(w.noFrames)
 
         SectionHeader(w.stretches)
-        page.live?.let { Figures(it.title, it.detail) }
-        page.stretches.forEach { Figures(it.title, it.detail) }
+        page.live?.let { Stretch(it, w) }
+        page.stretches.forEach { key(it.title, it.detail) { Stretch(it, w) } }
 
         SectionHeader(w.benchmarks)
         FlowRow(
@@ -96,6 +110,8 @@ private fun Recorded(shown: Shown, calls: String, covers: String, recorder: Reco
         }
         if (calls.isNotEmpty()) Figures(w.calls, calls)
         if (covers.isNotEmpty()) Figures(w.covers, covers)
+
+        Log(recorder)
     }
 }
 
@@ -106,6 +122,53 @@ private fun Figures(title: String, detail: String) {
         Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     Hairline()
+}
+
+/** A stretch's figures, and its events folded under them until asked for. */
+@Composable
+private fun Stretch(f: PerfFigures, w: PerfWords) {
+    var open by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp)) {
+        Text(f.title, style = MaterialTheme.typography.bodyLarge)
+        Text(f.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (f.events.isNotEmpty()) {
+            Text(
+                if (open) w.hideEvents else dev.nori.music.ffi.words.wordsPerfEvents(f.events.size.toUInt()),
+                Modifier.clickable { open = !open }.padding(top = 6.dp),
+                style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
+            )
+            AnimatedVisibility(open, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+                SelectionContainer {
+                    Text(
+                        f.events.joinToString("\n"), Modifier.padding(top = 4.dp),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+    Hairline()
+}
+
+/** The app's own log and any crash, folded away: read from logcat only when unfolded. */
+@Composable
+private fun Log(recorder: Recorder) {
+    val w = recorder.words
+    val text by recorder.log
+    val open by recorder.logOpen
+    SectionHeader(w.log)
+    Note(w.logNote)
+    Row(Modifier.padding(horizontal = Space.gutter, vertical = 6.dp)) {
+        PillButton(if (open) w.hideLog else w.showLog, Icons.Outlined.Info, { if (open) recorder.hideLog() else recorder.showLog() })
+    }
+    AnimatedVisibility(open, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        SelectionContainer {
+            Text(
+                text, Modifier.padding(horizontal = Space.gutter, vertical = 8.dp),
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }
 
 @Composable

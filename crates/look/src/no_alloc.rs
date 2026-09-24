@@ -47,7 +47,7 @@ fn asking_the_lyrics_where_they_are_allocates_nothing() {
     let lines = (0..80i64).map(|i| {
         let start = 5_000 + i * 2_500;
         let words = (0..5u32).map(|k| Word { start_ms: start + k as i64 * 400, end_ms: start + k as i64 * 400 + 350, start: k * 6, end: k * 6 + 5 }).collect();
-        Line { start_ms: start, len: 29, words }
+        Line { start_ms: start, len: 29, words, ..Default::default() }
     });
     let clock = LyricClock::new(LyricTiming::new(true, true, lines), 0);
     let mut seen = 0i64;
@@ -57,7 +57,8 @@ fn asking_the_lyrics_where_they_are_allocates_nothing() {
         for sweep in [true, false] {
             let mut t = 0;
             while t < 210_000 {
-                seen ^= clock.advance(t, sweep, t % 50_000 == 0).pack();
+                seen ^= clock.advance(t, sweep, sweep, t % 50_000 == 0).pack();
+                seen ^= clock.backing_sung().to_bits() as i64 ^ clock.shown_ms();
                 seen ^= std::hint::black_box(Step::unpack(seen)).frame.active as i64;
                 t += 33;
             }

@@ -164,6 +164,11 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // Where the sleeve ends, so the page behind it can be drawn at the same scale. Written on layout,
     // read in the draw phase; it only moves when the window does.
     var sleeveBottom by remember { mutableFloatStateOf(0f) }
+    // The player's own coordinates, which the sleeve is measured in. Not the window's: the sheet moves the
+    // whole player with a layer, and a layer moving counts as the sleeve moving, so measured against the
+    // window the sleeve's bottom rode up the screen with the sheet (a frame late, too). The page's blur,
+    // drawn inside the sheet, then sat a whole sheet's travel below the cover all the way up.
+    val player = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var sleeveHeight by remember { mutableFloatStateOf(0f) }
     var sleepMenu by remember { mutableStateOf(false) }
     // The transport's way of asking the sleeve to change record; see SleeveSlide.
@@ -221,6 +226,10 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
     // One picture for the sleeve and for the cover in flight (see SleeveArt).
     val sleeveArt = rememberSleeveArt(coverUrl)
+    // The moving cover (Settings, Look), over the still one while the sleeve is at rest (SleeveMotion.kt).
+    // Nothing of it exists while it is switched off: no lookup, no player, no surface, no touch watcher.
+    val motion = if (prefs.motionArtwork && prefs.thirdPartyLookups) remember { SleeveMotion(vm::motionView) } else null
+    if (motion != null) MotionDirector(vm, motion, sheet, onArtwork = panel == Panel.ART && showing == Panel.ART && !flying)
     // AMOLED black everywhere else, but the player keeps the cover's colours unless asked not to: in
     // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
     // carries the record's colour down the whole screen.
@@ -264,18 +273,22 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         // landed (see PageShift.arrived). Fading from the record before it then would be the page going
         // back to the old colour and coming forward again, which is the blink at the end of a change.
         val carried = shift.adopted == rowUrl || shift.amount > 0.9f && shift.towards == rowUrl
-        fadingFrom = if (carried) null else palette
+        val from = if (carried) null else palette
+        val fades = from != null && !AppMotion.reduce
+        // Back to its start before the colours change under it, not after. Taking the fade over from one
+        // still running can wait a frame for it to let go, and on that frame the new colours were drawn
+        // at the old fade's strength over the old ones: the page changed, went back, and changed again.
+        if (fades) washFade.snapTo(0f)
+        fadingFrom = from
         palette = found
         // In the same breath as the colours themselves, so the sleeve lets go of them on a frame where
         // the page is already drawing them.
         shift.adopted = rowUrl
-        // As long as the record takes to slide across, so the page and the sleeve arrive together.
+        // As long as the record takes to slide across, so the page and the sleeve arrive together: a
+        // song that changes by itself slides its record in over the same stretch (see SleeveCarousel).
         // Theme colours (text, Play, heart) travel with the wash via mixPalette - snapping the theme
         // while only the wash faded left the controls jumping a frame ahead of the page.
-        if (fadingFrom != null && !AppMotion.reduce) {
-            washFade.snapTo(0f)
-            washFade.animateTo(1f, androidx.compose.animation.core.tween(stage.colourFadeMs))
-        }
+        if (fades) washFade.animateTo(1f, androidx.compose.animation.core.tween(stage.colourFadeMs))
         fadingFrom = null
     }
 
@@ -347,7 +360,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         Box(
             // Pull down from anywhere on the artwork page and the whole player follows the finger down;
             // the lyrics and queue need a vertical drag to scroll, so there only the handle does.
-            Modifier.fillMaxSize().dragsSheet(sheet, enabled = panel == Panel.ART),
+            Modifier.fillMaxSize().onGloballyPositioned { player[0] = it }
+                .then(if (motion != null) Modifier.watchTouches(motion) else Modifier)
+                .dragsSheet(sheet, enabled = panel == Panel.ART),
         ) {
             // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
             // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
@@ -457,19 +472,24 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             // What is drawn, not what the column was told: the wash lines up with the
                             // picture, and the picture runs on under the title.
                             val drawn = it.size.width / SLEEVE
-                            sleeveBottom = it.positionInRoot().y + drawn
+                            val top = player[0]?.takeIf { p -> p.isAttached }?.localPositionOf(it, Offset.Zero)?.y
+                                ?: it.positionInRoot().y
+                            sleeveBottom = top + drawn
                             sleeveHeight = drawn
                         },
                 ) {
                     // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
                     // the moment the sheet arrives, in exactly the same place.
                     Box(Modifier.graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f }) {
+                        val previousSong = state.queue.getOrNull(state.previousIndex)
+                        val nextSong = state.queue.getOrNull(state.nextIndex)
                         Artwork(
                             vm, sleeveArt, coverUrl,
-                            state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
-                            state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            previousSong?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            nextSong?.let { vm.cover(it.coverArt, CoverSize.FULL) },
                             previousTintUrl, nextTintUrl,
-                            slide, shift,
+                            Songs(state.current?.id, previousSong?.id, nextSong?.id),
+                            slide, shift, motion,
                         )
                     }
                 } else {
@@ -747,7 +767,10 @@ private fun Artwork(
     previousUrl: String?, nextUrl: String?,
     /** The same two records at the size the colours are worked out from; see PageShift. */
     previousTint: String?, nextTint: String?,
+    songs: Songs,
     slide: SleeveSlide, shift: PageShift,
+    /** The moving cover, or null while it is switched off. */
+    motion: SleeveMotion?,
 ) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
@@ -758,8 +781,8 @@ private fun Artwork(
             Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
             SleeveCarousel(
-                art, currentUrl, previousUrl, nextUrl, previousTint, nextTint,
-                onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift,
+                art, currentUrl, previousUrl, nextUrl, previousTint, nextTint, songs,
+                onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift, motion = motion,
             )
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
@@ -856,53 +879,139 @@ private fun PanelFlight(
     val thumbRadius = with(density) { 9.dp.toPx() }
     val sleeveRadius = with(density) { 2.dp.toPx() }
     val shapes = remember { CornerShapes() }
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        // The sleeve's soft bottom stays where the sleeve's is (see rubOutBottom): the record flying
-        // through those rows goes soft there and is whole everywhere else.
-        Modifier.fillMaxSize()
-            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-            .rubOutBottom { (sleeveBottom - sleeveHeight * MELT) to sleeveBottom },
-    ) {
+    // 0 at the sleeve, 1 at the thumbnail, whichever way the change is going.
+    val away = FloatReader { progress.read().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it } }
+    // How much of the sleeve's own dressing the cover still has: all of it in the sleeve, none by the
+    // time it is under half way to the thumbnail.
+    val dressed = FloatReader { smooth(1f - away.read(), 0.55f, 1f) }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
-        Box(
-            Modifier.requiredSize(side).align(Alignment.TopStart)
-                .graphicsLayer {
-                    // 0 at the sleeve, 1 at the thumbnail, whichever way the change is going.
-                    val t = progress.read().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
-                    val eased = t * t * (3f - 2f * t)
-                    fun mix(a: Float, b: Float) = a + (b - a) * eased
-                    val k = (mix(sleeveHeight, thumb.height) / sleeveHeight).coerceAtLeast(0.01f)
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
-                    scaleX = k; scaleY = k
-                    // The sleeve is the square cropped by the screen's edges, so it starts wider than the
-                    // screen and centred on it; layout has already put it there, which `overhang` takes
-                    // back out before the travel is applied.
-                    val overhang = (w - size.width) / 2f
-                    translationX = mix((w - sleeveHeight) / 2f, thumb.left) - overhang
-                    translationY = mix(sleeveBottom - sleeveHeight, thumb.top)
-                    shape = shapes.of(mix(sleeveRadius, thumbRadius) / k)
-                    clip = true
-                },
+        // The sleeve's soft bottom stays where the sleeve's is (see SoftSleeve): the record flying through
+        // those rows goes soft there and is whole everywhere else, and its blur leaves with the record and
+        // comes back as it lands. The cover never goes below the sleeve's bottom on the way (the thumbnail
+        // is in the header above it), so the layer stops there rather than at the screen's foot.
+        SoftSleeve(
+            Modifier.fillMaxWidth().height(with(density) { sleeveBottom.toDp() }),
+            sleeve = { sleeveBottom to sleeveHeight }, blur = dressed,
         ) {
-            SleeveImage(art, Modifier.fillMaxSize())
-            // The shade the status bar's icons need on a pale cover belongs to the sleeve, so it arrives
-            // with it rather than being there from the thumbnail on.
             Box(
-                Modifier.fillMaxSize().graphicsLayer {
-                    val t = progress.read().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
-                    val near = (1f - t / 0.45f).coerceIn(0f, 1f)
-                    alpha = near * near * (3f - 2f * near)
-                }.drawWithCache {
-                    val shade = Brush.verticalGradient(
-                        0f to Color.Black.copy(alpha = stage.statusShade), 1f to Color.Transparent,
-                        startY = 0f, endY = size.height * stage.statusShadeTo,
-                    )
-                    val area = androidx.compose.ui.geometry.Size(size.width, size.height * stage.statusShadeTo)
-                    onDrawBehind { drawRect(shade, size = area) }
-                },
-            )
+                Modifier.requiredSize(side).align(Alignment.TopStart)
+                    .graphicsLayer {
+                        val t = away.read()
+                        val eased = t * t * (3f - 2f * t)
+                        fun mix(a: Float, b: Float) = a + (b - a) * eased
+                        val k = (mix(sleeveHeight, thumb.height) / sleeveHeight).coerceAtLeast(0.01f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                        scaleX = k; scaleY = k
+                        // The sleeve is the square cropped by the screen's edges, so it starts wider than
+                        // the screen and centred on it; layout has already put it there, which `overhang`
+                        // takes back out before the travel is applied.
+                        val overhang = (w - size.width) / 2f
+                        translationX = mix((w - sleeveHeight) / 2f, thumb.left) - overhang
+                        translationY = mix(sleeveBottom - sleeveHeight, thumb.top)
+                        shape = shapes.of(mix(sleeveRadius, thumbRadius) / k)
+                        clip = true
+                    },
+            ) {
+                SleeveImage(art, Modifier.fillMaxSize())
+                SleeveShade(dressed)
+            }
         }
     }
+}
+
+/**
+ * The sleeve's soft bottom round whatever [content] draws in it - the records at rest or in the hand, the
+ * cover flying up from the now playing bar, the cover shrinking into the lyrics. There is one of these
+ * wherever the sleeve is drawn, so its bottom is the same thing in all of them and nothing about it
+ * changes on the frame one hands over to the next.
+ *
+ * Two parts, both in [content]'s own layer, or the erase would take the page behind it too. Rubbing out
+ * only fades: a sharp line in the picture inside the band - a frame, a black strip - stays a sharp line,
+ * fainter. So a blurred copy of the content is faded in over it just above the band, and the band is
+ * rubbed out of both (see rubOutBottom): sharp, then soft, then the page's own blur, with no step
+ * between. The blurred copy is Android 12 and later; a switch in Appearance turns it off. [content] is
+ * composed a second time as that copy and told so, for anything that can only be drawn once.
+ *
+ * [sleeve] is the sleeve's bottom and height in this box's own pixels. [blur] is how much of the blurred
+ * copy is drawn, read in the draw phase: 1 for a sleeve at rest, less as the picture leaves it. Only the
+ * resting sleeve had the blur at first, so it vanished on the first frame of every move away from it and
+ * came back on the last frame of every move into it - when a record was put down, when the player
+ * opened, when the lyrics closed. Now it leaves and comes back with the move itself.
+ */
+@Composable
+private fun SoftSleeve(
+    modifier: Modifier,
+    sleeve: androidx.compose.ui.draw.CacheDrawScope.() -> Pair<Float, Float> = { size.height to size.height },
+    blur: FloatReader = FloatReader { 1f },
+    content: @Composable androidx.compose.foundation.layout.BoxScope.(blurred: Boolean) -> Unit,
+) {
+    val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
+        androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
+    val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
+    // A white, cream or black page has a wash in its own tint only (nori_look's wash), and the blurred band
+    // has to arrive at the same thing: blurred as it is, A Beautiful Lie's red lettering spread across its
+    // white bottom as a pink haze over a grey page. So on such a page the band keeps its light and dark
+    // but takes the page's tint - grey on white, cream on cream, whatever the page is, nothing fixed. A
+    // coloured page keeps the band's colours, as its wash does. Which it is, and the tint, are the look's
+    // (nori_look::dress); read in the draw phase.
+    val band = if (android.os.Build.VERSION.SDK_INT >= 31) remember(blurPx) { BandEffect(blurPx) } else null
+    val look = LocalLook.current
+    Box(
+        modifier
+            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+            .rubOutBottom { val (bottom, height) = sleeve(); (bottom - height * MELT) to bottom },
+    ) {
+        content(false)
+        if (soft && band != null) Box(
+            Modifier.fillMaxSize()
+                // At nought the layer is skipped whole, blur and all.
+                .graphicsLayer {
+                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+                    alpha = blur.read().coerceIn(0f, 1f)
+                }
+                .drawWithCache {
+                    // Where the blurred copy shows: nowhere above the band's upper reach, all of it by the
+                    // time the rub-out is under way. Eased, so its own start is no line. One brush per
+                    // size and place, not one per frame.
+                    val (bottom, height) = sleeve()
+                    val top = bottom - height
+                    val mask = alphaGradient(stage.soft, Color.Black, top + height * stage.softFrom, top + height * stage.softTo)
+                    onDrawWithContent {
+                        drawContent()
+                        drawRect(mask, blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
+                    }
+                },
+        ) {
+            Box(Modifier.fillMaxSize().graphicsLayer { renderEffect = band.of(look) }) { content(true) }
+        }
+    }
+}
+
+/**
+ * The shade under the status bar, on a picture travelling into or out of the sleeve: just enough for the
+ * status bar's icons to read on a pale cover, as the sleeve has. It belongs to the sleeve, so it arrives
+ * with the picture - at [strength] - rather than being there from the thumbnail on, or missing until the
+ * sleeve takes over and then there in one frame.
+ */
+@Composable
+private fun SleeveShade(strength: FloatReader) {
+    Box(
+        Modifier.fillMaxSize().graphicsLayer { alpha = strength.read() }.drawWithCache {
+            val shade = Brush.verticalGradient(
+                0f to Color.Black.copy(alpha = stage.statusShade), 1f to Color.Transparent,
+                startY = 0f, endY = size.height * stage.statusShadeTo,
+            )
+            val area = androidx.compose.ui.geometry.Size(size.width, size.height * stage.statusShadeTo)
+            onDrawBehind { drawRect(shade, size = area) }
+        },
+    )
+}
+
+/** 0 up to [from], 1 from [to] on, and a smooth step in between. */
+private fun smooth(x: Float, from: Float, to: Float): Float {
+    val t = ((x - from) / (to - from)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
 }
 
 /**
@@ -932,54 +1041,60 @@ private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, mea
     val density = androidx.compose.ui.platform.LocalDensity.current
     val thumbRadius = with(density) { 7.dp.toPx() }
     val shapes = remember { CornerShapes() }
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        // The sleeve's soft bottom is there before the record arrives and stays when it has gone: the
-        // same rows of the sheet, rubbed out of whatever flies through them (see rubOutBottom).
-        Modifier.fillMaxSize()
-            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-            .rubOutBottom { val h = size.width / SLEEVE; h * (1f - MELT) to h },
-    ) {
+    // How much of the sleeve's own dressing - the blurred bottom, the shade under the status bar - the
+    // cover has on its way: none for the first half of the climb, all of it on arrival, where the sleeve
+    // takes over with its own. Without it both were missing for the whole flight and appeared on the frame
+    // the sleeve took over, and went on the first frame of a pull down.
+    val dressed = FloatReader { smooth(sheet.progress.value, 0.5f, 1f) }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = w / SLEEVE
         val side = with(density) { h.toDp() }
-        Box(
-            Modifier.requiredSize(side).align(Alignment.TopStart)
-                .graphicsLayer {
-                    val t = sheet.progress.value.coerceIn(0f, 1f)
-                    val from = sheet.miniCover.translate(0f, -sheet.travel)
-                    fun mix(a: Float, b: Float) = a + (b - a) * t
-                    val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
-                    scaleX = k; scaleY = k
-                    // The square grows about its own middle and travels from the middle of the
-                    // thumbnail to the middle of the screen, which is where the sleeve's middle is.
-                    // Carrying its left edge instead - what this did - left it hanging in the top left
-                    // corner of the sheet for the whole climb, with the page showing down the right
-                    // hand side, and it arrived a little way off the sleeve it was handing over to.
-                    val drawn = size.width * k
-                    // Sideways it is most of the way over before it is half way up. The thumbnail sits
-                    // at the very left of the bar and the sheet under it is already the full width, so
-                    // a square that crosses at the same rate as it climbs spends the whole climb in the
-                    // corner with the page showing beside it. Easing only this axis keeps both ends
-                    // exact - the thumbnail at the start, the sleeve at the end - and has the record
-                    // under the middle of the screen by the time the sheet is half way, after which it
-                    // only grows.
-                    val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
-                    // The square is wider than the screen, and layout centres anything wider than the
-                    // room it was given: it is already sitting `overhang` to the left (a negative
-                    // number) before any of this moves it. Leaving that out put the record that far off
-                    // centre for the whole flight - its left side already cropped by the screen while
-                    // its right had a gap - and it jumped right by the same amount when the sleeve
-                    // took over at the end.
-                    val overhang = (w - size.width) / 2f
-                    translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f - overhang
-                    translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
-                    shape = shapes.of(thumbRadius * (1f - t) / k)
-                    clip = true
-                },
-        ) {
-            if (art.current == null) Cover(rowUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp, plate = false)
-            SleeveImage(art, Modifier.fillMaxSize())
+        // The sleeve's soft bottom is there before the record arrives and stays when it has gone: the same
+        // rows of the sheet, rubbed out of whatever flies through them (see SoftSleeve). The cover never
+        // leaves the sleeve's rows on the way - it grows from the thumbnail near the sheet's top edge into
+        // the sleeve that starts there - so the layer is the sleeve's size, not the screen's.
+        SoftSleeve(Modifier.fillMaxWidth().height(side), blur = dressed) {
+            Box(
+                Modifier.requiredSize(side).align(Alignment.TopStart)
+                    .graphicsLayer {
+                        val t = sheet.progress.value.coerceIn(0f, 1f)
+                        val from = sheet.miniCover.translate(0f, -sheet.travel)
+                        fun mix(a: Float, b: Float) = a + (b - a) * t
+                        val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                        scaleX = k; scaleY = k
+                        // The square grows about its own middle and travels from the middle of the
+                        // thumbnail to the middle of the screen, which is where the sleeve's middle is.
+                        // Carrying its left edge instead - what this did - left it hanging in the top left
+                        // corner of the sheet for the whole climb, with the page showing down the right
+                        // hand side, and it arrived a little way off the sleeve it was handing over to.
+                        val drawn = size.width * k
+                        // Sideways it is most of the way over before it is half way up. The thumbnail sits
+                        // at the very left of the bar and the sheet under it is already the full width, so
+                        // a square that crosses at the same rate as it climbs spends the whole climb in the
+                        // corner with the page showing beside it. Easing only this axis keeps both ends
+                        // exact - the thumbnail at the start, the sleeve at the end - and has the record
+                        // under the middle of the screen by the time the sheet is half way, after which it
+                        // only grows.
+                        val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
+                        // The square is wider than the screen, and layout centres anything wider than the
+                        // room it was given: it is already sitting `overhang` to the left (a negative
+                        // number) before any of this moves it. Leaving that out put the record that far off
+                        // centre for the whole flight - its left side already cropped by the screen while
+                        // its right had a gap - and it jumped right by the same amount when the sleeve
+                        // took over at the end.
+                        val overhang = (w - size.width) / 2f
+                        translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f - overhang
+                        translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
+                        shape = shapes.of(thumbRadius * (1f - t) / k)
+                        clip = true
+                    },
+            ) {
+                if (art.current == null) Cover(rowUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp, plate = false)
+                SleeveImage(art, Modifier.fillMaxSize())
+                SleeveShade(dressed)
+            }
         }
     }
 }
@@ -1009,6 +1124,11 @@ private class SleeveArt {
     var shownUrl by mutableStateOf<String?>(null)
     /** The next picture goes straight in: a swipe has already slid it into place. */
     var snapNext = false
+    /**
+     * The cover of the song on the page, as the sleeve was last composed with it: what a record that
+     * slides in by itself shows while the sleeve underneath is still changing (see SleeveCarousel).
+     */
+    var cover: CoverImage? = null
 
     /** Lets the current picture go, fading it out to the plate. */
     suspend fun letGo() {
@@ -1035,8 +1155,9 @@ private val HOLD_MS: Long get() = stage.sleeveHoldMs
 @Composable
 private fun SleeveCarousel(
     art: SleeveArt, currentUrl: String?, previousUrl: String?, nextUrl: String?,
-    previousTint: String?, nextTint: String?,
+    previousTint: String?, nextTint: String?, songs: Songs,
     onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide, shift: PageShift,
+    motion: SleeveMotion?,
 ) {
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
@@ -1108,6 +1229,61 @@ private fun SleeveCarousel(
         kotlinx.coroutines.withTimeoutOrNull(1_500) { androidx.compose.runtime.snapshotFlow { art.shownUrl }.first { it == url } }
         landed = null; landedUrl = null
     }
+    // A song that changes by itself - the end of one, gapless, a crossfade, an AutoMix switch, a skip
+    // from the notification - changes record the way a skip does: the record it left goes out one side
+    // and the new one comes in from the other, lifted, and settles into the sleeve. It used to dissolve
+    // in place, which next to a skip read as the player snapping. The song on the page only moves when
+    // the ear does (for a mix, where the incoming song becomes the louder), so the slide starts there.
+    //
+    // Decided while composing, so the first frame the new song is drawn on already has its record off
+    // the edge and the one it left in the middle: an effect would run after that frame, and the new
+    // cover would sit in the middle for it, then jump out and slide back in. Only a step to the song
+    // either side (the one left is now the neighbour, so its picture is already there) and only with
+    // both pictures in hand; anything else - a new queue, a song tapped far down the list, a cover not
+    // loaded yet, reduced motion, the player out of sight - changes as it did.
+    val passing = remember { Passing() }
+    var askedId by remember { mutableStateOf<String?>(null) }
+    val onScreen = LocalPlayerShown.current
+    val incoming = art.cover?.takeIf { it.url == currentUrl }?.painter
+    val go = when {
+        songs.current == null || passing.id == null || songs.current == passing.id -> 0
+        AppMotion.reduce || !onScreen || holding || moving?.isActive == true || landedUrl != null || songs.current == askedId -> 0
+        incoming == null -> 0
+        songs.previous == passing.id && before.image != null -> 1
+        songs.next == passing.id && after.image != null -> -1
+        else -> 0
+    }
+    /** Where a record sliding in by itself is, in records: 1 a whole record to the right, 0 in place. */
+    val natural = remember(songs.current) { Animatable(go.toFloat()) }
+    val naturalUrl = remember(songs.current) { currentUrl.takeIf { go != 0 } }
+    val naturalPicture = remember(songs.current) { incoming.takeIf { go != 0 } }
+    /** Which side the record left goes out to: the `go` this song's slide started with. */
+    val naturalGo = remember(songs.current) { go }
+    androidx.compose.runtime.SideEffect {
+        if (passing.id != songs.current) { passing.id = songs.current; askedId = null }
+    }
+    // The record that came in is drawn from its own picture until the sleeve underneath has finished
+    // changing to it (its dissolve runs out of sight meanwhile), then the sleeve takes over in the same
+    // place with the same picture.
+    val naturalHere by remember(natural, naturalUrl) {
+        androidx.compose.runtime.derivedStateOf { naturalUrl != null && (natural.value != 0f || art.shownUrl != naturalUrl) }
+    }
+    val naturalNow by androidx.compose.runtime.rememberUpdatedState(natural)
+    val nextIdNow by androidx.compose.runtime.rememberUpdatedState(songs.next)
+    val previousIdNow by androidx.compose.runtime.rememberUpdatedState(songs.previous)
+    LaunchedEffect(natural) {
+        if (natural.value == 0f) return@LaunchedEffect
+        // The same lift, slide and settle as a press on the transport (see the buttons' `run` below).
+        launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
+        settleByFrames(natural, BUTTON_STIFFNESS)
+        lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = 600f, visibilityThreshold = 0.001f))
+    }
+
+    // The moving cover plays only on a record at rest: none held, lifted, sliding (a skip or a song changing by itself) or waiting to land.
+    if (motion != null) LaunchedEffect(motion) {
+        androidx.compose.runtime.snapshotFlow { !holding && offset == 0f && lift.value == 0f && landedUrl == null && !naturalHere }
+            .collect { motion.resting = it }
+    }
     // The plate a record waits on, read while drawing: the page's colours move under a drag.
     val look = LocalLook.current
     val plate = Modifier.drawBehind { drawRect(look.color(CoverLook.SURFACE_VARIANT)) }
@@ -1157,6 +1333,17 @@ private fun SleeveCarousel(
     }
 
     /**
+     * A record still sliding in by itself is taken over where it is, by a finger or a press: its place
+     * goes into [offset], so what moves it next starts from where it can be seen.
+     */
+    suspend fun takeOver() {
+        val n = naturalNow.value
+        if (n == 0f) return
+        naturalNow.snapTo(0f)
+        offset += n * (heightPx * liftedScale(lift.value, widthPx, heightPx) + gap)
+    }
+
+    /**
      * The record goes [go] (-1 for the next one, 1 for the one before), the song changes as it arrives,
      * and the new record settles into the sleeve. Cancelled half way - a second button press, a new
      * gesture - it still changes the song, so nothing asked for is quietly dropped.
@@ -1190,6 +1377,7 @@ private fun SleeveCarousel(
         // the record after it showing beside it. Two records with the same picture still slide.
         if (stale) {
             committed = null
+            askedId = if (go < 0) nextIdNow else previousIdNow
             if (go < 0) onNextNow() else onPreviousNow()
             lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
             return
@@ -1226,6 +1414,7 @@ private fun SleeveCarousel(
             // picture is coming, and a snap left waiting here would cut the fade of the next real change.
             art.snapNext = url != art.shownUrl
             offset = rest
+            askedId = if (go < 0) nextIdNow else previousIdNow
             if (go < 0) onNextNow() else onPreviousNow()
         }
 
@@ -1299,6 +1488,7 @@ private fun SleeveCarousel(
                 presses++
                 moving = scope.launch {
                     running?.cancelAndJoin()
+                    takeOver()
                     // No bounce in the lift, and quicker than the slide. A record that is still being
                     // picked up is still shrinking, and the gap the next one waits in shrinks with it;
                     // a lift that sprang past its mark pulled the arriving record past the middle and
@@ -1327,6 +1517,7 @@ private fun SleeveCarousel(
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
+                    takeOver()
                     if (go == 0) {
                         launch { lift.animateTo(0f, down) }
                         androidx.compose.animation.core.animate(offset, 0f, v, spring(dampingRatio = 1f, stiffness = 520f, visibilityThreshold = 1f)) { value, _ -> offset = value }
@@ -1344,6 +1535,7 @@ private fun SleeveCarousel(
                     // the song on its way out if it had all but arrived (see land).
                     gesture++
                     moving?.cancel()
+                    scope.launch { takeOver() }
                     if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 420f, visibilityThreshold = 0.001f)) }
                 },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
@@ -1369,9 +1561,9 @@ private fun SleeveCarousel(
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
             val span = size.width * s + gap
-            val o = offset
+            val o = offset + natural.value * span
             translationX = dx.at(o, span)
-            alpha = fade.at((kotlin.math.abs(o) / span).coerceIn(0f, 1f))
+            alpha = fade.at(o, (kotlin.math.abs(o) / span).coerceIn(0f, 1f))
             if (l > 0f) {
                 shape = shapes.of(radius * l / s)
                 clip = true
@@ -1400,72 +1592,58 @@ private fun SleeveCarousel(
 
         /** The records themselves. */
         @Composable
-        fun androidx.compose.foundation.layout.BoxScope.records() {
+        fun androidx.compose.foundation.layout.BoxScope.records(blurred: Boolean) {
             // Not while a record that has landed is held over it: the two sit in the same place, and
             // the one on top is the whole record.
-            if (landedUrl == null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) {
+            if (landedUrl == null && !naturalHere) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f })) {
                 SleeveImage(art, Modifier.fillMaxSize())
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (offset < 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!afterHere && afterShown)) {
+            if (landedUrl == null && naturalHere) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f }).then(plate)) {
+                naturalPicture?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+            }
+            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { o, f -> if (o < 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!afterHere && afterShown)) {
                 after.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (offset > 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!beforeHere && beforeShown)) {
+            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { o, f -> if (o > 0f) 0.55f + 0.45f * f else 0f }).then(plate).loadingSheen(!beforeHere && beforeShown)) {
                 before.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
+            // The moving cover, in the same square as the still one and cropped by the same edges, so the
+            // fade between them shows no shift; it moves with the record, too. The sharp copy only: a
+            // surface is drawn once, so the blurred band at the sleeve's foot stays the still cover's, which
+            // is also what the page's wash is made of. When the song changes by itself it goes out with the
+            // record it was playing on, fading as it goes: that record is the neighbour by then, and the
+            // video used to vanish on the slide's first frame, leaving the still cover in its place.
+            // Composed here, after the records, whatever happens to them, so its surface is never made
+            // again in the middle of a move.
+            if (!blurred && motion != null && motion.present && landedUrl == null) Box(
+                Modifier.fillMaxSize().record(
+                    { o, span -> if (naturalHere) o - naturalGo * span else o },
+                    { o, f ->
+                        when {
+                            !naturalHere -> 1f - 0.35f * f
+                            naturalGo > 0 -> if (o > 0f) 0.55f + 0.45f * f else 0f
+                            else -> if (o < 0f) 0.55f + 0.45f * f else 0f
+                        }
+                    },
+                ),
+            ) { MotionCover(motion) }
             // It is the record that is showing, so it moves with the record: held still in the middle it
             // covered the next change from on top, which is the "cover stuck over the animation".
-            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).then(plate)) {
+            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f }).then(plate)) {
                 landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
         }
 
-        // All the records in one layer, and the sleeve's soft bottom rubbed out of that layer once: the
-        // band is the sleeve's, and a record lifted, sliding or growing back is whole above it and soft
-        // inside it. A layer of its own, or the erase would take the page behind it too.
+        // All the records in one layer, and the sleeve's soft bottom made of that layer once (SoftSleeve):
+        // the band is the sleeve's, and a record lifted, sliding or growing back is whole above it and soft
+        // inside it.
         //
-        // Rubbing out only fades: a sharp line in the picture inside the band - a frame, a black strip -
-        // stays a sharp line, fainter. So before the band starts, a blurred copy of the same records is
-        // faded in over them, and it is that copy the band melts away: sharp, then soft, then the page's
-        // own blur, with no step between. Inside the same layer, so it moves with the records and the
-        // erase takes it with them. Android 12 and later; a switch in Appearance turns it off.
-        val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
-            androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
-        val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
-        // A white, cream or black page has a wash in its own tint only (nori_look's wash), and the
-        // blurred band has to arrive at the same thing: blurred as it is, A Beautiful Lie's red
-        // lettering spread across its white bottom as a pink haze over a grey page. So on such a page
-        // the band keeps its light and dark but takes the page's tint - grey on white, cream on cream,
-        // whatever the page is, nothing fixed. A coloured page keeps the band's colours, as its wash does.
-        // Which it is, and the tint, are the look's (nori_look::dress); read in the draw phase.
-        val band = if (android.os.Build.VERSION.SDK_INT >= 31) remember(blurPx) { BandEffect(blurPx) } else null
-        Box(
-            Modifier.fillMaxSize()
-                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .rubOutBottom { size.height * (1f - MELT) to size.height },
-        ) {
-            records()
-            if (soft) Box(
-                Modifier.fillMaxSize()
-                    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                    .drawWithCache {
-                        // Where the blurred copy shows: nowhere above the band's upper reach, all of it
-                        // by the time the rub-out is under way. Eased, so its own start is no line.
-                        // One brush per size, not one per frame.
-                        val h = size.height
-                        val mask = alphaGradient(stage.soft, Color.Black, h * stage.softFrom, h * stage.softTo)
-                        onDrawWithContent {
-                            drawContent()
-                            drawRect(mask, blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
-                        }
-                    },
-            ) {
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        renderEffect = band?.of(look)
-                    },
-                ) { records() }
-            }
-        }
+        // The blurred half of that bottom goes as the record is picked up and comes back as it settles, on
+        // the lift's own spring. A record in the hand is a card, and a card has no blur at its foot: at full
+        // strength the blurred copy, which starts well above the band, smeared the lower part of the lifted
+        // record and hazed round its rounded corners - a blur that came and went as the record shrank and
+        // grew under it. Now the zoom out takes the blur with it and the zoom in brings it back, one move.
+        SoftSleeve(Modifier.fillMaxSize(), blur = FloatReader { smooth(1f - lift.value, 0f, 1f) }) { blurred -> records(blurred) }
     }
 }
 }
@@ -1516,9 +1694,16 @@ internal class OffsetBox {
     }
 }
 
-/** A record's sideways place for an offset and a span, and its brightness for how far across it is. */
+/** A record's sideways place for an offset and a span, and its brightness at an offset for how far across it is. */
 private fun interface RecordDx { fun at(offset: Float, span: Float): Float }
-private fun interface RecordFade { fun at(across: Float): Float }
+private fun interface RecordFade { fun at(offset: Float, across: Float): Float }
+
+/** The songs on the page and either side of it, by id: the sleeve tells a song that changed by itself from its own skips by them. */
+@androidx.compose.runtime.Immutable
+internal data class Songs(val current: String?, val previous: String?, val next: String?)
+
+/** The song the sleeve was last composed with; written after each composition, read by the next. */
+private class Passing { var id: String? = null }
 
 /**
  * How far the page's colour has travelled towards the record coming in, and which record that is.
@@ -1562,6 +1747,32 @@ internal class SleeveSlide {
     /** [go] is -1 for the next record, 1 for the one before. */
     fun ask(go: Int): Boolean = run?.invoke(go) ?: false
 }
+
+/**
+ * Brings [a] to rest at 0 as a critically damped spring of [stiffness] would, a frame at a time, with no
+ * frame counted as longer than [MAX_STEP_S]. A song that changes by itself starts its slide on the
+ * frames that compose the whole new song, and the first of those can take a tenth of a second or more:
+ * a spring timed by the clock had done most of its travel by the next frame, and the record jumped most
+ * of the way in. Counted like this, a slow frame slows the slide down instead of skipping it.
+ */
+internal suspend fun settleByFrames(a: Animatable<Float, androidx.compose.animation.core.AnimationVector1D>, stiffness: Float) {
+    val from = a.value
+    val w = kotlin.math.sqrt(stiffness)
+    var t = 0f
+    var last = androidx.compose.runtime.withFrameNanos { it }
+    while (true) {
+        val now = androidx.compose.runtime.withFrameNanos { it }
+        t += ((now - last) / 1e9f).coerceAtMost(MAX_STEP_S)
+        last = now
+        val x = from * (1f + w * t) * kotlin.math.exp(-w * t)
+        if (kotlin.math.abs(x) < 0.001f) break
+        a.snapTo(x)
+    }
+    a.snapTo(0f)
+}
+
+/** The longest a frame counts for in [settleByFrames]: two frames at sixty a second. */
+private const val MAX_STEP_S = 0.033f
 
 /** A record sent across by a button rather than a thumb: the same move, a little quicker. */
 private const val BUTTON_STIFFNESS = 950f
@@ -1607,6 +1818,7 @@ private fun liftedScale(l: Float, width: Float, side: Float): Float {
 private fun rememberSleeveArt(url: String?): SleeveArt {
     val art = remember { SleeveArt() }
     val cover = rememberCover(url, CoverSize.FULL)
+    art.cover = cover
     val picture = cover.painter
     LaunchedEffect(cover, cover.state, picture) {
         when {
@@ -1829,11 +2041,14 @@ private fun PanelButton(
  */
 @Composable
 private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track: Any? = null): androidx.compose.runtime.MutableLongState {
-    val pos = remember { mutableLongStateOf(vm.positionMs) }
+    // Read again on the frame the song changes, not by the effect below a frame later: for that frame
+    // the last song's time stood over the new song's length, and the time left read as a number that
+    // was neither.
+    val pos = remember(track) { mutableLongStateOf(vm.positionMs) }
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     val shown = LocalPlayerShown.current
-    LaunchedEffect(playing, resumed, shown, track) {
+    LaunchedEffect(playing, resumed, shown, pos) {
         pos.longValue = vm.positionMs
         while (playing && resumed && shown && isActive) { delay(everyMs); pos.longValue = vm.positionMs }
     }

@@ -11,7 +11,9 @@ pub mod demux;
 mod engine;
 pub mod library;
 mod mp4;
+pub mod offload;
 pub mod output;
+pub mod pieces;
 pub mod source;
 pub mod store;
 pub mod wav;
@@ -22,7 +24,8 @@ pub mod core;
 #[cfg(test)]
 mod no_alloc;
 
-pub use engine::{Config, Engine, Event, Settings, State, Status};
+pub use engine::{Config, Engine, Event, OutputFacts, Settings, State, Status};
+pub use offload::{Coded, Coding, OffloadOutput, OnCpu, Support};
 pub use library::{Library, Located, Source, Sources};
 pub use nori_player::pipeline::{App, Queue, Sound};
 pub use output::{AudioOutput, Device, DeviceWatch, Feed, OutputFormat, OutputKind};

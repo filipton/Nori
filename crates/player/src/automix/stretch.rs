@@ -562,7 +562,7 @@ mod tests {
     }
 
     /// CPU cost per second of 44.1 kHz stereo. Run with
-    /// `cargo test --release -p norimusic stretch_cost -- --ignored --nocapture`.
+    /// `cargo test --release -p nori-player stretch_cost -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn stretch_cost() {

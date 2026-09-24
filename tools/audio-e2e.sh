@@ -108,7 +108,9 @@ watch_from_now
 # album pair proves nothing either way.
 "$app" play "$song" >/dev/null; sleep 4
 "$app" do "playnext $other" >/dev/null
-check "a crossfade is planned for the next boundary" waitfor "transition .*: [A-Z_]+ [0-9]+ ms at" 10
+# Planned well before the song ends; the Rust engine plans once the next song is opened, a few seconds
+# after the edit, so the wait is generous rather than tight.
+check "a crossfade is planned for the next boundary" waitfor "transition .*: [A-Z_]+ [0-9]+ ms at" 20
 
 # And it is planned for the song already playing: turning the setting on and waiting for this song to
 # end is how anyone tries the feature out.
@@ -178,12 +180,22 @@ echo "-- a chain rebuild waits for the boundary"
 watch_from_now
 "$app" set eq true >/dev/null; sleep 3
 "$app" set eq false >/dev/null; sleep 3
-check "taking the EQ out waits for the boundary" waitfor "chain swap deferred" 10
-check "still playing after the EQ leaves" playing_audio
-"$app" do "playnext $other" >/dev/null; sleep 2
-"$app" do next >/dev/null; sleep 6
-check "the swap happens at the boundary" waitfor "chain swap at the boundary" 15
-check "still playing after the swap" playing_audio
+if [ "$(field engine)" = rust ]; then
+  # The Rust engine keeps the equalizer in its chain (flat when off), so switching it is heard at once
+  # and there is nothing to rebuild: no swap is deferred, and none happens at the boundary.
+  check "taking the EQ out is heard at once, with no swap deferred" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
+  check "still playing after the EQ leaves" playing_audio
+  "$app" do "playnext $other" >/dev/null; sleep 2
+  "$app" do next >/dev/null; sleep 6
+  check "still playing across the boundary" playing_audio
+else
+  check "taking the EQ out waits for the boundary" waitfor "chain swap deferred" 10
+  check "still playing after the EQ leaves" playing_audio
+  "$app" do "playnext $other" >/dev/null; sleep 2
+  "$app" do next >/dev/null; sleep 6
+  check "the swap happens at the boundary" waitfor "chain swap at the boundary" 15
+  check "still playing after the swap" playing_audio
+fi
 
 echo "-- tuning borrows the shallow buffer and returns it"
 # The equalizer screen trades the deep buffer for instant response; leaving it schedules the
@@ -203,7 +215,13 @@ shallow=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
 deep=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
 check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ] && [ '${shallow:-0}' -lt 1764000 ]"
 check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
-check "the deep buffer swap happens at the boundary" waitfor "chain swap at the boundary" 15
+if [ "$(field engine)" = rust ]; then
+  # The Rust engine takes the deep buffer back as the screen closes (one flush behind a dip), so there is
+  # no swap left for the boundary; the check above already saw it back.
+  check "the deep buffer came back without waiting for a boundary" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
+else
+  check "the deep buffer swap happens at the boundary" waitfor "chain swap at the boundary" 15
+fi
 check "still playing after the deep swap" playing_audio
 
 echo "-- AutoMix"
