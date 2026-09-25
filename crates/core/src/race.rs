@@ -59,7 +59,30 @@ impl Client {
         let evict = |prefix: &str| {
             let _ = self.core.cache_evict(prefix.to_string());
         };
-        lookup(&*self.transport, &*self.core, song, server_has_lines, server_synced, asked, shown, &evict).await;
+        if let Some(line) = lookup(&*self.transport, &*self.core, song, server_has_lines, server_synced, asked, shown, &evict).await {
+            nori_perf::perf_log::note_core("lyrics", line.trim_start_matches("lyrics: "));
+        }
+    }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Core {
+    /// How much the lyrics looked up online take in the app's database, in bytes: every service's
+    /// answers and the lyrics chosen for each song (Settings, Storage, "Lyrics").
+    pub fn lyrics_cache_bytes(&self) -> i64 {
+        let c = self.db.lock();
+        c.query_row(
+            "SELECT COALESCE(SUM(length(key) + length(body)), 0) FROM cache WHERE server=sid() AND key >= ?1 AND key < ?1 || x'ff'",
+            [CACHE_PREFIX],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    /// Forgets every lyrics lookup: the next time a song's lyrics are opened, the services are asked
+    /// again. The server's own lyrics are not touched.
+    pub fn lyrics_cache_clear(&self) {
+        let _ = self.cache_evict(CACHE_PREFIX.to_string());
     }
 }
 
@@ -133,6 +156,21 @@ pub(crate) mod tests {
         assert_eq!(c.core.cache_get("lyrics|LRCLIB|Pink Floyd|Plain|1024".into()).unwrap(), Some(vec![]), "the miss is kept");
         run(&c, &s, false, false, &lrclib());
         assert_eq!(fake.asked().len(), 2, "and fresh for a week");
+    }
+
+    #[test]
+    fn the_lyrics_cache_is_measured_and_cleared_alone() {
+        let (c, fake) = setup();
+        fake.answer(r#"{"statusCode":404}"#);
+        fake.answer(r#"[{"duration":1022,"syncedLyrics":"[00:02.00]line one\n[01:00.00]line two here\n[02:00.00]a third line\n[03:00.00]and the fourth"}]"#);
+        assert_eq!(c.core.lyrics_cache_bytes(), 0);
+        c.core.cache_put("getAlbum|1".into(), b"{}".to_vec()).unwrap();
+        run(&c, &song(), false, false, &lrclib());
+        let bytes = c.core.lyrics_cache_bytes();
+        assert!(bytes > 100, "the answer and the choice: {bytes}");
+        c.core.lyrics_cache_clear();
+        assert_eq!(c.core.lyrics_cache_bytes(), 0);
+        assert!(c.core.cache_get("getAlbum|1".into()).unwrap().is_some(), "the rest of the cache stays");
     }
 
     #[test]

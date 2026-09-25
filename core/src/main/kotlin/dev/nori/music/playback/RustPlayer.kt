@@ -204,10 +204,19 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     private var repeat = Player.REPEAT_MODE_OFF
     private var shuffle = false
     private var error: PlaybackException? = null
+    /** The engine's words for the last song that would not play, for the error a stop after it shows. */
+    private var lastError: String? = null
     /** The engine waits for a song's bytes with nothing left to play (its buffering event). */
     private var buffering = false
     /** The engine moved on by itself (a song ended into the next): said once, in the next state. */
     private var moved = false
+    /**
+     * The engine moved the music to another path (the audio chip to the CPU or back) without a jump asked
+     * for: the next state says the place again as a discontinuity, so the session and its controllers
+     * anchor their clocks there, as they do after a pause or a seek, rather than running on from an
+     * older word.
+     */
+    private var placed = false
     @Volatile private var loading = 0
     /** Pause when the song playing ends (the sleep timer's "end of this song"): the engine does it. */
     var pauseAtEndOfItem = false
@@ -300,7 +309,11 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         error?.let { b.setPlayerError(it) }
         if (moved) {
             moved = false
+            placed = false
             b.setPositionDiscontinuity(Player.DISCONTINUITY_REASON_AUTO_TRANSITION, 0)
+        } else if (placed) {
+            placed = false
+            b.setPositionDiscontinuity(Player.DISCONTINUITY_REASON_INTERNAL, RustPlayerJni.positionMs(h))
         }
         return b.build()
     }
@@ -376,7 +389,6 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     }
 
     override fun handleRelease(): ListenableFuture<*> {
-        runCatching { connectivity.unregisterNetworkCallback(network) }
         unfocus()
         follow(released = true)
         if (RustBridge.player === this) RustBridge.player = null
@@ -502,11 +514,15 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             when ((e ushr 32).toInt()) {
                 EVENT_STATE -> onState(arg)
                 EVENT_SONG -> onSong(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
-                EVENT_ERROR -> "rust player: ${RustPlayerJni.eventText(h)}".let { android.util.Log.w("nori", it); PlaybackService.observer?.error(it) }
+                EVENT_ERROR -> RustPlayerJni.eventText(h).let { lastError = it; "rust player error: $it".let { t -> android.util.Log.w("nori", t); PlaybackService.observer?.error(t) } }
                 EVENT_STOPPED -> stoppedByItself()
                 EVENT_BUFFERING -> buffering = arg != 0
                 EVENT_LOOPED -> onLoop(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
                 EVENT_TITLE -> announced = RustPlayerJni.eventText(h)
+                // A mix began or ended being heard: the page is nudged as it is by the ExoPlayer path's
+                // sink, and reads [mixing] then. Nothing else changes, so nothing else is said.
+                EVENT_MIXING -> TransitionSink.onHeardChanged?.invoke()
+                EVENT_PLACED -> placed = true
                 // Handed on after the batch: the bridge edits and seeks this player itself.
                 EVENT_BRIDGE -> main.post { if (onBridge?.invoke() != true) { stoppedByItself(); follow(); invalidateState() } }
                 // The output device's own sound is DeviceSound's, from Outputs, as on the ExoPlayer path:
@@ -537,6 +553,17 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
      */
     private fun stoppedByItself() {
         pauseAtEndOfItem = false
+        // After a run of songs that would not play (not the sleep timer's end of a song, which leaves no
+        // failure behind): the player's error, as ExoPlayer's is, so the page says why the music stopped.
+        // The words are the core's (PlayerConnection reads the kind from the code); play prepares again.
+        dev.nori.music.ffi.queue.queueLastError()?.let { kind ->
+            val code = when (kind) {
+                dev.nori.music.ffi.model.PlaybackError.NETWORK -> PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED
+                dev.nori.music.ffi.model.PlaybackError.OUTPUT -> PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED
+                dev.nori.music.ffi.model.PlaybackError.OTHER -> PlaybackException.ERROR_CODE_DECODING_FAILED
+            }
+            error = PlaybackException(lastError ?: "a song would not play", null, code)
+        }
         if (!playWhenReady) return
         playWhenReady = false
         whyPlayWhenReady = Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM
@@ -655,11 +682,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         // The DAC's mixer attributes are read by the framework when the track is built: set for this format first.
         nori.dac.onFormat(rate, encoding)
         val bitPerfect = nori.dac.state.value.bitPerfect
-        // A track of a fraction of a second is the equalizer screen's (crates/android/src/track.rs
-        // SHALLOW_TRACK_US): the normal mixer, whose short periods such a track keeps up with, where the
-        // power saving one reads in large ones.
-        val shallow = frames < rate / 2
-        val mode = if (bitPerfect || shallow) AudioTrack.PERFORMANCE_MODE_NONE else AudioTrack.PERFORMANCE_MODE_POWER_SAVING
+        // Always opened deep, in power saving mode: the equalizer screen's shallow buffer is the same track
+        // made smaller in place (setBufferSizeInFrames, crates/android/src/track.rs), not another one.
+        val mode = if (bitPerfect) AudioTrack.PERFORMANCE_MODE_NONE else AudioTrack.PERFORMANCE_MODE_POWER_SAVING
         val track = AudioTrack.Builder()
             .setAudioAttributes(PLATFORM_ATTRIBUTES)
             .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(encoding).setChannelMask(mask(channels)).build())
@@ -772,21 +797,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         if (changed) main.post { invalidateState() }
     }
 
-    /**
-     * The network the phone is on, told to the core whenever it changes, metered or not: the core resolves
-     * the quality a song streams at from it (`stream::resolve_now`) without asking here per song.
-     */
-    private val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
-    private val network = object : android.net.ConnectivityManager.NetworkCallback() {
-        override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
-            dev.nori.music.ffi.net.networkMetered(!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
-        }
-    }
-
     // Last, once everything above exists: from here on the engine's threads may call in.
     init {
-        dev.nori.music.ffi.net.networkMetered(nori.http.metered)
-        runCatching { connectivity.registerDefaultNetworkCallback(network, main) }
         RustBridge.player = this
         // Whatever the engine said before this was registered (its first state) is taken now.
         main.post(drain)
@@ -804,6 +816,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         const val EVENT_LOOPED = 6
         const val EVENT_TITLE = 7
         const val EVENT_BRIDGE = 8
+        const val EVENT_MIXING = 9
+        const val EVENT_PLACED = 10
 
         val ATTRIBUTES: AudioAttributes = AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build()
         val PLATFORM_ATTRIBUTES: android.media.AudioAttributes = android.media.AudioAttributes.Builder()

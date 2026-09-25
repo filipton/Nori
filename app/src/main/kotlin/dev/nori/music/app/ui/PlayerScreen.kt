@@ -2036,45 +2036,22 @@ private fun PanelButton(
 }
 
 /**
- * The only ticking thing in the app, and only while this screen is resumed and music is playing.
- *
- * [track] is whatever identifies the song on screen: paused, nothing ticks, so a skip would otherwise
- * leave the last song's time under the new song's title until someone pressed play.
- */
-@Composable
-private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track: Any? = null): androidx.compose.runtime.MutableLongState {
-    // Read again on the frame the song changes, not by the effect below a frame later: for that frame
-    // the last song's time stood over the new song's length, and the time left read as a number that
-    // was neither.
-    val pos = remember(track) { mutableLongStateOf(vm.positionMs) }
-    var resumed by remember { mutableStateOf(false) }
-    LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    val shown = LocalPlayerShown.current
-    LaunchedEffect(playing, resumed, shown, pos) {
-        pos.longValue = vm.positionMs
-        while (playing && resumed && shown && isActive) { delay(everyMs); pos.longValue = vm.positionMs }
-    }
-    // The state itself, not its value: only what shows the time reads it, so a tick recomposes the
-    // two times under the bar and nothing else.
-    return pos
-}
-
-/**
  * A hairline seek bar, drawn rather than assembled: two rounded rectangles and a dot, which is both
  * what it should look like and cheaper than a Slider with its own layers and ripples.
  *
  * The bar shows one of three places. The finger, while it is down. The place a released scrub asked
  * for, until the player is really there (the connection watches the seek and says so through
  * [PlayerViewModel.pendingSeek]; a slow seek thus reads as one held place, never a snap-back and a
- * glide). Otherwise the music: read from the player every frame, so the bar moves at the speed of
- * the song rather than in once-a-second steps, and eased towards with a short time constant, so a
- * jump in the position - a new song, a mix handing over, a seek from the notification - slides the
- * bar there in a third of a second instead of teleporting it. The easing lags steady playback by
- * that same constant, which is invisible, and it never fights a scrub: the finger and a held seek
- * are drawn directly.
+ * glide). Otherwise the music, paced by nori-look ([SeekPace]): drawn where the song is while it plays,
+ * a pixel at a time, and gliding over a third of a second when the song's place jumps - a new song, a
+ * mix handing over, a seek from the notification, a queue replaced - while the times under it cross-fade.
+ * Nothing teleports.
  *
- * The frame loop runs only while this screen is resumed, the music plays and nothing is held; a
- * paused bar takes one reading and stops.
+ * The only ticking thing in the app, and only while this screen is on screen and resumed and the music
+ * plays; a paused bar settles and stops. Put away, it does nothing at all, and the song moves on without
+ * it: so the moment it is on screen again (the player opened, the app come back) it is set straight to
+ * the song's real place, on the first frame drawn, rather than gliding there from wherever it was left -
+ * which, opened in the middle of a song change, was the middle of the last song.
  */
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
@@ -2083,6 +2060,7 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // Read through the gesture rather than keyed: a track that learns its real length mid-scrub
     // would otherwise restart the pointer detector under the finger.
     val d by rememberUpdatedState(durationMs.coerceAtLeast(1).toFloat())
+    val length by rememberUpdatedState(durationMs)
     val dragging = remember { mutableStateOf(false) }
     val drag = remember { mutableFloatStateOf(0f) }
     val held = remember { mutableStateOf<Long?>(null) }
@@ -2095,37 +2073,51 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val watched by vm.pendingSeek.collectAsStateWithLifecycle()
     LaunchedEffect(watched, held.value) { if (held.value != null && vm.pendingSeek.value == null) held.value = null }
 
-    val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, held.value))
-
-    val bar = remember { mutableFloatStateOf((vm.positionMs / d).coerceIn(0f, 1f)) }
+    val pace = remember { dev.nori.music.look.SeekPace() }
+    androidx.compose.runtime.DisposableEffect(pace) { onDispose { pace.close() } }
+    // What the pace says, as the draw phase reads it: written only when it changes.
+    val bar = remember { mutableFloatStateOf(0f) }
+    val times = remember { mutableLongStateOf(0L) }
+    val fadingFrom = remember { mutableLongStateOf(-1L) }
+    val fade = remember { mutableFloatStateOf(1f) }
+    val publish = remember(pace) {
+        {
+            val b = pace.bar
+            if (b != bar.floatValue) bar.floatValue = b
+            val t = pace.times
+            if (t != times.longValue) times.longValue = t
+            val from = pace.fadingFrom
+            if (from != fadingFrom.longValue) fadingFrom.longValue = from
+            val f = pace.fade
+            if (f != fade.floatValue) fade.floatValue = f
+        }
+    }
     /** The bar's length on screen, in pixels, for how often it needs drawing. */
     val barWidth = remember { mutableFloatStateOf(1000f) }
     val free = !dragging.value && held.value == null
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    val shownOnScreen = LocalPlayerShown.current
-    // Paused, the loop settles the bar and stops - nothing ticks over a paused song - so anything
-    // that can move a paused player must restart it: play, a skip, a rewind (`pos` is re-read on a
-    // skip and when a hold drops; while the music plays it ticks every second and is deliberately
-    // not a key, or the loop would be restarted and lose a frame each time). `playing` was not a
-    // key once, and a bar that had settled while paused stayed where it was for the rest of the
-    // song after play was pressed again.
-    LaunchedEffect(free, resumed, shownOnScreen, playing, if (playing) null else pos.longValue, state.current?.id, state.index) {
-        if (!free || !resumed || !shownOnScreen) return@LaunchedEffect
-        // Eased towards the song in frames, then drawn again only when the song has moved it a pixel
-        // (nori_look::motion::seek_step): a bar keeping up with a song is not redrawn every frame.
+    val live = resumed && LocalPlayerShown.current
+    // Coming on screen: straight to the song, in the frame being made - a side effect runs after this
+    // composition and before its frame is drawn, where an effect would start a frame later.
+    val wasLive = remember { booleanArrayOf(false) }
+    androidx.compose.runtime.SideEffect {
+        if (live && !wasLive[0]) { pace.sync(vm.positionMs, length); publish() }
+        wasLive[0] = live
+    }
+    // Paused, the loop settles the bar and stops - nothing ticks over a paused song - so anything that
+    // can move a paused player restarts it: play, a skip, a seek. While the music plays it keeps going,
+    // a step every frame through a glide and one a pixel or a second otherwise.
+    LaunchedEffect(free, live, playing, state.current?.id, state.index, durationMs, watched) {
+        if (!free || !live) return@LaunchedEffect
         var last = androidx.compose.runtime.withFrameNanos { it }
         while (isActive) {
-            val target = (vm.positionMs / d).coerceIn(0f, 1f)
             val now = androidx.compose.runtime.withFrameNanos { it }
-            val step = dev.nori.music.look.CoverLook.seekStep(bar.floatValue, target, (now - last) / 1e9f, barWidth.floatValue, if (playing) 1000f / d else 0f)
+            val wait = pace.step(vm.positionMs, length, (now - last) / 1e9f, barWidth.floatValue, if (playing) 1f else 0f)
             last = now
-            val next = Float.fromBits((step ushr 32).toInt())
-            if (next != bar.floatValue) bar.floatValue = next
-            val wait = step.toInt()
+            publish()
             if (wait < 0) break
-            // The wait is counted as time passed, so the step after it lands at once.
-            if (wait > 0) { kotlinx.coroutines.delay(wait.toLong()); last -= wait * 1_000_000L }
+            if (wait > 0) kotlinx.coroutines.delay(wait.toLong())
         }
     }
 
@@ -2159,11 +2151,12 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                             if (!change.pressed) break
                         }
                         // Apple seeks on release, not while the finger moves: one seek, at the end,
-                        // and the sound carries on undisturbed until then. The bar is seeded at the
-                        // finger so that when the hold drops there is nothing stale to slide from.
+                        // and the sound carries on undisturbed until then. The pace is set down at the
+                        // finger so that when the hold drops there is nothing stale to glide from.
                         if (seek) {
                             val target = (drag.floatValue * d).toLong()
-                            bar.floatValue = drag.floatValue
+                            pace.hold(drag.floatValue, target, length)
+                            publish()
                             held.value = target
                             vm.seekTo(target)
                         }
@@ -2186,57 +2179,104 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                     if (k > 0.01f) drawCircle(filled, h * k, Offset(size.width * f, size.height / 2f))
                 },
         )
-        SeekTimes(pos, dragging, drag, held, d, durationMs, state.error, state.sleepAtEndOfTrack, state.sleepAt)
+        val mixing = vm.mixing.collectAsStateWithLifecycle()
+        SeekTimes(times, fadingFrom, fade, dragging, drag, held, durationMs, state.error, state.sleepAtEndOfTrack, state.sleepAt, mixing)
     }
 }
 
 /**
- * The two times under the seek bar and whatever needs saying between them. The only thing a second's
- * tick recomposes: it reads the ticking position here and nowhere else, and each second's text is made
- * once (see [duration]).
+ * The two times under the seek bar and whatever needs saying between them. Nothing here recomposes as
+ * the song plays: the times are read in the draw phase, each second's text made once (see [duration]).
+ * When the bar glides over a jump the times cross-fade, the old ones out where they stand and the new
+ * ones in, rather than changing in one frame.
  */
 @Composable
 private fun SeekTimes(
-    pos: androidx.compose.runtime.LongState, dragging: androidx.compose.runtime.State<Boolean>,
-    drag: androidx.compose.runtime.FloatState, held: androidx.compose.runtime.State<Long?>, d: Float, durationMs: Long,
-    error: String?, sleepAtEndOfTrack: Boolean, sleepAt: Long,
+    times: androidx.compose.runtime.LongState, fadingFrom: androidx.compose.runtime.LongState, fade: androidx.compose.runtime.FloatState,
+    dragging: androidx.compose.runtime.State<Boolean>, drag: androidx.compose.runtime.FloatState, held: androidx.compose.runtime.State<Long?>,
+    durationMs: Long, error: String?, sleepAtEndOfTrack: Boolean, sleepAt: Long, mixing: androidx.compose.runtime.State<Boolean>,
 ) {
     val look = LocalLook.current
     val quiet = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON_VARIANT) }
-    // Which place the times count from - the finger, a held seek, the music - is the core's (`seek_times`).
-    // Asked over JNI with primitives, in the draw phase: a second's tick, or a scrub on every frame the
-    // finger moves, redraws the two times and recomposes nothing.
-    val times = { CoverLook.seekTimes(dragging.value, drag.floatValue, held.value ?: -1L, pos.longValue, durationMs) }
+    // Which place the times count from - the finger, a held seek, the music - is the core's (`seek_times`)
+    // and the pace's. Asked over JNI with primitives, in the draw phase: a second, or a scrub on every
+    // frame the finger moves, redraws the two times and recomposes nothing.
+    val now = {
+        if (dragging.value || held.value != null) CoverLook.seekTimes(dragging.value, drag.floatValue, held.value ?: -1L, 0L, durationMs)
+        else times.longValue
+    }
+    val gone = { if (dragging.value || held.value != null) -1L else fadingFrom.longValue }
     val style = MaterialTheme.typography.labelSmall
     val longest = (durationMs / 1000).coerceAtLeast(0)
+    // The new times come in as the old ones go; with nothing fading this is 1 and the old layer draws nothing.
+    val inAlpha = Modifier.graphicsLayer { alpha = if (gone() < 0) 1f else fade.floatValue }
+    val outAlpha = Modifier.graphicsLayer { alpha = 1f - fade.floatValue }
     Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-        LookTime({ duration(times() ushr 32) }, duration(longest), quiet, style, end = false)
+        Box {
+            LookTime({ gone().let { if (it < 0) "" else duration(it ushr 32) } }, duration(longest), quiet, style, end = false, modifier = outAlpha)
+            LookTime({ duration(now() ushr 32) }, duration(longest), quiet, style, end = false, modifier = inAlpha)
+        }
         // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty the
-        // rest of the time, holding its space so the two times either side never move. It said
-        // "Mixing" through every crossfade as well, which is a word about the plumbing rather than
-        // about the music, and it flickered up between songs for no reason anyone could see.
-        // While a timer is set the position's tick is read here, so it recomposes this once a second and
-        // keeps the minutes current; otherwise nothing here reads it. How the timer reads is
+        // rest of the time, holding its space so the two times either side never move.
+        // While a timer is set the times are read here, so it recomposes this once a second and
+        // keeps the minutes current; otherwise nothing here reads them. How the timer reads is
         // nori-core's (`words_sleep`), asked only while one is set.
         //
         // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
         // and subtracting one from the other gives a number about fifty years wide, which the
         // rounding then turned into a cheerful "1 min" for every timer ever set.
-        if (sleepAt > 0) pos.longValue
+        if (sleepAt > 0) times.longValue
         val centre = if (error == null && !sleepAtEndOfTrack && sleepAt <= 0) "" else dev.nori.music.ffi.seekMiddle(
             error, sleepAtEndOfTrack, if (sleepAt > 0) sleepAt - android.os.SystemClock.elapsedRealtime() else null,
         )
         val errorColour = MaterialTheme.colorScheme.error
-        LookText(
-            centre, if (error != null) androidx.compose.ui.graphics.ColorProducer { errorColour } else quiet,
-            Modifier.weight(1f).padding(horizontal = 8.dp),
-            style = MaterialTheme.typography.labelSmall,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        LookTime({ durationLeft(times() and 0xFFFF_FFFFL) }, durationLeft(longest), quiet, style, end = true)
+        Box(Modifier.weight(1f).padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+            LookText(
+                centre, if (error != null) androidx.compose.ui.graphics.ColorProducer { errorColour } else quiet,
+                Modifier.fillMaxWidth(),
+                style = MaterialTheme.typography.labelSmall,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            // An error or the sleep timer has the slot to itself.
+            MixingLabel(mixing, free = centre.isEmpty(), quiet)
+        }
+        Box {
+            LookTime({ gone().let { if (it < 0) "" else durationLeft(it and 0xFFFF_FFFFL) } }, durationLeft(longest), quiet, style, end = true, modifier = outAlpha)
+            LookTime({ durationLeft(now() and 0xFFFF_FFFFL) }, durationLeft(longest), quiet, style, end = true, modifier = inAlpha)
+        }
     }
 }
+
+/**
+ * "MIXING", between the times while an AutoMix or a crossfade is being heard, the way Apple's player says
+ * it. It fades in and out (counted in frames, like every fade on this page) where it stands, in a slot
+ * that is there either way, so the times beside it never move. Nothing of it exists between mixes: the
+ * word is only composed while it is shown or fading, and the flag it follows is pushed by the player when
+ * a mix starts and ends, so a song playing on its own costs no recomposition, no frame and no wakeup.
+ */
+@Composable
+private fun MixingLabel(mixing: androidx.compose.runtime.State<Boolean>, free: Boolean, colour: androidx.compose.ui.graphics.ColorProducer) {
+    val on = mixing.value && free
+    val shown = remember { Animatable(if (on) 1f else 0f) }
+    LaunchedEffect(on) {
+        val to = if (on) 1f else 0f
+        if (shown.value == to) return@LaunchedEffect
+        if (AppMotion.reduce) shown.snapTo(to) else shown.fadeByFrames(to, MIXING_FADE_MS)
+    }
+    // Read through a derived state, so the fade's frames redraw the word and recompose nothing.
+    val present by remember { androidx.compose.runtime.derivedStateOf { shown.value > 0f } }
+    if (!on && !present) return
+    val word = remember { say.mixing.uppercase() }
+    LookText(
+        word, colour, Modifier.graphicsLayer { alpha = fadeEase(shown.value) },
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = androidx.compose.ui.unit.TextUnit(1.4f, androidx.compose.ui.unit.TextUnitType.Sp), fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        maxLines = 1,
+    )
+}
+
+/** How long "MIXING" takes to come and go. */
+private const val MIXING_FADE_MS = 360f
 
 @Composable
 private fun Queue(vm: PlayerViewModel) {

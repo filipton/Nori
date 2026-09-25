@@ -241,10 +241,9 @@ impl DiskCache {
 mod tests {
     use super::*;
 
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("nori-covers-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+    /// A directory of the test's own, gone when the test is.
+    fn dir(name: &str) -> nori_testdir::TempDir {
+        nori_testdir::TempDir::new(&format!("covers-{name}"))
     }
 
     #[test]
@@ -258,7 +257,7 @@ mod tests {
     #[test]
     fn the_least_recently_used_go_first_and_a_read_is_a_use() {
         let d = dir("lru");
-        let c = DiskCache::open(&d, 30).unwrap();
+        let c = DiskCache::open(d.path(), 30).unwrap();
         let (a, b, x) = (Key::of("a"), Key::of("b"), Key::of("c"));
         c.put(a, &[1; 10]).unwrap();
         c.put(b, &[2; 10]).unwrap();
@@ -274,14 +273,13 @@ mod tests {
         // Larger than the whole cache: not kept, nothing else lost.
         c.put(Key::of("e"), &[5; 31]).unwrap();
         assert!(!c.contains(Key::of("e")) && c.contains(a));
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn opening_again_finds_the_files_in_the_order_they_were_used_and_trims_to_a_new_limit() {
         let d = dir("reopen");
         {
-            let c = DiskCache::open(&d, 100).unwrap();
+            let c = DiskCache::open(d.path(), 100).unwrap();
             for (i, name) in ["a", "b", "c"].iter().enumerate() {
                 c.put(Key::of(name), &[i as u8; 10]).unwrap();
                 // Modification times a clear step apart, whatever the file system's resolution.
@@ -289,22 +287,20 @@ mod tests {
             }
             File::create(d.join("0123.5-1.tmp")).unwrap();
         }
-        let c = DiskCache::open(&d, 20).unwrap();
+        let c = DiskCache::open(d.path(), 20).unwrap();
         assert!(!c.contains(Key::of("a")) && c.contains(Key::of("b")) && c.contains(Key::of("c")));
         assert!(!d.join("0123.5-1.tmp").exists());
         assert_eq!(c.bytes(), 20);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn a_file_deleted_behind_its_back_is_a_miss() {
         let d = dir("gone");
-        let c = DiskCache::open(&d, 100).unwrap();
+        let c = DiskCache::open(d.path(), 100).unwrap();
         c.put(Key::of("a"), &[1; 4]).unwrap();
         fs::remove_file(c.path(Key::of("a"))).unwrap();
         assert!(!c.read(Key::of("a"), &mut Vec::new()));
         assert_eq!(c.bytes(), 0);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     /// Whether the index and the directory say the same: every file kept is indexed at its size, and
@@ -335,7 +331,7 @@ mod tests {
     #[test]
     fn threads_putting_reading_and_trimming_the_same_covers_leave_the_index_and_the_directory_agreeing() {
         let d = dir("race");
-        let c = std::sync::Arc::new(DiskCache::open(&d, 60).unwrap());
+        let c = std::sync::Arc::new(DiskCache::open(d.path(), 60).unwrap());
         let keys: Vec<Key> = (0..3).map(|i| Key::of(&i.to_string())).collect();
         // Short rounds, each checked once its threads are done: a race that leaves the two disagreeing
         // is mended by a later put of the same cover, so one long run would hide it.
@@ -364,23 +360,20 @@ mod tests {
                 t.join().unwrap();
             }
             if let Err(e) = agree(&c) {
-                fs::remove_dir_all(&d).unwrap();
                 panic!("round {round}: {e}");
             }
         }
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn clearing_deletes_every_cover_and_the_cache_goes_on() {
         let d = dir("clear");
-        let c = DiskCache::open(&d, 100).unwrap();
+        let c = DiskCache::open(d.path(), 100).unwrap();
         c.put(Key::of("a"), &[1; 4]).unwrap();
         c.put(Key::of("b"), &[2; 4]).unwrap();
         c.clear();
         assert_eq!((c.bytes(), fs::read_dir(&d).unwrap().count()), (0, 0));
         c.put(Key::of("c"), &[3; 4]).unwrap();
         assert!(c.contains(Key::of("c")) && c.bytes() == 4);
-        fs::remove_dir_all(&d).unwrap();
     }
 }

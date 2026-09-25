@@ -83,8 +83,31 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * call with primitives in and out per frame.
      */
     val positionMs: Long get() {
-        val c = controller ?: return PlayheadJni.runOn(clock, android.os.SystemClock.elapsedRealtime(), _state.value.playing)
+        val c = controller ?: local() ?: return PlayheadJni.runOn(clock, android.os.SystemClock.elapsedRealtime(), _state.value.playing)
         return heard(c, _state.value.index)
+    }
+
+    /**
+     * The service's own player, while the controller is not connected and this is the main thread: it
+     * lives in this process, on this thread, and answers at once. The controller is let go of while the
+     * app is hidden (MainActivity.onStop) and connected again only after the first frame is out, and
+     * connecting takes a moment more: the screen come back used to show the song from before it went,
+     * for half a second, when the music had moved on while it was off.
+     */
+    private fun local(): Player? =
+        PlaybackService.sessionPlayer?.takeIf { android.os.Looper.myLooper() == android.os.Looper.getMainLooper() }
+
+    /**
+     * The page brought up to date from the service's player in one read, for a screen coming back: called
+     * before its first frame (MainActivity.onStart), so that frame shows the song playing now. Nothing is
+     * read while the app is hidden; this is one look as it returns, and the controller's own state takes
+     * over when it connects.
+     */
+    fun catchUp() {
+        if (controller != null) return
+        val p = local() ?: return
+        if (p.mediaItemCount == 0) return
+        publish(p, queueChanged = true)
     }
 
     /**
@@ -107,8 +130,12 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     }
 
     /** [heard] for the seek bar, whose page shows queue index [shown]: the place the bar shows. */
-    private fun heard(c: MediaController, shown: Int): Long =
-        read(PlayheadJni.position(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, c.currentPosition, shown))
+    private fun heard(c: Player, shown: Int): Long {
+        val raw = c.currentPosition
+        val out = read(PlayheadJni.position(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, raw, shown))
+        if (tracePositions) android.util.Log.d("noripos", "raw=$raw out=$out on=${c.currentMediaItemIndex} shown=$shown heard=$heardIndex c=${c.javaClass.simpleName} t=${Thread.currentThread().name}")
+        return out
+    }
 
     /** Unpacks an answer into [heardIndex]; returns the place in it. */
     private fun read(r: Long): Long {
@@ -122,6 +149,18 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private var heardIndex = -1
     /** nori-player's reading of the transition engine: see crates/player/src/heard.rs. */
     private val clock = HeardJni.create()
+
+    private val _mixing = MutableStateFlow(false)
+    /**
+     * A mix (AutoMix, a crossfade) is being heard right now, while the music plays. Pushed, not polled:
+     * whichever engine plays says when a mix starts and stops being heard (the ExoPlayer path's sink and
+     * nori-engine both nudge [publish], as for a change of song), so between mixes nothing runs for it.
+     * Apart from [state], so that a mix starting recomposes only what says so.
+     */
+    val mixing: StateFlow<Boolean> = _mixing
+
+    /** The player's own place, as the controller runs it on: for the test bridge's traces only. */
+    val playerPositionMs: Long get() = controller?.currentPosition ?: -1L
 
     val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
 
@@ -200,27 +239,25 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val fresh = queueChanged || !old.connected
         val look = fresh || p.shuffleModeEnabled != old.shuffle
         // The queue is the core's (crates/queue/src/playlist.rs), read in one call; the controller's copy
-        // of it trails the service a little, so the core's is taken when both are the same length. A
-        // timeline change is not always a queue change (a song's source opening is one too), so the
-        // core's revision is asked first and a queue the page already holds is not copied over again.
-        val same = look && old.connected && viewRev >= 0 && PlaylistJni.rev() == viewRev && old.queue.size == p.mediaItemCount
-        // The songs themselves only when the list changed since they were read: a shuffle or a song marked
-        // as added by hand moves the order alone.
-        val view = if (look && !same) dev.nori.music.ffi.queue.playlistView(heldList).takeIf { it.len.toInt() == p.mediaItemCount } else null
-        if (look && !same) viewRev = view?.rev?.toLong() ?: -1L
-        val listed = view?.let { v -> if (v.listRev == heldList && old.queue.size == p.mediaItemCount) old.queue else v.songs.takeIf { it.size == p.mediaItemCount } }
-        if (look && !same) heldList = if (listed != null && view != null) view.listRev else 0uL
-        val queue = listed ?: if (fresh && !same) dev.nori.music.ffi.queue.queueSongs(List(p.mediaItemCount) { p.getMediaItemAt(it).mediaId }) else old.queue
-        val order = view?.order?.map { it.toInt() } ?: if (look && !same) playOrder(p) else old.order
-        val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: if (fresh && !same) (0 until p.mediaItemCount).filterTo(HashSet()) { p.getMediaItemAt(it).queuedAs() != null } else old.queued
+        // of it trails the service a little, and while the two differ in length the core reads the
+        // player's own list instead (playlist_view_of). A timeline change is not always a queue change (a
+        // song's source opening is one too), so the core's revision is asked first and a queue the page
+        // already holds is not copied over again; nor are its songs when only the order changed.
+        val same = look && viewRev >= 0 && PlaylistJni.rev() == viewRev && old.queue.size == p.mediaItemCount
+        val view = if (look && !same) dev.nori.music.ffi.queue.playlistViewFor(heldList, p.mediaItemCount.toUInt()) ?: playerView(p) else null
+        if (view != null) { viewRev = view.rev.toLong(); heldList = view.listRev }
+        val queue = view?.songs?.takeIf { it.size == view.len.toInt() } ?: old.queue
+        val order = view?.order?.map { it.toInt() } ?: old.order
+        val queued = view?.queued?.mapTo(HashSet()) { it.toInt() } ?: old.queued
         // The song on the page is the one being heard. Into a transition the player has moved on to
         // the next song while the ending of this one still plays alone (see heard); the page stays
         // on this song until the mix is heard, and moves to the next one the moment it is, even while
-        // the player is still on the old one. Which copy of a song queued twice that is, the heard
-        // tracker decides (crates/player/src/heard.rs); a queue that has just changed is looked up anew.
-        val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let { this.heardIndex }?.takeIf { it >= 0 }?.let { i ->
-            if (fresh && !same) old.queue.getOrNull(i)?.id?.let { id -> queue.indexOfFirst { it.id == id }.takeIf { it >= 0 } } else i
-        }?.takeIf { queue.getOrNull(it)?.id != item?.mediaId }
+        // the player is still on the old one. Which row of the page's list that is, the core decides
+        // (crates/queue/src/heard.rs shown_row).
+        val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let {
+            dev.nori.music.ffi.queue.heardShownRow(this.heardIndex, queue.map { it.id }, item?.mediaId).takeIf { it >= 0 }
+        }
+        _mixing.value = p.isPlaying && (PlaybackService.rustPlayer?.mixing ?: TransitionSink.mixing)
         _state.value = old.copy(
             connected = true, queue = queue, order = order, queued = queued,
             index = if (p.mediaItemCount == 0) -1 else heardIndex ?: p.currentMediaItemIndex,
@@ -256,13 +293,14 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         return radioShown
     }
 
-    private fun playOrder(p: Player): List<Int> {
+    /** The player's own list as the core reads it while it trails the core's (playlist_view_of). */
+    private fun playerView(p: Player): dev.nori.music.ffi.queue.PlaylistView {
+        val items = List(p.mediaItemCount) { p.getMediaItemAt(it) }
         val t = p.currentTimeline
-        if (!p.shuffleModeEnabled || t.isEmpty) return List(p.mediaItemCount) { it }
-        val order = ArrayList<Int>(t.windowCount)
-        var i = t.getFirstWindowIndex(true)
-        while (i != C.INDEX_UNSET) { order += i; i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, true) }
-        return order
+        val order = ArrayList<UInt>(t.windowCount)
+        var i = if (t.isEmpty) C.INDEX_UNSET else t.getFirstWindowIndex(p.shuffleModeEnabled)
+        while (i != C.INDEX_UNSET) { order += i.toUInt(); i = t.getNextWindowIndex(i, Player.REPEAT_MODE_OFF, p.shuffleModeEnabled) }
+        return dev.nori.music.ffi.queue.playlistViewOf(items.map { it.mediaId }, items.map { it.queuedAs() ?: dev.nori.music.ffi.queue.Hand.NO }, order)
     }
 
     private fun items(songs: List<Song>): List<MediaItem> = songs.toMediaItems { nori.library.coverUrl(it.coverArt, NOTIFICATION_ART) }
@@ -356,6 +394,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * player ended up back at the top of the same song.
      */
     fun seekTo(ms: Long) = with { c ->
+        // Asked for: the bar and the lyrics go there as they are, even a moment back (heard.rs Playhead).
+        PlayheadJni.jumped(clock)
         // A tap is a place in the song on the page. While the ear is still on the song the player
         // has left (see publish), that is the earlier song: the seek goes to it, not to the one the
         // player is already counting.
@@ -471,6 +511,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
  * The seek bar's place over a [HeardJni] clock (crates/queue/src/heard.rs over nori_player::heard::Playhead):
  * asked every frame the bar is drawn, so primitives only.
  */
+/** Every seek bar reading logged (tag noripos), for a check frame by frame: the test bridge's "tracelyrics". */
+@Volatile var tracePositions = false
+
 internal object PlayheadJni {
     init { System.loadLibrary("norimusic") }
 
@@ -478,6 +521,8 @@ internal object PlayheadJni {
     @JvmStatic @CriticalNative external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int): Long
     /** The last place shown, run on from then if [playing]: for while the controller cannot be asked. */
     @JvmStatic @CriticalNative external fun runOn(h: Long, nowMs: Long, playing: Boolean): Long
+    /** The listener asked for a place (a seek): the next reading is shown as it is, even a moment back in the song. */
+    @JvmStatic @CriticalNative external fun jumped(h: Long)
     /** The length the page shows: the heard song's ([heardS] seconds, -1 none), else the player's, else the tags'. */
     @JvmStatic @CriticalNative external fun durationMs(heardS: Long, playerMs: Long, taggedMs: Long): Long
 }

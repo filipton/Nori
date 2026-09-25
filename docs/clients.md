@@ -21,7 +21,7 @@ platform opens and re-exports every crate below it by its module name (`nori_cor
 | Library, search, browse, mixes, smart lists, stats, history, favourites, playlists, M3U | `nori-library`: `library`, `search`, `browse`, `mixes`, `smart`, `history`, `stars`, `m3u` |
 | What each page shows, its menus and buttons, and every word on screen, pluralised and localised | `nori-library`: `pages`, `menus`, `rows`; `nori-queue::actions`; `nori-words`: `words`, `fmt`; `nori-text` |
 | The queue: order, shuffle (artists and albums always spread), autofill (taking turns with what it picked or played lately), radio, the offline bridge, error runs | `nori-player::playlist`; `nori-queue`: `playlist`, `queue`, `autofill`, `bridge`, `rules` |
-| Decoding MP3, FLAC, AAC-LC, Vorbis, ALAC and Opus, gapless, without allocating per packet | `nori-player::decode` |
+| Decoding MP3, FLAC, AAC-LC, Vorbis, ALAC and Opus, gapless, without allocating per packet; HE-AAC through a decoder the client lends | `nori-player::decode` |
 | The sound: EQ, pre-amp, limiter, balance, mono, crossfeed, ReplayGain, speed and pitch, silence skipping | `nori-player::dsp`, `sonic`, `speed`, `silence`, `stages` |
 | Transitions: crossfades, AutoMix analysis, planning and mixing | `nori-player::engine`, `transitions`, `automix`; the analyses kept and the planner the audio path asks: `nori-automix` |
 | The playhead, seeks, fades on play/pause/skip, and when the player may sleep | `nori-player::heard`, `seek`, `transport`, `burst` |
@@ -31,7 +31,7 @@ platform opens and re-exports every crate below it by its module name (`nori_cor
 | "Better beat detection": Beat This! over the ends of the songs coming up, its model's download and file (a build with the `neural-beats` feature; the app's builds leave it out) | `nori-engine::core::Measurer`; `nori-player::automix::beats`, `neural`; `nori-core::beat_download`; `nori-automix::beat_model` |
 | Output devices: naming, ranking, per-device sound profiles, AutoEQ curves, bit-perfect decisions | `nori-player::outputs`, `device`, `dac`; `nori-devices`: `outputs`, `profiles`, `autoeq` |
 | Downloads and stream cache bookkeeping: what is stored, what to fetch next, what to evict | `nori-transfers`: `transfers`, `stream_cache`; `nori-core::cache_policy` (the server's answers kept) |
-| Scrobbling decisions; lyrics: the server's, and sixteen lyrics services asked through the `Transport` (requests, matching, every format they answer in, ranking, asking them together, remembering the answers in the app's database), the current line, backing vocals and duet sides, and when the page redraws | `nori-queue::scrobble`; `nori-lyrics`: `lyrics`, `formats`, `json`, `html`, `lrclib`, `services`, `race`, `look`; `nori-core::race` (`Client::lyrics_lookup`); `nori-settings::lyrics_sources`; `nori-look::lyrics` |
+| Scrobbling decisions; lyrics: the server's, and sixteen lyrics services asked through the `Transport` (requests, matching, every format they answer in, credits stripped, each answer scored, asking them in waves, remembering the answers and the choice in the app's database, the lyrics cache's size and clearing), the current line, backing vocals and duet sides, and when the page redraws | `nori-queue::scrobble`; `nori-lyrics`: `lyrics`, `formats`, `json`, `html`, `lrclib`, `services`, `credits`, `trust`, `race`, `look`; `nori-core::race` (`Client::lyrics_lookup`); `nori-settings::lyrics_sources`; `nori-look::lyrics` |
 | What a song that will not play says, the credits (the core's crates, Android's libraries, the typeface and the third parties' data), About's lines | `nori-words::words`: `words_playback_error`, `words_about_android`; `nori-settings::settings_schema`: `core_credits`, `android_credits`, `data_credits` |
 | A perf recorder's bookkeeping: the state a stretch is filed under, what two readings of the counters make (the threads that woke most among them), the stretches kept, their sums by state, the page's figures, the audio output's line and the shared report | `nori-perf::perf_log` |
 | Cover colours: palette, theme, the page's colour scheme, the wash and melt behind the player | `nori-look::cover`, `palette`, `theme`, `dress` |
@@ -60,7 +60,11 @@ builds:
 - **Settings, generically**: every group, section and row is `settings_schema`'s (`settings_groups`,
   `page`), drawn by the row's kind (a switch, a choice, a slider, swatches, a ranked source, a key typed
   in, a link, an action) and changed by the row's own name through `setting_set`, `edit_level` or the
-  sound tools. A row Android gains appears in the terminal with no code. What a change asks of the player
+  sound tools. A row Android gains appears in the terminal with no code. The wording is for any device;
+  the few rows only a phone can use (swipes, the system's audio effects, a USB DAC the system drives,
+  offload, the choice of engine, moving covers) are flagged with a `Capability` (`setting_needs`), and a
+  client lists what it lacks in `SettingsFacts::lacks` (the terminal: all of them), so they are neither
+  drawn nor found by search (`settings_search_lacking`). What a change asks of the player
   (`SettingChange::effect`) is applied to the engine as Android applies it: `set_settings` for the sound,
   the fades and high quality output, `gain_changed`, `replan`. The client's own few settings (mouse,
   covers, volume) are kept beside the app's (`settings_store::app_value`, `keep_app_value`) and drawn as
@@ -73,7 +77,10 @@ builds:
   whichever protocol the terminal answers to (kitty graphics, sixel, iTerm2) or in half blocks. ratatui
   0.30 takes a cell's text width as the columns it covers, so the cell holding a picture's escape
   sequence is marked one column wide (`CellDiffOption::ForcedWidth`), or the rest of the frame is
-  skipped.
+  skipped. Under tmux, tmux itself is asked first: a tmux that draws sixel keeps the picture in the pane
+  and draws it again when the window comes back. Otherwise pictures pass through to the outer terminal,
+  which tmux does not keep (one sent while the window is hidden is lost), so the client turns tmux's
+  `focus-events` on and, when the pane has focus again, writes the whole screen and every picture again.
 - **Input**: one table of key bindings (keys.rs) that both dispatch and the help (`?`) read; every
   clickable place recorded as it is drawn; mouse capture off on request, so the terminal selects text.
 - **Cost**: one thread blocked on the terminal, and the screen's loop asleep on one channel for input,
@@ -82,8 +89,15 @@ builds:
   or idle it does not wake at all. Measured on a release build: idle and paused 0 wakeups and 0.00 % CPU
   of its own over 30 s; playing, the screen's thread wakes 1.0 times a second (0.03 to 0.1 % CPU), 5 to
   9 a second with word-by-word lyrics on screen (0.3 to 0.4 %); the engine's thread 0.1 to 3.4 a second.
-  What wakes most while music plays is the sound card's path under cpal (ALSA's thread and PipeWire's
-  data loop, about 270 a second together), which a larger cpal buffer in nori-output-cpal would cut.
+  The output asks the device for a 100 ms period (nori-output-cpal), so cpal's ALSA thread wakes 11 to 12
+  times a second. What still wakes most is PipeWire's data loop, a thread of the ALSA plugin inside the
+  process, which runs once per cycle of PipeWire's graph: the graph's quantum is set by whichever client
+  asks for the smallest, not by this one (its node asks for 4410 frames at 44.1 kHz). Measured 2026-09-25
+  (release `--script`, stdin held open, a 600 s MP3 over PipeWire 1.6, `/proc/<pid>/task/*/status`
+  context switches over 20 s, twice): the engine 2.1 to 2.5 a second, cpal's thread 10.9 to 11.7, the data
+  loop 188 (another client held the graph at 256 frames at 48 kHz, 187.5 cycles a second), about 202 in
+  all and 1.5 % of a core. On a graph left to its default quantum (1024 here, capped at 2048) the data
+  loop would wake about 47 times a second, or 23 at the cap (worked out, not measured).
 - **Everything else is the core's**: a failure's words (`describe_error`), times and captions
   (`nori_words::fmt`), the lyrics' credit, the queue saved for next time (`playlist_save`, `load_queue`).
 
@@ -130,7 +144,9 @@ only what touches the hardware:
   through the core's `playlist_*` calls and tell the engine (`queue_changed`); the controls are
   `play_at`, `play`, `pause`, `next`, `previous`, `seek`, `go_to`, `set_settings`, `replan`,
   `set_repeat`, `gain_changed`, `set_tuning` (the equalizer screen's shallow buffer, at once, the device
-  told through `AudioOutput::shallow`) and `pause_at_end`
+  told through `AudioOutput::shallow`; a device that says it `resizes` is changed in place and nothing is
+  heard, and the ring kept as deep as it says it needs, `AudioOutput::shallow_depth`; otherwise the music
+  is made again behind a dip) and `pause_at_end`
   (the sleep timer's "end of this song"). The player's own rules come with them: a seek or a `go_to`
   while paused is held until play and fetches nothing, and a skip button while paused is a request for
   music (`nori_player::transport::skip_plays`). A screen follows `Event`s (state, the song heard -
@@ -173,21 +189,49 @@ The engine also plays what the Android player plays around the sound chain, each
 - **Internet radio** (`Source::Live`, `Loader::live`): an endless stream on one connection, a window
   of it held, the station's ICY announcements taken out of the bytes and said as `Event::Title` when the
   ear reaches them. The client says where a station is (`ByteSource::open_live` asks for the
-  announcements).
+  announcements). An MP3 station is read frame by frame and each frame checked against the next
+  (`mpeg.rs`), so it plays on through noise, a join in the middle of a frame and a next song of another
+  rate or channel count (converted to the rate the device was opened at), and a read never looks through
+  more than 16 KiB for a frame: the engine's thread never waits on the network for one.
+- **HE-AAC** (AAC+ with SBR, v2 with PS; what most AAC radio sends, as ADTS saying AAC-LC at 22.05 or
+  24 kHz): symphonia decodes only its core, so what plays is the right pitch with nothing above
+  11-12 kHz. For the whole of it **the client lends a decoder**: `nori_player::decode::lend_platform_aac`
+  with a function making a `PlatformDecoder` for an `AacSetup` (the stated rate and channels, and the
+  AudioSpecificConfig when the container has one). A stream `decode::he_aac` calls HE-AAC (object type 5
+  or 29, the SBR extension in its config, or AAC-LC at 24 kHz or less) is then decoded by it, one access
+  unit at a time on the engine's thread, and the device is opened at the rate and channels it says.
+  Android lends MediaCodec through the NDK (crates/android `mediacodec.rs`). A desktop client lends none
+  by default and plays the core: no decoder of SBR in Rust is both free to link and fast enough (the one
+  found, oxideav-aac, MIT, decodes at 1.85 times real time), and FDK-AAC's licence and faad2's GPL do not
+  suit an MIT client. A desktop client that wants the treble can lend one over the system's libavcodec
+  (LGPL, linked at run time, its `aac` decoder has SBR and PS), feeding it each unit with a 7-byte ADTS
+  header put in front when there is no config.
 - **The offline bridge**: with `CoreApp::bridging`, a song the network would not bring is handed to the
   client as `Event::Bridge` when the core's rules say so; the client runs `Core::bridge_start` and plays
   what it edited in.
 - **Repeat one** says each time round as `Event::Looped`, for a scrobbler.
 
-Not in the engine yet, compared with the Android player: the precacher (the next song is fetched as the
-one before starts, but not the ones after it), AutoEQ curves offered for a new device (the core's
-`DeviceArrival` names one; fetching and offering it is the client's), the network's metered state (the
-engine streams the unmetered quality unless told), a desktop client's radio stations (the core keeps no
-station's address; the client's library says where each is), and symphonia's readers still allocate a
-buffer per packet (their API has no way to read into one kept).
+- **The network's metered state**: `core::network_metered(client, metered)` tells the core (and through it
+  every `CoreLibrary`) whether the network is metered, whenever the platform says it changed, and answers
+  the quality songs stream at from then on (the user's setting for that network, transcoded by the
+  server). It applies to the next song fetched: the song playing and the one already on its way keep the
+  address they were fetched from. Android's `EnginePlayer` tells it from its network callback; a desktop
+  client that never does streams the unmetered quality. `CoreLibrary::metered` forces the metered quality.
+- **Fetching ahead**: with a store, as each song starts the engine fetches the next one and the core's
+  `Client::precache_targets` names the ones after it (how many for this network - none on a metered one
+  by default - never a provider's song or a download), which `Store::fetch_ahead` fetches whole into the
+  stream cache one after another, each in one go, and then leaves the network alone until the next song
+  starts. A song the queue no longer wants is left half way; one the player is writing is left to it.
 
-Android can play through the engine too, as a second path to measure against ExoPlayer ("Playback
-engine" in the sound settings, read when the playback service starts; `tools/app.sh engine rust`).
+Not in the engine yet: AutoEQ curves offered for a new device (the core's `DeviceArrival` names one;
+the core fetches its curve, `Client::autoeq_curve`, and keeps the list, `Client::autoeq_update`, but
+offering it is the client's, as Android's `DeviceSound` does over `Outputs` for both of its players), a desktop client's radio stations (the core keeps no station's address; the client's library
+says where each is), and symphonia's readers still allocate a buffer per packet (their API has no way to
+read into one kept).
+
+Android plays through the engine by default (a new install; one that stored "ExoPlayer" keeps it). The
+ExoPlayer path stays as a choice while the two are compared ("Playback engine" in the sound settings,
+read when the playback service starts; `tools/app.sh engine rust|exoplayer`).
 `crates/android/src/track.rs` is the engine's output there: a thread of its own pours the ring into an
 AudioTrack whose buffer holds one of the engine's bursts and a second and a half more, in the
 power-saving mode, waking when a second is left and taking everything the ring has, so the engine is
@@ -206,9 +250,15 @@ AudioTrack opened for it by Kotlin (`RustBridge.openOffload`, the support asked 
 `RustPlayerJni.offloadEvent`; bit-perfect output opens 16-bit, 24-bit packed or float tracks pinned to the
 DAC as `BitPerfect.kt` says; a radio station's address comes from its queue item (`RustPlayerJni.radio`)
 and its stream through `RustBridge.openLive`; the offline bridge is `OfflineBridge.kt`, as on the
-ExoPlayer path.
+ExoPlayer path. What the service does around either player is the same for both: the precacher
+(`Precacher.kt`, a few seconds into each song, through the same stream cache), AutoMix's measuring ahead,
+each output's sound and the AutoEQ offer for a new device (`Outputs`, `DeviceSound`), the sleep timer,
+scrobbling, the notification, Android Auto's tree and resuming after a reboot (`onPlaybackResumption`).
+Audio focus, pausing when headphones are pulled out and the CPU wake lock are `EnginePlayer`'s own, as
+ExoPlayer's are; a stop after a run of songs that would not play is its player error, in the core's words
+(`queue_last_error`).
 
-By default Android keeps ExoPlayer for loading, demuxing and output, around the same Rust:
+With "Playback engine" on ExoPlayer, Android keeps ExoPlayer for loading, demuxing and output, around the same Rust:
 - **Loading and buffering:** fetch bytes (through the stream cache or a download), demux the container into
   packets, and keep a buffer ahead. Follow the core's `load_control` numbers: fill in one burst, then leave
   the network alone. Android: ExoPlayer (`playback/MediaSources.kt`, `PlaybackService.kt`).
@@ -473,10 +523,10 @@ platform object or cheaper than a crossing. They are for other clients.
 | `Covers.isProvider` (data/Library.kt) | `nori_core::covers::is_provider_cover` |
 | `Library.coverUrl` with `Uri.encode` (data/Library.kt) | `covers::cover_url_into` (into a kept buffer) |
 | `SearchViewModel`'s live search debounce, `isBlank` | `search::live_delay_ms`, `search::kotlin_whitespace` |
-| AutoEQ fetches: `Http.get(..).decodeToString()` in `SettingsViewModel.downloadAutoEqIndex`, `DeviceSound.adopt` | `autoeq::fetch_text`, `autoeq::text` (the JVM's UTF-8 repair) |
+| AutoEQ fetches: `Http.get(..).decodeToString()`, as the app read the index and presets before the core fetched them (`Client::autoeq_update`, `Client::autoeq_curve`, which Android now calls) | `autoeq::fetch_text`, `autoeq::text` (the JVM's UTF-8 repair) |
 | `AutoMixPrefetch.onDevice`, `AutoMixPrefetch.update` (retired: Android measures with nori-engine's `Measurer`) | `automix::ahead::whole_on_device`, `automix::ahead::plan` |
 | `ResizableEvictor.trimLocked` (playback/MediaSources.kt) | `stream_cache::trim` |
-| `PlayerConnection.publish`'s heard row, `PlayerConnection.read` | `heard::shown_index`, `heard::HeardAt::unpack` |
+| `PlayerConnection.read` | `heard::HeardAt::unpack` |
 | `PlayerViewModel.setVolumeFraction`, `volumeFraction` | `rules::volume_step`, `rules::volume_fraction` |
 | The car browser's paging (`PlaybackService.onGetChildren`, `onGetSearchResult`) | `car::page` |
 | `downloadEntry`'s missing songs (ui/DetailScreens.kt) | `menus::download_missing` |

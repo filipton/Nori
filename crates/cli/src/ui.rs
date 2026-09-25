@@ -504,8 +504,17 @@ fn cover(f: &mut Frame, area: Rect, art: Option<&mut Art>, key: Option<&str>, t:
     };
     match protocol {
         Some(p) => {
-            f.render_stateful_widget(StatefulImage::<StatefulProtocol>::default().resize(Resize::Scale(Some(image::imageops::FilterType::Triangle))), area, p);
+            let resize = Resize::Scale(Some(image::imageops::FilterType::Triangle));
+            let encode = ratatui_image::ResizeEncodeRender::needs_resize(p, &resize, area);
+            f.render_stateful_widget(StatefulImage::<StatefulProtocol>::default().resize(resize), area, p);
             forced_width(f, area);
+            // Made for this area now: the next frame written sends the picture to the terminal.
+            if let Some(rect) = encode {
+                match p.last_encoding_result() {
+                    Some(Err(e)) => eprintln!("nori: cover {} would not encode for {}x{} cells: {e}", key.unwrap_or_default(), rect.width, rect.height),
+                    _ => crate::term::debug!("cover {} encoded for {}x{} cells at {},{}: sent with this frame", key.unwrap_or_default(), rect.width, rect.height, area.x, area.y),
+                }
+            }
         }
         None => {
             let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(t.dim));

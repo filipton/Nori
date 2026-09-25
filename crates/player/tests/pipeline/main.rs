@@ -10,5 +10,6 @@ mod crossfade;
 mod gain;
 mod gapless;
 mod golden;
+mod levels;
 mod output;
 mod stages;

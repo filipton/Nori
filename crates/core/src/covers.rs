@@ -34,6 +34,10 @@ pub struct CoverRules {
     /// The share of the app's memory decoded covers may hold, and the disk cache's size.
     pub memory_share: f64,
     pub disk_bytes: u64,
+    /// The part of that memory still kept while no screen of the app is in sight (the screen off, another
+    /// app): the most recently drawn covers, the page that comes back first. Music may play on for hours
+    /// with nothing drawn.
+    pub hidden_share: f64,
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -47,6 +51,7 @@ pub fn cover_rules() -> CoverRules {
         provider_prefixes: PROVIDER_PREFIXES.map(String::from).to_vec(),
         memory_share: 0.15,
         disk_bytes: 256 * 1024 * 1024,
+        hidden_share: 0.25,
     }
 }
 
@@ -230,7 +235,7 @@ mod tests {
         assert_eq!((r.row, r.card, r.full), (320, 320, 800));
         assert_eq!((r.id_param.as_str(), r.size_param.as_str()), ("&id=", "&size="));
         assert_eq!(r.provider_prefixes, ["ext-", "pl-"]);
-        assert_eq!((r.memory_share, r.disk_bytes), (0.15, 268_435_456));
+        assert_eq!((r.memory_share, r.disk_bytes, r.hidden_share), (0.15, 268_435_456, 0.25));
     }
 
     #[test]

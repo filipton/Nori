@@ -13,12 +13,13 @@
 //! - the song on the screen is the one heard, give or take [`DIFFER_MS`];
 //! - the lyrics shown are the song heard's;
 //! - with AutoMix on, every song in the queue has a length (the planner has nothing to plan from without);
-//! - a setting changed is in the engine a second later.
+//! - a setting changed is in the engine a second later, judged only while it plays through an open output
+//!   and [`SETTLE_MS`] after the player service started or ended (an engine switch restarts it).
 //!
 //! [`Watch`] is the bookkeeping, plain and testable; the functions below keep one for the process and are
 //! what the engine's hook, the track and the platform call.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -28,6 +29,9 @@ pub const STILL_MS: i64 = 2_000;
 pub const DIFFER_MS: i64 = 1_000;
 /// Presses closer together than this are one run of skips.
 pub const RUN_MS: i64 = 3_000;
+/// After the player service starts or ends (an engine switch does both) its settings are not judged for
+/// this long: the service is still building its player, and a batch of settings arrived with it.
+pub const SETTLE_MS: i64 = 3_000;
 /// The most breaks kept for the self test to read back.
 pub const MOST_BREAKS: usize = 50;
 
@@ -88,6 +92,9 @@ pub struct Watch {
     shown: Option<String>,
     differ_since: Option<i64>,
     differ_said: bool,
+    /// Nobody can see the screen (the app is in the background, or the screen is off): what it shows is
+    /// not compared, since nothing on it is drawn or brought up to date until it is seen again.
+    hidden: bool,
     skips: Option<Skips>,
     queue_said: Vec<String>,
 }
@@ -141,6 +148,22 @@ impl Watch {
         self.compare(now, grace_ms)
     }
 
+    /// Whether the screen can be seen: the app in the foreground with the screen on. A difference is only
+    /// counted while it can, and from the moment it came back, so the time it spent off is not the
+    /// screen's lateness, and it has the same [`DIFFER_MS`] to catch up as after any change of song.
+    pub fn visible(&mut self, now: i64, on: bool, grace_ms: i64) -> Option<Break> {
+        if !on {
+            self.hidden = true;
+            self.differ_since = None;
+            return None;
+        }
+        if self.hidden {
+            self.hidden = false;
+            self.differ_since = None;
+        }
+        self.compare(now, grace_ms)
+    }
+
     /// Whether the screen and the ear agree, looked at now: a difference said once, when it has lasted
     /// longer than [`DIFFER_MS`] (and `grace_ms` more, the length of a mix the screen follows the ear through).
     pub fn compare(&mut self, now: i64, grace_ms: i64) -> Option<Break> {
@@ -148,6 +171,9 @@ impl Watch {
             self.differ_since = None;
             return None;
         };
+        if self.hidden {
+            return None;
+        }
         if heard == shown {
             self.differ_since = None;
             self.differ_said = false;
@@ -221,6 +247,13 @@ impl Watch {
     }
 }
 
+/// Whether the engine can be held to the settings now: only while it plays through an open output (paused,
+/// or with the output let go, the sound chain is not in any path) and not within [`SETTLE_MS`] of the
+/// player service starting or ending (`engine_since`).
+pub fn settings_judged(now: i64, playing: bool, output_open: bool, engine_since: Option<i64>) -> bool {
+    playing && output_open && engine_since.is_none_or(|t| now - t > SETTLE_MS)
+}
+
 /// A setting a second after it changed, against what the engine shows: each pair that disagrees.
 pub fn settings_held(expected: &[(&str, bool, bool)]) -> Option<Break> {
     let off: Vec<String> = expected.iter().filter(|(_, want, got)| want != got).map(|(what, want, got)| format!("{what}: {got}, expected {want}")).collect();
@@ -237,6 +270,8 @@ static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
 static BREAKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static ENGINE: Mutex<Option<PerfEngineSeen>> = Mutex::new(None);
 /// The self test's volume on every output, as f32 bits: 1 unless it is running quietly.
+/// When the player service last started or ended, wall ms; `i64::MIN` for never.
+static ENGINE_SINCE: AtomicI64 = AtomicI64::new(i64::MIN);
 static QUIET: AtomicU32 = AtomicU32::new(0x3F80_0000);
 
 /// Whether the watch is on: one atomic read, for every caller to ask first.
@@ -269,6 +304,15 @@ fn said(t: i64, b: Option<Break>) {
         kept.remove(0);
     }
     kept.push(format!("{} invariant: {line}", crate::perf_log::clock_words(t)));
+}
+
+/// The track's own account of the equalizer screen's shallow buffer (how deep it was made for the output
+/// it plays on and why, and any growth after it ran dry): a "tuning" event on the perf timeline. Nothing
+/// outside the perf build.
+pub fn tuning_said(detail: &str) {
+    if on() {
+        crate::perf_log::note_output(wall_ms(), "tuning", detail);
+    }
 }
 
 /// The perf build switches the watch on as it starts; nothing is watched before.
@@ -354,6 +398,16 @@ pub fn perf_watch_shown(wall_ms: i64, id: Option<String>, grace_ms: i64) {
     said(wall_ms, b);
 }
 
+/// The screen can be seen (the app in the foreground, the screen on), or no longer can.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn perf_watch_visible(wall_ms: i64, visible: bool, grace_ms: i64) {
+    if !on() {
+        return;
+    }
+    let b = with(|w| w.visible(wall_ms, visible, grace_ms));
+    said(wall_ms, b);
+}
+
 /// Anything else woke the platform's watcher: the screen and the ear compared at this moment too.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_watch_look(wall_ms: i64, grace_ms: i64) {
@@ -405,10 +459,15 @@ pub fn perf_watch_queue(wall_ms: i64, missing: Vec<String>, total: u32) {
 
 /// A second after the settings changed: what the engine shows (whether it asks for offload, whether the
 /// sound chain is in the samples' path) against what the settings say it should, over the output the
-/// platform sees (`usb`: something USB attached, where offload never goes).
+/// platform sees (`usb`: something USB attached, where offload never goes). Judged only as
+/// [`settings_judged`] says: `playing` through an output that is open (`output_open`).
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, usb: bool) {
+pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, usb: bool, playing: bool, output_open: bool) {
     if !on() {
+        return;
+    }
+    let since = ENGINE_SINCE.load(Ordering::Relaxed);
+    if !settings_judged(wall_ms, playing, output_open, (since != i64::MIN).then_some(since)) {
         return;
     }
     let Some(s) = nori_settings::settings_store::current() else { return };
@@ -419,6 +478,11 @@ pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, u
         pairs.push(("sound chain in the path", true, chain_in));
     }
     said(wall_ms, settings_held(&pairs));
+}
+
+/// The player service started or ended at `wall_ms` (the perf timeline's engine note).
+pub(crate) fn engine_changed(wall_ms: i64) {
+    ENGINE_SINCE.store(wall_ms, Ordering::Relaxed);
 }
 
 /// The invariant breaks this process said, oldest first, each "21:05:12 invariant: kind: detail".
@@ -536,6 +600,29 @@ mod tests {
     }
 
     #[test]
+    fn the_screen_is_not_late_while_nobody_can_see_it() {
+        let mut w = Watch::default();
+        w.heard(0, "a", 0);
+        w.shown(10, Some("a"), 0);
+        assert_eq!(w.visible(20, false, 0), None, "the screen goes off");
+        w.heard(1000, "b", 0);
+        assert_eq!(w.compare(60_000, 0), None, "a minute off: nothing is drawn, nothing is late");
+        assert_eq!(w.visible(64_000, true, 0), None, "back on: the second to catch up starts now");
+        assert_eq!(w.compare(64_900, 0), None);
+        let b = w.compare(65_100, 0).expect("still the old song 1.1 s after coming back");
+        assert_eq!(b.detail, "the screen showed a while b was heard, for 1100 ms");
+        // Caught up in time: nothing said.
+        let mut w = Watch::default();
+        w.heard(0, "a", 0);
+        w.shown(10, Some("a"), 0);
+        w.visible(20, false, 0);
+        w.heard(1000, "b", 0);
+        w.visible(64_000, true, 0);
+        assert_eq!(w.shown(64_300, Some("b"), 0), None);
+        assert_eq!(w.compare(70_000, 0), None);
+    }
+
+    #[test]
     fn lyrics_belong_to_the_song_heard() {
         let mut w = Watch::default();
         assert_eq!(w.lyrics(0, "a"), None, "nothing heard yet");
@@ -558,6 +645,18 @@ mod tests {
         assert_eq!(w.queue(true, &missing, 10), None, "the same songs said once");
         assert_eq!(w.queue(true, &[], 10), None);
         assert!(w.queue(true, &missing, 10).is_some(), "again after the queue was whole");
+    }
+
+    #[test]
+    fn a_setting_is_judged_only_playing_through_an_open_output_and_after_the_service_settled() {
+        // The self test's restore: the service had just started with a batch of settings, paused.
+        assert!(!settings_judged(1_000, false, false, Some(0)), "paused with no output, just started");
+        assert!(!settings_judged(10_000, false, true, Some(0)), "paused: the chain is in no path");
+        assert!(!settings_judged(10_000, true, false, Some(0)), "playing, but no output open yet");
+        assert!(!settings_judged(2_000, true, true, Some(0)), "the service started two seconds ago");
+        assert!(!settings_judged(SETTLE_MS, true, true, Some(0)), "still settling at the edge");
+        assert!(settings_judged(SETTLE_MS + 1, true, true, Some(0)));
+        assert!(settings_judged(5, true, true, None), "no service start seen: judged");
     }
 
     #[test]

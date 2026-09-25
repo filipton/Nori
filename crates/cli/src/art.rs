@@ -30,8 +30,9 @@ pub const COVER_PX: u32 = 600;
 /// The pictures on screen, each encoded once for the area it is drawn in.
 pub struct Art {
     picker: Picker,
-    /// A few covers by address, newest last: the one playing and the album page's.
-    kept: Vec<(String, StatefulProtocol)>,
+    /// A few covers by address, newest last: the one playing and the album page's, with the decoded
+    /// picture each was made from (to be sent again, [`Art::resend`]).
+    kept: Vec<(String, StatefulProtocol, Arc<Image>)>,
 }
 
 impl Art {
@@ -41,21 +42,39 @@ impl Art {
 
     /// A decoded cover, made ready for the terminal.
     pub fn put(&mut self, url: String, image: &Arc<Image>) {
-        let Some(rgba) = RgbaImage::from_raw(image.width, image.height, image.pixels.to_vec()) else { return };
-        let protocol = self.picker.new_resize_protocol(DynamicImage::ImageRgba8(rgba));
-        self.kept.retain(|(u, _)| *u != url);
+        let Some(protocol) = self.protocol(image) else { return };
+        self.kept.retain(|(u, _, _)| *u != url);
         if self.kept.len() >= 3 {
             self.kept.remove(0);
         }
-        self.kept.push((url, protocol));
+        self.kept.push((url, protocol, image.clone()));
+    }
+
+    fn protocol(&self, image: &Image) -> Option<StatefulProtocol> {
+        let rgba = RgbaImage::from_raw(image.width, image.height, image.pixels.to_vec())?;
+        Some(self.picker.new_resize_protocol(DynamicImage::ImageRgba8(rgba)))
+    }
+
+    /// Every picture made again, so the next draw sends it to the terminal in full: a protocol state
+    /// sends its picture once (kitty transmits it once, sixel only when its area changes), and a
+    /// terminal that dropped it (tmux, while the pane was in another window) would never see it again.
+    pub fn resend(&mut self) {
+        if self.picker.protocol_type() == ProtocolType::Halfblocks {
+            return;
+        }
+        for i in 0..self.kept.len() {
+            if let Some(p) = self.protocol(&self.kept[i].2) {
+                self.kept[i].1 = p;
+            }
+        }
     }
 
     pub fn get(&mut self, url: &str) -> Option<&mut StatefulProtocol> {
-        self.kept.iter_mut().find(|(u, _)| u == url).map(|(_, p)| p)
+        self.kept.iter_mut().find(|(u, _, _)| u == url).map(|(_, p, _)| p)
     }
 
     pub fn has(&self, url: &str) -> bool {
-        self.kept.iter().any(|(u, _)| u == url)
+        self.kept.iter().any(|(u, _, _)| u == url)
     }
 }
 
@@ -135,6 +154,9 @@ mod tests {
             picker.set_protocol_type(p);
             let mut art = Art::new(picker);
             art.put("u".into(), &image);
+            assert!(art.has("u"));
+            // Made again to be sent in full (a pane back from another tmux window): still there.
+            art.resend();
             assert!(art.has("u"));
             let mut buf = ratatui::buffer::Buffer::empty(ratatui::layout::Rect::new(0, 0, 10, 5));
             let widget = ratatui_image::StatefulImage::<StatefulProtocol>::default();

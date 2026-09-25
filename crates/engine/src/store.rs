@@ -8,7 +8,7 @@
 //! is the [`Order`]'s call (the core's `stream_cache` for a client that links it: never used by this
 //! run first, then least recently used), one whole song at a time.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -107,6 +107,8 @@ struct Held {
     /// Bytes the cache holds, once it has been counted (the first time something had to go).
     bytes: Option<u64>,
     limit: u64,
+    /// Keys an entry is being written for now: one writer each, or the second truncates the first's file.
+    writing: HashSet<String>,
 }
 
 /// The songs on disk. Shared by the engine's loaders, the downloader and whatever measures songs ahead.
@@ -114,6 +116,10 @@ pub struct Store {
     dir: PathBuf,
     order: Box<dyn Order>,
     held: Mutex<Held>,
+    /// The songs fetched ahead of their turn ([`Store::fetch_ahead`]).
+    pub(crate) ahead: crate::ahead::Ahead,
+    /// Told whenever a streamed song has become whole in the cache ([`Store::on_whole`]).
+    whole: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl Store {
@@ -122,7 +128,13 @@ impl Store {
         let dir = dir.into();
         fs::create_dir_all(dir.join(STREAM))?;
         fs::create_dir_all(dir.join(DOWNLOADS))?;
-        Ok(Arc::new(Store { dir, order, held: Mutex::new(Held { bytes: None, limit }) }))
+        Ok(Arc::new(Store { dir, order, held: Mutex::new(Held { bytes: None, limit, writing: HashSet::new() }), ahead: Default::default(), whole: Mutex::new(Vec::new()) }))
+    }
+
+    /// `told` hears of every streamed song that becomes whole in the cache from now on, on the thread
+    /// that wrote its last bytes: what measures songs ahead looks again then, never by polling.
+    pub fn on_whole(&self, told: Box<dyn Fn() + Send + Sync>) {
+        self.whole.lock().push(told);
     }
 
     fn stream_path(&self, key: &str) -> PathBuf {
@@ -164,13 +176,38 @@ impl Store {
         p.is_file().then_some(p)
     }
 
-    /// A new entry for `key`, written as the song loads; none when the file cannot be made.
+    /// A new entry for `key`, written as the song loads; none when the file cannot be made, or while
+    /// another writer has it (the player loading the song the precacher is fetching, or the other way
+    /// round): the one there first keeps it.
     pub fn writer(self: &Arc<Self>, key: &str) -> Option<Writer> {
+        if !self.held.lock().writing.insert(key.to_string()) {
+            return None;
+        }
         let mut part = self.stream_path(key).into_os_string();
         part.push(PART);
         let part = PathBuf::from(part);
-        let file = File::create(&part).ok()?;
+        let Ok(file) = File::create(&part) else {
+            self.held.lock().writing.remove(key);
+            return None;
+        };
         Some(Writer { store: self.clone(), key: key.to_string(), part, file: Some(file), at: 0 })
+    }
+
+    /// Whether an entry for `key` is being written now.
+    pub fn writing(&self, key: &str) -> bool {
+        self.held.lock().writing.contains(key)
+    }
+
+    /// Fetches `songs` (address and cache key, in order) whole into the stream cache ahead of their
+    /// turn, one after another through `bytes`, each in one go; see [`crate::ahead`]. Called again, the
+    /// new list replaces the old one; an empty one stops the fetching.
+    pub fn fetch_ahead(self: &Arc<Self>, bytes: Arc<dyn crate::source::ByteSource>, songs: Vec<(String, String)>) {
+        self.ahead.ask(self, bytes, songs);
+    }
+
+    /// Whether songs are being fetched ahead now: for a test to wait until they are.
+    pub fn fetching_ahead(&self) -> bool {
+        self.ahead.busy()
     }
 
     /// The stream cache's limit from now on, and whatever is over it dropped.
@@ -262,6 +299,9 @@ impl Store {
         }
         self.order.touch(key);
         self.trim(len);
+        for told in self.whole.lock().iter() {
+            told();
+        }
         true
     }
 }
@@ -310,6 +350,7 @@ impl Drop for Writer {
         if !self.part.as_os_str().is_empty() {
             let _ = fs::remove_file(&self.part);
         }
+        self.store.held.lock().writing.remove(&self.key);
     }
 }
 
@@ -317,11 +358,9 @@ impl Drop for Writer {
 mod tests {
     use super::*;
 
-    fn dir(name: &str) -> PathBuf {
-        // A few kilobytes each, in a directory of the process's own.
-        let d = std::env::temp_dir().join(format!("nori-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+    /// A few kilobytes each, in a directory of the test's own, gone when the test is.
+    fn dir(name: &str) -> nori_testdir::TempDir {
+        nori_testdir::TempDir::new(name)
     }
 
     fn put(s: &Arc<Store>, key: &str, len: usize) {
@@ -341,7 +380,8 @@ mod tests {
 
     #[test]
     fn a_song_is_an_entry_only_once_all_of_it_is_written() {
-        let s = Store::open(dir("store-whole"), 1 << 20, Box::new(Recent::default())).unwrap();
+        let d = dir("store-whole");
+        let s = Store::open(d.path(), 1 << 20, Box::new(Recent::default())).unwrap();
         let mut w = s.writer("a:0").unwrap();
         assert!(w.write(0, &[1; 100]));
         assert!(s.cached("a:0").is_none(), "not while it loads");
@@ -351,18 +391,19 @@ mod tests {
         put(&s, "a:0", 100);
         assert_eq!(fs::read(s.cached("a:0").unwrap()).unwrap().len(), 100);
         let w = s.writer("b:0").unwrap();
+        assert!(s.writer("b:0").is_none() && s.writing("b:0"), "one writer at a time: a second would truncate the first's file");
         drop(w);
+        assert!(!s.writing("b:0"));
         assert!(fs::read_dir(s.dir.join(STREAM)).unwrap().count() == 1, "an entry let go leaves nothing behind");
-        let _ = fs::remove_dir_all(&s.dir);
     }
 
     #[test]
     fn over_its_limit_the_cache_lets_the_least_recently_used_go_and_what_an_earlier_run_left_first() {
         let d = dir("store-limit");
-        let s = Store::open(&d, 1000, Box::new(Recent::default())).unwrap();
+        let s = Store::open(d.path(), 1000, Box::new(Recent::default())).unwrap();
         put(&s, "old:0", 300);
         drop(s);
-        let s = Store::open(&d, 1000, Box::new(Recent::default())).unwrap();
+        let s = Store::open(d.path(), 1000, Box::new(Recent::default())).unwrap();
         put(&s, "a:0", 300);
         put(&s, "b:0", 300);
         put(&s, "c:0", 300);
@@ -376,6 +417,5 @@ mod tests {
         assert!(s.cached("d:0").is_some(), "the latest used stays");
         s.clear_cache();
         assert_eq!(s.cache_bytes(), 0);
-        let _ = fs::remove_dir_all(d);
     }
 }

@@ -51,14 +51,9 @@ fn made(dir: &Path, name: &str, secs: u32, hz: u32, codec: &[&str], ext: &str) -
     std::fs::read(out).unwrap()
 }
 
-fn dir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("nori-paths-{}-{}", std::process::id(), nanos()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
-}
-
-fn nanos() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+/// A directory of the test's own, gone when the test is.
+fn dir() -> nori_testdir::TempDir {
+    nori_testdir::TempDir::new("paths")
 }
 
 fn mp3(dir: &Path, name: &str, secs: u32, hz: u32) -> Vec<u8> {
@@ -849,7 +844,6 @@ fn songs_of_one_format_join_on_one_offloaded_track_each_with_its_delay_and_paddi
     assert!(rig.wait(5, |r| r.events.lock().contains(&Event::State(State::Ended))), "{:?}", rig.events.lock());
     assert!(rig.card.opened.lock().is_empty(), "the CPU's output was never opened");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -875,7 +869,6 @@ fn a_track_that_is_torn_down_hands_the_music_to_the_cpu_where_the_ear_is() {
     let s = rig.engine.status();
     assert!(!s.offloaded && s.position_ms >= 5_000, "{s:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -922,7 +915,6 @@ fn offload_is_taken_up_where_the_ear_is_once_nothing_touches_the_samples_and_giv
     let s = rig.engine.status();
     assert!(s.index == Some(0) && s.position_ms >= at + 9_990, "{s:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -951,7 +943,6 @@ fn a_song_the_chip_does_not_decode_plays_on_the_cpu_between_songs_it_does() {
     let heard = rig.card.heard.lock().len() / 2;
     assert!(heard + 44_100 / 2 >= 30 * 44_100, "b whole on the CPU: {heard}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -984,7 +975,6 @@ fn a_seek_on_the_chip_empties_its_track_and_starts_again_at_a_packet() {
     let frames = fake.written() as i64;
     assert!((frames + at * 44_100 / 1000 - 30 * 44_100).abs() <= 1152, "{frames} frames from {at} ms");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1008,7 +998,6 @@ fn repeat_one_on_the_chip_joins_the_song_to_itself_and_says_each_loop() {
     }
     assert!(rig.wait(5, |r| r.events.lock().iter().filter(|e| matches!(e, Event::Looped { index: 0, .. })).count() == 2), "{:?}", rig.events.lock());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1042,7 +1031,6 @@ fn the_sleep_timer_s_end_of_song_on_the_chip_takes_back_the_song_written_after_i
     assert!(rig.wait(5, |r| r.events.lock().contains(&Event::Stopped)), "{:?}", rig.events.lock());
     assert!(rig.wait(5, |r| { let s = r.engine.status(); s.state == State::Paused && s.index == Some(1) && s.position_ms == 0 }), "{:?}", rig.engine.status());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1082,7 +1070,6 @@ fn opus_goes_to_the_chip_in_ogg_pages_its_header_first() {
     assert!(last >= 3 * 48_000 + skip && last < 3 * 48_000 + skip + 960 * 3, "{last}");
     assert_eq!(fake.written(), 3 * 48_000, "the frames heard, pre-skip and padding cut");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1107,7 +1094,6 @@ fn aac_in_mp4_goes_to_the_chip_with_its_edit_list_as_delay_and_padding() {
     assert_eq!((*delay, *padding), (1024, 0));
     assert_eq!(fake.written(), 3 * 44_100, "the frames heard");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 // ---- bit-perfect ----
@@ -1353,7 +1339,6 @@ fn a_song_on_the_cpu_says_why_the_chip_did_not_take_it() {
         assert!(fake.calls().iter().all(|c| !matches!(c, Call::Open(_))), "no track for the chip: {:?}", fake.calls());
         rig.engine.stop();
     }
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1374,7 +1359,6 @@ fn plain_offload_takes_a_song_with_no_gap_to_cut_as_media3_does() {
     assert!(fake.calls().contains(&Call::DelayPadding(0, 0)), "{:?}", fake.calls());
     assert_eq!(rig.engine.status().pcm_why, None);
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 // ---- offload without gapless support ----
@@ -1422,7 +1406,6 @@ fn without_gapless_offload_songs_of_different_albums_are_offloaded_their_delay_l
     assert_eq!(calls.iter().filter(|c| matches!(c, Call::DelayPadding(576, _))).count(), 3, "every song from its start: {calls:?}");
     assert!(rig.card.opened.lock().is_empty(), "the CPU's output was never opened");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1443,7 +1426,6 @@ fn without_gapless_offload_an_album_in_order_stays_on_the_cpu() {
     assert!(!rig.engine.status().offloaded);
     assert!(fake.calls().iter().all(|c| !matches!(c, Call::Open(_))), "no track for the chip: {:?}", fake.calls());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1471,7 +1453,6 @@ fn without_gapless_offload_the_cpu_takes_an_album_over_at_its_first_song_and_han
     assert!(heard + 44_100 / 2 >= 2 * 30 * 44_100, "a1 and a2 whole on the CPU: {heard} frames");
     assert_eq!(fake.calls().iter().filter(|c| matches!(c, Call::DelayPadding(576, _))).count(), 2, "x and y from their starts: {:?}", fake.calls());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 // ---- a play head that makes no sense ----
@@ -1557,7 +1538,6 @@ fn a_play_head_that_could_not_be_read_or_read_nought_skips_no_song() {
     let at = rig.engine.status().position_ms;
     assert!((0..100).contains(&at), "at the start of b: {at}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1586,7 +1566,6 @@ fn a_play_head_counting_again_from_nought_after_a_pause_skips_no_song() {
     let at = rig.engine.status().position_ms;
     assert!((0..100).contains(&at), "at the start of b: {at}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1606,7 +1585,6 @@ fn a_play_head_ahead_of_the_clock_hands_the_song_to_the_cpu_where_the_ear_is() {
     assert!(why.contains("could not be followed") && why.contains("ahead of the clock"), "{why}: {log:?}");
     assert!(fake.notes().iter().any(|n| n.starts_with("offload given up")), "{:?}", fake.notes());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1644,7 +1622,6 @@ fn a_late_word_that_everything_was_presented_ends_no_song() {
     assert!(notes.iter().any(|n| n.contains("would not take the end of stream while its track played (2 of 3)")), "{notes:?}");
     assert!(notes.iter().any(|n| n.starts_with("a ended by the play head")), "{notes:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1666,7 +1643,6 @@ fn an_end_of_stream_the_platform_keeps_refusing_hands_the_song_to_the_cpu() {
     assert!(why.contains("would not take the end of stream"), "{why}");
     assert!(!fake.calls().contains(&Call::EndOfStream));
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1695,7 +1671,6 @@ fn the_track_holds_four_minutes_at_most_whatever_the_platform_would_take() {
     assert!(rig.wait(5, |_| fake.written() == 300 * 44_100), "{}", fake.written());
     assert!(rig.wait(5, |_| fake.calls().contains(&Call::EndOfStream)));
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1715,7 +1690,6 @@ fn a_pause_after_the_engine_slept_through_the_music_keeps_the_ear_where_it_is() 
     assert!(s.offloaded && s.index == Some(0) && s.position_ms >= 1_990, "two seconds into a, still on the chip: {s:?}");
     assert!(!fake.notes().iter().any(|n| n.contains("ahead of the clock")), "{:?}", fake.notes());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 /// Two songs of `secs` on a Galaxy S22's offloaded track ([`Fake::phone`]).
@@ -1774,7 +1748,6 @@ fn a_phone_that_grants_64_kb_and_whose_play_head_never_moves_plays_by_its_timest
     assert!(s.offloaded && s.index == Some(0) && (7_000..=10_200).contains(&s.position_ms), "{s:?}");
     plays_through_on_the_phone(&rig, &fake, secs);
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1784,7 +1757,6 @@ fn a_phone_that_grants_64_kb_without_timestamps_plays_by_its_play_head() {
     let Some((rig, fake)) = two_on_a_phone(&d, secs, false, false) else { return };
     plays_through_on_the_phone(&rig, &fake, secs);
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1805,7 +1777,6 @@ fn a_track_whose_play_head_and_timestamp_never_move_hands_the_song_to_the_cpu_wh
     // Its requests kept it fed until then: no silence before the CPU took over.
     assert_eq!(fake.starved_ms(), 0, "{notes:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1820,7 +1791,6 @@ fn a_timestamp_that_stands_still_gives_way_to_a_play_head_that_moves() {
     plays_through_on_the_phone(&rig, &fake, secs);
     assert!(fake.notes().iter().any(|n| n.contains("the play head is followed instead")), "{:?}", fake.notes());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1877,7 +1847,6 @@ fn a_phone_whose_timestamp_jitters_keeps_the_ear_where_the_chip_is() {
     assert!(of_count.len() <= 2 && of_count.iter().all(|n| n.contains("ahead of the clock")), "{notes:?}");
     assert!(notes.iter().any(|n| n.contains(" ended ") && n.contains("a moment back")), "{notes:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -1919,7 +1888,6 @@ fn next_pressed_quickly_on_the_chip_moves_one_song_per_press() {
         assert!((900..2_000).contains(&s.position_ms), "gap {gap}: a second into d: {}", s.position_ms);
         rig.engine.stop();
     }
-    let _ = std::fs::remove_dir_all(d);
 }
 
 // ---- the transition settings and offload, changed while music plays ----
@@ -1927,13 +1895,15 @@ fn next_pressed_quickly_on_the_chip_moves_one_song_per_press() {
 /// The simulated app, shared, so a test can change the planner's settings (the core's, which change the
 /// moment the user touches them) and read its log while the engine plays.
 #[derive(Clone)]
-struct Watched(Arc<Mutex<sim::App>>);
+/// The second field, when above 0, is where every plan enters its incoming song, µs (a planner that
+/// skips the song's quiet opening).
+struct Watched(Arc<Mutex<sim::App>>, Arc<Mutex<i64>>);
 
 impl Watched {
     fn automix() -> Watched {
         let mut a = sim::App::new();
         a.prefs = nori_player::transitions::TransitionPrefs { auto_mix: true, auto_mix_max_s: 6, echo_out: false, ..sim::prefs_off() };
-        Watched(Arc::new(Mutex::new(a)))
+        Watched(Arc::new(Mutex::new(a)), Arc::default())
     }
 
     fn log(&self) -> Vec<String> {
@@ -1943,7 +1913,8 @@ impl Watched {
 
 impl Host for Watched {
     fn plan_for(&mut self, id: &str) -> Option<Plan> {
-        self.0.lock().plan_for(id)
+        let skip = *self.1.lock();
+        self.0.lock().plan_for(id).map(|p| if skip > 0 { Plan { in_skip_us: skip, ..p } } else { p })
     }
     fn wants_analysis(&mut self, id: &str) -> Option<u64> {
         self.0.lock().wants_analysis(id)
@@ -2009,7 +1980,6 @@ fn automix_switched_on_while_the_chip_plays_takes_the_music_to_the_cpu_at_once_a
     assert!(log.iter().any(|l| l.contains("transition a -> b")), "{log:?}");
     assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 /// As a phone had it: the chip plays with AutoMix off, the equalizer is switched on (the CPU takes the song
@@ -2045,7 +2015,6 @@ fn automix_switched_on_after_the_equalizer_took_the_song_off_the_chip_mixes() {
     assert!(log.iter().any(|l| l.contains("transition a -> b")), "{log:?}");
     assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -2073,7 +2042,6 @@ fn automix_switched_off_hands_the_song_back_to_the_chip_where_the_ear_is() {
     let s = rig.engine.status();
     assert!(s.index == Some(0) && s.position_ms >= before, "a from where the ear was ({before} ms): {s:?}");
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -2099,7 +2067,6 @@ fn automix_switched_off_leaves_an_album_in_order_on_the_cpu_without_gapless_offl
     assert!(rig.engine.status().offload_wanted && !rig.engine.status().offloaded);
     assert!(fake.calls().iter().all(|c| !matches!(c, Call::Open(_))), "no track for the chip: {:?}", fake.calls());
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
 }
 
 #[test]
@@ -2124,5 +2091,477 @@ fn offload_switched_off_and_on_while_playing_moves_the_song_at_once_both_ways() 
     rig.engine.set_settings(offload());
     assert!(rig.wait(10, |r| r.engine.status().offloaded), "back on the chip: {:?}", rig.engine.status().pcm_why);
     rig.engine.stop();
-    let _ = std::fs::remove_dir_all(d);
+}
+
+// ---- the chip's song handed to the CPU on a phone, where the chip really was ----
+
+/// What happened on the phone's chip before the equalizer was switched on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Before {
+    /// Ten seconds of a.
+    Played,
+    /// Five seconds of a, two paused, then five more.
+    PausedAndResumed,
+    /// Five seconds of a, then a skip to b, the equalizer switched on half a second into it.
+    Skipped,
+}
+
+/// A song plays on a Galaxy S22's chip (64 KB granted, a play head stuck at nought, its timestamps
+/// jittery if `jittery`), and the equalizer is switched on: the CPU takes the song over within a moment
+/// of where the chip was, and the song plays on from there, the status and the events following it.
+fn equalizer_on_a_phone(jittery: bool, before: Before) {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_phone_with(&d, secs, true, true, jittery) else { return };
+    rig.engine.position_updates(Some(Duration::from_millis(250)));
+    let head = || fake.0.lock().head;
+    let played = |frames: u64| rig.time.until(Duration::from_secs(40), || head() >= frames);
+    let song = match before {
+        Before::Played => {
+            assert!(played(10 * 44_100));
+            0
+        }
+        Before::PausedAndResumed => {
+            assert!(played(5 * 44_100));
+            rig.engine.pause();
+            rig.run(2_000);
+            assert!(!fake.0.lock().playing, "paused");
+            rig.engine.play();
+            assert!(played(10 * 44_100));
+            0
+        }
+        Before::Skipped => {
+            assert!(played(5 * 44_100));
+            rig.engine.go_to(1, 0);
+            // Half a second in: past the glitches of a jittery track's first 300 ms, whose timestamps
+            // say less than it presented.
+            assert!(rig.time.until(Duration::from_secs(10), || fake.0.lock().flushes == 1 && head() >= 44_100 / 2), "b on the chip");
+            1
+        }
+    };
+    let s = rig.engine.status();
+    assert!(s.offloaded && s.index == Some(song), "{s:?} {:?}", fake.notes());
+    let events_before = rig.events.lock().len();
+    // The chip moves only as the test's clock does: where it is now is where the ear is when the
+    // settings arrive.
+    let chip_ms = (head() * 1000 / 44_100) as i64;
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    let asked_at = rig.now_ms();
+    rig.engine.set_settings(Settings { sound: eq, ..offload() });
+    // At once: the CPU plays within a moment of the settings changing, not at the chip's next top-up.
+    assert!(rig.time.until(Duration::from_secs(10), || !rig.engine.status().offloaded && !rig.card.heard.lock().is_empty()));
+    assert!(rig.now_ms() - asked_at <= 300, "the CPU played {} ms after the equalizer went on: {:?}", rig.now_ms() - asked_at, fake.notes());
+    let took = rig.time.until(Duration::from_secs(10), || !rig.engine.status().offloaded && rig.card.heard.lock().len() >= 2 * 44_100 / 2);
+    assert!(took, "the CPU took over: {:?} {:?}", rig.engine.status(), fake.notes());
+    assert!(fake.calls().contains(&Call::Close) && !fake.0.lock().playing);
+    let s = rig.engine.status();
+    let cpu_ms = (rig.card.heard.lock().len() / 2 * 1000 / 44_100) as i64;
+    let notes = fake.notes();
+    assert!(s.index == Some(song) && s.state == State::Playing, "{s:?}");
+    // Where the CPU took over, as the perf report has it: where the chip was, not where the engine last
+    // looked at it, nor the end of what was written.
+    let left = notes.iter().find(|n| n.starts_with("offload: left at ")).cloned().unwrap_or_default();
+    assert!(left.contains("chip said") && left.contains("written"), "the handoff noted: {notes:?}");
+    let left_ms: i64 = left["offload: left at ".len()..].split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(-1);
+    assert!((left_ms - chip_ms).abs() <= 50, "the CPU took {song} over from {left_ms} ms, the chip was at {chip_ms} ms: {notes:?}");
+    // The status runs on from there with what the CPU played (as of the engine's last wake, a moment
+    // behind the card).
+    assert!(s.position_ms <= left_ms + cpu_ms + 50 && s.position_ms >= left_ms + cpu_ms - 300, "from {left_ms} ms, {cpu_ms} ms played: {s:?}");
+    // It plays on from there, the status with it.
+    rig.run(3_000);
+    let later = rig.engine.status();
+    assert!(later.index == Some(song) && later.state == State::Playing && !later.offloaded, "{later:?}");
+    assert!((later.position_ms - s.position_ms - 3_000).abs() <= 100, "three seconds on: {s:?} {later:?}");
+    // Nothing said another song, nor the end; the positions said go on from where the chip was.
+    let events: Vec<Event> = rig.events.lock()[events_before..].to_vec();
+    assert!(!events.iter().any(|e| matches!(e, Event::Song { index, .. } if *index != song) || *e == Event::State(State::Ended)), "{events:?}");
+    // The new place is said once, where the CPU took over, for a client running its own clock to take
+    // it again without a command: the player's own bar anchors there, not at the chip's last word.
+    let placed: Vec<(usize, i64)> = events.iter().filter_map(|e| if let Event::Placed { index, ms } = e { Some((*index, *ms)) } else { None }).collect();
+    assert!(placed.len() == 1 && placed[0].0 == song && (placed[0].1 - left_ms).abs() <= 50, "placed at {left_ms} ms: {placed:?}");
+    let positions: Vec<i64> = events.iter().filter_map(|e| if let Event::Position { index, ms } = e { assert_eq!(*index, song); Some(*ms) } else { None }).collect();
+    assert!(positions.len() >= 8, "{events:?}");
+    assert!(positions.windows(2).all(|w| w[1] >= w[0] - 20), "onwards: {positions:?}");
+    assert!(positions.iter().all(|&ms| ms >= chip_ms - 300 && ms <= later.position_ms + 50), "from where the chip was ({chip_ms} ms): {positions:?}");
+    rig.engine.stop();
+}
+
+#[test]
+fn the_equalizer_switched_on_while_a_phone_s_chip_plays_hands_the_song_to_the_cpu_where_the_chip_was() {
+    equalizer_on_a_phone(false, Before::Played);
+}
+
+#[test]
+fn the_equalizer_switched_on_while_a_jittery_phone_s_chip_plays_hands_the_song_to_the_cpu_where_the_chip_was() {
+    equalizer_on_a_phone(true, Before::Played);
+}
+
+#[test]
+fn the_equalizer_switched_on_after_a_pause_on_a_phone_s_chip_hands_the_song_to_the_cpu_where_the_chip_was() {
+    equalizer_on_a_phone(true, Before::PausedAndResumed);
+    equalizer_on_a_phone(false, Before::PausedAndResumed);
+}
+
+#[test]
+fn the_equalizer_switched_on_right_after_a_skip_on_a_phone_s_chip_hands_the_song_to_the_cpu_where_the_chip_was() {
+    equalizer_on_a_phone(true, Before::Skipped);
+    equalizer_on_a_phone(false, Before::Skipped);
+}
+
+/// A server that says no length (a song transcoded as it is sent, in chunks) and sends the first
+/// `hold` bytes of each song at once, the rest only once `gate` opens.
+struct Unsized {
+    files: Vec<(String, Arc<Vec<u8>>)>,
+    hold: usize,
+    gate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct Trickle {
+    file: Arc<Vec<u8>>,
+    at: usize,
+    hold: usize,
+    gate: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Read for Trickle {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.at >= self.hold && !self.gate.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let n = buf.len().min(self.file.len() - self.at);
+        buf[..n].copy_from_slice(&self.file[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+impl ByteSource for Unsized {
+    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+        let f = self.files.iter().find(|(u, _)| u == url).map(|(_, f)| f.clone()).ok_or("404")?;
+        Ok(Body { start: from, len: None, reader: Box::new(Trickle { file: f, at: from as usize, hold: self.hold, gate: self.gate.clone() }) })
+    }
+}
+
+struct UnsizedSongs(Arc<Unsized>, Vec<(String, String, i64)>);
+
+impl Library for UnsizedSongs {
+    fn locate(&mut self, id: &str) -> Result<Located, String> {
+        let (_, hint, ms) = self.1.iter().find(|(i, _, _)| i == id).cloned().ok_or("no such song")?;
+        Ok(Located { source: Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some(hint), duration_ms: Some(ms) })
+    }
+
+    fn about(&self, id: &str) -> WindowSong {
+        let ms = self.1.iter().find(|(i, _, _)| i == id).map_or(0, |s| s.2);
+        WindowSong { id: id.into(), title: id.into(), duration_ms: ms, ..Default::default() }
+    }
+}
+
+/// Two songs of `secs` from a server that does not say their length ([`Unsized`]), nine tenths of each
+/// sent and the rest held back until the gate opens (long songs, so that what the CPU reads ahead stays
+/// well short of it). None without ffmpeg.
+fn unsized_rig(d: &Path, secs: u32, fake: Option<Fake>, settings: Settings) -> Option<(Rig, Arc<std::sync::atomic::AtomicBool>)> {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed");
+        return None;
+    }
+    let (a, b) = (mp3(d, "a", secs, 440), mp3(d, "b", secs, 660));
+    let gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hold = a.len() * 9 / 10;
+    let server = Arc::new(Unsized { files: vec![("a".into(), Arc::new(a)), ("b".into(), Arc::new(b))], hold, gate: gate.clone() });
+    let songs = vec![("a".to_string(), "mp3".to_string(), secs as i64 * 1000), ("b".to_string(), "mp3".to_string(), secs as i64 * 1000)];
+    let queue = SharedQueue::default();
+    queue.0.lock().set(songs.iter().map(|s| s.0.clone()).collect(), Some(0), false, 0);
+    let card = Card::new();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let clock = Virtual::default();
+    if let Some(f) = &fake {
+        f.0.lock().clock = Some(clock.clone());
+        card.pull.lock().chip = Some(f.clone());
+    }
+    let config = Config { memory_mb: 256, settings, ..Config::default() };
+    let offload = fake.map(|f| Box::new(f) as Box<dyn OffloadOutput>);
+    let engine = Engine::start_on(UnsizedSongs(server, songs), app(), queue.clone(), Box::new(card.clone()), offload, config, clock.clone(), move |e| seen.lock().push(e));
+    engine.queue_changed();
+    Some((Rig { engine, time: Stepper::new(clock, card.pull.clone()), card, queue, events }, gate))
+}
+
+/// A song whose length the server does not say, still on its way, plays on the phone's chip; the
+/// equalizer goes on: the CPU takes it over where the chip was (a song of the library is seeked, not
+/// taken for a station that cannot be), and it plays on from there.
+#[test]
+fn the_equalizer_switched_on_over_a_song_of_no_known_length_still_coming_hands_it_to_the_cpu_where_the_chip_was() {
+    let d = dir();
+    let secs = 60;
+    let fake = Fake::new(MP3_ONLY);
+    fake.phone(true, true);
+    let Some((rig, gate)) = unsized_rig(&d, secs, Some(fake.clone()), offload()) else { return };
+    // The engine wakes every 100 ms to say where the ear is, so its status is never older than that.
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 0);
+    assert!(rig.time.until(Duration::from_secs(40), || fake.0.lock().head >= 8 * 44_100), "a on the chip: {:?} {:?}", rig.engine.status(), fake.notes());
+    let chip_ms = (fake.0.lock().head * 1000 / 44_100) as i64;
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    rig.engine.set_settings(Settings { sound: eq, ..offload() });
+    let took = rig.time.until(Duration::from_secs(10), || !rig.engine.status().offloaded && rig.card.heard.lock().len() >= 44_100);
+    let events = rig.events.lock().clone();
+    assert!(took, "the CPU took over: {:?} {:?} {events:?}", rig.engine.status(), fake.notes());
+    assert!(!events.iter().any(|e| matches!(e, Event::Error { .. })), "{events:?}");
+    rig.run(2_000);
+    let s = rig.engine.status();
+    let cpu_ms = (rig.card.heard.lock().len() / 2 * 1000 / 44_100) as i64;
+    assert!(s.index == Some(0) && s.state == State::Playing, "a plays on: {s:?} {:?}", rig.events.lock());
+    let lead = { let h = rig.card.heard.lock(); h.iter().position(|x| x.abs() > 1e-3).unwrap_or(h.len()) / 2 };
+    assert!((s.position_ms - chip_ms - cpu_ms).abs() <= 150, "from where the chip was ({chip_ms} ms), {cpu_ms} ms played, {lead} silent: {s:?} {:?}", fake.notes());
+    gate.store(true, std::sync::atomic::Ordering::Release);
+    rig.engine.stop();
+}
+
+/// The equalizer switched on and off quickly, again and again, while a song plays on a phone's chip:
+/// the song goes to the CPU and back without an error, a moment of silence on either path or a jump of
+/// its place, and ends where the last switch left it.
+#[test]
+fn the_equalizer_switched_on_and_off_quickly_on_a_phone_plays_on_without_a_glitch() {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_phone_with(&d, secs, true, true, true) else { return };
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    assert!(rig.time.until(Duration::from_secs(40), || fake.0.lock().head >= 5 * 44_100));
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    let events_before = rig.events.lock().len();
+    let started = rig.engine.status().position_ms;
+    let t0 = rig.now_ms();
+    for k in 0..8 {
+        let on = k % 2 == 0;
+        rig.engine.set_settings(if on { Settings { sound: eq.clone(), ..offload() } } else { offload() });
+        rig.run(if k == 3 { 1_000 } else { 150 });
+    }
+    // Last switched off: back on the chip, and playing there.
+    assert!(rig.time.until(Duration::from_secs(10), || rig.engine.status().offloaded && fake.0.lock().playing), "{:?} {:?}", rig.engine.status(), fake.notes());
+    rig.run(2_000);
+    let s = rig.engine.status();
+    let elapsed = rig.now_ms() - t0;
+    let events: Vec<Event> = rig.events.lock()[events_before..].to_vec();
+    let notes = fake.notes();
+    // Nor a loop: the song placed on the chip again is not repeat one starting it again.
+    assert!(!events.iter().any(|e| matches!(e, Event::Error { .. } | Event::Stopped | Event::Buffering(true) | Event::Looped { .. }) || matches!(e, Event::Song { index, .. } if *index != 0)), "{events:?}");
+    assert!(s.index == Some(0) && s.state == State::Playing, "{s:?}");
+    assert_eq!(s.underruns, 0, "the CPU's output never ran dry: {s:?}");
+    assert_eq!(fake.starved_ms(), 0, "the chip never ran dry: {notes:?}");
+    // The dips of the switches cost a little each, never a jump.
+    let moved = s.position_ms - started;
+    assert!(moved <= elapsed + 150 && moved >= elapsed - 8 * 150, "{moved} ms on in {elapsed} ms: {s:?} {notes:?}");
+    let positions: Vec<i64> = events.iter().filter_map(|e| if let Event::Position { ms, .. } = e { Some(*ms) } else { None }).collect();
+    assert!(positions.windows(2).all(|w| w[1] >= w[0] - 150 && w[1] <= w[0] + 400), "no jump: {positions:?}");
+    // Each move between the chip and the CPU said with its place.
+    let placed = events.iter().filter(|e| matches!(e, Event::Placed { index: 0, .. })).count();
+    assert!((2..=8).contains(&placed), "{events:?}");
+    rig.engine.stop();
+}
+
+/// As a phone had it with AutoMix on (the CPU plays): the equalizer switched on puts the sound chain in
+/// the path within a moment, and switched on and off quickly again and again never runs the output dry.
+#[test]
+fn the_equalizer_switched_on_and_off_quickly_on_the_cpu_is_heard_at_once_without_an_underrun() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed");
+        return;
+    }
+    let d = dir();
+    let a = mp3(&d, "a", 60, 440);
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a)]);
+    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), 60_000)], app(), None, Settings::default());
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.card.heard.lock().len() > 2 * 5 * 44_100), "the CPU plays a");
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    let asked_at = rig.now_ms();
+    rig.engine.set_settings(Settings { sound: eq.clone(), ..Settings::default() });
+    assert!(rig.time.until(Duration::from_secs(10), || rig.engine.status().chain), "{:?}", rig.engine.status());
+    assert!(rig.now_ms() - asked_at <= 300, "the chain came in {} ms after the equalizer went on", rig.now_ms() - asked_at);
+    let events_before = rig.events.lock().len();
+    for k in 0..8 {
+        rig.engine.set_settings(if k % 2 == 0 { Settings::default() } else { Settings { sound: eq.clone(), ..Settings::default() } });
+        rig.run(if k == 3 { 1_000 } else { 150 });
+    }
+    rig.run(2_000);
+    let s = rig.engine.status();
+    let events: Vec<Event> = rig.events.lock()[events_before..].to_vec();
+    assert!(!events.iter().any(|e| matches!(e, Event::Error { .. } | Event::Buffering(true))), "{events:?}");
+    assert!(s.index == Some(0) && s.state == State::Playing && s.chain, "{s:?}");
+    assert_eq!(s.underruns, 0, "the output never ran dry: {s:?}");
+    rig.engine.stop();
+}
+
+/// On the CPU, a song whose length the server does not say, still on its way: the equalizer switched on
+/// makes the music again from where the ear is (a seek), which plays on, the chain in the path at once.
+#[test]
+fn the_equalizer_switched_on_over_a_song_of_no_known_length_on_the_cpu_is_heard_at_once_where_the_ear_is() {
+    let d = dir();
+    let Some((rig, gate)) = unsized_rig(&d, 60, None, Settings::default()) else { return };
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.engine.status().position_ms >= 5_000), "{:?} {:?}", rig.engine.status(), rig.events.lock());
+    let before = rig.engine.status().position_ms;
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    let asked_at = rig.now_ms();
+    rig.engine.set_settings(Settings { sound: eq, ..Settings::default() });
+    assert!(rig.time.until(Duration::from_secs(10), || rig.engine.status().chain), "{:?}", rig.engine.status());
+    assert!(rig.now_ms() - asked_at <= 300, "the chain came in {} ms after", rig.now_ms() - asked_at);
+    rig.run(2_000);
+    let s = rig.engine.status();
+    let events = rig.events.lock().clone();
+    assert!(!events.iter().any(|e| matches!(e, Event::Error { .. }) || matches!(e, Event::Song { index, .. } if *index != 0)), "{events:?}");
+    assert!(s.index == Some(0) && s.state == State::Playing && (s.position_ms - before - 2_000).abs() <= 400, "a plays on from {before} ms: {s:?}");
+    gate.store(true, std::sync::atomic::Ordering::Release);
+    rig.engine.stop();
+}
+
+/// A seek in a song on a phone's chip places it on the track again: that is no loop of repeat one, and
+/// none is said (a client counts a loop as a play of its own, and moves its place to the song's end
+/// and back).
+#[test]
+fn a_seek_on_a_phone_s_chip_says_no_loop() {
+    let d = dir();
+    let Some((rig, fake)) = two_on_a_phone(&d, 30, true, true) else { return };
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    assert!(rig.time.until(Duration::from_secs(40), || fake.0.lock().head >= 3 * 44_100));
+    rig.engine.seek(12_000);
+    assert!(rig.time.until(Duration::from_secs(10), || fake.0.lock().flushes >= 1 && fake.0.lock().head >= 44_100));
+    rig.run(500);
+    let s = rig.engine.status();
+    assert!(s.offloaded && s.index == Some(0) && (13_000..14_000).contains(&s.position_ms), "{s:?}");
+    let events = rig.events.lock().clone();
+    assert!(!events.iter().any(|e| matches!(e, Event::Looped { .. })), "{events:?}");
+    rig.engine.stop();
+}
+
+/// Through an AutoMix, whenever a screen reads the engine (one come back mid-mix does so once), the
+/// place it gets belongs to the song it is told is heard: a's place while a is, b's from the moment b is,
+/// never a's place under b or b's under a.
+#[test]
+fn through_a_mix_the_place_read_belongs_to_the_song_read_with_it() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed");
+        return;
+    }
+    let d = dir();
+    let (a, b) = (mp3(&d, "a", 40, 440), mp3(&d, "b", 30, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let app = Watched::automix();
+    let songs = vec![("a".into(), "mp3".into(), 40_000), ("b".into(), "mp3".into(), 30_000)];
+    let rig = Rig::new(server, songs, app.clone(), None, automix());
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 0);
+    rig.engine.replan();
+    let mut last: Option<(Option<usize>, i64)> = None;
+    let mut bad = Vec::new();
+    let mut mixed = false;
+    let ended = rig.time.until(Duration::from_secs(90), || {
+        let s = rig.engine.status();
+        mixed |= s.mixing;
+        if s.state == State::Playing {
+            // a's place never past a's end; b's place, the moment b is said, no further in than the mix.
+            match s.index {
+                Some(0) if s.position_ms > 40_100 => bad.push((s.index, s.position_ms)),
+                Some(1) if last.is_some_and(|l| l.0 == Some(0)) && s.position_ms > 8_000 => bad.push((s.index, s.position_ms)),
+                _ => {}
+            }
+            if let Some((i, ms)) = last {
+                // Within one song the place only moves on, by no more than a step.
+                if i == s.index && (s.position_ms < ms - 50 || s.position_ms > ms + 2_000) {
+                    bad.push((s.index, s.position_ms));
+                }
+            }
+            last = Some((s.index, s.position_ms));
+        }
+        rig.events.lock().contains(&Event::State(State::Ended))
+    });
+    assert!(ended, "{:?}", app.log());
+    assert!(mixed, "a mix was heard: {:?}", app.log());
+    assert!(bad.is_empty(), "places read with the wrong song: {bad:?}");
+    // The positions said follow the same rule.
+    let events = rig.events.lock().clone();
+    let mut song = None;
+    for e in &events {
+        match e {
+            Event::Song { index, .. } => song = Some(*index),
+            Event::Position { index, ms } => {
+                assert_eq!(Some(*index), song, "a position said for the song said heard: {events:?}");
+                assert!(*index != 0 || *ms <= 40_100, "{events:?}");
+            }
+            _ => {}
+        }
+    }
+    rig.engine.stop();
+}
+
+/// After a mix, the place said for the song mixed into is the music of it really played, from where the
+/// mix entered it: a pause (which says the place again) finds it where the running on had it, and what is
+/// left of the song to its end is exactly what the card then plays.
+#[test]
+fn after_a_mix_the_new_song_s_place_is_what_was_played_of_it() {
+    mixed_into_b_its_place_is_what_was_played(0);
+}
+
+/// [`after_a_mix_the_new_song_s_place_is_what_was_played_of_it`], b opening on 5 s of silence the mix
+/// may enter past.
+#[test]
+fn after_a_mix_into_a_song_entered_past_its_start_its_place_is_what_was_played_of_it() {
+    mixed_into_b_its_place_is_what_was_played(5);
+}
+
+fn mixed_into_b_its_place_is_what_was_played(silent_s: u32) {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed");
+        return;
+    }
+    let d = dir();
+    let a = mp3(&d, "a", 40, 440);
+    let b = if silent_s == 0 { mp3(&d, "b", 30, 660) } else { quiet_start(&d, "b", silent_s, 30, 660) };
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let app = Watched::automix();
+    let songs = vec![("a".into(), "mp3".into(), 40_000), ("b".into(), "mp3".into(), 30_000)];
+    *app.1.lock() = silent_s as i64 * 1_000_000;
+    let rig = Rig::new(server, songs, app.clone(), None, automix());
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 25_000);
+    rig.engine.replan();
+    assert!(rig.wait(40, |r| r.heard_song("b")), "{:?}", app.log());
+    // Along b, the place moves with the clock, whatever the mix did around it.
+    let (t0, p0) = (rig.now_ms(), rig.engine.status().position_ms);
+    rig.run(4_000);
+    let said = |r: &Rig| r.events.lock().iter().rev().find_map(|e| match e { Event::Position { index: 1, ms } => Some(*ms), _ => None });
+    let before = said(&rig).expect("b's place said");
+    assert!((before - p0 - (rig.now_ms() - t0)).abs() <= 300, "b ran on from {p0} to {before} in {} ms", rig.now_ms() - t0);
+    rig.engine.pause();
+    assert!(rig.wait(5, |r| r.engine.status().state == State::Paused), "{:?}", rig.engine.status());
+    let paused = rig.engine.status();
+    assert_eq!(paused.index, Some(1));
+    assert!((paused.position_ms - before).abs() <= 300, "a pause put b's place back or on: {before} ms before it, {} ms paused", paused.position_ms);
+    // The rest of b, played from there to its end, is what the place said was left of it.
+    let rate = rig.card.opened.lock().last().map_or(44_100, |f| f.rate as i64);
+    let channels = rig.card.opened.lock().last().map_or(2, |f| f.channels as i64);
+    let from = rig.card.heard.lock().len() as i64;
+    rig.engine.play();
+    assert!(rig.wait(40, |r| r.events.lock().contains(&Event::State(State::Ended))), "{:?}", app.log());
+    let rest_ms = (rig.card.heard.lock().len() as i64 - from) / channels * 1000 / rate;
+    assert!((paused.position_ms + rest_ms - 30_000).abs() <= 400, "b paused at {} ms, then {rest_ms} ms of it played to its end", paused.position_ms);
+    rig.engine.stop();
+}
+
+/// `secs` of MP3 opening on `silent` seconds of silence, then a tone of `hz`.
+fn quiet_start(dir: &Path, name: &str, silent: u32, secs: u32, hz: u32) -> Vec<u8> {
+    let out = dir.join(format!("{name}.mp3"));
+    let filter = format!("sine=frequency={hz}:sample_rate=44100:duration={},adelay={}:all=1", secs - silent, silent * 1000);
+    let ok = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &filter, "-ac", "2", "-t", &secs.to_string()])
+        .arg(&out)
+        .status()
+        .is_ok_and(|s| s.success());
+    assert!(ok, "ffmpeg made {name}");
+    std::fs::read(out).unwrap()
 }

@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn the_model_lives_beside_the_database_and_goes_when_switched_off() {
-        let dir = std::env::temp_dir().join(format!("nori-model-{}", std::process::id()));
+        let dir = nori_testdir::TempDir::new("model");
         std::fs::create_dir_all(dir.join("models")).unwrap();
         std::fs::write(dir.join("models").join(FILE_NAME), b"model").unwrap();
         set_home(&dir.join("nori.db").to_string_lossy());
@@ -127,6 +127,5 @@ mod tests {
         }
         assert!(!dir.join("models").exists());
         assert_eq!((state(), ready()), (State::Absent, None));
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

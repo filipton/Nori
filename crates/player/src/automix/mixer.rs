@@ -3,7 +3,8 @@
 //! transition, so every curve lands on the planned sample:
 //!
 //! - gain curves (equal power, linear or sin²) per deck, plus a loudness trim on the incoming deck that glides back
-//!   to 0 dB over the last quarter of the transition;
+//!   to 0 dB by the end of the transition: over its last quarter, or longer when that would let go faster than
+//!   [`TRIM_GLIDE_MS_PER_DB`] (a transition too short to let go of all of it that gently is trimmed less);
 //! - the bass swap: both decks run through a 4th-order Linkwitz-Riley high-pass, and a raised-cosine crossfade
 //!   between dry and high-passed moves the lows from the outgoing to the incoming track over `bass_swap_len`;
 //! - the low-pass sweep on the outgoing deck, exponential in frequency, coefficients updated every 16 frames;
@@ -18,6 +19,9 @@
 use crate::types::{FadeCurve, TransitionPlan};
 
 const MAX_CHANNELS: usize = 8;
+/// The loudness trim lets go no faster than this, ms per dB: 0.67 dB in 100 ms at most, a glide rather than a
+/// step. Over the last quarter alone, a four-beat echo-out let 9 dB go in half a second (1.8 dB in 100 ms).
+pub const TRIM_GLIDE_MS_PER_DB: f64 = 150.0;
 /// Frames between low-pass coefficient updates.
 const LP_STEP: u64 = 16;
 /// The sweep fades its filter in over this long, so starting the filter never clicks.
@@ -114,8 +118,8 @@ pub fn crossover_ms(p: &[f32]) -> i64 {
     let in_fade = span(get(param::IN_FADE_START), get(param::IN_FADE_END));
     let gain = |i: usize| p.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0) as f64;
     let out_gain = 10f64.powf(gain(param::OUT_GAIN_DB).clamp(-24.0, 12.0) / 20.0);
-    let in_gain_db = gain(param::IN_GAIN_DB).clamp(-12.0, 12.0);
-    let glide = (len * 3.0 / 4.0, len);
+    let (in_gain_db, glide_ms) = trim(len, gain(param::IN_GAIN_DB));
+    let glide = (len - glide_ms, len);
     let mut t = 0.0;
     while t < len {
         let g_out = Mixer::fade(curve, progress(out_fade, t), true) * out_gain;
@@ -126,6 +130,16 @@ pub fn crossover_ms(p: &[f32]) -> i64 {
         t += 10.0;
     }
     len as i64
+}
+
+/// The loudness trim a transition of `len_ms` gives the incoming deck, dB, and how long before its end it starts
+/// to let go of it, ms: the last quarter, or as long as letting go of it at [`TRIM_GLIDE_MS_PER_DB`] takes, and
+/// no more of it than the whole transition can let go of at that pace.
+fn trim(len_ms: f64, db: f64) -> (f64, f64) {
+    let len_ms = len_ms.max(0.0);
+    let most = len_ms / TRIM_GLIDE_MS_PER_DB;
+    let db = db.clamp(-12.0, 12.0).clamp(-most, most);
+    (db, (len_ms / 4.0).max(db.abs() * TRIM_GLIDE_MS_PER_DB).min(len_ms))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -228,6 +242,9 @@ pub struct Mixer {
     duck_state: [[f64; 2]; MAX_CHANNELS],
     /// Beat-synced echo on the outgoing deck: delay frames, feedback, wet gain, and the ring per channel.
     echo: Option<(usize, f64, f64)>,
+    /// The repeats still ringing are let go over the transition's last delay, so none is cut off where the
+    /// incoming stream goes on alone.
+    echo_out: Span,
     echo_buf: Vec<f64>,
     echo_pos: usize,
 }
@@ -261,6 +278,7 @@ impl Mixer {
             duck_coef: Coef::default(),
             duck_state: [[0.0; 2]; MAX_CHANNELS],
             echo: None,
+            echo_out: Span { start: 0, end: 0 },
             echo_buf: Vec::new(),
             echo_pos: 0,
         };
@@ -291,8 +309,9 @@ impl Mixer {
         self.in_fade = span(get(param::IN_FADE_START), get(param::IN_FADE_END), self.len);
         let gain = |i: usize| p.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0) as f64;
         self.out_gain = 10f64.powf(gain(param::OUT_GAIN_DB).clamp(-24.0, 12.0) / 20.0);
-        self.in_gain_db = gain(param::IN_GAIN_DB).clamp(-12.0, 12.0);
-        self.trim_glide = Span { start: self.len * 3 / 4, end: self.len };
+        let (in_gain_db, glide_ms) = trim(get(param::DURATION), gain(param::IN_GAIN_DB));
+        self.in_gain_db = in_gain_db;
+        self.trim_glide = Span { start: self.len.saturating_sub(frames(glide_ms)), end: self.len };
         let (ss, sl) = (get(param::SWAP_START), get(param::SWAP_LEN));
         self.swap = (ss >= 0.0).then(|| Span { start: frames(ss).min(self.len), end: (frames(ss) + frames(sl.max(1.0))).min(self.len.max(1)) });
         self.hp = Coef::high_pass(self.rate, if get(param::BASS_CUT_HZ) > 0.0 { get(param::BASS_CUT_HZ) } else { 180.0 });
@@ -324,6 +343,7 @@ impl Mixer {
             (d, (ef as f64).clamp(0.0, 0.9), 10f64.powf((ew as f64).clamp(-24.0, 0.0) / 20.0))
         });
         if let Some((d, _, _)) = self.echo {
+            self.echo_out = Span { start: self.len.saturating_sub(d as u64), end: self.len };
             let need = d * self.ch;
             if self.echo_buf.len() < need {
                 self.echo_buf.resize(need, 0.0);
@@ -403,6 +423,7 @@ impl Mixer {
             let trim = self.in_gain_db * (1.0 - self.trim_glide.progress(p));
             let g_in = Self::fade(self.curve, self.in_fade.progress(p), false) * 10f64.powf(trim / 20.0);
             // Raised-cosine swap: `k_in` is how much of the incoming lows is still cut, `k_out` how much of the outgoing.
+            let echo_left = if self.echo.is_some() { 0.5 + 0.5 * (self.echo_out.progress(p) * std::f64::consts::PI).cos() } else { 1.0 };
             let (k_in, k_out) = match self.swap {
                 Some(s) => {
                     let x = 0.5 - 0.5 * (s.progress(p) * std::f64::consts::PI).cos();
@@ -454,14 +475,18 @@ impl Mixer {
                     o = o * (1.0 - lp_wet) + l * lp_wet;
                 }
                 if let Some((d, fb, wet)) = self.echo {
-                    // Post-fader send: the dry deck fades, the repeats decay on their own inside the overlap.
+                    // Post-fader send: the dry deck fades, the repeats decay on their own inside the overlap, and
+                    // what still rings is faded away over the last delay.
                     let idx = self.echo_pos * ch + c;
                     let rep = self.echo_buf[idx];
-                    self.echo_buf[idx] = o + rep * fb;
+                    // What goes into the delay is the deck after its fader: fed the dry deck as it was, the
+                    // repeats of an outgoing song that plays on under the mix never decayed, a delayed copy
+                    // of it at the wet level to the end of the transition, cut off there.
+                    self.echo_buf[idx] = o * g_out + rep * fb;
                     if c + 1 == ch {
                         self.echo_pos = (self.echo_pos + 1) % d;
                     }
-                    o = o * g_out + rep * wet;
+                    o = o * g_out + rep * wet * echo_left;
                     *dst.add(f * ch + c) = store(o + xi[c] * g_in);
                     continue;
                 }
@@ -631,21 +656,90 @@ mod tests {
     #[test]
     fn fades_follow_their_windows_and_trims() {
         let mut p = plan();
+        p.duration_ms = 4000;
         p.fade_curve = FadeCurve::Linear;
-        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (500, 1000, 0, 500);
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (2000, 4000, 0, 2000);
         p.in_gain_db = -6.0;
         let mut m = Mixer::new(RATE as u32, 1);
         m.configure(&params(&p));
-        let ones = vec![1f32; 48000];
-        let zeros = vec![0f32; 48000];
-        let mut y = vec![0f32; 48000];
+        let ones = vec![1f32; 192000];
+        let zeros = vec![0f32; 192000];
+        let mut y = vec![0f32; 192000];
         m.process_f32(&ones, &zeros, &mut y);
-        assert!((y[12000] - 1.0).abs() < 1e-6 && (y[36000] - 0.5).abs() < 1e-3, "outgoing holds, then falls linearly");
+        assert!((y[48000] - 1.0).abs() < 1e-6 && (y[144000] - 0.5).abs() < 1e-3, "outgoing holds, then falls linearly");
         m.configure(&params(&p));
         m.process_f32(&zeros, &ones, &mut y);
-        assert!((y[12000] as f64 - 0.5 * 0.501).abs() < 2e-3, "half way up, at -6 dB: {}", y[12000]);
-        assert!((y[30000] as f64 - 0.501).abs() < 2e-3, "fully up, still trimmed: {}", y[30000]);
-        assert!((y[47999] - 1.0).abs() < 2e-3, "the trim has glided back to 0 dB by the end: {}", y[47999]);
+        assert!((y[48000] as f64 - 0.5 * 0.501).abs() < 2e-3, "half way up, at -6 dB: {}", y[48000]);
+        assert!((y[120000] as f64 - 0.501).abs() < 2e-3, "fully up, still trimmed: {}", y[120000]);
+        assert!((y[191999] - 1.0).abs() < 2e-3, "the trim has glided back to 0 dB by the end: {}", y[191999]);
+    }
+
+    /// The incoming deck's level through a transition of `ms` trimmed by `db`, dB every 100 ms and after it.
+    fn trim_levels(ms: i64, db: f32) -> Vec<f64> {
+        let mut p = plan();
+        p.duration_ms = ms;
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (0, ms, 0, 0);
+        p.in_gain_db = db;
+        let n = (ms as f64 / 1000.0 * RATE) as usize + 4800;
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        let (ones, zeros) = (vec![1f32; n], vec![0f32; n]);
+        let mut y = vec![0f32; n];
+        m.process_f32(&zeros, &ones, &mut y);
+        y.iter().skip(1).step_by(4800).map(|v| 20.0 * (*v as f64).log10()).collect()
+    }
+
+    #[test]
+    fn the_loudness_trim_lets_go_no_faster_than_a_glide() {
+        // Long enough: the last quarter, as before.
+        let l = trim_levels(8000, 6.0);
+        assert!((l[50] - 6.0).abs() < 0.01 && (l[60] - 6.0).abs() < 0.01, "held through three quarters: {:.2} {:.2}", l[50], l[60]);
+        assert!((l[70] - 3.0).abs() < 0.01, "half let go half way through the last quarter: {:.2}", l[70]);
+        // A two-second echo-out's 9 dB: over 1.35 s, not the last half second.
+        for (ms, db) in [(8000, 9.0), (2000, 9.0), (2000, -9.0), (1000, 6.0), (300, -9.0)] {
+            let l = trim_levels(ms, db);
+            let step = l.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+            assert!(step <= 0.67 + 1e-3, "{ms} ms, {db} dB: {step:.2} dB in 100 ms: {l:.2?}");
+            assert!(l.last().unwrap().abs() < 1e-3, "{ms} ms, {db} dB: all of it let go by the end");
+            // As much of the match as the pace allows.
+            let most = (ms as f64 / TRIM_GLIDE_MS_PER_DB).min(db.abs() as f64);
+            assert!((l[0].abs() - most).abs() < 0.01, "{ms} ms, {db} dB: trimmed by {:.2}", l[0]);
+        }
+    }
+
+    #[test]
+    fn the_echo_decays_once_the_outgoing_deck_is_faded_out() {
+        // The outgoing song plays on under the transition, faded out over its first quarter: what is left
+        // after that is repeats of what went through the fader, each a delay apart and quieter by the feedback.
+        let mut p = plan();
+        p.duration_ms = 2000;
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (0, 500, 2000, 2000);
+        (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (250, 0.45, -7.0);
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        let (tone, zeros) = (sine(440.0, 96000), vec![0f32; 96000]);
+        let mut y = vec![0f32; 96000];
+        m.process_f32(&tone, &zeros, &mut y);
+        let ring = |ms: usize| rms(&y[ms * 48..(ms + 250) * 48]) / rms(&tone);
+        let (first, third) = (ring(500), ring(1000));
+        assert!(first > 0.05, "the repeats ring after the dry deck is gone: {first:.3}");
+        assert!(third < 0.3 * first, "and die away two delays on: {third:.3} against {first:.3}");
+    }
+
+    #[test]
+    fn the_echo_has_stopped_ringing_by_the_end_of_the_transition() {
+        let mut p = plan();
+        (p.out_fade_start_ms, p.out_fade_end_ms, p.in_fade_start_ms, p.in_fade_end_ms) = (0, 500, 1000, 1000);
+        (p.echo_delay_ms, p.echo_feedback, p.echo_wet_db) = (250, 0.45, -7.0);
+        let mut m = Mixer::new(RATE as u32, 1);
+        m.configure(&params(&p));
+        let (tone, zeros) = (sine(440.0, 48000), vec![0f32; 48000]);
+        let mut y = vec![0f32; 48000];
+        m.process_f32(&tone, &zeros, &mut y);
+        let ring = |a: usize, b: usize| rms(&y[a..b]) / rms(&tone);
+        let (after, end) = (ring(26400, 33600), ring(47000, 48000));
+        assert!(after > 0.05, "the repeats ring after the dry deck is gone: {after:.3}");
+        assert!(end < 0.05 * after, "and are let go by the end, not cut off there: {end:.4} against {after:.3}");
     }
 
     #[test]

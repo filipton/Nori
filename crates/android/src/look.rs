@@ -12,6 +12,7 @@ use nori_look::cover::derive;
 use nori_look::cover::WASH_OUT;
 use nori_look::dress;
 use nori_look::lyrics::LyricClock;
+use nori_look::motion::SeekPace;
 
 use crate::{native, Class};
 
@@ -22,6 +23,15 @@ pub(crate) static COVER: Class = Class {
         native!(c"seekTimes", c"(ZFJJJ)J", seek_times),
         native!(c"duration", c"(JZ)Ljava/lang/String;", duration),
         native!(c"seekStep", c"(FFFFF)J", seek_step),
+        native!(c"seekPaceNew", c"()J", seek_pace_new),
+        native!(c"seekPaceFree", c"(J)V", seek_pace_free),
+        native!(c"seekPaceSync", c"(JJJ)V", seek_pace_sync),
+        native!(c"seekPaceHold", c"(JFJJ)V", seek_pace_hold),
+        native!(c"seekPaceStep", c"(JJJFFF)I", seek_pace_step),
+        native!(c"seekPaceBar", c"(J)F", seek_pace_bar),
+        native!(c"seekPaceTimes", c"(J)J", seek_pace_times),
+        native!(c"seekPaceFrom", c"(J)J", seek_pace_from),
+        native!(c"seekPaceFade", c"(J)F", seek_pace_fade),
         native!(c"transportGlyph", c"(ZZZ)I", transport_glyph),
         native!(c"heroButtons", c"(ZZZZZZ)I", hero_buttons),
         native!(c"heroPlayLabel", c"(Z)Ljava/lang/String;", hero_play_label),
@@ -287,6 +297,64 @@ extern "system" fn hero_play_label(env: JNIEnv, _: JClass, pausing: jboolean) ->
 extern "system" fn seek_step(bar: jfloat, target: jfloat, dt_s: jfloat, width_px: jfloat, speed: jfloat) -> jlong {
     let (b, wait) = nori_look::motion::seek_step(bar, target, dt_s, width_px, speed);
     ((b.to_bits() as i64) << 32) | (wait as u32 as i64)
+}
+
+// ---- the seek bar's pace (`nori_look::motion::SeekPace`), one per seek bar on screen -----------------------
+
+fn pace<'a>(h: jlong) -> Option<&'a mut SeekPace> {
+    // SAFETY: Kotlin passes 0 or a handle `seek_pace_new` made, only from the main thread, and never one it
+    // has freed (SeekPace.kt).
+    (h != 0).then(|| unsafe { &mut *(h as *mut SeekPace) })
+}
+
+extern "system" fn seek_pace_new() -> jlong {
+    Box::into_raw(Box::new(SeekPace::new())) as jlong
+}
+
+extern "system" fn seek_pace_free(h: jlong) {
+    if h != 0 {
+        // SAFETY: made by `seek_pace_new`, freed once (Kotlin zeroes its handle).
+        drop(unsafe { Box::from_raw(h as *mut SeekPace) });
+    }
+}
+
+extern "system" fn seek_pace_sync(h: jlong, position_ms: jlong, duration_ms: jlong) {
+    if let Some(p) = pace(h) {
+        p.sync(position_ms, duration_ms);
+    }
+}
+
+extern "system" fn seek_pace_hold(h: jlong, bar: jfloat, position_ms: jlong, duration_ms: jlong) {
+    if let Some(p) = pace(h) {
+        p.hold(bar, position_ms, duration_ms);
+    }
+}
+
+extern "system" fn seek_pace_step(h: jlong, position_ms: jlong, duration_ms: jlong, dt_s: jfloat, width_px: jfloat, rate: jfloat) -> jint {
+    pace(h).map_or(-1, |p| p.step(position_ms, duration_ms, dt_s, width_px, rate))
+}
+
+extern "system" fn seek_pace_bar(h: jlong) -> jfloat {
+    pace(h).map_or(0.0, |p| p.bar())
+}
+
+fn pack_times((at, left): (i64, i64)) -> jlong {
+    (at << 32) | (left & 0xFFFF_FFFF)
+}
+
+/// The times shown, `at_s << 32 | left_s`.
+extern "system" fn seek_pace_times(h: jlong) -> jlong {
+    pace(h).map_or(0, |p| pack_times(p.times()))
+}
+
+/// The times fading out, packed as [`seek_pace_times`]; -1 with none.
+extern "system" fn seek_pace_from(h: jlong) -> jlong {
+    pace(h).and_then(|p| p.fading()).map_or(-1, |(t, _)| pack_times(t))
+}
+
+/// How strongly the times now are drawn, 0..1 (1: nothing fading).
+extern "system" fn seek_pace_fade(h: jlong) -> jfloat {
+    pace(h).map_or(1.0, |p| p.fade())
 }
 
 // ---- lyrics -------------------------------------------------------------------------------------------------

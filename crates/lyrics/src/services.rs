@@ -21,13 +21,15 @@ use parking_lot::Mutex;
 use serde_json::{json, Map, Value};
 
 use crate::lrclib::{self, clean, form_encode, DURATION_SLACK_S};
+use crate::trust::Named;
 use crate::{formats, html, json as answers, lyrics};
 
 /// A service's answer. `Failed` (no network, a refusal, an answer of a shape not known, too slow) is
 /// never remembered as `Missing`, so the song is asked again another time.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Lookup {
-    Found(Lyrics),
+    /// The words, and what the service said about the song it found them for (trust.rs weighs it).
+    Found(Lyrics, Named),
     Missing,
     Failed,
 }
@@ -153,13 +155,34 @@ fn settle(service: LyricsService, r: Asked<Lookup>) -> Lookup {
     }
 }
 
-/// Lyrics found, or a miss when there are no lines.
+/// Lyrics found, or a miss when there are no lines, from a service that names nothing.
 fn found(l: Lyrics) -> Lookup {
+    found_named(l, Named::default())
+}
+
+/// Lyrics found for the song the service `named`, or a miss when there are no lines.
+fn found_named(l: Lyrics, named: Named) -> Lookup {
     if l.lines.is_empty() {
         Lookup::Missing
     } else {
-        Lookup::Found(l)
+        Lookup::Found(l, named)
     }
+}
+
+/// What an answer names under the usual keys (see [`names_this`]).
+fn named_in(meta: &Value) -> Named {
+    let first = |keys: &[&str]| keys.iter().find_map(|k| text(meta, k)).unwrap_or_default();
+    let length = ["duration", "durationMs", "totalDuration", "length"].iter().map(|k| match meta.get(*k) {
+        Some(Value::String(v)) if v.contains(':') => clock_seconds(v),
+        _ => num(meta, k),
+    });
+    let length = length.into_iter().find(|d| *d > 0.0).unwrap_or(0.0);
+    Named::new(
+        first(&["title", "song", "trackName", "track_name", "name"]),
+        first(&["artist", "artistName", "artist_name", "singer"]),
+        first(&["album", "albumName", "album_name", "collectionName"]),
+        Named::seconds(length),
+    )
 }
 
 // ---- matching ------------------------------------------------------------------------------------------
@@ -326,32 +349,33 @@ async fn lrclib(a: &Ask<'_>, song: &Song) -> Lookup {
         Ok(_) => return settle(LyricsService::Lrclib, Err(shape("not an object"))),
         Err(e) => return settle(LyricsService::Lrclib, Err(e)),
     };
-    let exact_hit = if exact.contains_key("statusCode") { None } else { lrclib::pick(&exact) };
-    if let Some(hit) = exact_hit.as_ref().filter(|h| h.synced) {
-        return Lookup::Found(hit.clone());
+    let named = |o: &Map<String, Value>| named_in(&Value::Object(o.clone()));
+    let exact_hit = if exact.contains_key("statusCode") { None } else { lrclib::pick(&exact).map(|l| (l, named(&exact))) };
+    if let Some((hit, n)) = exact_hit.as_ref().filter(|h| h.0.synced) {
+        return Lookup::Found(hit.clone(), n.clone());
     }
     let hits = match a.fetch(&lrclib::search_url(song, &title), &[], None, REQUEST_MS).await.and_then(|(_, b)| parse(&b)) {
         Ok(Value::Array(v)) => v,
         other => {
-            if let Some(hit) = exact_hit {
-                return Lookup::Found(hit);
+            if let Some((hit, n)) = exact_hit {
+                return Lookup::Found(hit, n);
             }
             return settle(LyricsService::Lrclib, other.and(Err(shape("not an array"))));
         }
     };
     let distance = |o: &Map<String, Value>| (lrclib::number(o, "duration") - song.duration as f64).abs();
-    let mut best: Vec<(Lyrics, f64)> = hits
+    let mut best: Vec<(Lyrics, f64, Named)> = hits
         .iter()
         .filter_map(Value::as_object)
         .filter(|o| distance(o) <= DURATION_SLACK_S || song.duration == 0)
-        .filter_map(|o| lrclib::pick(o).map(|l| (l, distance(o))))
+        .filter_map(|o| lrclib::pick(o).map(|l| (l, distance(o), named(o))))
         .collect();
     best.sort_by(|x, y| formats::timing(&y.0).cmp(&formats::timing(&x.0)).then(x.1.total_cmp(&y.1)));
-    let best = best.into_iter().next().map(|(l, _)| l);
+    let best = best.into_iter().next().map(|(l, _, n)| (l, n));
     match (best, exact_hit) {
-        (Some(b), None) => Lookup::Found(b),
-        (Some(b), Some(_)) if b.synced => Lookup::Found(b),
-        (_, Some(e)) => Lookup::Found(e),
+        (Some((b, n)), None) => Lookup::Found(b, n),
+        (Some((b, n)), Some(_)) if b.synced => Lookup::Found(b, n),
+        (_, Some((e, n))) => Lookup::Found(e, n),
         (None, None) => Lookup::Missing,
     }
 }
@@ -378,7 +402,7 @@ async fn unison(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
     if !truthy(&o, "success") || !same_length(num(d, "duration"), song) || !names_this(d, song) {
         return Ok(Lookup::Missing);
     }
-    Ok(found(if s(d, "format").eq_ignore_ascii_case("ttml") { formats::from_ttml(words) } else { lyrics::from_lrc(words) }))
+    Ok(found_named(if s(d, "format").eq_ignore_ascii_case("ttml") { formats::from_ttml(words) } else { lyrics::from_lrc(words) }, named_in(d)))
 }
 
 /// NetEase's web API answers its own site; without the Referer some of its endpoints refuse.
@@ -404,7 +428,8 @@ async fn netease(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         .filter(|x| same_length(num(x, "duration"), song) && alike(&s(x, "name"), &title) && names(x, "artists").iter().any(|n| alike(n, &song.artist)))
         .collect();
     hits.sort_by(|x, y| off(num(x, "duration"), song).total_cmp(&off(num(y, "duration"), song)));
-    for id in hits.iter().map(|x| num(x, "id") as i64).filter(|id| *id > 0).take(2) {
+    for hit in hits.iter().filter(|x| num(x, "id") as i64 > 0).take(2) {
+        let id = num(hit, "id") as i64;
         let url = format!("https://music.163.com/api/song/lyric/v1?id={id}&cp=false&lv=0&kv=0&tv=0&rv=0&yv=0&ytv=0&yrv=0");
         let l = a.get_json(&url, &NETEASE).await?;
         if truthy(&l, "pureMusic") || truthy(&l, "nolyric") {
@@ -413,7 +438,9 @@ async fn netease(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         let part = |k: &str| l.get(k).and_then(|p| text(p, "lyric")).unwrap_or_default().to_string();
         let words = formats::from_netease(&part("yrc"), &part("lrc"), &song.title);
         if !words.lines.is_empty() {
-            return Ok(Lookup::Found(words));
+            let album = hit.get("album").map(|a| s(a, "name").into_owned()).unwrap_or_default();
+            let artist = names(hit, "artists").into_iter().next().unwrap_or_default();
+            return Ok(Lookup::Found(words, Named::new(&s(hit, "name"), &artist, &album, Named::seconds(num(hit, "duration")))));
         }
     }
     Ok(Lookup::Missing)
@@ -458,12 +485,14 @@ async fn kugou(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
     }
     let Some(content) = text(&file, "content") else { return Ok(Lookup::Missing) };
     // Content that is not a KRC file is a failure, asked again next time.
-    Ok(found(formats::from_krc(content, &song.title).map_err(Fail::Shape)?))
+    let named = Named::new(&s(best, "song"), &s(best, "singer"), "", Named::seconds(num(best, "duration")));
+    Ok(found_named(formats::from_krc(content, &song.title).map_err(Fail::Shape)?, named))
 }
 
 /// BiniLyrics: Apple Music's lyrics, syllable by syllable as TTML, kept on a volunteer's site. Grey: the
 /// words and timings are Apple's, served by someone else without a key. A search by title, artist, album
-/// and length, then the matched document from its storage host.
+/// and length, then the document of a result with this title, artist (unless one of the two is written in
+/// another script) and length, from its storage host.
 async fn bini_lyrics(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
     let title = clean(&song.title);
     let mut url = format!("https://lyrics-api.binimum.org/?track={}&artist={}", enc(&title), enc(&song.artist));
@@ -478,10 +507,14 @@ async fn bini_lyrics(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
     let results = list(&o, "results").ok_or_else(|| shape("no results"))?;
     let link = results
         .iter()
-        .filter(|x| same_length(num(x, "duration"), song) && (s(x, "track_name").trim().is_empty() || alike(&s(x, "track_name"), &title)))
-        .find_map(|x| text(x, "lyricsUrl").filter(|u| u.starts_with("https://")));
-    let Some(link) = link else { return Ok(Lookup::Missing) };
-    Ok(found(formats::from_ttml(&a.get(link, &[]).await?)))
+        .filter(|x| {
+            same_length(num(x, "duration"), song)
+                && (s(x, "track_name").trim().is_empty() || alike(&s(x, "track_name"), &title))
+                && (s(x, "artist_name").trim().is_empty() || alike(&s(x, "artist_name"), &song.artist) || !latin(&s(x, "artist_name")) || !latin(&song.artist))
+        })
+        .find_map(|x| text(x, "lyricsUrl").filter(|u| u.starts_with("https://")).map(|u| (u, x)));
+    let Some((link, hit)) = link else { return Ok(Lookup::Missing) };
+    Ok(found_named(formats::from_ttml(&a.get(link, &[]).await?), named_in(hit)))
 }
 
 /// BetterLyrics' documented address first, then the one its extension long used; tried in turn only
@@ -535,7 +568,8 @@ async fn paxsenix(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         };
         let words = answers::from_provider(&body, &song.title);
         if !words.lines.is_empty() {
-            return Ok(Lookup::Found(words));
+            let named = hits.iter().find(|x| num(x, "trackId") as i64 == id).map_or_else(Named::default, |x| named_in(x));
+            return Ok(Lookup::Found(words, named));
         }
     }
     Ok(Lookup::Missing)
@@ -567,11 +601,12 @@ async fn paxsenix_spotify(a: &Ask<'_>, song: &Song, key: &str) -> Asked<Lookup> 
         let d = |t: &answers::FoundTrack| if t.duration_ms > 0 { off(t.duration_ms as f64, song) } else { 5.0 };
         d(x).total_cmp(&d(y))
     });
-    for id in distinct(tracks.into_iter().map(|t| t.id)).into_iter().take(2) {
+    for id in distinct(tracks.iter().map(|t| t.id.clone())).into_iter().take(2) {
         let body = a.strict(&format!("{PAXSENIX_API}/lyrics/spotify?id={}", enc(&id)), &headers, None, PAXSENIX_REQUEST_MS).await?;
         let words = answers::from_provider(&body, &song.title);
         if !words.lines.is_empty() {
-            return Ok(Lookup::Found(words));
+            let named = tracks.iter().find(|t| t.id == id).map_or_else(Named::default, |t| Named::new(&t.title, &t.artist, "", t.duration_ms as f64 / 1000.0));
+            return Ok(Lookup::Found(words, named));
         }
     }
     Ok(Lookup::Missing)
@@ -624,7 +659,7 @@ async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
     let first = *LYRICS_PLUS_HOST.lock();
     if let Some(host) = first {
         match lyrics_plus_from(a, host, &query, song).await {
-            Lookup::Found(l) => return Lookup::Found(l),
+            Lookup::Found(l, n) => return Lookup::Found(l, n),
             Lookup::Missing => misses += 1,
             Lookup::Failed => {}
         }
@@ -634,9 +669,9 @@ async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
         LYRICS_PLUS_HOSTS.into_iter().filter(|h| Some(*h) != first).map(|host| async move { (host, lyrics_plus_from(a, host, query, song).await) }).collect();
     while let Some((host, answer)) = asking.next().await {
         match answer {
-            Lookup::Found(l) => {
+            Lookup::Found(l, n) => {
                 *LYRICS_PLUS_HOST.lock() = Some(host);
-                return Lookup::Found(l);
+                return Lookup::Found(l, n);
             }
             Lookup::Missing => misses += 1,
             Lookup::Failed => {}
@@ -660,7 +695,7 @@ async fn lyrics_plus_from(a: &Ask<'_>, host: &str, query: &str, song: &Song) -> 
             alog::info("LYRICS_PLUS answered with another song: a miss");
             Lookup::Missing
         }
-        Ok(body) => found(answers::from_lyricsplus(&body)),
+        Ok(body) => found_named(answers::from_lyricsplus(&body), parse(&body).ok().and_then(|v| v.get("metadata").map(named_in)).unwrap_or_default()),
         Err(Fail::Status(404)) => Lookup::Missing,
         Err(_) => Lookup::Failed,
     }
@@ -739,7 +774,7 @@ async fn simpmusic(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         .map(html::from_escaped_lrc)
         .filter(|l| !l.lines.is_empty())
         .max_by_key(formats::timing);
-    Ok(best.map_or(Lookup::Missing, Lookup::Found))
+    Ok(best.map_or(Lookup::Missing, |l| Lookup::Found(l, Named { duration_s: Some(num(entry, "duration")).filter(|d| *d > 0.0), ..Named::default() })))
 }
 
 /// A byte string in standard base64, padded.
@@ -793,7 +828,7 @@ async fn megalobiz(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         let words = html::from_megalobiz(&a.get(&format!("https://www.megalobiz.com{link}"), &[]).await?);
         let Some(last) = words.lines.last().map(|l| l.start_ms) else { continue };
         if song.duration == 0 || last <= song.duration as i64 * 1000 + 4_000 {
-            return Ok(Lookup::Found(words));
+            return Ok(Lookup::Found(words, Named::default()));
         }
     }
     Ok(Lookup::Missing)
@@ -812,9 +847,9 @@ async fn genius(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
         .flat_map(|x| list(x, "hits").into_iter().flatten())
         .filter_map(|h| h.get("result"))
         .filter(|r| alike(&s(r, "title"), &title) && alike(&s(r, "artist_names"), &song.artist) && !truthy(r, "instrumental") && !s(r, "path").to_lowercase().contains("translation"))
-        .find_map(|r| text(r, "url").filter(|u| u.starts_with("https://genius.com/")));
-    let Some(url) = url else { return Ok(Lookup::Missing) };
-    Ok(found(html::from_genius(&a.get(url, &[]).await?)))
+        .find_map(|r| text(r, "url").filter(|u| u.starts_with("https://genius.com/")).map(|u| (u, Named::new(&s(r, "title"), &s(r, "artist_names"), "", 0.0))));
+    let Some((url, named)) = url else { return Ok(Lookup::Missing) };
+    Ok(found_named(html::from_genius(&a.get(url, &[]).await?), named))
 }
 
 #[cfg(test)]
@@ -915,7 +950,22 @@ pub(crate) mod tests {
         let web = Web::default();
         let body = include_str!("../testdata/lyricsplus.json").replace(r#""source":"Apple","#, r#""source":"Apple","title":"Glass Harbour","artist":"The Lanterns","totalDuration":"3:59.000","#);
         web.answer("https://lyricsplus", 200, &body);
-        assert!(matches!(asking(&web, LyricsService::LyricsPlus), Lookup::Found(_)));
+        assert!(matches!(asking(&web, LyricsService::LyricsPlus), Lookup::Found(..)));
+    }
+
+    #[test]
+    fn bini_lyrics_takes_only_this_artists_song() {
+        let ttml = include_str!("../testdata/apple.ttml");
+        let result = |artist: &str| json!({"results": [{"track_name": "Glass Harbour", "artist_name": artist, "duration": 239, "lyricsUrl": "https://lyrics-storage.binimum.org/X.ttml"}]}).to_string();
+        let web = Web::default();
+        web.answer("https://lyrics-api.binimum.org/", 200, &result("Someone Else"));
+        web.answer("https://lyrics-storage.binimum.org/X.ttml", 200, ttml);
+        assert_eq!(asking(&web, LyricsService::Binilyrics), Lookup::Missing, "the same title by another artist");
+        let web = Web::default();
+        web.answer("https://lyrics-api.binimum.org/", 200, &result("The Lanterns"));
+        web.answer("https://lyrics-storage.binimum.org/X.ttml", 200, ttml);
+        let Lookup::Found(l, _) = asking(&web, LyricsService::Binilyrics) else { panic!("found") };
+        assert!(l.word_timed);
     }
 
     #[test]
@@ -923,7 +973,7 @@ pub(crate) mod tests {
         let web = Web::default();
         let ttml = include_str!("../testdata/apple.ttml");
         web.answer("https://unison.boidu.dev/lyrics?song=Glass+Harbour&artist=The+Lanterns&album=Low+Tide&duration=239", 200, &json!({"success": true, "data": {"lyrics": ttml, "format": "ttml", "duration": 239}}).to_string());
-        let Lookup::Found(l) = asking(&web, LyricsService::Unison) else { panic!("found") };
+        let Lookup::Found(l, _) = asking(&web, LyricsService::Unison) else { panic!("found") };
         assert!(l.word_timed);
         let web = Web::default();
         web.answer("https://unison.boidu.dev/", 200, r#"{"success": false, "data": null}"#);
@@ -948,7 +998,7 @@ pub(crate) mod tests {
         web.answer("https://music.163.com/api/search/get", 200, &found.to_string());
         let yrc = include_str!("../testdata/netease.yrc");
         web.answer("https://music.163.com/api/song/lyric/v1?id=8", 200, &json!({"yrc": {"lyric": yrc}, "lrc": {"lyric": ""}}).to_string());
-        let Lookup::Found(l) = asking(&web, LyricsService::Netease) else { panic!("found") };
+        let Lookup::Found(l, _) = asking(&web, LyricsService::Netease) else { panic!("found") };
         assert!(l.word_timed);
         let sent = web.sent.lock();
         assert!(sent.iter().all(|e| e.headers.get("Referer").map(String::as_str) == Some("https://music.163.com/")));
@@ -968,7 +1018,7 @@ pub(crate) mod tests {
         let web = Web::default();
         let ttml = include_str!("../testdata/apple.ttml");
         web.answer("https://lyrics-api.boidu.dev/getLyrics", 200, &json!({"ttml": ttml, "score": 0.9}).to_string());
-        let Lookup::Found(l) = asking(&web, LyricsService::BetterLyrics) else { panic!("found on the second host") };
+        let Lookup::Found(l, _) = asking(&web, LyricsService::BetterLyrics) else { panic!("found on the second host") };
         assert!(l.word_timed);
         assert_eq!(web.asked().len(), 2);
     }
@@ -983,7 +1033,7 @@ pub(crate) mod tests {
             {"duration": 238, "syncedLyrics": "[00:01.00]from lrc", "lyricsfile": file},
             {"duration": 300, "syncedLyrics": "[00:01.00]too long"}]);
         web.answer("https://lrclib.net/api/search", 200, &hits.to_string());
-        let Lookup::Found(l) = asking(&web, LyricsService::Lrclib) else { panic!("found") };
+        let Lookup::Found(l, _) = asking(&web, LyricsService::Lrclib) else { panic!("found") };
         assert!(l.word_timed);
         assert!(web.asked()[0].contains("track_name=Glass+Harbour&"), "the title cleaned");
         let web = Web::default();
@@ -1000,7 +1050,7 @@ pub(crate) mod tests {
         let s = Song { title: "Glass Harbour".into(), ..song() };
         let caption = block(ask(LyricsService::YoutubeCaptions, &Ask::new(&web, &k, &shared, LyricsService::YoutubeCaptions), &s));
         assert_eq!(caption, Lookup::Missing, "no transcript");
-        let Lookup::Found(l) = block(ask(LyricsService::Simpmusic, &Ask::new(&web, &k, &shared, LyricsService::Simpmusic), &s)) else { panic!("found") };
+        let Lookup::Found(l, _) = block(ask(LyricsService::Simpmusic, &Ask::new(&web, &k, &shared, LyricsService::Simpmusic), &s)) else { panic!("found") };
         assert_eq!(l.lines[0].text, "It's here");
         assert_eq!(web.asked().iter().filter(|u| u.contains("/search")).count(), 1);
         let body: Value = serde_json::from_str(web.sent.lock()[0].json.as_deref().unwrap()).unwrap();
@@ -1017,7 +1067,7 @@ pub(crate) mod tests {
         let k = LyricsLookup { paxsenix_key: "abc".into(), ..keys() };
         let shared = Shared::default();
         let got = block(ask(LyricsService::PaxsenixMusixmatch, &Ask::new(&web, &k, &shared, LyricsService::PaxsenixMusixmatch), &song()));
-        assert!(matches!(got, Lookup::Found(l) if l.word_timed));
+        assert!(matches!(got, Lookup::Found(l, _) if l.word_timed));
         assert_eq!(web.sent.lock()[0].headers["Authorization"], "Bearer abc");
         assert_eq!(web.sent.lock()[0].timeout_ms, PAXSENIX_REQUEST_MS);
     }

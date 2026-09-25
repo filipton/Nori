@@ -47,6 +47,11 @@ pub trait Library: Send + 'static {
     fn fetch_ahead(&self, _id: &str) -> bool {
         true
     }
+
+    /// A song has started and `next` is being fetched after it, in the same wake of the network: the
+    /// moment to fetch the songs after that one too, whole, into a stream cache (a precacher,
+    /// [`crate::Store::fetch_ahead`]). Nothing by default.
+    fn ahead(&mut self, _next: &str) {}
 }
 
 /// How many songs' bytes are kept at once: the one playing and the one after. The one before is not:
@@ -188,6 +193,7 @@ impl<L: Library> Songs for Sources<L> {
     }
 
     fn upcoming(&mut self, id: &str) {
+        self.library.ahead(id);
         if !self.library.fetch_ahead(id) {
             return;
         }

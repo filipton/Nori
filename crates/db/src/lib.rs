@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS kv(server TEXT NOT NULL, key TEXT NOT NULL, value TEX
 CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, server TEXT NOT NULL, endpoint TEXT NOT NULL, params TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS downloads(server TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, ts INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(server, id)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS autoeq(rowid INTEGER PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, form TEXT NOT NULL, target TEXT NOT NULL, path TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS autoeq_missing(path TEXT PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS profiles(name TEXT PRIMARY KEY, json TEXT NOT NULL, outputs TEXT NOT NULL DEFAULT '') WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS app_kv(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -245,8 +246,7 @@ mod tests {
 
     #[test]
     fn an_analysis_table_of_an_older_layout_is_made_again_not_carried_over() {
-        let dir = std::env::temp_dir().join(format!("nori-db-old-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("db-old");
         let path = dir.join("old.db").to_string_lossy().into_owned();
         {
             let c = Connection::open(&path).unwrap();
@@ -257,14 +257,11 @@ mod tests {
         assert!(cols.iter().any(|c| c == "outro_grid_source"), "the current layout");
         let rows: i64 = c.query_row("SELECT count(*) FROM track_analysis", [], |r| r.get(0)).unwrap();
         assert_eq!(rows, 0, "nothing carried over: the songs are measured again");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn each_server_reads_its_own_rows_and_forgetting_one_leaves_the_rest() {
-        let dir = std::env::temp_dir().join(format!("nori-one-db-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("one-db");
         let path = dir.join("nori.db").display().to_string();
 
         let mut def = open(&path, "default").unwrap();
@@ -280,6 +277,5 @@ mod tests {
         assert_eq!(search(&def, "airbag", 10).unwrap().songs.len(), 1);
         drop((def, x1));
         assert_eq!(search(&open(&path, "default").unwrap(), "airbag", 10).unwrap().songs.len(), 1, "opened again, nothing lost");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

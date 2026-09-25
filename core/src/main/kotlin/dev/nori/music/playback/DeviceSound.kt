@@ -2,11 +2,11 @@ package dev.nori.music.playback
 
 import dev.nori.music.ffi.model.AutoEqEntry
 import dev.nori.music.ffi.devices.ChoiceKind
+import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.Core
 import dev.nori.music.ffi.model.CurveStep
 import dev.nori.music.ffi.devices.DeviceEffect
 import dev.nori.music.ffi.model.SoundProfile
-import dev.nori.music.net.Http
 import dev.nori.music.net.said
 import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Sound
@@ -27,12 +27,14 @@ import kotlinx.coroutines.withContext
  * the effects and raises the notices. A device can be given a saved profile, a flat sound, an AutoEQ
  * curve, or nothing; when it becomes the active output its sound is loaded, and when music goes back to
  * a device with nothing chosen the sound from before comes back. Headphones with nothing chosen and a
- * curve in the AutoEQ list get it offered, or applied straight away when [autoEqAuto] is on.
+ * curve in the AutoEQ list get it offered, or applied straight away when [autoEqAuto] is on. When no
+ * curve is found because the list is not on the device yet, it is fetched then if the core says it is
+ * due (on Wi-Fi), so new headphones find their curve without a trip to the list first.
  *
  * Driven by [Outputs.current] from the playback service, so it works with the app's screens closed.
  * It adds no listener of its own: it runs once per device change, never while music plays.
  */
-class DeviceSound(private val settings: Settings, private val core: () -> Core, private val http: () -> Http) {
+class DeviceSound(private val settings: Settings, private val core: () -> Core, private val client: () -> Client, private val metered: () -> Boolean) {
     private val lock = Mutex()
 
     /** Something to tell the user about the device that just connected. */
@@ -73,26 +75,50 @@ class DeviceSound(private val settings: Settings, private val core: () -> Core, 
         _notice.value = null
         val a = io { core().deviceArrive(output) }
         perform(output, a.effect)
-        val entry = a.entry ?: return
-        if (a.curve == CurveStep.OFFER) {
-            post(Offer(output, entry))
+        if (a.curve == CurveStep.NONE) return
+        var entry = a.entry ?: listArrived(output) ?: return
+        // An entry AutoEQ turns out to have no curve for is hidden by the core; the next best is tried.
+        repeat(3) {
+            if (a.curve == CurveStep.OFFER) {
+                post(Offer(output, entry))
+                return
+            }
+            val before = settings.value.sound()
+            val created = try {
+                adopt(output, entry, live = true)
+            } catch (_: NoCurve) {
+                entry = curvesFor(output, 1).firstOrNull() ?: return
+                return@repeat
+            } catch (e: Exception) {
+                // No network, or GitHub not answering: asking later is better than silently doing nothing.
+                android.util.Log.w("nori", "autoeq for $output: ${e.said}")
+                post(Offer(output, entry))
+                return
+            }
+            post(Applied(output, entry.name, before, created))
             return
         }
-        val before = settings.value.sound()
-        val created = runCatching { adopt(output, entry, live = true) }.getOrElse {
-            // No network, or GitHub not answering: asking later is better than silently doing nothing.
-            android.util.Log.w("nori", "autoeq for $output: ${it.said}")
-            post(Offer(output, entry))
-            return
-        }
-        post(Applied(output, entry.name, before, created))
+    }
+
+    /** No curve matched: the AutoEQ list is fetched if the core says it is due, then asked again. */
+    private suspend fun listArrived(output: String): AutoEqEntry? {
+        val fetched = io { runCatching { client().autoeqUpdate(false, metered()) }.getOrNull() } ?: return null
+        return if (fetched == 0u) null else curvesFor(output, 1).firstOrNull()
     }
 
     /** The AutoEQ curves this output's own name points at, best first. Empty for the speaker, a nameless DAC, or no index. */
     suspend fun curvesFor(output: String, limit: Int = 5): List<AutoEqEntry> = io { runCatching { core().autoeqForOutput(output, limit.toUInt()) }.getOrDefault(emptyList()) }
 
-    /** Yes to an [Offer]. */
-    suspend fun accept(offer: Offer) { lock.withLock { adopt(offer.output, offer.entry, live = true) } }
+    /** Yes to an [Offer]. When AutoEQ turns out to have no curve for it, the next best one is offered. */
+    suspend fun accept(offer: Offer) {
+        lock.withLock {
+            try {
+                adopt(offer.output, offer.entry, live = true)
+            } catch (_: NoCurve) {
+                curvesFor(offer.output, 1).firstOrNull()?.let { post(Offer(offer.output, it)) }
+            }
+        }
+    }
 
     /** Undoes an [Applied]: the sound from before, nothing bound, and this device is not offered a curve again. */
     suspend fun undo(n: Applied): Unit = lock.withLock {
@@ -127,14 +153,17 @@ class DeviceSound(private val settings: Settings, private val core: () -> Core, 
         perform(output, io { core().deviceAssign(output, kind, name, live) })
     }
 
+    /** AutoEQ has no curve for this entry; the core has taken it out of the list. */
+    class NoCurve(val entry: AutoEqEntry) : Exception(entry.name)
+
     /**
-     * Fetches [entry]'s curve and has the core save it as a profile named after it, bound to [output]
-     * alone, and load it when [live]. Returns whether the profile is new. Throws when the preset cannot
-     * be fetched or has no filters in it.
+     * Fetches [entry]'s curve (its parametric preset, or its graphic curve fitted by the core) and has the
+     * core save it as a profile named after it, bound to [output] alone, and load it when [live]. Returns
+     * whether the profile is new. Throws [NoCurve] when AutoEQ has none, or why the request failed.
      */
     private suspend fun adopt(output: String, entry: AutoEqEntry, live: Boolean): Boolean {
         val c = io { core() }
-        val text = http().get(io { c.autoeqPresetUrl(entry) }).decodeToString()
+        val text = io { client().autoeqCurve(entry) } ?: throw NoCurve(entry)
         val effect = io { c.deviceAdopt(output, entry.name, text, live) }
         perform(output, effect)
         return effect.created

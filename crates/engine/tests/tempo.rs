@@ -48,14 +48,13 @@ fn wav(rate: u32, secs: f64) -> Vec<u8> {
     w
 }
 
-/// The songs, as files: `a` at 44.1 kHz (it opens the output), `b` and `c` at 48 kHz.
-struct Songs(Vec<(String, PathBuf, i64)>);
+/// The songs, as files: `a` at 44.1 kHz (it opens the output), `b` and `c` at 48 kHz, in a directory
+/// that goes with them (the engine lets them go as it stops, a failing test's too).
+struct Songs(Vec<(String, PathBuf, i64)>, #[allow(dead_code)] nori_testdir::TempDir);
 
 impl Songs {
     fn new() -> Songs {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("nori-tempo-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("tempo");
         let songs = [("a", 44_100, 12.0), ("b", 48_000, 30.0), ("c", 48_000, 30.0)];
         Songs(
             songs
@@ -66,6 +65,7 @@ impl Songs {
                     (id.to_string(), path, (secs * 1000.0) as i64)
                 })
                 .collect(),
+            dir,
         )
     }
 }

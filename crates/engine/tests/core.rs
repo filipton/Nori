@@ -119,9 +119,7 @@ fn beat_wav() -> Vec<u8> {
 
 #[test]
 fn downloads_the_disk_and_measuring_ahead_over_the_core() {
-    let dir = std::env::temp_dir().join(format!("nori-core-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = nori_testdir::TempDir::new("core");
     let core = Core::new(dir.join("nori.db").to_string_lossy().into_owned(), "test".into()).unwrap();
     let config = ServerConfig { url: "http://music.test".into(), user: "u".into(), password: "p".into(), api_key: None, legacy_auth: false };
     core.configure(config).unwrap();
@@ -154,6 +152,7 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
         Source::Cached { key, .. } => assert_eq!(key, "other:0", "streamed, and kept in the cache"),
         _ => panic!("a song that is not downloaded streams"),
     }
+    metered_and_ahead(&client, &store, &dir);
 
     // AutoMix on: the songs coming up are measured, those on the disk only.
     let mut prefs = nori_core::settings_store::settings_open(dir.join("app.db").to_string_lossy().into_owned()).unwrap();
@@ -179,6 +178,18 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
     assert!((a.bpm - 120.0).abs() < 2.0 || (a.bpm - 60.0).abs() < 1.0 || (a.bpm - 240.0).abs() < 4.0, "the beat heard: {}", a.bpm);
     assert!(core.analysis_get("m-2".into()).unwrap().is_none(), "not on the disk: left for later");
     assert!(audio.requests.lock().iter().all(|(u, _)| !u.contains("m-2")), "and never fetched for it");
+    // The player fetches it (the next song, or one a queue edit put next): measured as it becomes whole.
+    let key = client.resolve("m-2".into(), false, nori_core::stream::metered()).key;
+    let beat = beat_wav();
+    let mut w = store.writer(&key).unwrap();
+    assert!(w.write(0, &beat));
+    assert!(w.finish(beat.len() as u64));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while core.analysis_get("m-2".into()).unwrap().is_none() {
+        assert!(std::time::Instant::now() < until, "m-2 was measured once it was whole in the cache");
+        std::thread::park_timeout(std::time::Duration::from_millis(200));
+    }
+    drop(measurer);
 
     // From a client's own disk (Android's media3 cache, a song in pieces): each song decoded once, only
     // once it is whole, and one that cannot be measured is not tried again every time it is looked at.
@@ -250,7 +261,72 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
     }
     #[cfg(feature = "neural-beats")]
     listens_with_a_real_model(&core, &dir, &measurer, &settle);
-    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Whole songs, every request counted: the precacher's network.
+#[derive(Default)]
+struct Plain(Mutex<Vec<String>>);
+
+impl ByteSource for Plain {
+    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+        self.0.lock().push(url.to_string());
+        let mut c = Cursor::new(bytes_of(url));
+        c.set_position(from);
+        Ok(Body { start: from, len: Some(LEN as u64), reader: Box::new(c) })
+    }
+}
+
+/// The network turning metered in the middle of a queue: the song playing and the one already on its way
+/// keep their addresses, the next song fetched streams at the metered quality. And the songs after the
+/// next are fetched whole ahead of their turn, as many as the settings give the network, none on a metered
+/// one by default.
+fn metered_and_ahead(client: &Arc<Client>, store: &Arc<Store>, dir: &std::path::Path) {
+    use nori_player::pipeline::Songs;
+    let songs: Vec<Song> = (1..=5).map(|i| Song { id: format!("p-{i}"), title: format!("P{i}"), duration: 3, suffix: "mp3".into(), ..Default::default() }).collect();
+    nori_core::queue::queue_register(songs);
+    let ids: Vec<String> = (1..=5).map(|i| format!("p-{i}")).collect();
+    nori_core::playlist::playlist_set(ids, 0, false);
+    let _ = nori_core::settings_store::settings_open(dir.join("app.db").to_string_lossy().into_owned()).unwrap();
+
+    let net = Arc::new(Plain::default());
+    let library = CoreLibrary { client: client.clone(), bytes: net.clone(), metered: false, store: Some(store.clone()) };
+    let load: [i64; 5] = nori_core::rules::load_control(256).try_into().unwrap();
+    let mut sources = nori_engine::Sources::new(library, load, std::thread::current());
+    let q = nori_engine::core::network_metered(client, false);
+    assert_eq!((q.bit_rate, q.format.as_str()), (0, ""), "the original file on Wi-Fi");
+    let _playing = sources.open("p-1", 0).unwrap();
+    sources.upcoming("p-2");
+    let settle = || {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.fetching_ahead() {
+            assert!(std::time::Instant::now() < until, "the fetching ahead ends");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    settle();
+    assert!(store.peek("p-3:0").is_some(), "the song after the next, fetched whole ahead");
+    assert!(store.peek("p-4:0").is_none(), "two ahead on Wi-Fi by default: the next (the engine's own) and this one");
+    assert_eq!(net.0.lock().iter().filter(|u| u.ends_with("&id=p-3")).count(), 1, "in one request");
+
+    let q = nori_engine::core::network_metered(client, true);
+    assert_eq!((q.bit_rate, q.format.as_str()), (192, "opus"), "the settings' quality for mobile data");
+    let asked = net.0.lock().len();
+    let _seek = sources.open("p-1", 1_000).unwrap();
+    let _next = sources.open("p-2", 0).unwrap();
+    assert!(net.0.lock()[asked..].iter().all(|u| !u.contains("format=opus")), "the song playing and the one on its way keep theirs: {:?}", &net.0.lock()[asked..]);
+    nori_core::playlist::playlist_moved_to(1);
+    sources.upcoming("p-3");
+    settle();
+    let _after = sources.open("p-4", 0).unwrap();
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !net.0.lock().iter().any(|u| u.contains("&id=p-4")) {
+        assert!(std::time::Instant::now() < until, "p-4 is asked for");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let opened: Vec<String> = net.0.lock()[asked..].to_vec();
+    assert!(opened.iter().any(|u| u.ends_with("&id=p-4&maxBitRate=192&format=opus&estimateContentLength=true")), "the next song fetched streams at the metered quality: {opened:?}");
+    assert!(store.peek("p-5:0").is_none() && store.peek("p-5:192opus").is_none(), "one ahead on mobile data by default: the engine's own next song, none more");
+    nori_engine::core::network_metered(client, false);
 }
 
 /// The measurer with the real model, put where the app keeps it: the songs measured before it are decoded once

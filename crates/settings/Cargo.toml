@@ -29,3 +29,6 @@ nori-library = { path = "../library" }
 nori-automix = { path = "../automix" }
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
+
+[dev-dependencies]
+nori-testdir = { path = "../testdir" }

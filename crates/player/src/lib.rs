@@ -10,6 +10,7 @@ pub mod device;
 pub mod decode;
 pub mod dsp;
 pub mod engine;
+pub mod eqfit;
 pub mod outputs;
 pub mod packets;
 pub mod heard;

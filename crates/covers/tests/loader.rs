@@ -64,10 +64,9 @@ impl Transport for Server {
     fn address_changed(&self) {}
 }
 
-fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("nori-covers-loader-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    d
+/// A directory of the test's own, gone when the test is.
+fn dir(name: &str) -> nori_testdir::TempDir {
+    nori_testdir::TempDir::new(&format!("covers-loader-{name}"))
 }
 
 fn config(dir: Option<PathBuf>, workers: usize) -> Config {
@@ -154,7 +153,7 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
     let d = dir("disk");
     let provider = "http://s/rest/getCoverArt.view?u=a&id=ext-deezer-1&size=320";
     {
-        let loader = Loader::new(config(Some(d.clone()), 2), Server::new(200));
+        let loader = Loader::new(config(Some(d.to_path_buf()), 2), Server::new(200));
         loader.load(PHOTO, 8, 8).unwrap();
         loader.load(provider, 8, 8).unwrap();
         let disk = loader.disk().unwrap();
@@ -163,26 +162,24 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
     }
     // A server that is not there: the kept cover still comes, the provider's does not.
     let down = Server::new(0);
-    let loader = Loader::new(config(Some(d.clone()), 2), down.clone());
+    let loader = Loader::new(config(Some(d.to_path_buf()), 2), down.clone());
     assert_eq!(loader.load(PHOTO, 8, 8).unwrap().width, 8);
     assert_eq!(down.calls(), 0);
     assert!(matches!(loader.load(provider, 8, 8), Err(Error::Transport { kind: FailureKind::Connect, .. })));
     drop(loader);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]
 fn an_error_answer_is_an_error_and_is_not_kept() {
     let d = dir("error");
     let server = Server::new(404);
-    let loader = Loader::new(config(Some(d.clone()), 1), server.clone());
+    let loader = Loader::new(config(Some(d.to_path_buf()), 1), server.clone());
     assert_eq!(loader.load(PHOTO, 8, 8), Err(Error::Status(404)));
     assert_eq!(loader.disk().unwrap().bytes(), 0);
     // Not remembered as a failure either: the next ask asks again.
     assert_eq!(loader.load(PHOTO, 8, 8), Err(Error::Status(404)));
     assert_eq!(server.calls(), 2);
     drop(loader);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 #[test]
@@ -283,7 +280,7 @@ fn a_warm_up_fetches_onto_the_disk_once_and_decodes_nothing() {
     let d = dir("warm");
     let server = Server::new(200);
     let painted = Arc::new(AtomicUsize::new(0));
-    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.clone()), 1) }, server.clone(), Counted(painted.clone()));
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.to_path_buf()), 1) }, server.clone(), Counted(painted.clone()));
     server.hold();
     // The one worker is busy with a view; a warm-up and another view queue behind it.
     let busy = loader.request("http://s/busy", 8, 8, |_| {});
@@ -314,7 +311,6 @@ fn a_warm_up_fetches_onto_the_disk_once_and_decodes_nothing() {
     assert_eq!(server.calls(), 3);
     drop((busy, late));
     drop(loader);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// A painter that panics on one size, as a decoder might on one hostile file.
@@ -337,7 +333,7 @@ impl Paint for Fragile {
 fn a_cover_that_panics_is_its_own_error_and_every_cover_after_it_still_comes() {
     let d = dir("panic");
     let server = Server::new(200);
-    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.clone()), 1) }, server.clone(), Fragile);
+    let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(Some(d.to_path_buf()), 1) }, server.clone(), Fragile);
     for _ in 0..3 {
         assert!(matches!(loader.load(PHOTO, 13, 13), Err(Error::Panicked(why)) if why == "a decoder bug"));
         // Not kept: the file may be what broke it.
@@ -350,7 +346,6 @@ fn a_cover_that_panics_is_its_own_error_and_every_cover_after_it_still_comes() {
     drop(t);
     assert_eq!(loader.load(PHOTO, 10, 10), Ok((10, 10)));
     drop(loader);
-    std::fs::remove_dir_all(&d).unwrap();
 }
 
 /// A painter that counts the worker threads alive (each marks itself on its first cover, and is counted

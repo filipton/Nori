@@ -397,6 +397,9 @@ fun SongRow(
     }
 }
 
+/** How long the playing bars wait between steps, ms: with the frame after it, about twenty steps a second. */
+private const val BARS_STEP_MS = 34L
+
 /**
  * The bars Apple draws where a playing track's number would be. They move while the music does and
  * stand still when it is paused, which is the cue that matters: a frozen glyph beside the marked row
@@ -421,7 +424,13 @@ fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
         // One callback object for every frame, handed to the frame clock as it is: the millisecond
         // variants wrap it in a new lambda each frame, which is garbage for as long as the music plays.
         val tick: (Long) -> Unit = { phase.floatValue = it / 1e9f }
-        while (coroutineContext.isActive) androidx.compose.runtime.withFrameNanos(tick)
+        // Not every display frame: each one is a frame of the whole screen, and every display frame of a
+        // 120 Hz phone kept a page with this row on it at a fifth of a core. A score or so of steps a second
+        // still reads as the bars moving with the music; see BARS_STEP_MS.
+        while (coroutineContext.isActive) {
+            androidx.compose.runtime.withFrameNanos(tick)
+            kotlinx.coroutines.delay(BARS_STEP_MS)
+        }
     }
     androidx.compose.foundation.Canvas(modifier) {
         val t = phase.floatValue

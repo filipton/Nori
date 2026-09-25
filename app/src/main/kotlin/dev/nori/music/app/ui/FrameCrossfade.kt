@@ -33,8 +33,12 @@ internal class FadeTimes(val inMs: Float, val outMs: Float, val delayMs: Float =
  * restarted from the wrong end. A piece that is asked for again while it is still leaving comes back from
  * where it had got to rather than being replaced by a new copy of itself.
  */
-internal class FrameFades<T>(first: T, private val key: (T) -> Any?, private val times: FadeTimes) {
-    inner class Piece(value: T) {
+internal class FrameFades<T>(
+    first: T, private val key: (T) -> Any?, private val times: FadeTimes,
+    /** The times of the change from one target to the next, when they are not [times]: see [FrameCrossfade]. */
+    private val timesFor: ((from: T, to: T) -> FadeTimes?)? = null,
+) {
+    inner class Piece(value: T, var times: FadeTimes) {
         var value by mutableStateOf(value)
         val key: Any? get() = this@FrameFades.key(value)
         var level by mutableFloatStateOf(0f)
@@ -43,7 +47,7 @@ internal class FrameFades<T>(first: T, private val key: (T) -> Any?, private val
         var leaving by mutableStateOf(false)
     }
 
-    val pieces = mutableStateListOf(Piece(first).apply { level = 1f; rise = 1f })
+    val pieces = mutableStateListOf(Piece(first, times).apply { level = 1f; rise = 1f })
 
     /** The piece arriving or shown: the last one not leaving. */
     val current: Piece? get() = pieces.lastOrNull { !it.leaving }
@@ -56,16 +60,20 @@ internal class FrameFades<T>(first: T, private val key: (T) -> Any?, private val
         val k = key(target)
         val now = current
         if (now != null && now.key == k) { now.value = target; return }
+        // The change's own times: the one leaving goes as they say, and the one arriving comes by them.
+        val change = now?.let { timesFor?.invoke(it.value, target) } ?: times
         now?.leaving = true
+        now?.times = change
         val back = pieces.firstOrNull { it.key == k }
         if (back != null) {
             back.value = target
+            back.times = change
             back.leaving = false
             // Drawn last, over the ones leaving, as a new arrival would be.
             pieces.remove(back)
             pieces.add(back)
         } else {
-            pieces.add(Piece(target).apply { wait = times.delayMs; rise = if (times.riseMs > 0f) 0f else 1f })
+            pieces.add(Piece(target, change).apply { wait = change.delayMs; rise = if (change.riseMs > 0f) 0f else 1f })
         }
     }
 
@@ -74,7 +82,7 @@ internal class FrameFades<T>(first: T, private val key: (T) -> Any?, private val
         val gone = ArrayList<Piece>(0)
         for (p in pieces) {
             if (p.leaving) {
-                p.level = (p.level - ms / times.outMs).coerceAtLeast(0f)
+                p.level = (p.level - ms / p.times.outMs).coerceAtLeast(0f)
                 if (p.level == 0f) gone += p
                 continue
             }
@@ -85,8 +93,8 @@ internal class FrameFades<T>(first: T, private val key: (T) -> Any?, private val
                 left -= w
                 if (left <= 0f) continue
             }
-            p.level = (p.level + left / times.inMs).coerceAtMost(1f)
-            if (times.riseMs > 0f) p.rise = (p.rise + left / times.riseMs).coerceAtMost(1f)
+            p.level = (p.level + left / p.times.inMs).coerceAtMost(1f)
+            if (p.times.riseMs > 0f) p.rise = (p.rise + left / p.times.riseMs).coerceAtMost(1f)
         }
         pieces.removeAll(gone)
     }
@@ -107,7 +115,8 @@ private const val FRAME_MS = 16.7f
 /**
  * [content] for [target], cross-faded into the next target's rather than cut: the one leaving fades out
  * where it stands while the one arriving fades in (and rises into place, with [FadeTimes.riseMs]).
- * Targets with the same [key] are the same piece.
+ * Targets with the same [key] are the same piece. [timesFor] may give one change its own times (the
+ * same song's words replaced by finer ones cross-fade in place, with no wait and no rise).
  *
  * Timed by frames, the way the sleeve's slide is ([settleByFrames]), and not by the clock: the frame a
  * song changes on composes the whole new song and can take a quarter of a second, and a clock-timed
@@ -121,9 +130,10 @@ internal fun <T> FrameCrossfade(
     times: FadeTimes,
     modifier: Modifier = Modifier,
     key: (T) -> Any? = { it },
+    timesFor: ((from: T, to: T) -> FadeTimes?)? = null,
     content: @Composable BoxScope.(T) -> Unit,
 ) {
-    val fades = remember { FrameFades(target, key, times) }
+    val fades = remember { FrameFades(target, key, times, timesFor) }
     // In this composition, before the pieces are read below: the new piece is composed on the frame the
     // target changed, together with whatever else changed with it (the song's title, the page).
     fades.show(target)
@@ -146,7 +156,7 @@ internal fun <T> FrameCrossfade(
             Box(
                 Modifier.graphicsLayer {
                     alpha = fadeEase(piece.level)
-                    if (times.riseMs > 0f) translationY = (1f - fadeEase(piece.rise)) * size.height / 40f
+                    if (piece.times.riseMs > 0f) translationY = (1f - fadeEase(piece.rise)) * size.height / 40f
                 },
             ) { content(piece.value) }
         }

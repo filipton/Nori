@@ -17,6 +17,7 @@ pub(crate) static PLAYHEAD: Class = Class {
     methods: &[
         native!(c"position", c"(JJZIIJI)J", position),
         native!(c"runOn", c"(JJZ)J", run_on),
+        native!(c"jumped", c"(J)V", jumped),
         native!(c"durationMs", c"(JJJ)J", duration_ms),
     ],
 };
@@ -49,6 +50,13 @@ extern "system" fn at(h: jlong, now_ms: jlong, playing: jboolean, on: jint, next
 extern "system" fn position(h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong, shown: jint) -> jlong {
     let Some(c) = clock(h) else { return position_ms.max(0) };
     c.lock().position(now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms, usize::try_from(shown).ok()).pack()
+}
+
+/// The listener asked for a place: the bar shows the next reading as it is, even a moment back.
+extern "system" fn jumped(h: jlong) {
+    if let Some(c) = clock(h) {
+        c.lock().jumped();
+    }
 }
 
 extern "system" fn run_on(h: jlong, now_ms: jlong, playing: jboolean) -> jlong {

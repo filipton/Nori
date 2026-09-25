@@ -31,6 +31,9 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     /** Where a seek asked to go, while it is still being watched into place; the seek bar holds this. */
     val pendingSeek: StateFlow<Long?> = player.pendingSeek
 
+    /** A mix is being heard (see [dev.nori.music.playback.PlayerConnection.mixing]): the seek row says so. */
+    val mixing: StateFlow<Boolean> = player.mixing
+
     /** Just the id, so a list can highlight its playing row without observing the whole player. */
     val currentId: StateFlow<String?> = state.map { it.current?.id }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -65,7 +68,7 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
             answers = lyricsKept,
             same = ::sameLyrics,
             keep = { it is Load.Ready && it.data.lyrics.lines.isNotEmpty() },
-        ) { song -> nori.library.lyricsFor(song).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
+        ) { song -> (dev.nori.music.app.TestHooks.lyrics?.invoke(song) ?: nori.library.lyricsFor(song)).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), dev.nori.music.data.ForSong(null, Load.Loading))
 
     /**
@@ -112,6 +115,10 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
         if (motionLazy.isInitialized()) motion.pause()
     }
 
+    fun motionRest() {
+        if (motionLazy.isInitialized()) motion.rest()
+    }
+
     fun motionRelease() {
         if (motionLazy.isInitialized()) motion.release()
     }
@@ -155,6 +162,8 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs
+    /** The player's own place, unshaped: for the test bridge's traces. */
+    val playerPositionMs: Long get() = player.playerPositionMs
 
     /** [positionMs] while the song playing is still [songId]; null once the player has left it. */
     fun positionIn(songId: String?): Long? = dev.nori.music.data.playheadFor(songId, state.value.current?.id) { player.positionMs }

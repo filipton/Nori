@@ -49,7 +49,11 @@ echo "-- lyrics"
 lines=$(field lyricLines); source=$(field lyricsSource); synced=$(field lyricsSynced)
 echo "     $lines lines from $source (synced=$synced, wordTimed=$(field lyricsWordTimed))"
 check "lyrics arrive for a well-known song" test "${lines:-0}" -gt 0
-check "sweeping only claimed for real word timing" bash -c '[ "$('"$app"' state | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get(\"lyricsWordTimed\",False) or not d.get(\"lyricsSynced\",False) or True)")" = "True" ]'
+# Word timing claimed (the sweep) only for synced lyrics whose lines carry words; unsynced lyrics never
+# claim it. Lyrics that are synced line by line only pass too: then nothing is claimed.
+check "sweeping only claimed for real word timing" bash -c '"'"$app"'" state | python3 -c "
+import sys,json;d=json.load(sys.stdin)
+sys.exit(0 if not d.get(\"lyricsWordTimed\",False) or (d.get(\"lyricsSynced\",False) and d.get(\"lyricsWordLines\",0)>0) else 1)"'
 # Each lyrics service on its own, for the same song. Reported rather than checked: a service may
 # simply not have it, and when the server has timed lyrics of its own no service is asked at all (the
 # source then reads SERVER). A service that times words shows wordTimed=True; one that answers with

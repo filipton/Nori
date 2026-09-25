@@ -1,0 +1,12 @@
+[package]
+name = "nori-testdir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A directory of a test's own under the system's temp directory, removed when the test is done: for the crates' tests only"
+publish = false
+
+[lib]
+name = "nori_testdir"
+
+[dependencies]

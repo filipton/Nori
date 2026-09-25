@@ -226,15 +226,40 @@ impl Order for CoreOrder {
     }
 }
 
-/// Songs stream from the server the client is logged in to, at the quality the settings ask for; with
-/// a store, a finished download or a whole cached copy plays from the disk before the network is asked,
-/// and what streams is kept in the cache.
+/// Songs stream from the server the client is logged in to, at the quality the settings ask for on the
+/// network the device is on ([`network_metered`]); with a store, a finished download or a whole cached
+/// copy plays from the disk before the network is asked, what streams is kept in the cache, and the
+/// songs after the next one are fetched into it ahead of their turn as the core says
+/// (`Client::precache_targets`: how many for this network, never a provider's song or a download), as
+/// Android's precacher fetches them for the ExoPlayer path.
 pub struct CoreLibrary {
     pub client: Arc<Client>,
     pub bytes: Arc<dyn ByteSource>,
-    /// The network is metered: the metered quality is streamed.
+    /// Always stream the metered quality, whatever the platform last said of the network.
     pub metered: bool,
     pub store: Option<Arc<Store>>,
+}
+
+impl CoreLibrary {
+    /// Whether songs opened or fetched now stream at the metered quality.
+    fn metered(&self) -> bool {
+        self.metered || nori_core::stream::metered()
+    }
+}
+
+/// The network the device is on is `metered` or not now (a phone's mobile data, a tethered laptop), as
+/// the platform says whenever it changes: Android's `EnginePlayer` from its network callback, a desktop
+/// client from wherever its system says it (NetworkManager's `Metered`, Windows' cost), or never, and
+/// songs stream at the unmetered quality. Answers that quality: the user's setting for the network
+/// (bit rate and format, transcoded by the server; 0 and none are the original file).
+///
+/// It applies to the next song fetched, not to one already on its way: the song playing keeps the
+/// bytes it has and the address it came from (a seek reads on from the same file), and so does the one
+/// after it once its fetch has begun. Fetching ahead follows at the next song's start: how many songs,
+/// and none on a metered network unless the settings allow it.
+pub fn network_metered(client: &Client, metered: bool) -> nori_core::stream::StreamQuality {
+    nori_core::stream::network_metered(metered);
+    client.streaming_quality(metered)
 }
 
 /// The container a cache key's quality names (`<id>:192opus` is Opus); none for the original file.
@@ -252,7 +277,7 @@ impl Library for CoreLibrary {
         if let Some(path) = kept {
             return Ok(Located { source: Source::File(path), hint: None, duration_ms });
         }
-        let target = self.client.resolve(id.to_string(), false, self.metered);
+        let target = self.client.resolve(id.to_string(), false, self.metered());
         let hint = key_format(&target.key).or_else(|| song.as_ref().map(|s| s.suffix.clone())).filter(|s| !s.is_empty());
         let (url, bytes) = (target.url, self.bytes.clone());
         let source = match &self.store {
@@ -269,6 +294,14 @@ impl Library for CoreLibrary {
     /// Never a provider's song: asking for one makes the server download it.
     fn fetch_ahead(&self, id: &str) -> bool {
         fetch_ahead(id)
+    }
+
+    /// The songs the core names to fetch ahead, whole into the stream cache, but `next`, which the
+    /// engine is fetching itself; nothing without a store.
+    fn ahead(&mut self, next: &str) {
+        let Some(store) = &self.store else { return };
+        let songs = self.client.precache_targets(self.metered()).into_iter().filter(|f| f.id != next).map(|f| (f.url, f.key)).collect();
+        store.fetch_ahead(self.bytes.clone(), songs);
     }
 }
 
@@ -480,8 +513,12 @@ impl Shelf for StoreShelf {
                 return Some(Whole { files: vec![p], hint: None });
             }
         }
-        let key = self.client.resolve(id.to_string(), false, false).key;
-        let path = self.store.peek(&key)?;
+        // The quality for the network the device is on now first, then the other one's copy.
+        let metered = nori_core::stream::metered();
+        let (key, path) = [metered, !metered].into_iter().find_map(|m| {
+            let key = self.client.resolve(id.to_string(), false, m).key;
+            self.store.peek(&key).map(|p| (key, p))
+        })?;
         let hint = key_format(&key).or_else(|| nori_core::queue::queue_song(id.to_string()).map(|s| s.suffix)).filter(|s| !s.is_empty());
         Some(Whole { files: vec![path], hint })
     }
@@ -592,8 +629,17 @@ impl Schedule {
 
 impl Measurer {
     /// Measures from nori-engine's own [`Store`]: the downloads and the stream cache there.
+    /// A song the store's cache finishes (the next one, fetched after the song playing started or a
+    /// queue edit put it there) is looked at as it becomes whole.
     pub fn new(core: Arc<Core>, client: Arc<Client>, store: Arc<Store>) -> Arc<Measurer> {
-        Measurer::on_shelf(move || Some(core.clone()), Box::new(StoreShelf { client, store }), None)
+        let m = Measurer::on_shelf(move || Some(core.clone()), Box::new(StoreShelf { client, store: store.clone() }), None);
+        let weak = Arc::downgrade(&m);
+        store.on_whole(Box::new(move || {
+            if let Some(m) = weak.upgrade() {
+                m.arrived();
+            }
+        }));
+        m
     }
 
     /// Measures the songs `shelf` says are whole, storing into `core()` as it is at each look; `told`

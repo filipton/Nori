@@ -10,6 +10,69 @@ use crate::{alog, autoeq, Arrival, AutoEqEntry, Core, CoreError, CurveStep, Soun
 
 pub use nori_devices::profiles::*;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::client::{Client, NetResult};
+
+/// True while the AutoEQ index is being fetched: a second trigger meanwhile (the app starting while the
+/// network turns unmetered) does nothing.
+static INDEX_FETCHING: AtomicBool = AtomicBool::new(false);
+
+/// Clears [INDEX_FETCHING] however the fetch ends, a dropped future included.
+struct Fetching;
+
+impl Drop for Fetching {
+    fn drop(&mut self) {
+        INDEX_FETCHING.store(false, Ordering::Release);
+    }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Client {
+    /// Keeps the AutoEQ index on the device. Called when the app starts, when the network turns
+    /// unmetered and when a device arrives with no curve found for it; never on a timer. Fetches only
+    /// when it is due (`autoeq::index_due`: "Keep the AutoEQ list" and looking things up on, `metered`
+    /// false, the list missing or a month old) or when `asked` (the list's own button, which is the
+    /// user's consent on any network). How many headphones the list offers when it was fetched; none when
+    /// nothing was due or another fetch is running.
+    pub async fn autoeq_update(&self, asked: bool, metered: bool) -> NetResult<Option<u32>> {
+        let now = crate::db::now_ms();
+        if !asked {
+            let auto = crate::settings_store::with_prefs(|p| p.auto_eq_download && p.third_party_lookups).unwrap_or(false);
+            let (stored, fetched) = {
+                let c = self.core.db.lock();
+                (autoeq::count(&c)?, autoeq::fetched_ms(&c)?)
+            };
+            if !autoeq::index_due(auto, metered, stored, fetched, now) {
+                return Ok(None);
+            }
+        }
+        if INDEX_FETCHING.swap(true, Ordering::AcqRel) {
+            return Ok(None);
+        }
+        let _fetching = Fetching;
+        let markdown = autoeq::fetch_text(&*self.transport, autoeq::INDEX_URL.to_string()).await?;
+        let n = autoeq::store(&mut self.core.db.lock(), &markdown, now)?;
+        alog::info(&format!("autoeq: index kept, {n} headphones"));
+        Ok(Some(n))
+    }
+
+    /// The curve of `entry` as preset text for `device_adopt` or the equalizer's import: its parametric
+    /// preset, or its graphic curve where it has none (fitted when the text is read). None when AutoEQ has
+    /// neither: the entry is then left out of every list from now on. A failed request is an error and
+    /// hides nothing.
+    pub async fn autoeq_curve(&self, entry: AutoEqEntry) -> NetResult<Option<String>> {
+        match autoeq::fetch_curve(&*self.transport, &entry).await? {
+            autoeq::Curve::Found(text) => Ok(Some(text)),
+            autoeq::Curve::Missing => {
+                alog::info(&format!("autoeq: no curve for {} ({})", entry.name, entry.path));
+                autoeq::mark_missing(&self.core.db.lock(), &entry.path)?;
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// The output that music now goes to.
@@ -399,5 +462,32 @@ pub(crate) mod tests {
         c.settle("Bluetooth: X", step);
         c.device_undo("Bluetooth: X".into(), "Sony".into(), false, sound());
         assert_eq!(c.profiles().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_autoeq_list_is_fetched_when_asked_and_a_curve_less_entry_is_hidden() {
+        use crate::client::tests::{block, client};
+        let (c, fake) = client(crate::client::NetProfile { url: "h".into(), ..Default::default() });
+        let index = "- [Sony WH-1000XM6](./Super%20Review/over-ear/Sony%20WH-1000XM6) by Super Review\n\
+- [Sony WH-1000XM6 (analog cable)](./Super%20Review/over-ear/Sony%20WH-1000XM6%20(analog%20cable)) by Super Review\n";
+        assert_eq!(block(c.autoeq_update(false, true)).unwrap(), None, "never by itself on a metered network");
+        assert!(fake.asked().is_empty());
+        fake.answer(index);
+        assert_eq!(block(c.autoeq_update(true, true)).unwrap(), Some(2), "asked for, on any network");
+        assert_eq!(fake.asked(), [autoeq::INDEX_URL]);
+
+        let cable = c.core.autoeq_search("analog".into(), 5).unwrap().remove(0);
+        fake.answers.lock().push_back(Ok((404, b"404: Not Found".to_vec())));
+        fake.answers.lock().push_back(Ok((404, b"404: Not Found".to_vec())));
+        assert_eq!(block(c.autoeq_curve(cable.clone())).unwrap(), None);
+        assert!(c.core.autoeq_search("analog".into(), 5).unwrap().is_empty(), "left out from now on");
+        assert_eq!(c.core.autoeq_count().unwrap(), 1);
+
+        let plain = c.core.autoeq_search("WH-1000XM6".into(), 5).unwrap().remove(0);
+        fake.fail(crate::transport::FailureKind::Timeout);
+        assert!(block(c.autoeq_curve(plain.clone())).is_err(), "a failure is not a missing curve");
+        assert_eq!(c.core.autoeq_count().unwrap(), 1);
+        fake.answer("Preamp: -4.6 dB\nFilter 1: ON LSC Fc 105 Hz Gain -8.3 dB Q 0.70\n");
+        assert!(block(c.autoeq_curve(plain)).unwrap().unwrap().starts_with("Preamp: -4.6 dB"));
     }
 }

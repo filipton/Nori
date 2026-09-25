@@ -49,6 +49,8 @@ pub enum Msg {
     Mouse(MouseEvent),
     Paste(String),
     Resize,
+    /// The terminal (or, under tmux, the pane) was given focus (true) or lost it.
+    Focus(bool),
     Engine(Event),
     Data(Req, Result<Data, String>),
     /// A cover by its id, decoded, and the page's colours when they were asked for.
@@ -61,6 +63,27 @@ pub enum Msg {
     LoggedIn(Result<SavedServer, String>),
     /// The server's reachability, checked once a session opens.
     Reachable(Result<(), String>),
+}
+
+impl Msg {
+    /// In a few words, for the debug log (no lyrics, no pixels, no passwords).
+    pub fn brief(&self) -> String {
+        match self {
+            Msg::Key(k) => format!("key {:?} {:?} {:?}", k.code, k.modifiers, k.kind),
+            Msg::Mouse(m) => format!("mouse {:?} at {},{}", m.kind, m.column, m.row),
+            Msg::Paste(p) => format!("paste of {} bytes", p.len()),
+            Msg::Resize => "resize".into(),
+            Msg::Focus(on) => format!("focus {}", if *on { "gained" } else { "lost" }),
+            Msg::Engine(e) => format!("engine {e:?}"),
+            Msg::Data(req, r) => format!("data {req:?} {}", if r.is_ok() { "ok" } else { "failed" }),
+            Msg::Cover { art, image, colours } => format!("cover {art} {}x{}{}", image.width, image.height, if colours.is_some() { " with colours" } else { "" }),
+            Msg::Lyrics { song, .. } => format!("lyrics for {song}"),
+            Msg::Search(v) => format!("search results for {:?}", v.query),
+            Msg::Note { text, error } => format!("note {text:?} error={error}"),
+            Msg::LoggedIn(r) => format!("logged in: {}", r.is_ok()),
+            Msg::Reachable(r) => format!("reachable: {}", r.is_ok()),
+        }
+    }
 }
 
 /// A read a screen asked for.
@@ -666,6 +689,10 @@ impl Session {
                 self.store.clear_cache();
                 self.note("Cleared the streamed music".into(), false);
             }
+            "clear-lyrics" => {
+                self.core.lyrics_cache_clear();
+                self.note("Cleared the lyrics found online".into(), false);
+            }
             "clear-covers" => {
                 if let Some(d) = self.covers.as_ref().and_then(|l| l.disk()) {
                     d.clear();
@@ -929,6 +956,7 @@ fn facts(core: &Arc<Core>, client: &Arc<Client>, store: &Arc<Store>, cover_bytes
             download_songs: downloads.len() as u32,
             index_bytes: db_bytes,
             busy: false,
+            lyrics_bytes: core.lyrics_cache_bytes(),
         },
         folders,
         ..Default::default()

@@ -83,10 +83,11 @@ data class EqNotice(val message: String, val action: String, val source: DeviceS
 
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
-/** What lives on the phone: streamed music, covers, finished downloads and the library index. */
+/** What lives on the phone: streamed music, covers, lyrics found online, finished downloads and the library index. */
 data class StorageUi(
     val streamBytes: Long = 0L,
     val coverBytes: Long = 0L,
+    val lyricsBytes: Long = 0L,
     val downloadBytes: Long = 0L,
     val downloadSongs: Int = 0,
     val indexBytes: Long = 0L,
@@ -129,8 +130,10 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         coverBlur = android.os.Build.VERSION.SDK_INT >= 31,
         analysed = analysed.toUInt(),
         sync = SyncFacts(s.running, s.indexed.songs, s.indexed.albums, s.indexed.artists, s.error),
-        storage = StorageFacts(st.streamBytes, st.coverBytes, st.downloadBytes, st.downloadSongs.toUInt(), st.indexBytes, st.busy),
+        storage = StorageFacts(st.streamBytes, st.coverBytes, st.downloadBytes, st.downloadSongs.toUInt(), st.indexBytes, st.busy, st.lyricsBytes),
         folders = folders,
+        // A phone does everything the settings have rows for: none are left out.
+        lacks = emptyList(),
     )
 
     /** A row's setting changed: its name and the value picked, which the core reads and applies. */
@@ -139,14 +142,13 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     /**
-     * A ranked row (a lyrics service) held and dragged [by] one place up (-1) or down (1) past its
-     * neighbour; whether it had one to pass. The ranking itself is the core's (`lyricsMove`).
+     * A ranked row (a lyrics service) dragged by its handle and dropped at place [to] of the one list;
+     * whether the core took it. The ranking itself is the core's (`lyricsPlace`).
      */
-    fun moveRanked(id: String, by: Int): Boolean {
-        val change = settingSet("lyricsMove", "$id:$by") ?: return false
-        val moved = change.prefs.lyricsOrder != nori.settings.value.lyricsOrder
+    fun placeRanked(id: String, to: Int): Boolean {
+        val change = settingSet("lyricsPlace", "$id:$to") ?: return false
         apply(change)
-        return moved
+        return true
     }
 
     private fun apply(change: SettingChange) {
@@ -167,6 +169,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
             "download-library" -> downloadLibrary()
             "clear-stream" -> clearStreamCache()
             "clear-covers" -> clearCovers()
+            "clear-lyrics" -> clearLyrics()
         }
     }
 
@@ -187,6 +190,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         _storage.value = StorageUi(
             streamBytes = nori.sources.streamBytes(),
             coverBytes = dirBytes(java.io.File(app.cacheDir, dev.nori.music.data.CoverLoader.DIR)),
+            lyricsBytes = runCatching { nori.core.lyricsCacheBytes() }.getOrDefault(0L),
             downloadBytes = nori.sources.downloadBytes(),
             downloadSongs = nori.downloads.state.value.done.size,
             indexBytes = index.sumOf { dirBytes(files[it.toInt()]) },
@@ -204,6 +208,13 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     fun clearCovers() = viewModelScope.launch(Dispatchers.IO) {
         _storage.update { it.copy(busy = true) }
         dev.nori.music.data.CoverLoader.get(getApplication()).clearDisk()
+        refreshStorage()
+    }
+
+    /** Forgets the lyrics found online (the core's `lyrics_cache_clear`); they are looked up again when opened. */
+    fun clearLyrics() = viewModelScope.launch(Dispatchers.IO) {
+        _storage.update { it.copy(busy = true) }
+        runCatching { nori.core.lyricsCacheClear() }
         refreshStorage()
     }
 
@@ -268,6 +279,8 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         if (name == "clearAnalyses") { clearAnalyses(); return true }
         // The "Streamed music" button: a check that needs a song to be fetched cannot have it cached.
         if (name == "clearStreamCache") { clearStreamCache(); return true }
+        // The "Lyrics" button under Storage, without its question.
+        if (name == "clearLyricsCache") { clearLyrics(); return true }
         // Which names exist, how each value reads and the ranges are the core's (settings::set_by_name),
         // the same the settings screen's rows use and the settings are loaded with.
         apply(settingSet(name, value) ?: return false)
@@ -434,14 +447,17 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     private fun AutoEqUi.counted(n: UInt) = autoeqCountWords(n).let { w -> copy(count = n.toInt(), countWords = w.count, searchWords = w.search) }
 
-    /** Downloads the AutoEQ index once (850 kB) so searching is local afterwards. */
+    /**
+     * Downloads the AutoEQ index (850 kB) now so searching is local afterwards; the core otherwise keeps
+     * it by itself on Wi-Fi (Nori.keepAutoEqList).
+     */
     fun downloadAutoEqIndex() = viewModelScope.launch {
-        // Asked for by name, with a button: that is the consent. The lookups switch is for what the app
-        // fetches on its own - missing lyrics, update checks - not for a download the user started.
+        // Asked for by name, with a button: that is the consent, on any network. The lookups switch and
+        // "Keep the AutoEQ list" are for what the app fetches on its own, not for a download the user started.
         _autoEq.update { it.copy(busy = true, error = null) }
         _autoEq.value = try {
-            val text = withContext(Dispatchers.IO) { nori.http.get(nori.core.autoeqIndexUrl()).decodeToString() }
-            AutoEqUi().counted(withContext(Dispatchers.IO) { nori.core.autoeqStore(text) })
+            val n = withContext(Dispatchers.IO) { nori.client.autoeqUpdate(true, nori.http.metered) }
+            AutoEqUi().counted(n ?: withContext(Dispatchers.IO) { nori.core.autoeqCount() })
         } catch (e: Exception) {
             AutoEqUi(error = describeConnectionError(e))
         }
@@ -465,8 +481,17 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {
         _autoEq.update { it.copy(busy = true, error = null) }
         try {
-            val text = withContext(Dispatchers.IO) { nori.http.get(nori.core.autoeqPresetUrl(entry)).decodeToString() }
-            import(text)
+            // The parametric preset, or the graphic curve fitted with parametric filters when that is all
+            // AutoEQ has (the core's autoeq_curve and parse_eq_preset); null when it has neither.
+            val text = withContext(Dispatchers.IO) { nori.client.autoeqCurve(entry) }
+            if (text == null) {
+                // The core has taken it out of the list: the search and the count say so at once.
+                val n = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqCount() }.getOrDefault(0u) }
+                _autoEq.update { it.counted(n).copy(busy = false, error = dev.nori.music.ffi.words.wordsUi().autoeqNoCurve) }
+                searchAutoEq(_autoEq.value.query)
+                return@launch
+            }
+            withContext(Dispatchers.IO) { import(text) }
             _autoEq.update { it.copy(busy = false, applied = entry.name) }
         } catch (e: Exception) {
             _autoEq.update { it.copy(busy = false, error = describeConnectionError(e)) }

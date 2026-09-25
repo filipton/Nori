@@ -102,6 +102,16 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
                 lastLyrics = nori.library.lyricsFor(song).last()
             }
             "seek" -> nori.player.seekTo(ref.toLongOrNull() ?: 0L)
+            // "fakelyrics <ms>": every song's lyrics come timed by the line at once and then, <ms> later,
+            // the same words timed word by word, as a slower and finer service replaces a fast one in the
+            // lyrics race. "fakelyrics off" goes back to the real lookup.
+            // "tracelyrics on|off": the lyrics panel logs each reading it takes and the moment it shows (tag norilyrics).
+            "tracelyrics" -> { dev.nori.music.app.TestHooks.traceLyrics = ref == "on"; dev.nori.music.playback.tracePositions = ref == "on" }
+            // "fakelyrics <ms>,<shift>" starts every line <shift> ms later, to put a word mid-fill at a given moment.
+            "fakelyrics" -> dev.nori.music.app.TestHooks.lyrics = if (ref == "off") null else ref.substringBefore(',').toLongOrNull()?.let { slow ->
+                val shift = ref.substringAfter(',', "0").toLongOrNull() ?: 0L
+                { song -> fakeLyrics(song, slow, shift) }
+            }
             // "dac <name>@44100/16,96000/24" pretends a USB DAC with those bit-perfect modes is attached;
             // "dac off" hands the app back to the real audio system. See DacSource.mock.
             "dac" -> {
@@ -133,6 +143,27 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
                 nori.library.createPlaylist(name, tracks.map { it.id })
             }
         }
+    }
+
+    /** Made-up lyrics for [song] (see "fakelyrics"): a line every four seconds, by the line, then by the word after [slowMs]. */
+    private fun fakeLyrics(song: Song, slowMs: Long, shiftMs: Long = 0): kotlinx.coroutines.flow.Flow<dev.nori.music.data.FoundLyrics> = kotlinx.coroutines.flow.flow {
+        val words = listOf("Somewhere", "the", "night", "is", "turning", "slowly", "over", "the", "water", "tonight", "and", "we")
+        val total = (song.duration.toLong() * 1000).coerceAtLeast(60_000)
+        fun lines(timed: Boolean) = (0 until (total / 4000).toInt()).map { i ->
+            val start = 2000L + shiftMs + i * 4000L
+            val n = 3 + i % 4
+            val picked = List(n) { words[(i * 5 + it) % words.size] }
+            val text = picked.joinToString(" ")
+            var at = 0
+            val timedWords = if (!timed) emptyList() else picked.mapIndexed { k, w ->
+                val from = at; at += w.length + 1
+                dev.nori.music.ffi.model.LyricWord(start + k * 3000L / n, start + (k + 1) * 3000L / n, from.toUInt(), (from + w.length).toUInt())
+            }
+            dev.nori.music.ffi.model.LyricLine(start, start + 3500, text, timedWords, null, false, "", emptyList(), 0u)
+        }
+        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, false, lines(false), 0uL), dev.nori.music.ffi.words.LyricsOrigin.LRCLIB))
+        kotlinx.coroutines.delay(slowMs)
+        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, true, lines(true), 0uL), dev.nori.music.ffi.words.LyricsOrigin.BETTER_LYRICS))
     }
 
     /** The last lyrics the test bridge asked for, so the state dump can report what arrived. */

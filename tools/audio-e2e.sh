@@ -213,8 +213,15 @@ shallow=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
 "$app" do "playnext $other" >/dev/null; sleep 2
 "$app" do next >/dev/null; sleep 6
 deep=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
-check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ] && [ '${shallow:-0}' -lt 1764000 ]"
-check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
+if [ "$(field engine)" = rust ]; then
+  # The Rust engine's track is opened deep once and resized in place, never reopened: its log says so.
+  check "tuning takes the shallow buffer, in place" bash -c "grep -q 'shallow for the equalizer in place' '$watching'"
+  check "the deep buffer is back, in place" bash -c "grep -q 'deep again in place' '$watching'"
+  check "the track was not reopened for tuning" bash -c "! grep -qE 'rust AudioTrack: .*(160|80) ms' '$watching'"
+else
+  check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ] && [ '${shallow:-0}' -lt 1764000 ]"
+  check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
+fi
 if [ "$(field engine)" = rust ]; then
   # The Rust engine takes the deep buffer back as the screen closes (one flush behind a dip), so there is
   # no swap left for the boundary; the check above already saw it back.
@@ -272,7 +279,8 @@ c=$(field positionMs)
 check "play resumes from the seek ($c)" bash -c "[ '${c:-0}' -ge 29000 ]"
 
 echo "-- errors"
-errs=$(adb logcat -d | grep -c "ExoPlayerImplInternal: Playback error")
+# Either engine's: ExoPlayer's own line, or the Rust player's error events (RustPlayer.kt).
+errs=$(adb logcat -d | grep -cE "ExoPlayerImplInternal: Playback error|nori.*rust player error: ")
 check "no playback errors in logcat ($errs)" test "$errs" -eq 0
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

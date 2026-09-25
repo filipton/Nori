@@ -32,13 +32,14 @@ const GROUPS: [(&str, &str, &str); 8] = [
     ("sound", "Sound", "Equalizer, volume, output"),
     ("look", "Appearance", "Theme, colours, size"),
     ("lyrics", "Lyrics", "Display and sources"),
-    ("library", "Library", "Gestures, search, history"),
+    ("library", "Library", "Lists, search, history"),
     ("data", "Downloads and storage", "Quality, downloads, space"),
     ("about", "About", "Version, build, licences"),
 ];
 
-/// Pages reached from inside another page rather than from the list: About's licences.
-const SUBPAGES: [(&str, &str, &str); 1] = [("licences", "Licences", "What this app is made of")];
+/// Pages reached from inside another page rather than from the list: About's licences, and the lyrics
+/// services in the order they are asked. A row opens one with the action `page:<id>`.
+const SUBPAGES: [(&str, &str, &str); 2] = [("licences", "Licences", "What this app is made of"), ("lyrics-sources", "Lyrics sources", "Which services are asked, and in what order")];
 
 fn group_title(id: &str) -> Option<&'static str> {
     GROUPS.iter().chain(SUBPAGES.iter()).find(|g| g.0 == id).map(|g| g.1)
@@ -48,7 +49,7 @@ fn group_title(id: &str) -> Option<&'static str> {
 /// matched by its own title, so the entry here and the row on the page cannot drift apart in wording -
 /// only in existence, which a missing result makes obvious. The hints are the rows' own descriptions,
 /// plus the jargon someone might type (ReplayGain, AMOLED).
-const INDEX: [(&str, &str, &str); 93] = [
+const INDEX: [(&str, &str, &str); 96] = [
     ("playing", "Crossfade", "One song fades into the next"),
     ("playing", "AutoMix", "Blends songs like a DJ, matching the beat"),
     ("playing", "Longest mix", ""),
@@ -60,7 +61,7 @@ const INDEX: [(&str, &str, &str); 93] = [
     ("playing", "Echo out clashes", "Overlapping vocals end in an echo instead"),
     ("playing", "Better beat detection", "A neural beat tracker for AutoMix, downloaded once (Beat This!)"),
     ("playing", "Download over mobile data", "For the beat model; otherwise it waits for Wi-Fi"),
-    ("playing", "Measured songs", "Tempo and beats, measured on this phone"),
+    ("playing", "Measured songs", "Tempo and beats, measured on this device"),
     ("playing", "Keep albums gapless", "No mixing between songs of the same album"),
     ("playing", "Fade on play and pause", "A short fade when you play, pause, seek or skip"),
     ("playing", "Speed", ""),
@@ -75,6 +76,7 @@ const INDEX: [(&str, &str, &str); 93] = [
     ("playing", "Play downloads when offline", "If the server drops, keep playing from downloads"),
     ("sound", "Equalizer and crossfeed", ""),
     ("sound", "AutoEQ for headphones", "Applies a known correction curve when headphones connect"),
+    ("sound", "Keep the AutoEQ list", "The headphone list, downloaded on Wi-Fi and refreshed monthly"),
     ("sound", "Remember sound per device", "Each device keeps its own equalizer settings"),
     ("sound", "System audio effects", ""),
     ("sound", "Even out volume", "ReplayGain. Quiet and loud songs play at the same level"),
@@ -82,7 +84,7 @@ const INDEX: [(&str, &str, &str); 93] = [
     ("sound", "High quality output", "Plays 24-bit files in full. Turns the equalizer off"),
     ("sound", "Bit perfect USB DAC", "Sends the file to a USB DAC unchanged. Android 14 and later"),
     ("sound", "Save battery while playing", "Offload. The audio chip decodes instead of the processor"),
-    ("look", "Theme", "Light, dark or the same as the phone"),
+    ("look", "Theme", "Light, dark or the same as the system"),
     ("look", "Black background", "AMOLED. True black in dark mode, saves power on OLED"),
     ("look", "Player in the cover's colours", "Off makes the player black too"),
     ("look", "Wallpaper colours", "Material You. Accent colour from your wallpaper"),
@@ -93,40 +95,41 @@ const INDEX: [(&str, &str, &str); 93] = [
     ("look", "Confirm favourites", "A short message when you favourite or unfavourite something"),
     ("look", "Text and button size", ""),
     ("look", "Less movement", "Shorter, simpler animations"),
-    ("look", "Animate anyway", "Keeps animations on even when Android's are off"),
+    ("look", "Animate anyway", "Keeps animations on even when the system's are off"),
     ("lyrics", "Fill in words as they're sung", "For lyrics timed word by word"),
     ("lyrics", "Text size", ""),
     ("lyrics", "Show translations", "When your server has them"),
     ("lyrics", "Keep the screen on", "While lyrics are shown and music plays"),
-    ("lyrics", "Find missing lyrics online", "Asks the lyrics services below. Sends the artist, song and album name"),
+    ("lyrics", "Find missing lyrics online", "Asks the lyrics sources. Sends the artist, song and album name"),
     ("lyrics", "Prefer word-by-word lyrics", "Keeps looking past lyrics timed line by line"),
-    ("lyrics", "BiniLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
-    ("lyrics", "BetterLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
-    ("lyrics", "PaxSenix", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
-    ("lyrics", "LyricsPlus", "Lyrics service. YouLy+, syllable by syllable"),
-    ("lyrics", "BetterLyrics Portato", "Lyrics service. QQ Music, word by word"),
-    ("lyrics", "PaxSenix: Musixmatch", "Lyrics service. Word by word, with a key"),
-    ("lyrics", "SimpMusic", "Lyrics service. Timed by listeners, matched on YouTube"),
-    ("lyrics", "Unison", "Lyrics service. Open, written and timed by listeners, word by word"),
-    ("lyrics", "NetEase Cloud Music", "Lyrics service. Word by word, strong on Chinese music"),
-    ("lyrics", "KuGou", "Lyrics service. Word by word, Chinese, Japanese and Korean music"),
-    ("lyrics", "LRCLIB", "Lyrics service. Open, run by volunteers"),
-    ("lyrics", "PaxSenix: Spotify", "Lyrics service. Spotify's lyrics, with a key"),
-    ("lyrics", "YouTube captions", "Lyrics service. Timed line by line"),
-    ("lyrics", "Megalobiz", "Lyrics service. Timed line by line"),
-    ("lyrics", "YouTube Music", "Lyrics service. Not timed"),
-    ("lyrics", "Genius", "Lyrics service. Not timed"),
-    ("lyrics", "PaxSenix key", "For its Spotify and Musixmatch lyrics"),
-    ("lyrics", "BetterLyrics key", "Finds lyrics it has not stored yet"),
-    ("library", "Tapping a song", ""),
+    ("lyrics", "Lyrics sources", "Which lyrics services are asked, and in what order"),
+    ("lyrics-sources", "BiniLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics-sources", "BetterLyrics", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics-sources", "PaxSenix", "Lyrics service. Apple Music's lyrics, syllable by syllable"),
+    ("lyrics-sources", "LyricsPlus", "Lyrics service. YouLy+, syllable by syllable"),
+    ("lyrics-sources", "BetterLyrics Portato", "Lyrics service. QQ Music, word by word"),
+    ("lyrics-sources", "PaxSenix: Musixmatch", "Lyrics service. Word by word, with a key"),
+    ("lyrics-sources", "SimpMusic", "Lyrics service. Timed by listeners, matched on YouTube"),
+    ("lyrics-sources", "Unison", "Lyrics service. Open, written and timed by listeners, word by word"),
+    ("lyrics-sources", "NetEase Cloud Music", "Lyrics service. Word by word, strong on Chinese music"),
+    ("lyrics-sources", "KuGou", "Lyrics service. Word by word, Chinese, Japanese and Korean music"),
+    ("lyrics-sources", "LRCLIB", "Lyrics service. Open, run by volunteers"),
+    ("lyrics-sources", "PaxSenix: Spotify", "Lyrics service. Spotify's lyrics, with a key"),
+    ("lyrics-sources", "YouTube captions", "Lyrics service. Timed line by line"),
+    ("lyrics-sources", "Megalobiz", "Lyrics service. Timed line by line"),
+    ("lyrics-sources", "YouTube Music", "Lyrics service. Not timed"),
+    ("lyrics-sources", "Genius", "Lyrics service. Not timed"),
+    ("lyrics-sources", "PaxSenix key", "For its Spotify and Musixmatch lyrics"),
+    ("lyrics-sources", "BetterLyrics key", "Finds lyrics it has not stored yet"),
+    ("library", "Choosing a song", "What opening a song in a list does"),
     ("library", "Swipe right", ""),
     ("library", "Swipe left", ""),
-    ("library", "Offline search", "Song names kept on the phone so search works without a connection"),
+    ("library", "Offline search", "Song names kept on this device so search works without a connection"),
     ("library", "Search delay", "How long to wait after you stop typing"),
-    ("library", "Keep listening history", "Stored on this phone. Powers mixes and stats"),
+    ("library", "Keep listening history", "Stored on this device. Powers mixes and stats"),
     ("library", "Tell the server what you play", "Scrobbling. Sends your plays to your server"),
     ("library", "Count a play after", ""),
-    ("library", "Look things up online", "Update checks, missing lyrics and moving covers. Sends the artist, song and album name"),
+    ("library", "Look things up online", "Missing lyrics, the AutoEQ headphone list and moving covers. Third-party lookups"),
     ("data", "Quality on Wi-Fi", ""),
     ("data", "Quality on mobile data", ""),
     ("data", "Quality for downloads", ""),
@@ -135,10 +138,11 @@ const INDEX: [(&str, &str, &str); 93] = [
     ("data", "Load ahead on Wi-Fi", "Songs fetched before you get to them"),
     ("data", "Load ahead on mobile data", ""),
     ("data", "Load covers ahead", ""),
-    ("data", "Space for streamed music", "How much streamed music to keep on the phone"),
-    ("data", "Stored on this phone", "Streamed music, covers, downloads and the library"),
+    ("data", "Space for streamed music", "How much streamed music to keep on this device"),
+    ("data", "Stored on this device", "Streamed music, covers, downloads and the library"),
     ("data", "Streamed music", "Clear the streamed music. Downloads stay"),
     ("data", "Covers", "Clear the covers. They are fetched again when needed"),
+    ("data", "Lyrics", "Clear the lyrics cache. Lyrics found online are looked up again"),
     ("about", "Licences", "Open source libraries, fonts and data, and their terms"),
     ("servers", "Music folder", ""),
     ("servers", "Bitrate limit on the second address", ""),
@@ -172,13 +176,14 @@ pub struct SettingsHit {
 /// Rows only a build with the beat model's runtime has.
 const BEAT_MODEL_ROWS: [&str; 2] = ["Better beat detection", "Download over mobile data"];
 
-fn search(query: &str) -> Vec<SettingsHit> {
+fn search(query: &str, lacks: &[Capability]) -> Vec<SettingsHit> {
     static TEXT: OnceLock<Arc<TextIndex>> = OnceLock::new();
     let text = TEXT.get_or_init(|| TextIndex::new(INDEX.iter().map(|(_, t, h)| vec![t.to_string(), h.to_string()]).collect()));
     // Titles first, then anything whose explanation mentions it: "oled" finds AMOLED black.
     text.ranked(query.trim().to_string())
         .into_iter()
         .filter(|i| beats::AVAILABLE || !BEAT_MODEL_ROWS.contains(&INDEX[*i as usize].1))
+        .filter(|i| needs(&setting_key(INDEX[*i as usize].1)).is_none_or(|c| !lacks.contains(&c)))
         .map(|i| {
             let (group, title, hint) = INDEX[i as usize];
             let page = group_title(group).unwrap_or_default();
@@ -228,9 +233,9 @@ pub enum SettingRow {
     /// A saved server: its name, a line about it, and whether it is the one in use.
     Server { id: String, label: String, detail: String, active: bool },
     Button { title: String, action: String },
-    /// One of a ranked list of sources (the lyrics services): switched by [`setting_set`] with `name`,
-    /// and, while `on`, held and dragged to move it past its neighbours, each place one `lyricsMove` of
-    /// `id` by -1 or 1.
+    /// One of a ranked list of sources (the lyrics services), all in one list whether on or off: switched
+    /// where it stands by [`setting_set`] with `name`, and picked up and dropped at place `n` with
+    /// one `lyricsPlace` of `id:n` (or a place at a time with `lyricsMove` of `id:-1` or `id:1`).
     Ranked { key: String, name: String, id: String, title: String, detail: String, on: bool },
     /// Text typed in (a service's key): `value` is what is stored, shown hidden when `secret`, and a new
     /// one goes back through [`setting_set`] with `name`.
@@ -267,7 +272,7 @@ pub struct DacFacts {
     pub track: Option<String>,
 }
 
-/// The offline index: what is on the phone, whether it is being filled, and why that failed.
+/// The offline index: what is on this device, whether it is being filled, and why that failed.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SyncFacts {
@@ -278,7 +283,7 @@ pub struct SyncFacts {
     pub error: Option<String>,
 }
 
-/// What lives on the phone, in bytes; `busy` while something is being cleared.
+/// What lives on this device, in bytes; `busy` while something is being cleared.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StorageFacts {
@@ -288,6 +293,9 @@ pub struct StorageFacts {
     pub download_songs: u32,
     pub index_bytes: i64,
     pub busy: bool,
+    /// The lyrics looked up online, kept in the app's database (nori-core's `lyrics_cache_bytes`).
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub lyrics_bytes: i64,
 }
 
 /// What a page depends on besides the settings.
@@ -305,6 +313,88 @@ pub struct SettingsFacts {
     pub storage: StorageFacts,
     /// The active server's music folders.
     pub folders: Vec<MusicFolder>,
+    /// What this platform cannot do: the rows that need it ([`setting_needs`]) are left off its pages
+    /// and out of its search. None for a phone, which does all of it.
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub lacks: Vec<Capability>,
+}
+
+/// Something only some platforms can do, which a few settings exist for. Everything else in the
+/// settings is the same everywhere and worded for any device; a row that needs one of these is flagged
+/// with it ([`setting_needs`]), keeps the wording of the platforms that have it, and is not listed where
+/// the platform says it lacks it ([`SettingsFacts::lacks`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum Capability {
+    /// Rows in lists swiped aside (a touch screen).
+    Swipe,
+    /// The system's own audio effects panel (Android's).
+    SystemEffects,
+    /// A USB DAC the system hands the file to unchanged (Android 14 and later).
+    UsbDac,
+    /// Decoding handed to the audio chip, to save battery (audio offload).
+    Offload,
+    /// A second playback engine to choose (ExoPlayer or nori's own).
+    EngineChoice,
+    /// Moving covers: a video looping in the player's sleeve.
+    MovingCovers,
+}
+
+impl Capability {
+    pub const ALL: [Capability; 6] = [Capability::Swipe, Capability::SystemEffects, Capability::UsbDac, Capability::Offload, Capability::EngineChoice, Capability::MovingCovers];
+}
+
+/// The flag in the schema: the rows (by key) that exist only where the platform can do something.
+const NEEDS: [(&str, Capability); 8] = [
+    ("swipe-right", Capability::Swipe),
+    ("swipe-left", Capability::Swipe),
+    ("system-audio-effects", Capability::SystemEffects),
+    ("bit-perfect-usb-dac", Capability::UsbDac),
+    ("save-battery-while-playing", Capability::Offload),
+    ("playback-engine", Capability::EngineChoice),
+    ("moving-covers", Capability::MovingCovers),
+    ("moving-covers-on-mobile-data", Capability::MovingCovers),
+];
+
+/// What the row with `key` needs of the platform, if anything: a platform without it does not list it.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn setting_needs(key: String) -> Option<Capability> {
+    needs(&key)
+}
+
+fn needs(key: &str) -> Option<Capability> {
+    NEEDS.iter().find(|(k, _)| *k == key).map(|(_, c)| *c)
+}
+
+fn row_key(r: &SettingRow) -> Option<&str> {
+    match r {
+        SettingRow::Toggle { key, .. }
+        | SettingRow::Choice { key, .. }
+        | SettingRow::Link { key, .. }
+        | SettingRow::Action { key, .. }
+        | SettingRow::Info { key, .. }
+        | SettingRow::Ranked { key, .. }
+        | SettingRow::Text { key, .. } => Some(key),
+        _ => None,
+    }
+}
+
+/// The rows a platform lacking `lacks` can use. A row's notes go with it: a section left with nothing
+/// but notes is left out.
+fn keep_usable(sections: Vec<SettingsSection>, lacks: &[Capability]) -> Vec<SettingsSection> {
+    if lacks.is_empty() {
+        return sections;
+    }
+    let usable = |r: &SettingRow| row_key(r).and_then(needs).is_none_or(|c| !lacks.contains(&c));
+    sections
+        .into_iter()
+        .filter_map(|mut s| {
+            let before = s.rows.len();
+            s.rows.retain(|r| usable(r));
+            let only_notes = s.rows.iter().all(|r| matches!(r, SettingRow::Note { .. }));
+            (s.rows.len() == before || !only_notes).then_some(s)
+        })
+        .collect()
 }
 
 /// Whether the samples go out untouched: bit-perfect output and high quality output both hand exactly
@@ -444,6 +534,15 @@ fn sound(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
             divider: true,
         },
         toggle("autoEqAuto", "AutoEQ for headphones", "Applies a known correction curve when headphones connect.", p.auto_eq_auto, true),
+        // Under the switch for looking things up at all (Library), and turns it on with it, as finding
+        // lyrics online does.
+        toggle(
+            "autoEqDownload",
+            "Keep the AutoEQ list",
+            "Downloads the headphone list (850 kB, from github.com) on Wi-Fi, and again once a month, so headphones find their curve.",
+            p.auto_eq_download && p.third_party_lookups,
+            true,
+        ),
         toggle("profilePerOutput", "Remember sound per device", "Each device keeps its own equalizer settings.", p.profile_per_output, true),
         SettingRow::Link {
             key: setting_key("System audio effects"),
@@ -498,17 +597,17 @@ fn sound(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     };
     let out = nori_model::OutputState { hi_res: p.hi_res, bit_perfect: d.bit_perfect, usb: d.device.is_some(), offload_refused: false };
     output.push(toggle("offload", "Save battery while playing", &nori_words::words::words_offload(prefs, out), p.offload, true));
-    // The Rust player, measured against ExoPlayer before it becomes anything more than a choice here.
+    // The Rust player is the default; ExoPlayer stays a choice while the two are compared.
     let experimental = vec![
         ordinal("playbackEngine", "Playback engine", p.playback_engine, &["ExoPlayer", "Rust"]),
-        SettingRow::Note { text: "Takes effect the next time the app starts. Rust plays through nori's own engine: no audio offload, no offline bridge and no internet radio yet.".into() },
+        SettingRow::Note { text: "Takes effect the next time the app starts. Rust plays through nori's own engine; ExoPlayer is the player the app used before it.".into() },
     ];
     vec![section("Equalizer", eq), section("Volume", volume), section("Output", output), section("Experimental", experimental)]
 }
 
 fn look(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     let mut theme = vec![
-        ordinal("theme", "Theme", p.theme, &["Same as the phone", "Light", "Dark"]),
+        ordinal("theme", "Theme", p.theme, &["Same as the system", "Light", "Dark"]),
         toggle("amoled", "Black background", "True black in dark mode. Saves power on OLED screens.", p.amoled, true),
     ];
     if p.amoled {
@@ -534,11 +633,11 @@ fn look(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     }
     let messages = vec![toggle("favouriteNotice", "Confirm favourites", "A short message when you favourite or unfavourite something.", p.favourite_notice, true)];
     let mut size = vec![
-        floats("uiScale", "Text and button size", p.ui_scale, &[(0.0, "Automatic"), (0.9, "Smaller"), (1.0, "Same as the phone"), (1.1, "Larger")], true),
+        floats("uiScale", "Text and button size", p.ui_scale, &[(0.0, "Automatic"), (0.9, "Smaller"), (1.0, "Same as the system"), (1.1, "Larger")], true),
         toggle("reduceMotion", "Less movement", "Shorter, simpler animations.", p.reduce_motion, true),
     ];
     if !p.reduce_motion {
-        size.push(toggle("ignoreSystemMotion", "Animate anyway", "Keeps animations on even when Android's are off.", p.ignore_system_motion, true));
+        size.push(toggle("ignoreSystemMotion", "Animate anyway", "Keeps animations on even when the system's are off.", p.ignore_system_motion, true));
     }
     vec![section("Theme", theme), section("Cover art", cover), section("Messages", messages), section("Size and motion", size)]
 }
@@ -556,7 +655,7 @@ fn lyrics(p: &StoredPrefs) -> Vec<SettingsSection> {
     let mut sources = vec![toggle(
         "lyricsOnline",
         "Find missing lyrics online",
-        "When your server has no timed lyrics. Sends the artist, song and album name to the services below.",
+        "When your server has no timed lyrics. Sends the artist, song and album name to the lyrics sources.",
         online,
         true,
     )];
@@ -564,20 +663,41 @@ fn lyrics(p: &StoredPrefs) -> Vec<SettingsSection> {
         return vec![section("Display", display), section("Sources", sources)];
     }
     sources.push(toggle("lyricsPreferWords", "Prefer word-by-word lyrics", "Keeps looking past lyrics timed line by line.", p.lyrics_prefer_words, true));
-    let service = |s: LyricsService, on: bool| SettingRow::Ranked {
-        key: setting_key(s.title()),
-        name: format!("lyricsService:{}", s.name()),
-        id: s.name().into(),
-        title: s.title().into(),
-        detail: s.about().into(),
-        on,
-    };
-    let asked: Vec<LyricsService> = lyrics_sources::switched_on(p);
-    let mut ranked: Vec<SettingRow> = asked.iter().map(|s| service(*s, true)).collect();
-    ranked.push(SettingRow::Note {
-        text: "Asked together, the top ones first; hold one to move it. Lyrics timed word by word are taken first, whoever has them, then lyrics timed by line, and your server's own timed lyrics always come before all of these. The unofficial ones use other apps' lyrics without asking them, so they stay off until you turn them on.".into(),
+    let on = lyrics_sources::switched_on(p).len();
+    sources.push(SettingRow::Link {
+        key: setting_key("Lyrics sources"),
+        title: "Lyrics sources".into(),
+        status: if on == 0 { "None on".into() } else { format!("{on} on") },
+        dimmed: on == 0,
+        action: "page:lyrics-sources".into(),
+        divider: false,
     });
-    let others: Vec<SettingRow> = p.lyrics_order.iter().filter_map(|n| LyricsService::named(n)).filter(|s| !asked.contains(s)).map(|s| service(s, false)).collect();
+    vec![section("Display", display), section("Sources", sources)]
+}
+
+/// Every lyrics service in one list, in the order they are asked: each switched on or off where it
+/// stands, and picked up and moved. A switch never moves a service, so the list reads the same after it.
+fn lyrics_sources_page(p: &StoredPrefs) -> Vec<SettingsSection> {
+    let on = lyrics_sources::switched_on(p);
+    let mut ranked: Vec<SettingRow> = lyrics_sources::complete_order(&p.lyrics_order)
+        .iter()
+        .filter_map(|n| LyricsService::named(n))
+        .map(|s| SettingRow::Ranked {
+            key: setting_key(s.title()),
+            name: format!("lyricsService:{}", s.name()),
+            id: s.name().into(),
+            title: s.title().into(),
+            detail: s.about().into(),
+            on: on.contains(&s),
+        })
+        .collect();
+    ranked.push(SettingRow::Note {
+        text: if p.lyrics_online && p.third_party_lookups {
+            "The quick ones (PaxSenix, BiniLyrics, Unison and LRCLIB) are asked first, together, and the others only when those find nothing good. Every answer is scored on how well it matches the song, how finely it is timed and whether the other services agree, and the best is shown; the order here settles near ties. Your server's own timed lyrics always come before all of these. The unofficial ones use other apps' lyrics without asking them.".into()
+        } else {
+            "Nothing is asked while Find missing lyrics online is off.".into()
+        },
+    });
     let keys = vec![
         SettingRow::Text {
             key: setting_key("PaxSenix key"),
@@ -596,18 +716,13 @@ fn lyrics(p: &StoredPrefs) -> Vec<SettingsSection> {
             secret: true,
         },
     ];
-    let mut out = vec![section("Display", display), section("Sources", sources), section("Asked", ranked)];
-    if !others.is_empty() {
-        out.push(section("Not asked", others));
-    }
-    out.push(section("Keys", keys));
-    out
+    vec![section("In the order they're asked", ranked), section("Keys", keys)]
 }
 
 fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     let swipes = ["Nothing", "Add to queue", "Play next", "Favourite", "Download"];
     let gestures = vec![
-        ordinal("tapAction", "Tapping a song", p.tap_action, &["Plays the list from there", "Plays only that song", "Adds it to the queue", "Plays it next"]),
+        ordinal("tapAction", "Choosing a song", p.tap_action, &["Plays the list from there", "Plays only that song", "Adds it to the queue", "Plays it next"]),
         ordinal("swipeRight", "Swipe right", p.swipe_right, &swipes),
         ordinal("swipeLeft", "Swipe left", p.swipe_left, &swipes),
     ];
@@ -616,7 +731,7 @@ fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
         SettingRow::Action {
             key: setting_key("Offline search"),
             title: "Offline search".into(),
-            detail: s.error.clone().unwrap_or_else(|| format!("{} songs · {} albums · {} artists on this phone", s.songs, s.albums, s.artists)),
+            detail: s.error.clone().unwrap_or_else(|| format!("{} songs · {} albums · {} artists on this device", s.songs, s.albums, s.artists)),
             button: (if s.running { "Updating…" } else { "Update" }).into(),
             enabled: !s.running,
             error: s.error.is_some(),
@@ -625,7 +740,7 @@ fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
         ints("liveSearchDelayMs", "Search delay", p.live_search_delay_ms, &[(150, "150 ms"), (250, "250 ms"), (350, "350 ms"), (500, "500 ms"), (800, "800 ms")], true),
     ];
     let mut history = vec![
-        toggle("tasteModel", "Keep listening history", "Stored on this phone. Powers mixes and stats.", p.taste_model, true),
+        toggle("tasteModel", "Keep listening history", "Stored on this device. Powers mixes and stats.", p.taste_model, true),
         toggle("scrobble", "Tell the server what you play", "Sends your plays to your server (scrobbling).", p.scrobble, true),
     ];
     if p.scrobble {
@@ -635,11 +750,11 @@ fn library(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     let online = vec![toggle(
         "thirdPartyLookups",
         "Look things up online",
-        "Update checks, missing lyrics and moving covers. Sends the artist, song and album name.",
+        "Missing lyrics (sends the artist, song and album name), the AutoEQ headphone list and moving covers, each with its own switch. Off, nothing is asked.",
         p.third_party_lookups,
         true,
     )];
-    vec![section("Gestures", gestures), section("Search", search), section("Listening history", history), section("Online", online)]
+    vec![section("Songs in lists", gestures), section("Search", search), section("Listening history", history), section("Online", online)]
 }
 
 fn data(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
@@ -656,7 +771,7 @@ fn data(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
         ints("precacheMobile", "Load ahead on mobile data", p.precache_mobile, &[(1, "Next song"), (2, "2 songs"), (3, "3 songs"), (5, "5 songs")], true),
         ints("coversAhead", "Load covers ahead", p.covers_ahead, &[(0, "Off"), (1, "1"), (2, "2"), (3, "3"), (5, "5"), (8, "8"), (10, "10")], true),
     ];
-    // What lives on the phone, and a way to throw the throwaway parts out. Downloads are the permanent
+    // What lives on this device, and a way to throw the throwaway parts out. Downloads are the permanent
     // copy and are removed where they are listed; the streamed music and the covers rebuild themselves.
     let s = &f.storage;
     let bytes = nori_words::fmt::format_bytes;
@@ -664,12 +779,13 @@ fn data(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
     let storage = vec![
         ints("cacheMb", "Space for streamed music", p.cache_mb, &[(256, "256 MB"), (1024, "1 GB"), (4096, "4 GB"), (16384, "16 GB")], true),
         SettingRow::Info {
-            key: setting_key("Stored on this phone"),
-            title: "Stored on this phone".into(),
+            key: setting_key("Stored on this device"),
+            title: "Stored on this device".into(),
             detail: format!(
-                "{} streamed · {} covers · {} in {} downloads · {} library",
+                "{} streamed · {} covers · {} lyrics · {} in {} downloads · {} library",
                 bytes(s.stream_bytes),
                 bytes(s.cover_bytes),
+                bytes(s.lyrics_bytes),
                 bytes(s.download_bytes),
                 s.download_songs,
                 bytes(s.index_bytes)
@@ -677,14 +793,42 @@ fn data(p: &StoredPrefs, f: &SettingsFacts) -> Vec<SettingsSection> {
         },
         action("Streamed music", "Oldest goes first. Downloads stay.".into(), clearing, !s.busy && s.stream_bytes > 0, "clear-stream"),
         action("Covers", "Fetched again when needed.".into(), clearing, !s.busy && s.cover_bytes > 0, "clear-covers"),
+        action("Lyrics", format!("{} found online. Looked up again when needed.", bytes(s.lyrics_bytes)), clearing, !s.busy && s.lyrics_bytes > 0, "clear-lyrics"),
         action("Downloads", "Remove them from the Downloads page.".into(), "Show", true, "downloads"),
     ];
     vec![section("Streaming quality", streaming), section("Downloads", downloads), section("Loading ahead", ahead), section("Storage", storage)]
 }
 
+/// A question a settings action asks before it is done.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct ActionAsk {
+    pub title: String,
+    pub text: String,
+    /// The button that does it.
+    pub confirm: String,
+}
+
+/// Whether the settings action `action` asks first, and what it says; none for one that is done at once.
+/// Clearing the lyrics asks: what is gone is fetched again from somebody else's services, song by song.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn settings_action_asks(action: String, facts: SettingsFacts) -> Option<ActionAsk> {
+    match action.as_str() {
+        "clear-lyrics" => Some(ActionAsk {
+            title: "Clear the lyrics cache?".into(),
+            text: format!(
+                "The lyrics found online for your songs ({}) are forgotten, and looked up again the next time each song's lyrics are opened. Your server's own lyrics stay.",
+                nori_words::fmt::format_bytes(facts.storage.lyrics_bytes)
+            ),
+            confirm: "Clear".into(),
+        }),
+        _ => None,
+    }
+}
+
 /// The line under a saved server: who signs in, whether it is in use, and what is special about it.
 pub fn server_detail(s: &crate::settings::SavedServer, active: bool) -> String {
-    let mut parts: Vec<&str> = vec![if s.user.is_empty() { "API key" } else { &s.user }, if active { "in use" } else { "tap to switch" }];
+    let mut parts: Vec<&str> = vec![if s.user.is_empty() { "API key" } else { &s.user }, if active { "in use" } else { "not in use" }];
     if s.wifi_only {
         parts.push("Wi-Fi only");
     }
@@ -735,12 +879,13 @@ pub fn page(id: &str, p: &StoredPrefs, f: &SettingsFacts) -> Option<SettingsPage
         "sound" => sound(p, f),
         "look" => look(p, f),
         "lyrics" => lyrics(p),
+        "lyrics-sources" => lyrics_sources_page(p),
         "library" => library(p, f),
         "data" => data(p, f),
         "servers" => servers(p, f),
         _ => Vec::new(),
     };
-    Some(SettingsPage { title, sections })
+    Some(SettingsPage { title, sections: keep_usable(sections, &f.lacks) })
 }
 
 /// One thing the core is built from that is not ours: what it is, whose it is, under what terms, and
@@ -830,7 +975,7 @@ const ANDROID_CREDITS: [(&str, &str, &str, &str, Option<&str>); 6] = [
 /// services, so any app on it credits them).
 const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 16] = [
     ("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", Some("OFL-1.1")),
-    ("AutoEQ", "Headphone correction curves, fetched when you ask for them", "Copyright (c) 2018 Jaakko Pasanen", "MIT", Some("MIT")),
+    ("AutoEQ", "Headphone correction curves: the list kept on Wi-Fi, a curve fetched when it is chosen", "Copyright (c) 2018 Jaakko Pasanen", "MIT", Some("MIT")),
     ("LRCLIB", "Timed lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", None),
     (
         "Unison",
@@ -894,7 +1039,13 @@ pub fn settings_groups() -> Vec<SettingsGroup> {
 /// The rows whose title (first) or words (after) contain `query`; nothing for a blank one.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn settings_search(query: String) -> Vec<SettingsHit> {
-    search(&query)
+    search(&query, &[])
+}
+
+/// [`settings_search`] on a platform that lacks `lacks`: the rows it does not list are not found.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn settings_search_lacking(query: String, lacks: Vec<Capability>) -> Vec<SettingsHit> {
+    search(&query, &lacks)
 }
 
 /// One group's page for the settings as they are now; `None` for a group there is not.
@@ -997,17 +1148,17 @@ mod tests {
 
     #[test]
     fn search_finds_titles_first_then_words() {
-        let hits = search("oled");
+        let hits = search("oled", &[]);
         assert_eq!(hits[0].title, "Black background");
         assert_eq!(hits[0].detail, "Appearance · AMOLED. True black in dark mode, saves power on OLED");
         assert_eq!(hits[0].key, "black-background");
-        let gapless = search("gapless");
+        let gapless = search("gapless", &[]);
         assert_eq!(gapless[0].title, "Keep albums gapless");
-        let speed = search("Speed");
+        let speed = search("Speed", &[]);
         assert_eq!(speed[0].title, "Biggest speed change", "in the order of the pages");
         assert_eq!(speed.iter().find(|h| h.title == "Speed").unwrap().detail, "Playback", "no words, only the page");
         assert!(speed.iter().position(|h| h.title == "Biggest speed change") < speed.iter().position(|h| h.title == "Match the beat"));
-        assert!(search("  ").is_empty());
+        assert!(search("  ", &[]).is_empty());
         // Every entry points at a row its page has (or a row the platform draws itself).
         let p = StoredPrefs { auto_mix: true, replay_gain: 1, amoled: true, third_party_lookups: true, motion_artwork: true, ..StoredPrefs::default() };
         let active = SavedServer { id: "a".into(), alt_url: "https://b".into(), ..SavedServer::default() };
@@ -1031,7 +1182,7 @@ mod tests {
         assert_eq!(t.iter().any(|t| t == "Better beat detection"), beats::AVAILABLE);
         // Asked for and not on the device yet: whether it may come over mobile data.
         assert_eq!(t.iter().any(|t| t == "Download over mobile data"), beats::AVAILABLE);
-        assert_eq!(search("beat detection").iter().any(|h| h.title == "Better beat detection"), beats::AVAILABLE);
+        assert_eq!(search("beat detection", &[]).iter().any(|h| h.title == "Better beat detection"), beats::AVAILABLE);
         let off = titles(&StoredPrefs { auto_mix_better_beats: false, ..on }, &SettingsFacts::default(), "playing");
         assert!(!off.iter().any(|t| t == "Download over mobile data"));
     }
@@ -1125,11 +1276,11 @@ mod tests {
         assert_eq!(choice(&StoredPrefs { speed: 1.1, ..p.clone() }, "playing", "speed").1, "1.1", "a value no option has shows as itself");
         assert_eq!(choice(&StoredPrefs { crossfade_sec: 5, ..p.clone() }, "playing", "crossfade").1, "5");
         let (_, shown, o) = choice(&p, "look", "theme");
-        assert_eq!(shown, "Same as the phone");
+        assert_eq!(shown, "Same as the system");
         assert_eq!(set_by_name(&p, "theme", &o[2].value).unwrap().prefs.theme, 2);
         assert_eq!(choice(&p, "library", "swipe-left").1, "Favourite");
         assert_eq!(choice(&p, "library", "swipe-right").1, "Add to queue");
-        assert_eq!(choice(&p, "library", "tapping-a-song").1, "Plays the list from there");
+        assert_eq!(choice(&p, "library", "choosing-a-song").1, "Plays the list from there");
         assert_eq!(choice(&p, "lyrics", "text-size").1, "Medium");
         assert_eq!(choice(&p, "look", "text-and-button-size").1, "Automatic");
         assert_eq!(choice(&p, "data", "space-for-streamed-music").1, "1 GB");
@@ -1169,8 +1320,14 @@ mod tests {
             SettingRow::Toggle { on, name, .. } => (on, name),
             r => panic!("{r:?}"),
         };
-        assert_eq!(lrc(&d), (false, "lyricsOnline".to_string()), "lyrics online needs the lookups switch too");
-        assert!(lrc(&StoredPrefs { third_party_lookups: true, ..d.clone() }).0);
+        assert_eq!(lrc(&d), (true, "lyricsOnline".to_string()), "on out of the box");
+        assert!(!lrc(&StoredPrefs { third_party_lookups: false, ..d.clone() }).0, "lyrics online needs the lookups switch too");
+        let list = |p: &StoredPrefs| match find(p, &f, "sound", "keep-the-autoeq-list") {
+            SettingRow::Toggle { on, .. } => on,
+            r => panic!("{r:?}"),
+        };
+        assert!(list(&d), "the AutoEQ list is kept out of the box");
+        assert!(!list(&StoredPrefs { third_party_lookups: false, ..d.clone() }), "and needs the lookups switch");
         match rows(&d, &f, "look").into_iter().find(|r| matches!(r, SettingRow::Palette { .. })).unwrap() {
             SettingRow::Palette { colours, chosen, .. } => assert_eq!((colours.len(), colours[0], chosen), (8, 0xFF6750A4, 0xFF6750A4)),
             _ => unreachable!(),
@@ -1199,13 +1356,22 @@ mod tests {
 
     #[test]
     fn storage_and_the_offline_index() {
-        let storage = StorageFacts { stream_bytes: 2048, cover_bytes: 0, download_bytes: 5 * 1_048_576, download_songs: 3, index_bytes: 100, busy: false };
+        let storage = StorageFacts { stream_bytes: 2048, cover_bytes: 0, download_bytes: 5 * 1_048_576, download_songs: 3, index_bytes: 100, busy: false, lyrics_bytes: 0 };
         let sync = SyncFacts { songs: 10, albums: 2, artists: 1, ..SyncFacts::default() };
         let f = SettingsFacts { storage, sync, ..SettingsFacts::default() };
         let p = StoredPrefs::default();
         let r = rows(&p, &f, "data");
         let info = r.iter().find_map(|r| if let SettingRow::Info { detail, .. } = r { Some(detail.clone()) } else { None }).unwrap();
-        assert_eq!(info, "2 KB streamed · 0 B covers · 5.0 MB in 3 downloads · 100 B library");
+        assert_eq!(info, "2 KB streamed · 0 B covers · 0 B lyrics · 5.0 MB in 3 downloads · 100 B library");
+        assert!(!enabled(&find(&p, &f, "data", "lyrics")), "no lyrics kept: nothing to clear");
+        let lyrics = SettingsFacts { storage: StorageFacts { lyrics_bytes: 3 * 1024, ..f.storage.clone() }, ..f.clone() };
+        match find(&p, &lyrics, "data", "lyrics") {
+            SettingRow::Action { detail, enabled, action, .. } => assert_eq!((detail.as_str(), enabled, action.as_str()), ("3 KB found online. Looked up again when needed.", true, "clear-lyrics")),
+            r => panic!("{r:?}"),
+        }
+        let ask = settings_action_asks("clear-lyrics".into(), lyrics.clone()).expect("asks first");
+        assert!(ask.text.contains("3 KB") && ask.confirm == "Clear");
+        assert_eq!(settings_action_asks("clear-covers".into(), lyrics), None);
         assert!(enabled(&find(&p, &f, "data", "streamed-music")));
         assert!(!enabled(&find(&p, &f, "data", "covers")), "nothing to clear");
         assert!(enabled(&find(&p, &f, "data", "download-the-whole-library")));
@@ -1216,7 +1382,7 @@ mod tests {
         }
         match find(&p, &f, "library", "offline-search") {
             SettingRow::Action { detail, button, error, .. } => {
-                assert_eq!((detail.as_str(), button.as_str(), error), ("10 songs · 2 albums · 1 artists on this phone", "Update", false))
+                assert_eq!((detail.as_str(), button.as_str(), error), ("10 songs · 2 albums · 1 artists on this device", "Update", false))
             }
             r => panic!("{r:?}"),
         }
@@ -1238,7 +1404,7 @@ mod tests {
         assert_eq!(
             t,
             [
-                "server: Home (me · tap to switch · Wi-Fi only)",
+                "server: Home (me · not in use · Wi-Fi only)",
                 "server: music.example.com (API key · in use · second address)",
                 "button: Add server",
                 "Bitrate limit on the second address",
@@ -1257,37 +1423,176 @@ mod tests {
     }
 
     #[test]
-    fn the_lyrics_services_are_ranked_rows_under_their_switch() {
+    fn the_lyrics_services_are_one_list_on_a_page_of_their_own() {
         let f = SettingsFacts::default();
-        let d = StoredPrefs::default();
+        let off = StoredPrefs { third_party_lookups: false, ..StoredPrefs::default() };
         let ranked = |p: &StoredPrefs| -> Vec<(String, bool)> {
-            rows(p, &f, "lyrics").into_iter().filter_map(|r| match r {
+            rows(p, &f, "lyrics-sources").into_iter().filter_map(|r| match r {
                 SettingRow::Ranked { id, on, .. } => Some((id, on)),
                 _ => None,
             }).collect()
         };
-        assert!(ranked(&d).is_empty(), "nothing to rank while lookups are off");
-        let on = StoredPrefs { third_party_lookups: true, ..d.clone() };
+        let link = |p: &StoredPrefs| rows(p, &f, "lyrics").into_iter().find_map(|r| match r {
+            SettingRow::Link { action, status, .. } if action == "page:lyrics-sources" => Some(status),
+            _ => None,
+        });
+        assert_eq!(link(&off), None, "no sources to pick while lookups are off");
+        let on = StoredPrefs::default();
+        assert!(rows(&on, &f, "lyrics").iter().all(|r| !matches!(r, SettingRow::Ranked { .. })), "the lyrics page lists none itself");
+        assert_eq!(link(&on).as_deref(), Some("9 on"));
         let r = ranked(&on);
         assert_eq!(r.len(), 16);
-        assert_eq!(r[..2], [("UNISON".to_string(), true), ("LRCLIB".to_string(), true)], "the ones asked first, in their order");
-        assert!(r[2..].iter().all(|(_, on)| !on));
-        assert!(titles(&on, &f, "lyrics").contains(&"PaxSenix key".to_string()));
+        assert_eq!(r.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), on.lyrics_order, "every service, in the order they are asked");
+        assert_eq!(r.iter().filter(|(_, on)| *on).map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"]);
+        // Switched off, it stays where it was.
+        let off = crate::settings::set_by_name(&on, "lyricsService:BINILYRICS", "false").unwrap().prefs;
+        let r2 = ranked(&off);
+        assert_eq!(r2.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), on.lyrics_order);
+        assert_eq!(r2[1], ("BINILYRICS".to_string(), false));
+        assert!(titles(&on, &f, "lyrics-sources").contains(&"PaxSenix key".to_string()));
+        assert_eq!(page("lyrics-sources", &on, &f).unwrap().title, "Lyrics sources");
+        let hit = search("lrclib", &[]).into_iter().next().unwrap();
+        assert_eq!((hit.group.as_str(), hit.key.as_str()), ("lyrics-sources", "lrclib"), "search lands on the service's row");
     }
 
     #[test]
     fn moving_covers_are_off_and_need_the_lookups_switch() {
         let f = SettingsFacts::default();
-        let d = StoredPrefs::default();
+        let d = StoredPrefs { third_party_lookups: false, ..StoredPrefs::default() };
         let moving = |p: &StoredPrefs| match find(p, &f, "look", "moving-covers") {
             SettingRow::Toggle { on, .. } => on,
             r => panic!("{r:?}"),
         };
+        assert!(!moving(&StoredPrefs::default()), "off out of the box, though looking things up is on");
         assert!(!moving(&d) && !titles(&d, &f, "look").contains(&"Moving covers on mobile data".to_string()));
         assert!(!moving(&StoredPrefs { motion_artwork: true, ..d.clone() }), "not without looking things up");
         let on = set_by_name(&d, "motionArtwork", "true").unwrap().prefs;
         assert!(on.third_party_lookups && moving(&on), "switching it on switches looking things up on");
         assert!(on.motion_artwork_wifi_only, "Wi-Fi only out of the box");
         assert!(!set_by_name(&on, "motionArtworkMobile", "true").unwrap().prefs.motion_artwork_wifi_only);
+    }
+
+    /// Words only a phone (or Android) can mean. Whole words, so "headphones" is not a phone.
+    fn phone_words(text: &str) -> Vec<String> {
+        const WORDS: [&str; 18] = [
+            "phone", "phones", "android", "tap", "taps", "tapping", "swipe", "swiping", "notification", "notifications", "bluetooth", "haptic", "haptics", "vibrate",
+            "vibration", "battery", "lockscreen", "widget",
+        ];
+        let lower = text.to_lowercase();
+        let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let mut found: Vec<String> = words.iter().filter(|w| WORDS.contains(w)).map(|w| w.to_string()).collect();
+        for phrase in ["lock screen", "system audio effects", "android auto"] {
+            if lower.contains(phrase) {
+                found.push(phrase.into());
+            }
+        }
+        found
+    }
+
+    /// Every piece of text a row shows, and the capability it is flagged with.
+    fn texts(r: &SettingRow) -> (Option<Capability>, Vec<String>) {
+        let flag = row_key(r).and_then(needs);
+        let t = match r {
+            SettingRow::Toggle { title, detail, .. } | SettingRow::Info { title, detail, .. } | SettingRow::Ranked { title, detail, .. } | SettingRow::Text { title, detail, .. } => {
+                vec![title.clone(), detail.clone()]
+            }
+            SettingRow::Choice { title, options, shown, .. } => [title.clone(), shown.clone()].into_iter().chain(options.iter().map(|o| o.label.clone())).collect(),
+            SettingRow::Note { text } => vec![text.clone()],
+            SettingRow::Link { title, status, .. } => vec![title.clone(), status.clone()],
+            SettingRow::Action { title, detail, button, .. } => vec![title.clone(), detail.clone(), button.clone()],
+            SettingRow::Slider { label, .. } => vec![label.clone()],
+            SettingRow::Server { label, detail, .. } => vec![label.clone(), detail.clone()],
+            SettingRow::Button { title, .. } => vec![title.clone()],
+            SettingRow::Palette { .. } => Vec::new(),
+        };
+        (flag, t)
+    }
+
+    /// Settings that open every row there is: the sub-rows under AutoMix, ReplayGain, moving covers,
+    /// the black background, scrobbling, the queue's refill and the lyrics services.
+    fn everything_on() -> StoredPrefs {
+        StoredPrefs {
+            auto_mix: true,
+            auto_mix_beat_match: true,
+            replay_gain: 1,
+            motion_artwork: true,
+            third_party_lookups: true,
+            amoled: true,
+            scrobble: true,
+            auto_fill: true,
+            lyrics_online: true,
+            servers: vec![crate::settings::SavedServer { id: "a".into(), url: "https://a".into(), user: "me".into(), ..Default::default() }],
+            ..StoredPrefs::default()
+        }
+    }
+
+    #[test]
+    fn no_core_label_is_a_phones_unless_its_row_is_flagged() {
+        let facts = SettingsFacts { wallpaper_colours: true, cover_blur: true, analysed: 3, ..SettingsFacts::default() };
+        let mut bad = Vec::new();
+        for g in settings_groups() {
+            for t in [&g.title, &g.summary] {
+                if !phone_words(t).is_empty() {
+                    bad.push(format!("group {}: {t}", g.id));
+                }
+            }
+            for p in [StoredPrefs::default(), everything_on()] {
+                let Some(page) = page(&g.id, &p, &facts) else { continue };
+                for s in &page.sections {
+                    if !phone_words(&s.title).is_empty() {
+                        bad.push(format!("section {}: {}", g.id, s.title));
+                    }
+                    for r in &s.rows {
+                        let (flag, texts) = texts(r);
+                        for t in texts.iter().filter(|t| !phone_words(t).is_empty()) {
+                            if flag.is_none() {
+                                bad.push(format!("{}: {t} {:?}", g.id, phone_words(t)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (group, title, hint) in INDEX {
+            if needs(&setting_key(title)).is_none() && !phone_words(&format!("{title} {hint}")).is_empty() {
+                bad.push(format!("search {group}: {title} · {hint}"));
+            }
+        }
+        let other = crate::settings::SavedServer { id: "b".into(), user: "me".into(), wifi_only: true, ..Default::default() };
+        bad.extend([server_detail(&other, false)].into_iter().filter(|t| !phone_words(t).is_empty()));
+        bad.extend([crate::settings::profile_use(&[])].into_iter().filter(|t| !phone_words(t).is_empty()));
+        assert!(bad.is_empty(), "phone words in rows every platform lists (word them for any device, or flag the row):\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn a_platform_that_lacks_something_does_not_list_its_rows() {
+        let every = SettingsFacts::default();
+        let desktop = SettingsFacts { lacks: Capability::ALL.to_vec(), ..SettingsFacts::default() };
+        let p = everything_on();
+        let keys = |f: &SettingsFacts| -> Vec<String> {
+            settings_groups()
+                .iter()
+                .filter_map(|g| page(&g.id, &p, f))
+                .flat_map(|pg| pg.sections)
+                .flat_map(|s| s.rows)
+                .filter_map(|r| row_key(&r).map(str::to_string))
+                .collect()
+        };
+        let (all, some) = (keys(&every), keys(&desktop));
+        // Every flag names a row there is, so a renamed row cannot slip out from under its flag.
+        for (key, _) in NEEDS {
+            assert!(all.iter().any(|k| k == key), "{key} is flagged but no page has it");
+            assert!(!some.iter().any(|k| k == key), "{key} listed on a platform without it");
+        }
+        assert_eq!(all.len() - some.len(), NEEDS.len(), "only the flagged rows go");
+        // A section left with only its note goes with its row: the engine choice's.
+        let sound = page("sound", &p, &desktop).unwrap();
+        assert!(!sound.sections.iter().any(|s| s.title == "Experimental"));
+        assert!(page("sound", &p, &every).unwrap().sections.iter().any(|s| s.title == "Experimental"));
+        // Nor does search find them.
+        assert!(settings_search("battery".into()).iter().any(|h| h.key == "save-battery-while-playing"));
+        assert!(!settings_search_lacking("battery".into(), Capability::ALL.to_vec()).iter().any(|h| h.key == "save-battery-while-playing"));
+        assert_eq!(setting_needs("swipe-left".into()), Some(Capability::Swipe));
+        assert_eq!(setting_needs("theme".into()), None);
     }
 }

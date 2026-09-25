@@ -201,7 +201,10 @@ data class Prefs(
     // ---- optional subsystems; one that is off is never initialised and costs nothing ----
     /** Keeps a local play history and a taste score per song; feeds mixes, smart playlists and the year in review. */
     val tasteModel: Boolean,
-    /** Third-party lookups: lyrics from the lyrics services, the AutoEQ headphone list, update checks. */
+    /**
+     * "Look things up online": over everything asked of a third party by itself - lyrics from the lyrics
+     * services, the AutoEQ headphone list, moving covers - each with its own switch too. On for a new install.
+     */
     val thirdPartyLookups: Boolean,
     /** Apply the profile bound to an output device when that device becomes the active one. */
     val profilePerOutput: Boolean,
@@ -210,6 +213,11 @@ data class Prefs(
      * remember it for the device, instead of asking first. Off asks. Fetches one small preset per new device.
      */
     val autoEqAuto: Boolean,
+    /**
+     * Keep the AutoEQ headphone list: the core fetches it on an unmetered network when it is missing or a
+     * month old (`Client.autoeqUpdate`). Needs [thirdPartyLookups]. On by default.
+     */
+    val autoEqDownload: Boolean,
     /** The sung part of the current lyric line fills in word by word. Redraws one line of text per frame, only while the lyrics are on screen. */
     val lyricsSweep: Boolean,
     /** The bottom of the player's cover goes blurred before it melts into the page. One blur pass per frame while the cover moves. */
@@ -361,7 +369,7 @@ fun Prefs.stored() = StoredPrefs(
     autoMixBassSwap = autoMixBassSwap, autoMixFilters = autoMixFilters, autoMixEchoOut = autoMixEchoOut, autoMixKeepPitch = autoMixKeepPitch,
     autoMixBetterBeats = autoMixBetterBeats, autoMixBeatsMobileData = autoMixBeatsMobileData,
     speed = speed, skipSilence = skipSilence, scrobblePercent = scrobblePercent, liveSearchDelayMs = liveSearchDelayMs, tasteModel = tasteModel,
-    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto,
+    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto, autoEqDownload = autoEqDownload,
     lyricsSweep = lyricsSweep, softSleeve = softSleeve, motionArtwork = motionArtwork, motionArtworkWifiOnly = motionArtworkWifiOnly,
     favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsOnline = lyricsOnline, lyricsOrder = lyricsOrder, lyricsOn = lyricsOn,
@@ -385,7 +393,7 @@ fun StoredPrefs.prefs() = Prefs(
     autoMixBassSwap = autoMixBassSwap, autoMixFilters = autoMixFilters, autoMixEchoOut = autoMixEchoOut, autoMixKeepPitch = autoMixKeepPitch,
     autoMixBetterBeats = autoMixBetterBeats, autoMixBeatsMobileData = autoMixBeatsMobileData,
     speed = speed, skipSilence = skipSilence, scrobblePercent = scrobblePercent, liveSearchDelayMs = liveSearchDelayMs, tasteModel = tasteModel,
-    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto,
+    thirdPartyLookups = thirdPartyLookups, profilePerOutput = profilePerOutput, autoEqAuto = autoEqAuto, autoEqDownload = autoEqDownload,
     lyricsSweep = lyricsSweep, softSleeve = softSleeve, motionArtwork = motionArtwork, motionArtworkWifiOnly = motionArtworkWifiOnly,
     favouriteNotice = favouriteNotice, lyricsKeepScreenOn = lyricsKeepScreenOn,
     lyricsTranslation = lyricsTranslation, lyricsSize = lyricsSize, lyricsOnline = lyricsOnline, lyricsOrder = lyricsOrder, lyricsOn = lyricsOn,

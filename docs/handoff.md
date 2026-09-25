@@ -402,7 +402,7 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   (`MediaItem.queued`); the service's `Controls.addMediaItems` sends marked items to `upNext`, which
   places them in the list and, under shuffle, rebuilds the `DefaultShuffleOrder` so they are not
   scattered. Turning shuffle on puts the playing song first, keeps the hand-added run after it and
-  shuffles only the rest (`shuffleAroundCurrent`). The queue panel lists songs in play order
+  shuffles only the rest (the core's `playlist_shuffle`, over nori-player's `queue::shuffle_around`). The queue panel lists songs in play order
   (`PlayerState.order`), marks hand-added ones, and hides reordering under shuffle. Checked with
   `build/upnext.sh`-style runs via `do enqueue|playnext|shuffle` and the `upNext` state field.
 - **Swipes.** A song row moves only in a direction that has an action. Right adds to the queue, left
@@ -488,10 +488,10 @@ red but darker. The background *is* the artwork, enormously enlarged and blurred
 matches the sleeve so exactly.
 
 One average of the cover's bottom rows cannot do that. *In Rainbows* is vivid everywhere and near
-black along its bottom edge, so the page came out brown mud next to a rainbow. `CoverColors.washOf`
-now shrinks the cover to 16 px a side, smooths it once off the main thread, pulls every pixel to
+black along its bottom edge, so the page came out brown mud next to a rainbow. nori-look's `wash_of`
+(crates/look/src/cover.rs) now shrinks the cover to 16 px a side, smooths it once off the main thread, pulls every pixel to
 within 0.05 of the page colour's own lightness (0.035 in light mode) and holds its saturation back —
-then `Design.drawPageWash` draws that stretched over the page and lets the GPU's bilinear filter do
+then `sleeveWash` (Design.kt) draws that stretched over the page and lets the GPU's bilinear filter do
 the enlarging. The hues vary the way the record's do; the contrast text needs does not move.
 
 It is still static: one 4 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers
@@ -536,12 +536,12 @@ about an eighth of the cover off each side, which is the price of the sleeve rea
 sleeve, Apple's colour varies *more* than ours ever did - channel spreads of 36/21/17 against our
 8/5/5 now - but all of their variation is inside one red, because that cover is one hue. A cover that
 is teal down one side and warm down the other gives the page teal and warm patches at the same
-spread, and a patch reads as a fault where a glow does not. `CoverColors.MUTE` pulls every pixel most
+spread, and a patch reads as a fault where a glow does not. `MUTE` in nori-look's cover.rs pulls every pixel most
 of the way back to the flat page colour after the lightness clamp; that is what makes it subtle
 without making it grey.
 
 Below that, the sleeve's last rows are rubbed out of the records' layer (`rubOutBottom` in
-PlayerScreen, a `DstOut` gradient over the last `MELT` of the sleeve) and `drawSleeveWash` draws the
+PlayerScreen, a `DstOut` gradient over the last `MELT` of the sleeve) and `sleeveWash` draws the
 cover's blur behind and below at the sleeve's own scale, so what shows through the rubbed-out rows is
 the same picture gone soft and the join cannot be seen. (`drawSleeveMelt`, which painted the blurred
 rows over each record, is gone: a band painted on a record travelled with it.) **Nowhere in either is
@@ -551,7 +551,7 @@ page along a dead straight line every time.
 
 Two traps at that edge: the rub-out must reach full strength *before* the sleeve's last row, not on
 it, or a hairline of raw cover is left along the bottom (plain to see the moment a lifted record grows
-back); and `drawSleeveWash`'s three bands must round their *edges*, not their heights, or a row of page
+back); and `sleeveWash`'s three bands must round their *edges*, not their heights, or a row of page
 colour shows between them.
 
 ## Sizes, measured

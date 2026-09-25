@@ -26,6 +26,7 @@ mod engine;
 mod heard;
 mod look;
 mod measure;
+mod mediacodec;
 mod player;
 mod playlist;
 mod seek;
@@ -100,6 +101,8 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
             nori_core::alog::info("jni: no uniffi/UniffiKt; callbacks from the core's own threads will fail");
         }
     }
+    // HE-AAC for the Rust engine, through the platform's decoder.
+    mediacodec::lend();
     for class in CLASSES {
         register(&mut env, class);
     }

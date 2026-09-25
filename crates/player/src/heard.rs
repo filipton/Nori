@@ -120,27 +120,89 @@ impl HeardTracker {
 /// time under it, so the bar holds where it was. And while the app is reconnecting to the player
 /// nothing can be asked at all - reporting zero then makes the bar snap to 0:00 and jump back a
 /// heartbeat later, so it carries on from where it was, moving if the music was.
+///
+/// Within one song the place never goes back by itself, nor leaps ahead. A player's clock read through a
+/// media session is the player's last word run on at one times, and when the player says its place again
+/// (a mix starting, a hold, a pause) that word can be a little behind where the running on had got: the
+/// music started a moment after the place was said. And on the ExoPlayer path the ear's own reading takes
+/// over from the player's through a held ending, a few hundred ms from it either way. Shown as they come,
+/// those are the bar and the lyrics' word fill stepping back, or skipping a piece of a word, in one frame.
+/// Up to [`GLIDE_MS`] behind, the place shown runs on at half the music's pace until the reading has
+/// caught up with it (stands, paused); up to [`GLIDE_MS`] ahead, at twice it until it has caught the
+/// reading. A jump the listener asked for ([`Playhead::jumped`]) is shown as it is, as is another song.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Playhead {
     ms: i64,
     at_ms: i64,
+    /// The song the place was shown in: the page's queue index, else the ear's; `None` for neither.
+    song: Option<usize>,
+    /// A seek was asked for: the next reading is shown as it is, even behind.
+    jumped: bool,
 }
+
+/// A reading at most this far behind or ahead of the place shown in the same song is glided to, not
+/// jumped to: see [`Playhead`].
+pub const GLIDE_MS: i64 = 2_000;
+/// The most time one question counts for a glide: a bar not asked for a while (the screen was away, the
+/// music paused) does not run a glide on over the whole of it.
+pub const GLIDE_STEP_MS: i64 = 250;
 
 impl Playhead {
     pub const fn new() -> Self {
-        Playhead { ms: 0, at_ms: 0 }
+        Playhead { ms: 0, at_ms: 0, song: None, jumped: false }
     }
 
     /// What the bar shows for `seen`, asked at `now_ms` while the page shows queue index `shown`.
     pub fn show(&mut self, t: &HeardTracker, seen: Seen, shown: Option<usize>, now_ms: i64) -> i64 {
+        self.show_for(t, seen, shown, now_ms, None, 0, true)
+    }
+
+    /// The listener asked for a place (a seek, a tap on a lyric line): the next reading is shown as it
+    /// is, even a moment back in the same song.
+    pub fn jumped(&mut self) {
+        self.jumped = true;
+    }
+
+    /// [`Playhead::show`], told the player's own song (`on`, a queue index) and its place in it, and
+    /// whether the music plays. The bar holds while the page is a song behind the ear, for the moment it
+    /// takes to follow. A page on the player's own song while the ear is still on the ending before it is
+    /// not behind: it was put there (a screen come back mid-mix reads the player's song, and the player
+    /// has moved on) and shows the player's place in that song - never the place it held from another
+    /// song, from before the screen went away, which put the bar ahead and kept it there until the song
+    /// before ended.
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_for(&mut self, t: &HeardTracker, seen: Seen, shown: Option<usize>, now_ms: i64, on: Option<usize>, position_ms: i64, playing: bool) -> i64 {
         if let (Some(h), Some(s)) = (seen.index, shown) {
             if t.differs(h, s) {
-                return self.ms;
+                if on.is_none_or(|o| t.differs(o, s)) {
+                    return self.ms;
+                }
+                return self.put(now_ms, shown, position_ms.max(0), playing);
             }
         }
-        self.ms = seen.ms;
+        self.put(now_ms, shown.or(seen.index), seen.ms, playing)
+    }
+
+    /// Shows `ms` in `song` at `now_ms`, never back by itself within the song: see [`Playhead`].
+    fn put(&mut self, now_ms: i64, song: Option<usize>, ms: i64, playing: bool) -> i64 {
+        let same = !self.jumped && self.at_ms > 0 && self.song == song;
+        let step = (now_ms - self.at_ms).max(0);
+        // Where the place shown would be, run on at one times since it was shown.
+        let run = self.ms + step;
+        let shown = if same && ms < self.ms && self.ms - ms <= GLIDE_MS {
+            // Behind: half the pace, never back.
+            if playing { ms.max(self.ms + step.min(GLIDE_STEP_MS) / 2) } else { self.ms }
+        } else if same && playing && ms > run && ms - run <= GLIDE_MS {
+            // Ahead: twice the pace, never past the reading.
+            ms.min(run + step.min(GLIDE_STEP_MS))
+        } else {
+            ms
+        };
+        self.jumped = false;
+        self.song = song;
+        self.ms = shown;
         self.at_ms = now_ms;
-        self.ms
+        shown
     }
 
     /// Where the bar is at `now_ms` with nothing to ask: the last place, run on at one times if `playing`.
@@ -399,13 +461,13 @@ mod tests {
         let mut p = Playhead::new();
         let seen = |index, ms| Seen { index, ms, changed: false };
         assert_eq!(p.show(&t, seen(None, 5_000), Some(A), 100), 5_000, "the player's own word");
-        assert_eq!(p.show(&t, seen(Some(A), 6_000), Some(A), 200), 6_000, "heard on the song shown");
-        assert_eq!(p.show(&t, seen(Some(2), 7_000), Some(A), 300), 7_000, "another copy of the same song is the same song");
-        assert_eq!(p.show(&t, seen(Some(B), 1_000), Some(A), 400), 7_000, "the ear moved to b, the page is still on a: hold");
-        assert_eq!(p.show(&t, seen(Some(B), 1_100), None, 500), 1_100, "a page showing nothing does not hold");
-        assert_eq!(p.show(&t, seen(Some(B), 1_200), Some(9), 600), 1_200, "nor one the queue does not have");
-        assert_eq!(p.run_on(1_600, true), 2_200, "reconnecting while playing: runs on from when it was taken");
-        assert_eq!(p.run_on(1_600, false), 1_200, "paused: stands");
+        assert_eq!(p.show(&t, seen(Some(A), 6_000), Some(A), 1_100), 6_000, "heard on the song shown");
+        assert_eq!(p.show(&t, seen(Some(2), 7_000), Some(A), 2_100), 7_000, "another copy of the same song is the same song");
+        assert_eq!(p.show(&t, seen(Some(B), 1_000), Some(A), 2_200), 7_000, "the ear moved to b, the page is still on a: hold");
+        assert_eq!(p.show(&t, seen(Some(B), 1_100), None, 2_300), 1_100, "a page showing nothing does not hold");
+        assert_eq!(p.show(&t, seen(Some(B), 1_200), Some(9), 2_400), 1_200, "nor one the queue does not have");
+        assert_eq!(p.run_on(3_400, true), 2_200, "reconnecting while playing: runs on from when it was taken");
+        assert_eq!(p.run_on(3_400, false), 1_200, "paused: stands");
         assert_eq!(Playhead::new().run_on(5_000, true), 0, "never shown: zero, not the clock");
     }
 
@@ -415,5 +477,111 @@ mod tests {
         assert_eq!(shown_duration_ms(None, 200_123, 199_000), 200_123, "measured");
         assert_eq!(shown_duration_ms(None, 0, 199_000), 199_000, "not measured yet");
         assert_eq!(shown_duration_ms(None, i64::MIN + 1, 199_000), 199_000, "unknown (media3's TIME_UNSET)");
+    }
+
+    #[test]
+    fn a_page_come_back_on_the_player_s_song_mid_mix_shows_that_song_s_place() {
+        let mut t = HeardTracker::new();
+        t.set_queue([("a".to_string(), 200_000), ("b".to_string(), 180_000)]);
+        let mut p = Playhead::new();
+        let seen = |index, ms| Seen { index, ms, changed: false };
+        // The bar last drawn on a, 150 s in; the screen goes away.
+        assert_eq!(p.show_for(&t, seen(Some(A), 150_000), Some(A), 1_000, Some(A), 150_000, true), 150_000);
+        // It comes back 45 s later mid-mix: the ear on a's ending, the player on b and 2 s into it, and the
+        // page put on b (the player's song). The bar shows b's place, not a's held from before.
+        assert_eq!(p.show_for(&t, seen(Some(A), 195_000), Some(B), 46_000, Some(B), 2_000, true), 2_000);
+        assert_eq!(p.show_for(&t, seen(Some(A), 195_100), Some(B), 46_100, Some(B), 2_100, true), 2_100, "and runs on with it");
+        // The page catching up to the ear holds for a moment only, as before.
+        assert_eq!(p.show_for(&t, seen(Some(A), 195_200), Some(A), 46_200, Some(B), 2_200, true), 195_200);
+        assert_eq!(p.show_for(&t, seen(Some(B), 1_000), Some(A), 46_300, Some(B), 1_000, true), 195_200, "the ear moved to b, the page still on a: held");
+        // A page on a song that is neither the ear's nor the player's holds too.
+        let mut q = Playhead::new();
+        q.show_for(&t, seen(Some(A), 10_000), Some(A), 1_000, Some(A), 10_000, true);
+        assert_eq!(q.show_for(&t, seen(Some(A), 50_000), Some(B), 41_000, Some(A), 50_000, true), 10_000);
+    }
+
+    /// A mix starts: the player says its place again, a quarter of a second behind where the session had
+    /// run its last word on to (the music started a moment after that word). Frame by frame the heard
+    /// song's place - the seek bar's and the lyrics' - never goes back, and catches up with the truth
+    /// within twice the step. The mix ending moves the page to the next song, whose place is shown as it is.
+    #[test]
+    fn mix_starts_the_heard_song_s_position_never_goes_backwards() {
+        let t = tracker();
+        let mut p = Playhead::new();
+        let player = |index, ms| Seen { index, ms, changed: false };
+        let mut last = 0;
+        let mut caught = None;
+        for now in (1_000..6_000).step_by(16) {
+            // The session's clock: 190 s at 1 s, run on at one times; at 3 s the mix starts and the player's
+            // word puts it 250 ms back, from where it runs on again.
+            let reading = 189_000 + now - if now >= 3_000 { 250 } else { 0 };
+            let shown = p.show_for(&t, player(None, reading), Some(A), now, Some(A), reading, true);
+            assert!(shown >= last, "back from {last} to {shown} at {now} ms (reading {reading})");
+            assert!(shown - reading <= 250, "never further ahead than the step");
+            if now >= 3_000 && shown == reading && caught.is_none() {
+                caught = Some(now);
+            }
+            last = shown;
+        }
+        let caught = caught.expect("caught up with the reading");
+        assert!(caught - 3_000 <= 520, "caught up within twice the step, at {caught}");
+        // The same on the ExoPlayer path, the ear on a's held ending while the player is on b: a reading of
+        // the ending a moment behind the last one (an output's clock read in steps) does not step back.
+        let mut t = tracker();
+        let mut p = Playhead::new();
+        let mut last = 0;
+        for (i, at) in (60_000..61_000).step_by(16).enumerate() {
+            let us = 190_000_000 + (at - 60_000) * 1000 - if i >= 30 { 120_000 } else { 0 };
+            let seen = t.at(&holding(us, at), now(at, "b", 0));
+            let shown = p.show_for(&t, seen, Some(A), at, Some(B), 0, true);
+            assert!(shown >= last, "back from {last} to {shown} at {at} ms");
+            last = shown;
+        }
+        // The mix over, the page on b: b's place at once, not a's held.
+        assert_eq!(p.show_for(&t, player(None, 5_300), Some(B), 61_100, Some(B), 5_300, true), 5_300);
+    }
+
+    #[test]
+    fn a_seek_back_is_shown_at_once_and_paused_the_place_stands() {
+        let t = tracker();
+        let mut p = Playhead::new();
+        let player = |ms| Seen { index: None, ms, changed: false };
+        assert_eq!(p.show_for(&t, player(50_000), Some(A), 1_000, Some(A), 50_000, true), 50_000);
+        // A tap on the lyric line that began 800 ms ago: the listener asked for it.
+        p.jumped();
+        assert_eq!(p.show_for(&t, player(49_200), Some(A), 1_016, Some(A), 49_200, true), 49_200);
+        assert_eq!(p.show_for(&t, player(49_216), Some(A), 1_032, Some(A), 49_216, true), 49_216);
+        // Paused, with the place said again a little behind: it stands where it was until the music moves.
+        assert_eq!(p.show_for(&t, player(49_100), Some(A), 1_100, Some(A), 49_100, false), 49_216);
+        assert_eq!(p.show_for(&t, player(49_100), Some(A), 9_000, Some(A), 49_100, false), 49_216);
+        // A step back further than a glide is a jump (another controller's seek): shown as it is.
+        assert_eq!(p.show_for(&t, player(30_000), Some(A), 9_016, Some(A), 30_000, true), 30_000);
+        // Resumed after a long pause a little behind the place shown: the glide runs on one step's worth,
+        // not over the whole pause.
+        assert_eq!(p.show_for(&t, player(29_900), Some(A), 60_000, Some(A), 29_900, true), 30_000 + GLIDE_STEP_MS / 2);
+    }
+
+    /// A held ending on the ExoPlayer path: the ear's reading takes over from the player's 400 ms ahead of
+    /// it, and gives the page back to it 8 s later. Neither is a leap: the place shown catches up at twice
+    /// the pace, and waits for the player's at half, every frame moving on.
+    #[test]
+    fn the_ear_taking_over_from_the_player_neither_leaps_ahead_nor_steps_back() {
+        let t = tracker();
+        let mut p = Playhead::new();
+        let mut last = 0;
+        let mut caught = None;
+        for now in (60_000..70_000).step_by(16) {
+            let player = 180_000 + now - 60_000;
+            let seen = if (61_000..69_000).contains(&now) { Seen { index: Some(A), ms: player + 400, changed: false } } else { Seen { index: None, ms: player, changed: false } };
+            let shown = p.show_for(&t, seen, Some(A), now, Some(A), player, true);
+            assert!(shown >= last, "back from {last} to {shown} at {now} ms");
+            assert!(last == 0 || shown - last <= 2 * 16 + 1, "leapt from {last} to {shown} at {now} ms");
+            if now >= 61_000 && shown == seen.ms && caught.is_none() {
+                caught = Some(now);
+            }
+            last = shown;
+        }
+        assert!(caught.is_some_and(|c| c - 61_000 <= 420), "caught up with the ear within the step: {caught:?}");
+        assert_eq!(last, 180_000 + 9_984, "back on the player's clock by the end");
     }
 }

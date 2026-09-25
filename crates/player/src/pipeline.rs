@@ -107,6 +107,12 @@ pub trait Track {
     /// flush that goes with it): a track with a buffer of its own behind the one counted here (a device
     /// behind a ring) keeps its own as shallow when this is.
     fn depth(&mut self, _capacity_us: i64) {}
+    /// Whether [`Track::depth`] takes effect at once, over the same track, keeping what it holds and
+    /// playing on: the sink's depth then changes in place when the equalizer screen opens or closes,
+    /// with nothing made again ([`Player::set_tuning`]).
+    fn resizes(&self) -> bool {
+        false
+    }
 }
 
 /// media3's AudioSink with nori's processors in it, over a [`Track`]. Its clock is media3's: the
@@ -792,6 +798,9 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     /// The sound changed while paused: what the output holds is made again when the music comes back.
     resound: bool,
     reading: Option<Reader<S::Reading>>,
+    /// The song after the current one as last fetched ahead ([`Songs::upcoming`]): a queue edit that
+    /// puts another there fetches and measures that one at once.
+    upcoming: Option<String>,
     /// A song to read after a jump, a seek or a rebuild, still opening.
     opening: Option<Opening<S::Reading>>,
     /// Where the song being read started, until the output's clock has moved past it: music is heard.
@@ -859,6 +868,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             shallow_us: SHALLOW_US,
             resound: false,
             reading: None,
+            upcoming: None,
             opening: None,
             heard_from: None,
             next: None,
@@ -1224,12 +1234,45 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         }
     }
 
-    /// The equalizer screen opened or closed: its shallow buffer comes and goes at the next boundary.
+    /// The equalizer screen opened or closed: its shallow buffer comes and goes at the next boundary; at
+    /// once, and in place, over a track that [`Track::resizes`].
     pub fn set_tuning(&mut self, on: bool) {
+        let was = self.chain;
         let act = self.chain.tuning(on, self.sound.on(), self.current.is_none(), self.playing);
         self.burst.enabled = self.chain.bursting(false);
+        if self.sink.track.resizes() {
+            // Nothing waits for a boundary or a pause, and nothing is made again: the sink takes no more
+            // than the new depth from here on, and the track follows.
+            self.chain.swap_pending = was.swap_pending;
+            self.chain.deep_at_next_pause = was.deep_at_next_pause;
+            self.resize_sink();
+            return;
+        }
         if act == ChainAct::Rebuild {
             self.rebuild_sink();
+        }
+    }
+
+    /// The shallow buffer is `us` from now on (a device kept shallow found it needs a deeper ring to be
+    /// fed from): at once, in place, while tuned over a track that [`Track::resizes`], else from the
+    /// next time the sink is made shallow.
+    pub fn set_shallow_us(&mut self, us: i64) {
+        if us == self.shallow_us {
+            return;
+        }
+        self.shallow_us = us;
+        if self.chain.tuning && self.sink.track.resizes() {
+            self.resize_sink();
+        }
+    }
+
+    /// The sink's depth as the tuning wants it, in place: for a track that [`Track::resizes`].
+    fn resize_sink(&mut self) {
+        let capacity = self.depth();
+        if self.sink.capacity_us != capacity {
+            self.sink.capacity_us = capacity;
+            self.sink.track.depth(capacity);
+            self.app.log(&format!("output depth in place: {} ms", capacity / 1000));
         }
     }
 
@@ -1361,6 +1404,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     pub fn queue_changed(&mut self) {
         let ids = self.queue.read(|q| q.ids().to_vec());
         let old = std::mem::replace(&mut self.ids, ids);
+        let edited = old != self.ids;
         if !old.is_empty() && old != self.ids {
             let new = &self.ids;
             let at = |i: usize| moved(&old, new, i).unwrap_or_else(|| i.min(new.len().saturating_sub(1)));
@@ -1388,6 +1432,28 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         // What follows the song playing may be another song now, and its ending was planned into the
         // old one: asked again on the next buffer, as the platform player does on a timeline change.
         self.engine.replan();
+        let Some(cur) = self.current else { return };
+        // A song queued to follow the one playing (Play next, Add to queue onto its end) is fetched and
+        // measured now, not when the song playing ends: its mix is planned before then, and with nothing
+        // measured of it AutoMix had nothing to mix it by.
+        let next = self.next_of(cur).map(|n| self.id_at(n));
+        let other_next = next != self.upcoming;
+        if other_next {
+            self.upcoming = next;
+            if let Some(id) = &self.upcoming {
+                self.tracks.upcoming(id);
+            }
+        }
+        if (edited || other_next) && self.app.auto_mix() && self.measure_on_move {
+            self.measure_ahead();
+        }
+    }
+
+    /// The reader has gone on from `cur`, the song the ear is on, into a song that no longer follows it:
+    /// the queue was edited after the ending was made.
+    pub fn read_astray(&self, cur: usize) -> bool {
+        let Some(r) = self.reading.as_ref().map(|r| r.index).or(self.opening.as_ref().map(|o| o.index)) else { return false };
+        r != cur && Some(r) != self.next_of(cur)
     }
 
     /// Repeat off, one or all (`playlist::REPEAT_*`): the player walks the queue that way from now on,
@@ -1434,9 +1500,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.queue.moved_to(i);
         self.changes.push((self.now_ms, i));
         self.sync_queue();
-        if let Some(n) = self.next_of(i) {
-            let id = self.id_at(n);
-            self.tracks.upcoming(&id);
+        self.upcoming = self.next_of(i).map(|n| self.id_at(n));
+        if let Some(id) = &self.upcoming {
+            self.tracks.upcoming(id);
         }
         if !first && self.chain.boundary(false) == ChainAct::Rebuild {
             self.app.log("chain swap at the boundary");

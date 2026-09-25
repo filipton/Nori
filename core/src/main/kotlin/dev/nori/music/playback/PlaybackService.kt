@@ -92,6 +92,12 @@ class PlaybackService : MediaLibraryService() {
         @Volatile private var exoOffloadWanted = false
         /** Whether the chain is currently asking for offload; read by the test bridge and the perf recorder, which cannot see in here. */
         val offloadWanted: Boolean get() = rustPlayer?.offloadWanted ?: exoOffloadWanted
+        /**
+         * The session's own player, for the app's screen to read once, on the main thread, as it comes
+         * back before its controller is connected again (PlayerConnection.catchUp). Null with no service.
+         */
+        @Volatile var sessionPlayer: Player? = null
+            private set
         /** The Rust player while it is the one playing; read by the test bridge. */
         @Volatile var rustPlayer: EnginePlayer? = null
             private set
@@ -173,23 +179,48 @@ class PlaybackService : MediaLibraryService() {
     private val served = LruCache<String, MediaItem>(500)
     private val saveQueue = Runnable { persistQueue(push = false) }
     /**
-     * Paused for a long while: the output goes, and with it media3's once-a-second tick, so the phone sleeps.
-     * The queue and the place in the song stay (nori_player::transport::IDLE_RELEASE_MS).
+     * Paused for a long while: the player stops, whichever it is. The output goes, and with it media3's
+     * once-a-second tick, so the phone sleeps; the session goes idle, so nothing holds the service in the
+     * foreground and its notification can be swiped away. The queue and the place in the song are saved
+     * first; play, a media button or onPlaybackResumption (once the service is gone) picks them up
+     * (nori_player::transport::IDLE_RELEASE_MS).
      */
     private val idleRelease = Runnable {
-        if (!player.playWhenReady && player.playbackState != Player.STATE_IDLE) {
+        if (LongPause.releases(player.playWhenReady, player.playbackState)) {
             android.util.Log.i("nori", "paused a long while: output released")
             persistQueue(push = false)
             player.stop()
         }
     }
     private val sleepAlarm = AlarmManager.OnAlarmListener { player.pause() }
+    /**
+     * The network the phone is on, told to the core whenever it turns metered or not, for both players: the
+     * core resolves the quality a song streams at (`stream::resolve_now`) and whether a download may use
+     * mobile data from it, without asking here. One registration for the service's life; a change that
+     * leaves the answer as it was is not passed on.
+     */
+    private val connectivity by lazy { getSystemService(android.net.ConnectivityManager::class.java) }
+    private var metered: Boolean? = null
+    private val network = object : android.net.ConnectivityManager.NetworkCallback() {
+        override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) =
+            tellMetered(!caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_NOT_METERED))
+    }
+    private fun tellMetered(now: Boolean) {
+        if (now == metered) return
+        metered = now
+        dev.nori.music.ffi.net.networkMetered(now)
+        // Onto Wi-Fi: the AutoEQ list is fetched if the core says it is due, and nothing happens otherwise.
+        if (!now) scope.launch { nori.keepAutoEqList() }
+    }
 
     override fun onCreate() {
         super.onCreate()
         nori = Nori.get(this)
         scrobbler = Scrobbler(nori, scope)
         hiRes = nori.settings.value.hiRes
+        // Before either player opens a song.
+        tellMetered(nori.http.metered)
+        runCatching { connectivity.registerDefaultNetworkCallback(network, main) }
         // Read once, here: the two players cannot be swapped under a running session.
         player = if (nori.settings.value.playbackEngine == 1) {
             android.util.Log.i("nori", "playback engine: Rust")
@@ -239,6 +270,7 @@ class PlaybackService : MediaLibraryService() {
 
         val open = packageManager.getLaunchIntentForPackage(packageName)?.let { PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE) }
         controls = Controls(player)
+        sessionPlayer = controls
         session = MediaLibrarySession.Builder(this, controls, Callback())
             // Notification and lock-screen art: same connection pool as everything else, last bitmap kept, decoded no larger than needed.
             .setBitmapLoader(CacheBitmapLoader(DataSourceBitmapLoader.Builder(this).setDataSourceFactory(nori.sources.network).setMaximumOutputDimension(512).build()))
@@ -345,6 +377,7 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         Equalizer.active = null
+        sessionPlayer = null
         rustPlayer = null
         engine = null
         track = null
@@ -354,6 +387,7 @@ class PlaybackService : MediaLibraryService() {
         main.removeCallbacks(precache)
         main.removeCallbacks(measure)
         main.removeCallbacks(idleRelease)
+        runCatching { connectivity.unregisterNetworkCallback(network) }
         precacher.release()
         analyser.release()
         offlineBridge?.abandon()
@@ -431,7 +465,7 @@ class PlaybackService : MediaLibraryService() {
             scrobbler.onPlaying(isPlaying)
             if (!isPlaying && !player.playWhenReady) persistQueue(push = true)
             main.removeCallbacks(idleRelease)
-            if (!isPlaying && !player.playWhenReady && player.playbackState != Player.STATE_IDLE && exo != null) main.postDelayed(idleRelease, timings.idleReleaseMs)
+            if (LongPause.arms(isPlaying, player.playWhenReady, player.playbackState)) main.postDelayed(idleRelease, timings.idleReleaseMs)
         }
 
         override fun onShuffleModeEnabledChanged(on: Boolean) { refreshUpcoming(); refreshButtons() }
@@ -442,11 +476,13 @@ class PlaybackService : MediaLibraryService() {
             refreshUpcoming()
             if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED) {
                 scheduleSave()
-                // The queue was edited: what comes next is not what it was, and measuring the new next
-                // track is the whole point of measuring ahead at all. Only that - the fetching ahead is
-                // left alone, since restarting it would throw away a track it is halfway through.
+                // The queue was edited: what comes next may not be what it was. A song queued to play next
+                // is fetched and measured now, while there is time to plan its mix, not when its turn comes:
+                // without it AutoMix had nothing to mix it by. Once per burst of edits, and the precacher
+                // carries on untouched when the songs to fetch are the ones it is fetching already.
                 main.removeCallbacks(measure)
-                main.postDelayed(measure, timings.measureAfterEditMs)
+                main.removeCallbacks(precache)
+                main.postDelayed(precache, timings.measureAfterEditMs)
             }
         }
 
@@ -973,6 +1009,30 @@ class PlaybackService : MediaLibraryService() {
 
     // ---- session: custom commands, Android Auto browsing, voice search ----
 
+    /** The controller whose screen has the shallow buffer on, or null: one owner, so it cannot be left on. */
+    private var tuner: MediaSession.ControllerInfo? = null
+
+    /**
+     * The equalizer screen is being tuned ([on]) or no longer is. Only a change is passed on: every one is
+     * a rebuild of the output, which is a moment of silence, so an "off" that finds it off does nothing.
+     */
+    private fun tune(on: Boolean, controller: MediaSession.ControllerInfo?) {
+        if (on == (tuner != null)) { if (on) tuner = controller; return }
+        tuner = if (on) controller else null
+        // The Rust player keeps the same rule in its own pipeline (nori_player::transport::Chain::tuning).
+        rust?.setTuning(on)
+        observer?.tuning(on)
+        if (exo != null) {
+            // Shallow buffer makes a band move audible within ~0.5 s instead of up to the deep
+            // 10 s AudioTrack fill. Rebuilding mid-track is a stop/prepare gap, so while music
+            // plays the swap waits for the next boundary (or the next pause); bursts turn
+            // off immediately so the track stops being topped up in multi-second bursts.
+            val rebuild = chain.tuning(on, equalizer.enabled, player.playbackState == Player.STATE_IDLE, player.playWhenReady)
+            updateBurst()
+            if (rebuild) reconfigureSink(urgent = true)
+        }
+    }
+
     private inner class Callback : MediaLibrarySession.Callback {
         override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon().add(SessionCommand(CMD_SLEEP, Bundle.EMPTY)).add(SessionCommand(CMD_TUNING, Bundle.EMPTY))
@@ -1005,20 +1065,15 @@ class PlaybackService : MediaLibraryService() {
             }
             if (command.customAction == CMD_SHUFFLE) controls.shuffleModeEnabled = !player.shuffleModeEnabled
             if (command.customAction == CMD_FILL_NEXT) fillThenNext()
-            // The Rust player keeps the same rule in its own pipeline (nori_player::transport::Chain::tuning).
-            if (command.customAction == CMD_TUNING) rust?.setTuning(args.getBoolean(ARG_ON))
-            if (command.customAction == CMD_TUNING) observer?.tuning(args.getBoolean(ARG_ON))
-            if (command.customAction == CMD_TUNING && exo != null) {
-                val on = args.getBoolean(ARG_ON)
-                // Shallow buffer makes a band move audible within ~0.5 s instead of up to the deep
-                // 10 s AudioTrack fill. Rebuilding mid-track is a stop/prepare gap, so while music
-                // plays the swap waits for the next boundary (or the next pause); bursts turn
-                // off immediately so the track stops being topped up in multi-second bursts.
-                val rebuild = chain.tuning(on, equalizer.enabled, player.playbackState == Player.STATE_IDLE, player.playWhenReady)
-                updateBurst()
-                if (rebuild) reconfigureSink(urgent = true)
-            }
+            if (command.customAction == CMD_TUNING) tune(args.getBoolean(ARG_ON), controller)
             return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+
+        // The screen that asked for the shallow buffer has gone with its controller (the app's process
+        // died, or it let go of the service): nobody is tuning any more, so the deep buffer comes back
+        // rather than staying shallow for as long as the service lives.
+        override fun onDisconnected(session: MediaSession, controller: MediaSession.ControllerInfo) {
+            if (tuner == controller) tune(false, null)
         }
 
         override fun onAddMediaItems(session: MediaSession, controller: MediaSession.ControllerInfo, items: MutableList<MediaItem>): ListenableFuture<MutableList<MediaItem>> {
@@ -1110,4 +1165,14 @@ interface PlaybackObserver {
 
     /** The player arrived on queue place [index]: by itself ([auto], a song that ended) or by a jump; [shuffled] under shuffle. */
     fun arrived(index: Int, auto: Boolean, shuffled: Boolean) {}
+}
+
+/**
+ * The long pause's rule, the same for both players: paused (not playing, not wanting to) and not already
+ * let go, the release is armed for `IDLE_RELEASE_MS`; when it fires, the player is stopped only if it is
+ * still paused and not already idle.
+ */
+internal object LongPause {
+    fun arms(isPlaying: Boolean, playWhenReady: Boolean, state: Int): Boolean = !isPlaying && releases(playWhenReady, state)
+    fun releases(playWhenReady: Boolean, state: Int): Boolean = !playWhenReady && state != Player.STATE_IDLE
 }

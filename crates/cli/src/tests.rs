@@ -227,7 +227,8 @@ fn every_settings_page_is_drawn_from_the_schema() {
         a.settings.invalidate();
         let s = draw(&mut a, 160, 70);
         dump(&format!("settings-{}", g.id), &s);
-        let Some(page) = settings_schema::page(&g.id, &a.prefs, &SettingsFacts::default()) else { continue };
+        let terminal = SettingsFacts { lacks: settings_schema::Capability::ALL.to_vec(), ..SettingsFacts::default() };
+        let Some(page) = settings_schema::page(&g.id, &a.prefs, &terminal) else { continue };
         for section in &page.sections {
             if !section.title.is_empty() {
                 assert!(s.contains(&section.title), "{}: section {} missing", g.id, section.title);
@@ -239,6 +240,15 @@ fn every_settings_page_is_drawn_from_the_schema() {
                 };
                 assert!(s.contains(title.as_str()), "{}: {title} missing:\n{s}", g.id);
             }
+        }
+    }
+    // What only a phone can do is not listed here.
+    for i in 0..groups.len() {
+        a.settings.group.at = i + 1;
+        a.settings.invalidate();
+        let s = draw(&mut a, 160, 70);
+        for phone in ["System audio effects", "Save battery while playing", "Swipe left", "Playback engine", "Moving covers"] {
+            assert!(!s.contains(phone), "{phone} listed in a terminal:\n{s}");
         }
     }
     // A switch shows its state, and enter on it asks the core to change it by its own name.
@@ -373,12 +383,28 @@ fn the_equalizer_draws_its_bands_as_bars() {
     a.prefs.eq_bands[2].gain_db = 12.0;
     a.prefs.eq_bands[5].gain_db = -6.0;
     a.go(Screen::Equalizer);
-    assert!(a.cmds.contains(&Cmd::Tuning(true)), "the shallow buffer while tuning");
+    assert!(!a.cmds.iter().any(|c| matches!(c, Cmd::Tuning(_))), "opening the screen leaves the output as it is");
     let s = draw(&mut a, 100, 36);
     assert!(s.contains("█") && s.contains("1k") && s.contains("Presets"), "{s}");
     dump("equalizer", &s);
+    // Moving around the screen and redrawing it asks nothing of the settings or the engine.
+    let before = a.cmds.len();
+    for _ in 0..5 {
+        key(&mut a, KeyCode::Down);
+        draw(&mut a, 100, 36);
+    }
+    key(&mut a, KeyCode::Up);
+    assert_eq!(a.cmds.len(), before, "{:?}", &a.cmds[before..]);
+    // The first sound really changed there asks for the shallow buffer, once.
+    assert!(a.sound_edited());
+    assert!(!a.sound_edited());
     a.go(Screen::Home);
     assert!(a.cmds.contains(&Cmd::Tuning(false)));
+    // Left without changing anything: nothing to ask back.
+    a.cmds.clear();
+    a.go(Screen::Equalizer);
+    a.go(Screen::Home);
+    assert!(!a.cmds.iter().any(|c| matches!(c, Cmd::Tuning(_))), "{:?}", a.cmds);
 }
 
 #[test]
@@ -397,5 +423,135 @@ fn a_picture_in_a_graphics_protocol_does_not_hide_the_rest_of_the_frame() {
         // missing from it.
         let s = draw_with(&mut a, 120, 30, Some(&mut art));
         assert!(s.contains("Up next") && s.contains("3:20") && s.contains("q quit"), "{protocol:?} hid the frame:\n{s}");
+    }
+}
+
+#[test]
+fn focus_lost_draws_nothing_and_focus_back_draws() {
+    let mut a = app();
+    a.dirty = false;
+    a.handle(Msg::Focus(false));
+    assert!(!a.dirty, "nothing changed on screen");
+    a.handle(Msg::Focus(true));
+    assert!(a.dirty, "back in view: drawn again");
+}
+
+/// The player bar's play/pause button, as drawn (the controls' middle symbol).
+fn button(s: &str) -> &'static str {
+    let bar = s.lines().rev().find(|l| l.contains('⏮')).expect("the controls are drawn");
+    if bar.contains('⏸') {
+        "pause"
+    } else if bar.contains('▶') {
+        "play"
+    } else {
+        panic!("no play or pause button: {bar}")
+    }
+}
+
+#[test]
+fn space_and_the_engines_answer_change_the_play_button_at_once() {
+    let mut t = Terminal::new(TestBackend::new(100, 20)).unwrap();
+    let mut frame = |a: &mut App| {
+        t.draw(|f| crate::ui::draw(f, a, None)).unwrap();
+        a.dirty = false;
+        let buf = t.backend().buffer();
+        (0..buf.area.height).map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n").collect::<String>()
+    };
+    let mut a = app();
+    a.heard(Some(song("s1", "First", 200)));
+    a.now.state = State::Paused;
+    assert_eq!(button(&frame(&mut a)), "play");
+    // Space asks the engine, and is drawn.
+    key(&mut a, KeyCode::Char(' '));
+    assert!(a.cmds.contains(&Cmd::Toggle), "{:?}", a.cmds);
+    assert!(a.dirty);
+    // The engine's answer alone, with no key pressed, redraws the button.
+    a.handle(Msg::Engine(nori_engine::Event::State(State::Playing)));
+    assert!(a.dirty, "an engine event is drawn");
+    assert_eq!(button(&frame(&mut a)), "pause");
+    a.handle(Msg::Engine(nori_engine::Event::State(State::Paused)));
+    assert!(a.dirty);
+    assert_eq!(button(&frame(&mut a)), "play");
+}
+
+#[test]
+fn a_message_that_changes_nothing_does_not_undo_the_draw_an_event_before_it_asked_for() {
+    let mut a = app();
+    a.dirty = false;
+    // Taken in one batch: the engine paused, then the terminal lost focus (which alone draws nothing).
+    a.handle(Msg::Engine(nori_engine::Event::State(State::Paused)));
+    a.handle(Msg::Focus(false));
+    assert!(a.dirty, "the pause is still to be drawn");
+}
+
+#[test]
+fn the_clock_stops_where_it_was_when_the_engine_says_paused() {
+    let mut a = app();
+    let start = Instant::now() - Duration::from_secs(5);
+    a.now = crate::app::Now { state: State::Playing, position_ms: 10_000, at: start, ..Default::default() };
+    a.handle(Msg::Engine(nori_engine::Event::State(State::Paused)));
+    let at = a.now.position(Instant::now());
+    assert!((14_900..16_000).contains(&at), "stopped about 15 s in, not back at 10 s: {at}");
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(a.now.position(Instant::now()), at, "paused: the clock stands");
+}
+
+#[test]
+fn the_engines_status_is_not_believed_over_its_newer_events() {
+    // The engine says a change before its status shows it: read in between, the status is behind.
+    let mut said = crate::runner::Said::default();
+    assert_eq!(said.behind(State::Idle, None), None, "no event yet: the status stands");
+    said.state = Some(State::Playing);
+    assert_eq!(said.behind(State::Idle, Some("a")), Some(None), "the status still says idle");
+    assert_eq!(said.behind(State::Playing, Some("a")), None, "caught up");
+    said.song = Some("b".into());
+    assert_eq!(said.behind(State::Playing, Some("a")), Some(Some("b".into())), "the song the event named is shown");
+    assert_eq!(said.behind(State::Playing, Some("b")), None);
+}
+
+#[test]
+fn tmux_is_trusted_with_sixel_only_on_a_terminal_it_found_draws_sixel() {
+    use crate::term::sixel_feature;
+    // Ghostty (kitty graphics, no sixel) under tmux 3.7: tmux still answers that it draws sixel, and
+    // would show a box of + signs; the pictures go through to Ghostty instead.
+    assert!(!sixel_feature("bpaste,ccolour,clipboard,cstyle,focus,RGB,title"));
+    assert!(!sixel_feature(""));
+    // xterm as a VT340, foot, WezTerm with sixel: tmux keeps and draws the picture.
+    assert!(sixel_feature("256,bpaste,ccolour,clipboard,cstyle,extkeys,focus,mouse,rectfill,RGB,sixel,strikethrough,title"));
+}
+
+#[test]
+fn a_cover_is_sent_on_the_first_frame_and_again_when_the_song_changes() {
+    use ratatui_image::picker::{Picker, ProtocolType};
+    let image = |v: u8| std::sync::Arc::new(nori_covers::memory::Image { width: 64, height: 64, pixels: vec![v; 64 * 64 * 4].into_boxed_slice() });
+    for protocol in [ProtocolType::Sixel, ProtocolType::Kitty, ProtocolType::Iterm2] {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(protocol);
+        let mut art = crate::art::Art::new(picker);
+        let mut t = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let mut a = app();
+        a.go(Screen::Playing);
+        a.heard(Some(Song { cover_art: Some("c1".into()), ..song("s1", "First", 200) }));
+        assert!(a.cmds.contains(&Cmd::Cover { art: "c1".into(), colours: true }), "the heard song's cover is asked for");
+        // What the terminal is sent in a frame: ratatui's diff, as written to it.
+        fn sent(t: &mut Terminal<TestBackend>, a: &mut App, art: &mut crate::art::Art) -> usize {
+            let before = t.backend().buffer().clone();
+            t.draw(|f| crate::ui::draw(f, a, Some(art))).unwrap();
+            let after = t.backend().buffer();
+            before.diff(after).into_iter().filter(|(_, _, c)| c.symbol().starts_with('\x1b')).count()
+        }
+        art.put("c1".into(), &image(100));
+        assert!(sent(&mut t, &mut a, &mut art) > 0, "{protocol:?}: the first cover is sent");
+        // (kitty's next frame swaps the transmission for a bare placement: one cell, once)
+        sent(&mut t, &mut a, &mut art);
+        assert_eq!(sent(&mut t, &mut a, &mut art), 0, "{protocol:?}: and not again while it stays");
+        a.heard(Some(Song { cover_art: Some("c2".into()), ..song("s2", "Second", 200) }));
+        art.put("c2".into(), &image(200));
+        assert!(sent(&mut t, &mut a, &mut art) > 0, "{protocol:?}: the next song's cover is sent");
+        // A pane back from another tmux window: every picture made again and the whole screen written
+        // (term::repaint: a blank frame, then the next draw writes everything).
+        art.resend();
+        t.draw(|_| {}).unwrap();
+        assert!(sent(&mut t, &mut a, &mut art) > 0, "{protocol:?}: sent again after resend");
     }
 }

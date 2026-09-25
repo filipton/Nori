@@ -75,9 +75,18 @@ class TestBridge : BroadcastReceiver() {
                 "play" -> TestHooks.play?.let { it(arg); "ok" } ?: "no ui"
                 "login" -> TestHooks.login?.let { it(arg); "ok" } ?: "no ui"
                 "do" -> TestHooks.act?.let { it(arg); "ok" } ?: "no ui"
+                // An internet radio station by its address, as the server would list it:
+                //   --es cmd radio --es arg https://ice1.somafm.com/groovesalad-32-aac
+                "radio" -> {
+                    dev.nori.music.Nori.get(context).player.playRadio(dev.nori.music.ffi.model.RadioStation("test:$arg", arg, arg, null))
+                    "ok"
+                }
                 // Which Compose states change in the next second, and how often: a screen that redraws
                 // when nothing on it moves has one of these changing every frame.
                 "states" -> { watchStates(); "watching" }
+                // How many collections the runtime has run so far, and how much it has allocated: read
+                // before and after a stretch to count its GCs.
+                "gc" -> "gc ${android.os.Debug.getRuntimeStat("art.gc.gc-count")} blocking ${android.os.Debug.getRuntimeStat("art.gc.blocking-gc-count")}"
                 // What a crossing into the core costs, by kind, against the same work done in Kotlin.
                 "bench" -> Bench.calls()
                 else -> "unknown command $cmd"

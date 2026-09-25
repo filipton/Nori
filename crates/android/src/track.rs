@@ -27,12 +27,39 @@
 //! Paused, or at the end, it sleeps until the engine says something.
 //!
 //! While the equalizer is tuned the engine keeps its ring shallow (`nori_engine::output::SHALLOW_US`) and
-//! says so ([`AudioOutput::shallow`]), just before the flush that goes with it: at that flush the track is
-//! opened again at [`SHALLOW_TRACK_US`], and topped up once per half of that, so a band moved is heard
-//! within a quarter of a second (the ring's and the track's together); at the flush that ends it, it is
-//! opened at its deep size again. The writer runs at audio priority, as ExoPlayer's playback thread does:
-//! with the equalizer screen drawing at 120 frames a second, a thread at the normal priority is woken
-//! late often enough for a shallow track to run dry.
+//! says so ([`AudioOutput::shallow`]). The track is never opened again for it: it is opened deep once, in
+//! power saving mode, and only the part of its buffer it may fill changes, at once
+//! (`AudioTrack.setBufferSizeInFrames`, [`Sink::resize`]): [`SHALLOW_TRACK_US`] while tuned on the phone's
+//! speaker, topped up once per half of that, so a band moved is heard within a quarter of a second (the
+//! ring's and the track's together), more on an output that needs more (below); all of it again when the
+//! screen closes. Neither way drops anything or stops the track, so
+//! neither is heard: made shallow, the seconds it holds play out first (the engine makes the music again
+//! behind its dip for the first band moved before they have, `nori_engine`'s `Worker::apply`); made deep,
+//! it is filled up from the next burst on. Opening it again at the other size, as it once was, was a
+//! stutter each way: a new track takes its time to start, and a shallow one went to another mixer.
+//!
+//! How shallow is the output's to say, not a constant's. The writer's clock counts music from the moment
+//! the track lets it go (the play head as the device presents it), so what the output holds past the
+//! track - its own latency, a Bluetooth link's couple of hundred milliseconds - is counted as the track's,
+//! and a track made as shallow as for the phone's speaker held nothing at all on a pair of Bluetooth
+//! headphones: the platform lets `setBufferSizeInFrames` go down to 16 frames whatever the output needs,
+//! where a track opened anew is given at least `AudioTrack.getMinBufferSize` for it. So the shallow size
+//! is [`shallow_marks`]: topped up while it still holds the output's latency, the least the platform would
+//! give a new track there and a wake's lateness ([`Needs`]), which on the speaker is the 160 ms it always
+//! was. The writer then watches, only while shallow: the latency it sees (what the track let go against
+//! what was heard) and the track's underruns, and grows for either, never shrinking again for that
+//! output. The engine keeps its ring as deep as one of those top-ups ([`AudioOutput::shallow_depth`]).
+//!
+//! What the platform does with a buffer made smaller: nothing but that. The track stays on the output its
+//! performance mode chose when it was built (the deep buffer mixer, for power saving, on a phone that has
+//! one), whose periods and latency do not change, so the time from the track to the ear is that output's
+//! in both sizes; the sound server takes no more from the track per period than before, the writer only
+//! tops it up more often. The start threshold (Android 12 on) is kept inside the size, or a track flushed
+//! while shallow would wait for more than it may hold; before 12 a track starts once full at its size.
+//! Deep, the track is exactly what it was before: the same buffer, mode and wakes, so the battery is too.
+//! The writer runs at audio priority, as ExoPlayer's playback thread does: with the equalizer screen
+//! drawing at 120 frames a second, a thread at the normal priority is woken late often enough for a
+//! shallow track to run dry.
 //!
 //! A sound server may give a smaller buffer than asked, or say it gave the size asked and take less. The
 //! writer is timed by what the track holds, never by what is pulled for it, and a track that refuses a
@@ -50,12 +77,12 @@
 //! No JNI here: the AudioTrack is a [`Sink`], so the tests below run the whole thing on a simulated
 //! track and a virtual clock. `player.rs` has the real one.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{JoinHandle, Thread};
 use std::time::Duration;
 
-use nori_engine::{AudioOutput, DeviceWatch, Feed, OutputFormat};
+use nori_engine::{AudioOutput, DeviceWatch, Feed, OutputFormat, ShallowDepth};
 use nori_player::burst::BUFFER_US;
 use nori_player::transport::{fade_step, FADE_TICK_MS};
 use parking_lot::Mutex;
@@ -70,6 +97,13 @@ pub(crate) const TRACK_US: i64 = BUFFER_US + LOW_US + 500_000;
 /// How much the track holds while the equalizer is tuned: topped up at half of it, it keeps between 80
 /// and 160 ms, which with the ring's 40 to 80 ms before it is what a band moved takes to be heard.
 pub(crate) const SHALLOW_TRACK_US: i64 = 160_000;
+/// How late the writer may wake while shallow and still find the output fed: part of the low mark.
+const SHALLOW_LATE_US: i64 = 40_000;
+/// The deepest a shallow track grows for an output that keeps running dry: past this the equalizer screen
+/// might as well have the deep buffer.
+const SHALLOW_MOST_US: i64 = 1_500_000;
+/// A latency seen this much past the one planned for makes the track deeper.
+const LAG_STEP_US: i64 = 20_000;
 /// The samples moved per write, in bytes.
 pub(crate) const CHUNK_BYTES: usize = 128 * 1024;
 /// How often the track is filled while it is being filled after a start or a flush.
@@ -98,7 +132,88 @@ pub(crate) trait Sink: Send {
     /// Frames heard since the last flush, and the monotonic time (ns) that was true at; none while the
     /// device cannot say.
     fn heard(&mut self, playing: bool) -> Option<(u64, i64)>;
+    /// From now on the track holds at most `frames` (`AudioTrack.setBufferSizeInFrames`), up to the buffer
+    /// it was opened with, and starts after a flush once it holds a quarter of a second or all of that.
+    /// Nothing it holds is dropped and it keeps playing: a size under what it holds only stops it taking
+    /// more until it has played down to it. Returns the size it gave.
+    fn resize(&mut self, frames: u64) -> u64;
+    /// What the output the track plays on now says of itself ([`Route`]): read as the track is made
+    /// shallow, where the headphones connected since it was opened count.
+    fn route(&mut self) -> Route {
+        Route::default()
+    }
+    /// Times the track ran dry since it was made (`AudioTrack.getUnderrunCount`); none where it cannot say.
+    fn underruns(&mut self) -> Option<u64> {
+        None
+    }
+    /// Frames the sound server took from the track since the last flush (the play head, ahead of what the
+    /// device presents by the output's own latency); none where it cannot say.
+    fn consumed(&mut self) -> Option<u64> {
+        None
+    }
     fn release(&mut self);
+}
+
+/// What an output says of itself, for the shallow track's size ([`shallow_marks`]).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Route {
+    /// The least the platform gives a new track there (`AudioTrack.getMinBufferSize`), frames: what it
+    /// holds the output must be able to take from the track at once.
+    pub min_frames: Option<u64>,
+    /// The output's own latency past the track (`AudioTrack.getLatency`, less the track's buffer), frames.
+    pub latency_frames: Option<u64>,
+    /// Where it plays, in the log's words: "Bluetooth", "the phone speaker".
+    pub name: Option<&'static str>,
+}
+
+/// What the output needs of a shallow track, as it said and as the writer saw it, frames.
+#[derive(Default, Clone, Copy, Debug)]
+struct Needs {
+    /// Music the track let go and the ear has not heard: the output's own latency. The writer's clock
+    /// counts it as the track's.
+    lag: u64,
+    /// What the track must still hold for the output's next pull: the least the platform gives a new
+    /// track there, and more each time the track ran dry.
+    pull: u64,
+    /// Where it plays, for the log; a new name is a new output, whose needs are its own.
+    name: Option<&'static str>,
+    /// Times the track ran dry, as last read.
+    underruns: Option<u64>,
+    /// Times it grew for running dry, on this output.
+    grown: u32,
+}
+
+/// The shallow track's marks for an output with `lag` past the track and pulls of `pull` (frames, at
+/// `rate`): topped up at the low mark, while it still holds the latency, one pull and a wake's lateness
+/// (never under half of [`SHALLOW_TRACK_US`]), with a quarter of that again or half of
+/// [`SHALLOW_TRACK_US`], whichever is more. `(low, capacity)`, counted as the writer's clock counts. An
+/// output that says nothing of itself (the phone's speaker, fed from the deep buffer mixer) gets the
+/// 80/160 ms it always had.
+pub(crate) fn shallow_marks(rate: u32, lag: u64, pull: u64) -> (u64, u64) {
+    let f = |us: i64| (rate as i64 * us / 1_000_000) as u64;
+    let half = f(SHALLOW_TRACK_US / 2);
+    let low = (lag + pull + f(SHALLOW_LATE_US)).max(half).min(f(SHALLOW_MOST_US));
+    let top = half.max(low / 4);
+    (low, low + top)
+}
+
+/// What the shallow track found it needs, for the engine (`AudioOutput::shallow_depth`): µs, 0 until known.
+#[derive(Default)]
+pub(crate) struct Depth {
+    device_us: AtomicI64,
+    ring_us: AtomicI64,
+}
+
+impl Depth {
+    fn set(&self, device_us: i64, ring_us: i64) {
+        self.device_us.store(device_us, Ordering::Relaxed);
+        self.ring_us.store(ring_us, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get(&self) -> Option<ShallowDepth> {
+        let (device_us, ring_us) = (self.device_us.load(Ordering::Relaxed), self.ring_us.load(Ordering::Relaxed));
+        (device_us > 0).then_some(ShallowDepth { device_us, ring_us })
+    }
 }
 
 /// A sink as it was opened: how many frames its buffer holds, and whether it only starts once that
@@ -224,6 +339,11 @@ impl Clock {
         c.given.saturating_sub(c.heard_at(now_ns))
     }
 
+    /// Frames heard by now.
+    fn heard_now(&self, now_ns: i64) -> u64 {
+        self.0.lock().heard_at(now_ns)
+    }
+
     fn update(&self, f: impl FnOnce(&mut Counts)) {
         f(&mut self.0.lock());
     }
@@ -264,7 +384,7 @@ pub(crate) struct Control {
     pub playing: bool,
     pub ramp: Option<(Option<f32>, f32, i64)>,
     pub stop: bool,
-    /// The track is to be shallow ([`SHALLOW_TRACK_US`]) from the next flush on.
+    /// The track is to be shallow ([`SHALLOW_TRACK_US`]), from now on.
     pub shallow: bool,
 }
 
@@ -289,6 +409,8 @@ pub(crate) struct Writer<R: Ring> {
     opener: Arc<Mutex<Box<dyn Opener>>>,
     format: OutputFormat,
     asked: u64,
+    /// The buffer the track was opened with, which its size moves inside.
+    allocated: u64,
     /// Why the track died and would not open again, for the engine ([`AudioOutput::failed`]).
     failure: Arc<Mutex<Option<String>>>,
     /// No track at all: nothing is written until the output is let go.
@@ -322,15 +444,19 @@ pub(crate) struct Writer<R: Ring> {
     settled: usize,
     /// How long the next look waits while the ring has nothing to give.
     starved_ms: u64,
-    /// The track was opened shallow, and whether the engine wants it so from the next flush on.
+    /// The track is kept shallow, and whether the engine wants it so.
     shallow: bool,
     wants_shallow: bool,
+    /// What the output needs of the shallow track.
+    needs: Needs,
+    /// The shallow track's size as found, for the engine.
+    depth: Arc<Depth>,
 }
 
 impl<R: Ring> Writer<R> {
-    pub(crate) fn new(ring: R, opened: Opened, reopen: Reopen, format: OutputFormat, float: bool, clock: Arc<Clock>, bytes: Arc<AtomicU64>) -> Writer<R> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(ring: R, opened: Opened, reopen: Reopen, format: OutputFormat, float: bool, clock: Arc<Clock>, bytes: Arc<AtomicU64>, depth: Arc<Depth>) -> Writer<R> {
         let rate = format.rate;
-        let shallow = reopen.frames < track_frames(rate, false);
         clock.update(|c| *c = Counts { rate, ..Counts::default() });
         said_small(opened.frames, reopen.frames, rate);
         Writer {
@@ -339,6 +465,7 @@ impl<R: Ring> Writer<R> {
             opener: reopen.opener,
             format,
             asked: reopen.frames,
+            allocated: opened.frames,
             failure: reopen.failure,
             dead: false,
             revived: false,
@@ -360,8 +487,10 @@ impl<R: Ring> Writer<R> {
             started_ns: 0,
             settled: SETTLE_MS.len(),
             starved_ms: FILL_TICK_MS,
-            shallow,
-            wants_shallow: shallow,
+            shallow: false,
+            wants_shallow: false,
+            needs: Needs::default(),
+            depth,
         }
     }
 
@@ -375,6 +504,100 @@ impl<R: Ring> Writer<R> {
         self.low = low_mark(frames, self.rate);
     }
 
+    /// The track made shallow or deep as the engine wants it, in place: what it holds plays on. Shallow,
+    /// it takes nothing more until it has played down to its new low mark, as deep as the output it plays
+    /// on needs ([`shallow_marks`]); deep, it is topped up at the next look, from what the ring has and
+    /// the engine's next burst.
+    fn resize(&mut self) {
+        self.shallow = self.wants_shallow;
+        if self.shallow {
+            self.look_at_route();
+            self.make_shallow(None);
+            return;
+        }
+        let got = self.sink.resize(self.allocated);
+        log(&format!("deep again in place: {} ms of the {} ms opened", self.ms(got), self.ms(self.allocated)));
+        self.holds(got);
+    }
+
+    fn ms(&self, frames: u64) -> u64 {
+        frames * 1000 / self.rate.max(1) as u64
+    }
+
+    fn frames(&self, us: i64) -> u64 {
+        (self.rate as i64 * us / 1_000_000) as u64
+    }
+
+    /// What the output the track plays on says of itself, taken into its needs: another output than the
+    /// last one starts from what it says; the same one keeps what was seen of it too (it grows, never
+    /// shrinks). The underruns are counted from here.
+    fn look_at_route(&mut self) {
+        let route = self.sink.route();
+        let said_lag = route.latency_frames.unwrap_or(0).min(self.frames(SHALLOW_MOST_US));
+        let said_pull = route.min_frames.unwrap_or(0).min(self.frames(SHALLOW_MOST_US));
+        if route.name != self.needs.name {
+            self.needs = Needs { name: route.name, ..Needs::default() };
+        }
+        self.needs.lag = self.needs.lag.max(said_lag);
+        self.needs.pull = self.needs.pull.max(said_pull);
+        self.needs.underruns = self.sink.underruns();
+    }
+
+    /// The track made as shallow as the output needs now, in place, and the engine told how deep its ring
+    /// is to be; `why` is what changed since it was last made so, for the log.
+    fn make_shallow(&mut self, why: Option<String>) {
+        let (low, capacity) = shallow_marks(self.rate, self.needs.lag, self.needs.pull);
+        let got = self.sink.resize(capacity.min(self.allocated));
+        self.capacity = got.max(1);
+        self.low = low.min(got / 2 + got / 4);
+        self.depth.set((self.capacity * 1_000_000 / self.rate.max(1) as u64) as i64, ((self.capacity - self.low) * 1_000_000 / self.rate.max(1) as u64) as i64);
+        let to = self.needs.name.map_or(String::new(), |n| format!(" for {n}"));
+        let line = match why {
+            Some(why) => format!("shallow {} ms{to}, grown: {why}", self.ms(got)),
+            None => {
+                let mut parts = Vec::new();
+                if self.needs.lag > 0 {
+                    parts.push(format!("its latency is {} ms", self.ms(self.needs.lag)));
+                }
+                if self.needs.pull > 0 {
+                    parts.push(format!("its pulls are {} ms", self.ms(self.needs.pull)));
+                }
+                let because = if parts.is_empty() { String::new() } else { format!(": {}", parts.join(", ")) };
+                format!("shallow {} ms{to}{because}", self.ms(got))
+            }
+        };
+        log(&format!("{line} (topped up at {} ms, of the {} ms opened)", self.ms(self.low), self.ms(self.allocated)));
+        nori_perf::invariants::tuning_said(&line);
+    }
+
+    /// While shallow, at a wake the writer made anyway: the output's latency as seen (what the track let
+    /// go against what the ear heard), and its underruns. A latency past the one planned for, or a track
+    /// that ran dry, makes it deeper, for good on this output.
+    fn watch_output(&mut self, now_ns: i64) {
+        if let Some(n) = self.sink.underruns() {
+            match self.needs.underruns.replace(n) {
+                Some(was) if n > was => {
+                    self.needs.grown += 1;
+                    let more = (self.needs.pull / 2).max(self.frames(SHALLOW_TRACK_US / 2));
+                    self.needs.pull = (self.needs.pull + more).min(self.frames(SHALLOW_MOST_US));
+                    let why = format!("it ran dry {} more time{}, its pulls are counted as {} ms", n - was, if n - was == 1 { "" } else { "s" }, self.ms(self.needs.pull));
+                    self.make_shallow(Some(why));
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Some(consumed) = self.sink.consumed() {
+            let heard = self.clock.heard_now(now_ns);
+            let lag = consumed.saturating_sub(heard).min(self.frames(SHALLOW_MOST_US));
+            if lag > self.needs.lag + self.frames(LAG_STEP_US) {
+                self.needs.lag = lag;
+                let why = format!("its latency is seen to be {} ms", self.ms(lag));
+                self.make_shallow(Some(why));
+            }
+        }
+    }
+
     /// One wake: does what the engine asked and what the track needs, and says how long to sleep
     /// (ms; `None` until the engine says something).
     pub(crate) fn step(&mut self, now_ns: i64, c: &mut Control) -> Option<u64> {
@@ -383,6 +606,9 @@ impl<R: Ring> Writer<R> {
         }
         let now_ms = now_ns / 1_000_000;
         self.wants_shallow = c.shallow;
+        if self.shallow != self.wants_shallow {
+            self.resize();
+        }
         let mut wake: Option<u64> = None;
         let mut at = |ms: u64| wake = Some(wake.map_or(ms, |w| w.min(ms)));
         if let Some((from, to, ms)) = c.ramp.take() {
@@ -421,17 +647,7 @@ impl<R: Ring> Writer<R> {
         // A flush shows in the next pull, even one that takes nothing: the track follows it at once.
         self.ring.pull(&mut []);
         if self.ring.flushed() {
-            if self.shallow != self.wants_shallow {
-                // Nothing the track holds is wanted any more: the moment to open it at the other size.
-                let frames = track_frames(self.rate, self.wants_shallow);
-                log(if self.wants_shallow { "opened shallow for the equalizer" } else { "opened deep again" });
-                self.reopen(now_ns, frames);
-                if self.dead {
-                    return None;
-                }
-            } else {
-                self.restart(now_ns);
-            }
+            self.restart(now_ns);
         }
         if !self.playing {
             return wake;
@@ -514,6 +730,14 @@ impl<R: Ring> Writer<R> {
             return Some(ms(fill - self.low, self.rate) + 1);
         }
         self.read_clock();
+        if self.shallow && self.playing {
+            if self.filling {
+                // Filling from empty after a start or a flush is not the output running dry.
+                self.needs.underruns = self.sink.underruns();
+            } else {
+                self.watch_output(now_ns);
+            }
+        }
         let full = self.top_up(now_ns);
         if self.dead {
             return None;
@@ -657,13 +881,19 @@ impl<R: Ring> Writer<R> {
     fn reopen(&mut self, now_ns: i64, frames: u64) {
         self.sink.release();
         self.asked = frames;
-        self.shallow = frames < track_frames(self.rate, false);
         let opened = self.opener.lock().open(self.format, self.float, frames);
         match opened {
             Ok(o) => {
                 self.sink = o.sink;
                 said_small(o.frames, self.asked, self.rate);
+                self.allocated = o.frames;
                 self.holds(o.frames);
+                // Opened at its whole size: made shallow again if it is to be, its underruns its own.
+                self.shallow = false;
+                self.needs.underruns = None;
+                if self.wants_shallow {
+                    self.resize();
+                }
                 self.starts_full = o.starts_full;
                 self.staged = (0, 0);
                 self.drained = false;
@@ -713,6 +943,8 @@ pub(crate) struct Shared {
     pub watch: Mutex<Option<DeviceWatch>>,
     /// Why the track died and would not open again, until the engine has heard.
     failure: Arc<Mutex<Option<String>>>,
+    /// How deep the shallow track found it must be, for the engine.
+    depth: Arc<Depth>,
 }
 
 impl Shared {
@@ -758,13 +990,14 @@ impl AudioOutput for TrackOutput {
         // The engine's thread, which starts the output, decodes what the track is fed: it takes the
         // writer's priority too.
         audio_priority("the engine");
+        // Opened deep, always: while tuned it is made shallow in place, before anything is written.
         let shallow = self.shared.control.lock().shallow;
-        let frames = track_frames(format.rate, shallow);
+        let frames = track_frames(format.rate, false);
         let opened = self.opener.lock().open(format, self.float, frames).inspect_err(|e| log(&format!("the AudioTrack would not open: {e}")))?;
         *self.shared.control.lock() = Control { shallow, ..Control::default() };
         *self.shared.failure.lock() = None;
         let reopen = Reopen { opener: self.opener.clone(), frames, failure: self.shared.failure.clone() };
-        let writer = Writer::new(feed, opened, reopen, format, self.float, self.shared.clock.clone(), self.shared.bytes.clone());
+        let writer = Writer::new(feed, opened, reopen, format, self.float, self.shared.clock.clone(), self.shared.bytes.clone(), self.shared.depth.clone());
         let shared = self.shared.clone();
         let t = std::thread::Builder::new().name("nori-track".into()).spawn(move || run(writer, shared)).map_err(|e| e.to_string())?;
         *self.shared.writer.lock() = Some(t.thread().clone());
@@ -804,9 +1037,18 @@ impl AudioOutput for TrackOutput {
         true
     }
 
-    /// The track is opened at the other size at the flush that follows.
+    /// The track's size changes at once, in place ([`Sink::resize`]).
     fn shallow(&mut self, on: bool) {
         self.shared.tell(|c| c.shallow = on);
+    }
+
+    fn resizes(&self) -> bool {
+        true
+    }
+
+    /// As deep as the writer found the output it plays on needs, once it has looked.
+    fn shallow_depth(&self) -> Option<ShallowDepth> {
+        self.shared.depth.get()
     }
 
     /// Seconds of music sit in the track after the ring has run empty: the end is when it has played them.
@@ -926,6 +1168,7 @@ fn run<R: Ring>(mut w: Writer<R>, shared: Arc<Shared>) {
 mod tests {
     use super::*;
     use nori_player::burst::LOW_US as RING_LOW_US;
+    use std::collections::VecDeque;
 
     const RATE: u32 = 48_000;
     const MS: i64 = 1_000_000;
@@ -934,7 +1177,9 @@ mod tests {
     /// once it is full when it starts only full.
     #[derive(Default)]
     struct Track {
+        /// The buffer it was opened with, and the part of it that may be filled (`setBufferSizeInFrames`).
         capacity: u64,
+        size: u64,
         starts_full: bool,
         buffered: u64,
         played: u64,
@@ -953,6 +1198,20 @@ mod tests {
         /// Tracks opened in place of a dead one, and whether another may be.
         reopened: u32,
         refuse_open: bool,
+        /// Every frame written and not yet played, as the ring numbered it, while `record` is on; frames
+        /// played out of their order, and the longest silence heard once music had started.
+        record: bool,
+        queued: VecDeque<f32>,
+        last_played: Option<f32>,
+        jumps: u32,
+        heard_any: bool,
+        silent_run: u64,
+        longest_silence: u64,
+        resizes: u32,
+        /// The output past the track: what the device presents lags what it took by this many frames.
+        latency: u64,
+        /// What it says of itself.
+        route: Route,
     }
 
     struct FakeSink {
@@ -972,7 +1231,14 @@ mod tests {
                 return Err(-6);
             }
             let fb = if self.float { 8 } else { 4 };
-            let frames = ((t.capacity - t.buffered) as usize).min(len / fb);
+            let frames = (t.size.saturating_sub(t.buffered) as usize).min(len / fb);
+            if t.record && self.float {
+                let first = from / 4;
+                for k in 0..frames {
+                    let v = self.staging[first + k * 2];
+                    t.queued.push_back(v);
+                }
+            }
             if frames > 0 {
                 // SAFETY: the staging memory is f32s, aligned for i16, and `from` lies inside it.
                 let sample: i16 = unsafe { *(self.staging.as_ptr() as *const i16).add(from / 2) };
@@ -986,18 +1252,22 @@ mod tests {
             let mut t = self.track.lock();
             t.started = true;
             t.stopping = false;
-            t.ready = !t.starts_full || t.buffered >= t.capacity;
+            t.ready = !t.starts_full || t.buffered >= t.size;
         }
         fn pause(&mut self) {
             let mut t = self.track.lock();
             t.started = false;
             t.ready = false;
+            t.heard_any = false;
+            t.silent_run = 0;
         }
         fn flush(&mut self) {
             let mut t = self.track.lock();
             assert!(!t.started, "a track is only flushed paused");
             t.buffered = 0;
             t.played = 0;
+            t.queued.clear();
+            t.last_played = None;
             t.flushes += 1;
         }
         fn stop(&mut self) {
@@ -1009,7 +1279,24 @@ mod tests {
             self.track.lock().volume = volume;
         }
         fn heard(&mut self, _playing: bool) -> Option<(u64, i64)> {
-            Some((self.track.lock().played, self.now.load(Ordering::Relaxed) as i64))
+            let t = self.track.lock();
+            Some((t.played.saturating_sub(t.latency), self.now.load(Ordering::Relaxed) as i64))
+        }
+        fn route(&mut self) -> Route {
+            self.track.lock().route
+        }
+        fn underruns(&mut self) -> Option<u64> {
+            Some(self.track.lock().underruns as u64)
+        }
+        fn consumed(&mut self) -> Option<u64> {
+            Some(self.track.lock().played)
+        }
+        /// As the platform does it: at least 16 frames, at most the buffer opened.
+        fn resize(&mut self, frames: u64) -> u64 {
+            let mut t = self.track.lock();
+            t.size = frames.clamp(16, t.capacity);
+            t.resizes += 1;
+            t.size
         }
         fn release(&mut self) {}
     }
@@ -1019,10 +1306,11 @@ mod tests {
             if !self.started {
                 return;
             }
-            if !self.ready && (self.buffered >= self.capacity || self.stopping) {
+            if !self.ready && (self.buffered >= self.size || self.stopping) {
                 self.ready = true;
             }
             if !self.ready {
+                self.silence(frames);
                 return;
             }
             let n = frames.min(self.buffered);
@@ -1031,6 +1319,30 @@ mod tests {
             }
             self.buffered -= n;
             self.played += n;
+            for _ in 0..n.min(self.queued.len() as u64) {
+                let v = self.queued.pop_front();
+                if let (Some(was), Some(v)) = (self.last_played, v) {
+                    if v != was + 1.0 {
+                        self.jumps += 1;
+                    }
+                }
+                self.last_played = v;
+            }
+            if n > 0 {
+                self.heard_any = true;
+                self.silent_run = 0;
+            }
+            if !self.stopping {
+                self.silence(frames - n);
+            }
+        }
+
+        /// `frames` of silence where music was due, once music had started.
+        fn silence(&mut self, frames: u64) {
+            if self.heard_any && frames > 0 {
+                self.silent_run += frames;
+                self.longest_silence = self.longest_silence.max(self.silent_run);
+            }
         }
     }
 
@@ -1081,6 +1393,10 @@ mod tests {
         due: Option<i64>,
         now: Arc<AtomicU64>,
         dice: Dice,
+        /// Each frame pulled carries its number (from 1, counted since the last flush) instead of `value`:
+        /// for a float track that records what it plays.
+        counting: bool,
+        pulled: u64,
     }
 
     impl FakeRing {
@@ -1088,7 +1404,7 @@ mod tests {
             let low = (RATE as i64 * (RING_LOW_US - 250_000) / 1_000_000) as usize;
             // A burst is ten seconds counted from the ear, which moves on while it is decoded: a little more.
             let burst = (RATE as i64 * (BUFFER_US + 200_000) / 1_000_000) as usize;
-            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5, engine_woken: 0, engine: Engine::Bursts, due: None, now, dice: Dice(7) };
+            let mut r = FakeRing { available: 0, left: music_s * RATE as u64, low, burst, refills: 0, flushed: false, value: 0.5, engine_woken: 0, engine: Engine::Bursts, due: None, now, dice: Dice(7), counting: false, pulled: 0 };
             r.refill();
             r
         }
@@ -1148,6 +1464,7 @@ mod tests {
         /// A seek: what the ring held goes, and a burst of other music comes.
         fn flush(&mut self, value: f32) {
             self.available = 0;
+            self.pulled = 0;
             self.flushed = true;
             self.value = value;
             self.refill();
@@ -1161,7 +1478,14 @@ mod tests {
         fn pull(&mut self, out: &mut [f32]) -> usize {
             let mut r = self.lock();
             let n = r.take(out.len() / 2);
-            out[..n * 2].fill(r.value);
+            if r.counting {
+                for f in out[..n * 2].as_chunks_mut::<2>().0 {
+                    r.pulled += 1;
+                    *f = [r.pulled as f32; 2];
+                }
+            } else {
+                out[..n * 2].fill(r.value);
+            }
             n
         }
         fn pull_i16(&mut self, out: &mut [i16]) -> usize {
@@ -1190,6 +1514,38 @@ mod tests {
         due: i64,
         next: i64,
         dice: Dice,
+        /// A Bluetooth output: every `every` ns or so it takes nothing for `stall` ns (a range), then all
+        /// it missed at once.
+        bursts: Option<Bursts>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Bursts {
+        every: (i64, i64),
+        stall: (i64, i64),
+        /// Taking nothing until then, and ns of music owed since.
+        until: Option<i64>,
+        owed: i64,
+        next: i64,
+    }
+
+    impl Mixer {
+        /// The ns of music the mixer takes from the track at its read at `now`.
+        fn take(&mut self, now: i64) -> i64 {
+            let Some(b) = self.bursts.as_mut() else { return self.period };
+            if b.until.is_some_and(|u| now < u) {
+                b.owed += self.period;
+                return 0;
+            }
+            let took = self.period + std::mem::take(&mut b.owed);
+            b.until = None;
+            if now >= b.next {
+                let stall = b.stall.0 + self.dice.roll(b.stall.1 - b.stall.0);
+                b.until = Some(now + stall);
+                b.next = now + stall + b.every.0 + self.dice.roll(b.every.1 - b.every.0);
+            }
+            took
+        }
     }
 
     struct Sim {
@@ -1208,6 +1564,8 @@ mod tests {
         mixer: Option<Mixer>,
         /// The most music between the ring's writing end and the ear, as the simulation went, frames.
         deepest: u64,
+        /// What the writer found the shallow track needs, as the engine reads it.
+        depth: Arc<Depth>,
     }
 
     /// Opens the simulated track again, empty, as a new AudioTrack in place of a dead one.
@@ -1225,7 +1583,7 @@ mod tests {
                 return Err("no sound server".into());
             }
             let starts_full = t.starts_full;
-            *t = Track { capacity: frames, starts_full, volume: 1.0, reopened: t.reopened + 1, underruns: t.underruns, ..Track::default() };
+            *t = Track { capacity: frames, size: frames, starts_full, volume: 1.0, reopened: t.reopened + 1, underruns: t.underruns, record: t.record, latency: t.latency, route: t.route, ..Track::default() };
             let sink = FakeSink { track: self.track.clone(), staging: vec![0.0; CHUNK_BYTES / 4], float, now: self.now.clone() };
             Ok(Opened { sink: Box::new(sink), frames, starts_full })
         }
@@ -1247,7 +1605,7 @@ mod tests {
             let ring = Arc::new(Mutex::new(FakeRing::new(music_s, now.clone())));
             let capacity = (RATE as i64 * said_us / 1_000_000) as u64;
             let holds = (RATE as i64 * holds_us / 1_000_000) as u64;
-            let track = Arc::new(Mutex::new(Track { capacity: holds, starts_full, volume: 1.0, ..Track::default() }));
+            let track = Arc::new(Mutex::new(Track { capacity: holds, size: holds, starts_full, volume: 1.0, ..Track::default() }));
             let sink = FakeSink { track: track.clone(), staging: vec![0.0; CHUNK_BYTES / 4], float, now: now.clone() };
             let clock = Arc::new(Clock::default());
             let format = OutputFormat { rate: RATE, channels: 2, bits: 0 };
@@ -1256,9 +1614,10 @@ mod tests {
             let failure = Arc::new(Mutex::new(None));
             let asked = (RATE as i64 * asked_us / 1_000_000) as u64;
             let reopen = Reopen { opener: Arc::new(Mutex::new(Box::new(opener))), frames: asked, failure: failure.clone() };
-            let writer = Writer::new(ring.clone(), opened, reopen, format, float, clock.clone(), Arc::new(AtomicU64::new(0)));
+            let depth = Arc::new(Depth::default());
+            let writer = Writer::new(ring.clone(), opened, reopen, format, float, clock.clone(), Arc::new(AtomicU64::new(0)), depth.clone());
             let control = Control { shallow: asked < track_frames(RATE, false), ..Control::default() };
-            Sim { writer, ring, track, clock, now, control, wakes: 0, next: Some(0), failure, late: 0, dice: Dice(11), mixer: None, deepest: 0 }
+            Sim { writer, ring, track, clock, now, control, wakes: 0, next: Some(0), failure, late: 0, dice: Dice(11), mixer: None, deepest: 0, depth }
         }
 
         fn now(&self) -> i64 {
@@ -1268,7 +1627,39 @@ mod tests {
         /// The track is read by a mixer `period_ms` at a time, each read up to `late_ms` late.
         fn mixed(&mut self, period_ms: i64, late_ms: i64) {
             let at = self.now() + period_ms * MS;
-            self.mixer = Some(Mixer { period: period_ms * MS, late: late_ms * MS, due: at, next: at, dice: Dice(5) });
+            self.mixer = Some(Mixer { period: period_ms * MS, late: late_ms * MS, due: at, next: at, dice: Dice(5), bursts: None });
+        }
+
+        /// A Bluetooth output: read 20 ms at a time, but every 300 to 600 ms it takes nothing for 100 to
+        /// 200 ms and then all of that at once; what it presents lags what it took by `latency_ms`; and
+        /// it says so of itself, or nothing (`says`).
+        fn bluetooth(&mut self, latency_ms: i64, says: bool) {
+            self.mixed(20, 4);
+            let now = self.now();
+            if let Some(m) = self.mixer.as_mut() {
+                m.bursts = Some(Bursts { every: (300 * MS, 600 * MS), stall: (100 * MS, 200 * MS), until: None, owed: 0, next: now + 300 * MS });
+            }
+            let mut t = self.track.lock();
+            t.latency = (RATE as i64 * latency_ms / 1000) as u64;
+            t.route = if says {
+                // What getMinBufferSize gives for such an output: about its latency.
+                Route { min_frames: Some(t.latency), latency_frames: Some(t.latency), name: Some("Bluetooth") }
+            } else {
+                Route::default()
+            };
+        }
+
+        /// The engine keeps its shallow ring as deep as the writer found it needs, as nori-engine does
+        /// (`Worker::follow_depth`).
+        fn follow_depth(&mut self) {
+            let Some(d) = self.depth.get() else { return };
+            let cap = (RATE as i64 * d.ring_us.max(nori_engine::output::SHALLOW_US) / 1_000_000) as usize;
+            let mut r = self.ring.lock();
+            if let Engine::Shallow { cap: was, late } = r.engine {
+                if was != cap {
+                    r.kept(Engine::Shallow { cap, late });
+                }
+            }
         }
 
         /// The writer wakes now.
@@ -1293,7 +1684,10 @@ mod tests {
                 }
                 self.now.store(to as u64, Ordering::Relaxed);
                 if let Some(m) = self.mixer.as_mut().filter(|m| m.next == to) {
-                    self.track.lock().advance((m.period as u128 * RATE as u128 / 1_000_000_000) as u64);
+                    let took = m.take(to);
+                    if took > 0 {
+                        self.track.lock().advance((took as u128 * RATE as u128 / 1_000_000_000) as u64);
+                    }
                     m.due += m.period;
                     m.next = m.due + m.dice.roll(m.late);
                 }
@@ -1509,28 +1903,34 @@ mod tests {
         assert_eq!(s.track.lock().underruns, 0, "never runs dry");
     }
 
+    /// The ring the engine keeps while the equalizer is tuned, in frames.
+    fn shallow_ring() -> usize {
+        (RATE as i64 * nori_engine::output::SHALLOW_US / 1_000_000) as usize
+    }
+
     #[test]
-    fn tuned_the_track_is_opened_shallow_and_never_runs_dry_for_a_late_writer_and_a_jittery_mixer() {
+    fn tuned_the_track_is_made_shallow_in_place_and_never_runs_dry_for_a_late_writer_and_a_jittery_mixer() {
         let mut s = Sim::new(600, false, false);
         // A mixer reading 20 ms at a time, up to 8 ms late; a writer woken up to 30 ms late.
         s.mixed(20, 8);
         s.late = 30 * MS;
         s.play();
         s.run(15_000);
-        // The equalizer screen: the engine keeps its ring shallow, says so, and makes the music again where
-        // the ear is (a flush), waking up to 15 ms late whenever the ring runs down to half.
-        let cap = (RATE as i64 * nori_engine::output::SHALLOW_US / 1_000_000) as usize;
+        // The equalizer screen: the engine keeps its ring shallow and says so; a band moved before the
+        // deep seconds have played out makes the music again where the ear is (a flush), and from then on
+        // the engine wakes up to 15 ms late whenever the ring runs down to half.
         s.control.shallow = true;
-        {
-            let mut r = s.ring.lock();
-            r.kept(Engine::Shallow { cap, late: 15 * MS });
-            r.flush(0.25);
-        }
         s.wake();
         {
             let t = s.track.lock();
-            assert_eq!((t.reopened, t.capacity), (1, track_frames(RATE, true)), "opened again, shallow, at the flush");
+            assert_eq!((t.reopened, t.capacity, t.size), (0, track_frames(RATE, false), track_frames(RATE, true)), "the same track, made shallow in place");
         }
+        {
+            let mut r = s.ring.lock();
+            r.kept(Engine::Shallow { cap: shallow_ring(), late: 15 * MS });
+            r.flush(0.25);
+        }
+        s.wake();
         let (wakes, underruns) = (s.wakes, s.track.lock().underruns);
         s.deepest = 0;
         s.run(60_000);
@@ -1539,37 +1939,195 @@ mod tests {
         assert!(ms <= 250, "a band moved is heard {ms} ms later at most");
         let wakes = s.wakes - wakes;
         assert!(wakes <= 60 * 16, "about once per 80 ms: {wakes} wakes in a minute");
-        // The screen closed: deep again at the flush that comes with it, and in bursts.
+        // The screen closed: deep again at once, and in bursts.
         s.control.shallow = false;
-        {
-            let mut r = s.ring.lock();
-            r.kept(Engine::Bursts);
-            r.flush(0.5);
-        }
+        s.ring.lock().kept(Engine::Bursts);
         s.wake();
         {
             let t = s.track.lock();
-            assert_eq!((t.reopened, t.capacity), (2, track_frames(RATE, false)), "opened deep again");
+            assert_eq!((t.reopened, t.size), (0, track_frames(RATE, false)), "deep again, in place");
         }
-        s.run(5_000);
+        s.run(15_000);
         let wakes = s.wakes;
         s.run(60_000);
         assert_eq!(s.track.lock().underruns, underruns);
         assert!(s.wakes - wakes <= 8, "back to a wake every ten seconds or so: {}", s.wakes - wakes);
     }
 
+    /// The equalizer screen opened and closed `rounds` times over a track that records what it plays,
+    /// read by a jittery mixer and written by a late writer: the longest silence heard and the frames
+    /// heard out of their order.
+    fn tuned_back_and_forth(starts_full: bool, rounds: usize) -> (u64, u32) {
+        let mut s = Sim::new(900, true, starts_full);
+        s.ring.lock().counting = true;
+        s.track.lock().record = true;
+        s.mixed(20, 8);
+        s.late = 30 * MS;
+        s.play();
+        s.run(15_000);
+        let deep = track_frames(RATE, false);
+        for round in 0..rounds {
+            // Opened while the track is full, or while the deep seconds are still playing out.
+            s.control.shallow = true;
+            s.ring.lock().kept(Engine::Shallow { cap: shallow_ring(), late: 15 * MS });
+            s.wake();
+            assert_eq!(s.track.lock().size, track_frames(RATE, true), "round {round}: shallow at once");
+            // What the ring and the track held of the deep buffer plays out first; then a band moved is
+            // heard within a quarter of a second.
+            s.run(25_000);
+            s.deepest = 0;
+            s.run(5_000);
+            let ms = s.deepest * 1000 / RATE as u64;
+            assert!(ms <= 250, "round {round}: a band moved is heard {ms} ms later at most");
+            s.control.shallow = false;
+            s.ring.lock().kept(Engine::Bursts);
+            s.wake();
+            assert_eq!(s.track.lock().size, deep, "round {round}: deep at once");
+            // Closed again before the deep buffer has filled, once in a while.
+            s.run(if round % 2 == 0 { 20_000 } else { 3_000 });
+        }
+        let t = s.track.lock();
+        assert_eq!((t.reopened, t.flushes, t.underruns), (0, 0, 0), "never opened again, emptied or run dry");
+        assert_eq!(t.resizes as usize, rounds * 2);
+        assert!(t.played > 0 && t.last_played.is_some());
+        (t.longest_silence, t.jumps)
+    }
+
     #[test]
-    fn a_shallow_change_waits_for_the_flush_that_comes_with_it() {
+    fn the_equalizer_screen_opening_and_closing_is_not_heard_either_way() {
+        for starts_full in [false, true] {
+            let (silence, jumps) = tuned_back_and_forth(starts_full, 6);
+            let ms = silence as f64 * 1000.0 / RATE as f64;
+            assert!(ms <= 5.0, "starts full {starts_full}: {ms} ms of silence at a switch");
+            assert_eq!(jumps, 0, "starts full {starts_full}: every frame heard, in order");
+        }
+    }
+
+    #[test]
+    fn a_track_made_shallow_plays_what_it_holds_and_takes_more_once_below_its_new_size() {
         let mut s = Sim::new(600, false, false);
         s.play();
         s.run(3_000);
-        // Told before the flush: what the track holds still plays until the flush says it is not wanted.
+        let held = s.track.lock().buffered;
+        assert!(held > track_frames(RATE, true) * 10, "seconds in the track");
+        s.control.shallow = true;
+        s.ring.lock().kept(Engine::Shallow { cap: shallow_ring(), late: 0 });
+        s.wake();
+        let written = s.track.lock().written_bytes;
+        s.run(1_000);
+        let t = s.track.lock();
+        assert_eq!((t.reopened, t.flushes), (0, 0), "nothing dropped");
+        assert_eq!(t.written_bytes, written, "nothing more while it holds more than its new size");
+        assert!(t.buffered < held, "and it plays on");
+    }
+
+    #[test]
+    fn a_track_that_died_while_tuned_is_opened_deep_and_made_shallow_again() {
+        let mut s = Sim::new(600, false, false);
+        s.play();
+        s.run(3_000);
+        s.control.shallow = true;
+        s.ring.lock().kept(Engine::Shallow { cap: shallow_ring(), late: 0 });
+        s.wake();
+        s.track.lock().dead = true;
+        s.run(12_000);
+        let t = s.track.lock();
+        assert_eq!(t.reopened, 1);
+        assert_eq!((t.capacity, t.size), (track_frames(RATE, false), track_frames(RATE, true)));
+    }
+
+    /// Tuned over a Bluetooth output ([`Sim::bluetooth`], which says what it is or not) after 15 s played
+    /// deep: made shallow in place, a band moved made again at once (a flush) as the engine does, and
+    /// the engine's ring following what the writer found. Returns the sim, playing shallow.
+    fn tuned_over_bluetooth(says: bool) -> Sim {
+        let mut s = Sim::new(900, false, false);
+        s.bluetooth(200, says);
+        s.late = 30 * MS;
+        s.play();
+        s.run(15_000);
+        assert_eq!(s.track.lock().underruns, 0, "deep, Bluetooth never runs it dry");
         s.control.shallow = true;
         s.wake();
-        assert_eq!(s.track.lock().reopened, 0);
-        s.ring.lock().flush(0.25);
+        {
+            let t = s.track.lock();
+            assert_eq!((t.reopened, t.capacity), (0, track_frames(RATE, false)), "the same track, made shallow in place");
+            assert!(t.size < t.capacity / 10, "and shallow: {} ms", t.size * 1000 / RATE as u64);
+        }
+        {
+            let mut r = s.ring.lock();
+            r.kept(Engine::Shallow { cap: shallow_ring(), late: 15 * MS });
+            r.flush(0.25);
+        }
+        s.follow_depth();
         s.wake();
-        assert_eq!(s.track.lock().reopened, 1);
+        s
+    }
+
+    #[test]
+    fn tuned_over_bluetooth_the_track_is_as_deep_as_the_output_needs_and_never_runs_dry() {
+        let mut s = tuned_over_bluetooth(true);
+        let bt = RATE as u64 / 5;
+        let (_, capacity) = shallow_marks(RATE, bt, bt);
+        assert_eq!(s.track.lock().size, capacity, "sized for the output's latency and pulls");
+        let d = s.depth.get().expect("the engine is told how deep");
+        assert!(d.ring_us >= nori_engine::output::SHALLOW_US && d.device_us == (capacity * 1_000_000 / RATE as u64) as i64, "{d:?}");
+        let (underruns, wakes) = (s.track.lock().underruns, s.wakes);
+        s.deepest = 0;
+        for _ in 0..60 {
+            s.run(1_000);
+            s.follow_depth();
+        }
+        let t = s.track.lock();
+        assert_eq!(t.underruns, underruns, "never runs dry, its 200 ms pulled at once and all");
+        assert_eq!((t.reopened, t.size), (0, capacity), "never opened again, never grown");
+        drop(t);
+        let ms = s.deepest * 1000 / RATE as u64;
+        assert!(ms <= 700, "a band moved reaches the output {ms} ms later at most (and its own 200 ms after that)");
+        let wakes = s.wakes - wakes;
+        assert!(wakes <= 60 * 12, "{wakes} wakes in a minute");
+        // Closed: deep again, in place.
+        s.control.shallow = false;
+        s.ring.lock().kept(Engine::Bursts);
+        s.wake();
+        assert_eq!(s.track.lock().size, track_frames(RATE, false));
+        s.run(30_000);
+        assert_eq!(s.track.lock().underruns, underruns);
+    }
+
+    #[test]
+    fn tuned_over_an_output_that_says_nothing_the_track_grows_for_what_it_sees_and_stops_running_dry() {
+        let mut s = tuned_over_bluetooth(false);
+        assert_eq!(s.track.lock().size, track_frames(RATE, true), "at first, as for the speaker");
+        for _ in 0..20 {
+            s.run(1_000);
+            s.follow_depth();
+        }
+        let (underruns, size) = {
+            let t = s.track.lock();
+            (t.underruns, t.size)
+        };
+        assert!(underruns <= 10, "it grew within a few underruns: {underruns}");
+        assert!(size > track_frames(RATE, true) * 2, "for the latency it saw and the pulls it missed: {} ms", size * 1000 / RATE as u64);
+        for _ in 0..60 {
+            s.run(1_000);
+            s.follow_depth();
+        }
+        let t = s.track.lock();
+        assert_eq!(t.underruns, underruns, "and then never ran dry");
+        assert_eq!((t.reopened, t.size), (0, size), "never grown again, never shrunk, never opened again");
+    }
+
+    #[test]
+    fn the_shallow_marks_are_the_speaker_s_for_an_output_that_needs_no_more_and_grow_with_what_it_does() {
+        let f = |ms: u64| ms * RATE as u64 / 1000;
+        assert_eq!(shallow_marks(RATE, 0, 0), (f(80), f(160)), "the speaker's, as before");
+        assert_eq!(shallow_marks(RATE, f(10), f(20)), (f(80), f(160)));
+        let (low, capacity) = shallow_marks(RATE, f(200), f(200));
+        assert_eq!(low, f(440), "the latency, a pull and a late wake");
+        assert_eq!(capacity, f(550));
+        let (low, capacity) = shallow_marks(RATE, f(5_000), f(5_000));
+        assert_eq!(low, f(1_500), "never past the most");
+        assert!(capacity < f(2_000));
     }
 
     /// An AudioTrack playing on the real clock, keeping every sample written since its last flush.
@@ -1622,6 +2180,9 @@ mod tests {
         }
         fn heard(&mut self, _playing: bool) -> Option<(u64, i64)> {
             Some((self.0.lock().played(), mono_ns()))
+        }
+        fn resize(&mut self, frames: u64) -> u64 {
+            frames
         }
         fn release(&mut self) {}
     }

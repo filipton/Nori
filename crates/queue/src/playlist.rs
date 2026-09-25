@@ -392,6 +392,33 @@ pub fn playlist_view(held: u64) -> PlaylistView {
     PlaylistView { songs, len, list_rev, order, queued, index, shuffle, repeat, bridging, rev }
 }
 
+/// [`playlist_view`] for a page whose player lists `len` songs, or none when the core's list is not that
+/// long: after a change the platform's player trails the core's list for a moment, and a page must not
+/// pair the player's current index with the core's songs then. [`playlist_view_of`] reads the player's
+/// own list in that moment.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn playlist_view_for(held: u64, len: u32) -> Option<PlaylistView> {
+    let v = playlist_view(held);
+    (v.len == len).then_some(v)
+}
+
+/// The queue as the app lists it, read from the platform player's own list while that trails the core's
+/// ([`playlist_view_for`] gave none): `ids` and how each was added (`hands`) as the player's items carry
+/// them, and `order`, the player's list indexes in the order they play. An order that is not one of
+/// every index once (a player with no timeline yet) is the list's own. The songs are always sent, and
+/// `list_rev` is 0 and `rev` `u64::MAX`, so no reader takes them for the core's list.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn playlist_view_of(ids: Vec<String>, hands: Vec<Hand>, order: Vec<u32>) -> PlaylistView {
+    let len = ids.len();
+    let mut seen = vec![false; len];
+    let whole = order.len() == len && order.iter().all(|&i| seen.get_mut(i as usize).is_some_and(|s| !std::mem::replace(s, true)));
+    let order = if whole { order } else { (0..len as u32).collect() };
+    let queued = (0..len as u32).filter(|&i| hands.get(i as usize).is_some_and(|h| *h != Hand::No)).collect();
+    let (shuffle, repeat, bridging) = with(|p| (p.lit(), p.repeat(), p.bridging()));
+    let songs = if ids.is_empty() { Vec::new() } else { queue::queue_songs(ids) };
+    PlaylistView { songs, len: len as u32, list_rev: 0, order, queued, index: -1, shuffle, repeat, bridging, rev: u64::MAX }
+}
+
 /// What the list looks like now, cheaply: changes whenever the list or its order does.
 pub fn playlist_rev() -> u64 {
     with(|p| p.rev())
@@ -502,6 +529,27 @@ pub(crate) mod tests {
         assert_eq!((added.songs.len(), added.len), (4, 4));
         assert_ne!(added.list_rev, first.list_rev);
         assert_eq!(playlist_view(0).songs.len(), 4, "a reader holding nothing gets them all");
+    }
+
+    #[test]
+    fn a_player_of_another_length_gets_no_core_view() {
+        let _g = hold(&["l1", "l2", "l3"], 0);
+        assert_eq!(playlist_view_for(0, 3).map(|v| v.songs.len()), Some(3));
+        assert!(playlist_view_for(0, 2).is_none(), "the player trails the core's list");
+    }
+
+    #[test]
+    fn the_players_own_list_is_read_while_it_trails() {
+        let _g = hold(&["p1"], 0);
+        let v = playlist_view_of(ids(&["p1", "p2", "p3"]), vec![Hand::No, Hand::Next, Hand::Last], vec![2, 0, 1]);
+        assert_eq!((v.songs.len(), v.len, v.order.as_slice(), v.queued.as_slice()), (3, 3, &[2u32, 0, 1][..], &[1u32, 2][..]));
+        assert_eq!((v.list_rev, v.rev as i64), (0, -1), "never taken for the core's list");
+        // An order that is not every index once is the list's own.
+        for bad in [vec![], vec![0, 0, 1], vec![0, 1, 3], vec![0, 1]] {
+            assert_eq!(playlist_view_of(ids(&["p1", "p2", "p3"]), vec![], bad.clone()).order, [0, 1, 2], "{bad:?}");
+        }
+        assert!(playlist_view_of(ids(&["p1", "p2"]), vec![], vec![]).queued.is_empty(), "no marks: none added by hand");
+        assert_eq!(playlist_view_of(vec![], vec![], vec![]).len, 0);
     }
 
     #[test]

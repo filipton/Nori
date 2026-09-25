@@ -37,6 +37,16 @@ impl Client {
         }
         q
     }
+
+    /// The quality a song that is not downloaded streams at on a network that is `metered` or not: the
+    /// user's setting for that network (bit rate and format; 0 and none are the original file), capped
+    /// on the profile's second address. What [`Self::resolve`] fetches at, for a client to show or log
+    /// as the network changes.
+    pub fn streaming_quality(&self, metered: bool) -> StreamQuality {
+        let q = |s: &crate::settings::SavedQuality| StreamQuality { bit_rate: s.bit_rate.max(0) as u32, format: s.format.clone() };
+        let (wifi, mobile) = crate::rules::prefs(|p| (q(&p.wifi), q(&p.mobile)));
+        self.quality(metered, wifi, mobile)
+    }
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -133,6 +143,8 @@ mod tests {
         // The settings' defaults: the original on Wi-Fi, 192k opus on a metered network.
         assert_eq!(c.resolve("s1".into(), false, false).key, "s1:0");
         assert_eq!(c.resolve("s1".into(), false, true).key, "s1:192opus");
+        let (wifi, metered) = (c.streaming_quality(false), c.streaming_quality(true));
+        assert_eq!((wifi.bit_rate, wifi.format.as_str(), metered.bit_rate, metered.format.as_str()), (0, "", 192, "opus"), "what those keys name");
     }
 
     #[test]

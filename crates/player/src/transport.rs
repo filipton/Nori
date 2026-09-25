@@ -35,6 +35,23 @@ pub fn switch_dip(fade_ms: i32, switch: Switch, playing: bool) -> Option<Dip> {
     (ms > 0 && playing).then_some(Dip { down_ms: ms.min(DIP_DOWN_MAX_MS), up_ms: ms })
 }
 
+/// A jump's place stands for the ear at most this long while the engine dips before making it: longer
+/// than any dip ([`DIP_DOWN_MAX_MS`]) with the time a command takes to arrive.
+pub const JUMP_SHOWN_MS: i64 = 1_000;
+
+/// The place a player shows for the ear: the one a jump asked for (`jump`: its place and how long ago it
+/// was asked, ms) while the engine has not reported since (`reported_since` false) or is still dipping
+/// before making it (`switching`, within [`JUMP_SHOWN_MS`] of the jump), else the engine's own
+/// (`engine_ms`). A dip that is not the jump's - the music made again after a settings change, long after
+/// the last jump - is no reason to show that jump's old place: taken as one, a pause or a change of path
+/// in it put the session's clock back seconds, to wherever the last seek had once gone.
+pub fn shown_place(jump: Option<(i64, i64)>, reported_since: bool, switching: bool, engine_ms: i64) -> i64 {
+    match jump {
+        Some((ms, age)) if !reported_since || (switching && age <= JUMP_SHOWN_MS) => ms.max(0),
+        _ => engine_ms.max(0),
+    }
+}
+
 /// Pressing play: from silence up over this long; `None` to start at full volume.
 pub fn play_fade(fade_ms: i32, playing: bool) -> Option<i32> {
     (fade_ms > 0 && !playing).then_some(fade_ms)
@@ -307,6 +324,16 @@ pub fn load_control(memory_class_mb: u32) -> [i64; 5] {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_jump_s_place_stands_only_until_the_engine_has_made_it() {
+        assert_eq!(shown_place(None, true, true, 5_000), 5_000);
+        assert_eq!(shown_place(Some((30_000, 10)), false, false, 5_000), 30_000, "not reported since");
+        assert_eq!(shown_place(Some((30_000, 80)), true, true, 5_000), 30_000, "dipping before the jump");
+        assert_eq!(shown_place(Some((30_000, 400)), true, false, 30_390), 30_390, "made");
+        // A resound's dip a minute after the seek: the engine's place, not the seek's.
+        assert_eq!(shown_place(Some((12_000, 60_000)), true, true, 17_000), 17_000);
+    }
+
     use super::*;
 
     #[test]

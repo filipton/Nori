@@ -309,6 +309,18 @@ pub fn motion_token(js: Vec<u8>, now_s: i64) -> Option<String> {
     fallback
 }
 
+// ---- playing one ----------------------------------------------------------------------------------------
+
+/// How much of a moving cover its player holds, as media3's `DefaultLoadControl` takes it: min and max
+/// buffer (ms), buffer for playback, buffer after a rebuffer, and a byte cap. Left to media3's defaults,
+/// a looping video is buffered 50 s ahead - several passes of the loop, at up to 1080 px, in the Java
+/// heap - which was the largest part of the app's memory while the player was open. The loop comes out
+/// of the moving-cover cache on disk, so a few seconds ahead is plenty and costs no network.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn motion_load_control() -> Vec<i64> {
+    vec![4_000, 8_000, 1_000, 2_000, 4 * 1024 * 1024]
+}
+
 // ---- finding one ----------------------------------------------------------------------------------------
 
 /// One storefront for all of it, the largest. Catalogue ids and their motion artwork are found the same
@@ -538,6 +550,14 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_moving_cover_is_buffered_seconds_ahead_not_a_minute() {
+        let c = motion_load_control();
+        assert!(c[0] <= c[1] && c[1] <= 10_000, "a few seconds of a loop that comes off the disk");
+        assert!(c[2] <= c[0] && c[3] <= c[0]);
+        assert!(c[4] <= 8 * 1024 * 1024, "a few MB of the Java heap at most");
+    }
 
     fn enc(bytes: &[u8]) -> String {
         const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";

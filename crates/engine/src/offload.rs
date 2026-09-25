@@ -563,6 +563,34 @@ impl Offload {
         self.jitter = (0, 0);
     }
 
+    /// The CPU takes the music over at `now_ms` (the settings or the output no longer let the chip play
+    /// it): the count is read once more, so the CPU starts where the chip really is and not where the
+    /// last turn (up to a top-up's time ago) saw it, and the track is let go. Where the ear was, as
+    /// (queue index, ms), with a note of it for the perf report.
+    pub(crate) fn leave(&mut self, now_ms: i64) -> Option<(usize, i64)> {
+        self.now_ms = now_ms;
+        if self.playing && self.started && !self.placed.is_empty() {
+            self.read_head();
+        }
+        self.note_left();
+        self.release()
+    }
+
+    /// Where the CPU takes over, for the perf report: the place in the song, the chip's own count and
+    /// what was written to it, all in ms.
+    fn note_left(&mut self) {
+        let Some((_, ms, _)) = self.heard() else { return };
+        let rate = self.rate() as u64;
+        let f = |frames: u64| frames * 1000 / rate;
+        let count = if self.by_stamp { self.stamp } else { self.head };
+        let said = match self.raw {
+            Some(_) => format!("{} ms by its {}", f(count.base + count.last), if self.by_stamp { "timestamp" } else { "play head" }),
+            None => "nothing".into(),
+        };
+        let what = format!("offload: left at {ms} ms (chip said {said}, heard {} ms, written {} ms)", f(self.heard_at), f(self.written_frames));
+        self.note(what);
+    }
+
     /// Lets the track go (a long pause, or the CPU takes over): where the ear was, as (queue index, ms).
     pub(crate) fn release(&mut self) -> Option<(usize, i64)> {
         let at = self.heard().map(|(i, ms, _)| (i, ms)).or(self.starting.as_ref().map(|s| (s.0, s.1)));
@@ -955,6 +983,7 @@ impl Offload {
         if refused {
             self.on_cpu = Some(OnCpu::Failed);
         }
+        self.note_left();
         let at = self.heard().map(|(i, ms, _)| (i, ms)).or(self.starting.as_ref().map(|s| (s.0, s.1)));
         self.release();
         match at {

@@ -92,6 +92,36 @@ pub enum Cmd {
     Quit,
 }
 
+impl Cmd {
+    /// In a few words, for the debug log (no password).
+    pub fn brief(&self) -> String {
+        match self {
+            Cmd::Load(r) => format!("load {r:?}"),
+            Cmd::Play { songs, start, shuffle } => format!("play {} songs from {start} shuffle={shuffle}", songs.len()),
+            Cmd::Enqueue(songs, next) => format!("enqueue {} songs next={next}", songs.len()),
+            Cmd::Download(songs) => format!("download {} songs", songs.len()),
+            Cmd::Login(p) => format!("log in to {}", p.url),
+            Cmd::Cover { art, colours } => format!("cover {art} colours={colours}"),
+            Cmd::Lyrics(id) => format!("lyrics {id}"),
+            Cmd::Toggle => "toggle".into(),
+            Cmd::Next => "next".into(),
+            Cmd::Previous => "previous".into(),
+            Cmd::Seek(ms) => format!("seek {ms}"),
+            Cmd::Volume(v) => format!("volume {v}"),
+            Cmd::Jump(i) => format!("jump {i}"),
+            Cmd::Shuffle(on) => format!("shuffle {on}"),
+            Cmd::Repeat(m) => format!("repeat {m}"),
+            Cmd::Setting(k, v) => format!("setting {k}={v}"),
+            Cmd::Action(a) => format!("action {a}"),
+            Cmd::Tuning(on) => format!("tuning {on}"),
+            Cmd::Mouse(on) => format!("mouse {on}"),
+            Cmd::Images(on) => format!("images {on}"),
+            Cmd::Quit => "quit".into(),
+            _ => "an edit".into(),
+        }
+    }
+}
+
 /// The equalizer's tools, as a command (SoundTool is not comparable).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SoundToolCmd {
@@ -436,6 +466,9 @@ pub struct App {
     pub cmds: Vec<Cmd>,
     pub dirty: bool,
     pub quit: bool,
+    /// The engine was asked for the equalizer's shallow buffer ([`App::sound_edited`]): asked back when
+    /// the equalizer screen closes.
+    pub tuning: bool,
     /// A drag on the seek bar: where it is, as a share of the song.
     pub scrub: Option<f32>,
     pub seek_rect: Rect,
@@ -485,6 +518,7 @@ impl App {
             cmds: Vec::new(),
             dirty: true,
             quit: false,
+            tuning: false,
             scrub: None,
             seek_rect: Rect::default(),
             last_click: None,
@@ -514,7 +548,7 @@ impl App {
     // ---- going places ----
 
     pub fn go(&mut self, screen: Screen) {
-        if self.screen == Screen::Equalizer && screen != Screen::Equalizer {
+        if self.screen == Screen::Equalizer && screen != Screen::Equalizer && std::mem::take(&mut self.tuning) {
             self.cmds.push(Cmd::Tuning(false));
         }
         self.screen = screen;
@@ -533,7 +567,6 @@ impl App {
                     self.cmds.push(Cmd::Load(Req::Facts));
                 }
             }
-            Screen::Equalizer => self.cmds.push(Cmd::Tuning(true)),
             // The queue opens on the song playing.
             Screen::Queue => {
                 let current = self.queue.as_ref().map_or(-1, |q| q.index);
@@ -638,12 +671,21 @@ impl App {
     // ---- what comes in ----
 
     pub fn handle(&mut self, msg: Msg) {
-        self.dirty = true;
+        // A message that changes nothing on screen says so by clearing `dirty`; one taken before it in
+        // the same batch (an engine event, then a key that does nothing) is still drawn.
+        let was = std::mem::replace(&mut self.dirty, true);
+        self.take(msg);
+        self.dirty |= was;
+    }
+
+    fn take(&mut self, msg: Msg) {
         match msg {
             Msg::Key(k) => self.key(k),
             Msg::Mouse(m) => self.mouse_event(m),
             Msg::Paste(text) => self.paste(&text),
             Msg::Resize => {}
+            // Focus lost changes nothing on screen; focus back is drawn (the runner decides how fully).
+            Msg::Focus(on) => self.dirty = on,
             Msg::Engine(e) => self.engine(e),
             Msg::Data(req, r) => self.data(req, r),
             Msg::Cover { art, colours, .. } => {
@@ -683,6 +725,11 @@ impl App {
     fn engine(&mut self, e: Event) {
         match e {
             Event::State(s) => {
+                // The clock stops or starts where it is now: the engine's status, read by the runner,
+                // may still be the one from before this event.
+                let t = Instant::now();
+                self.now.position_ms = self.now.position(t);
+                self.now.at = t;
                 self.now.state = s;
                 if s == State::Playing {
                     self.lyrics_wake = Some(Instant::now());
@@ -698,7 +745,8 @@ impl App {
             Event::Output { name } => self.say(format!("Playing on {name}"), false),
             Event::Title(t) => self.say(format!("On air: {t}"), false),
             Event::Bridge => self.say("The network is gone", true),
-            Event::Position { .. } => {}
+            Event::Mixing(on) => self.now.mixing = on,
+            Event::Position { .. } | Event::Placed { .. } => {}
         }
     }
 
@@ -1447,7 +1495,7 @@ impl App {
         }
     }
 
-    /// A song picked from a list, as the "Tapping a song" setting says.
+    /// A song picked from a list, as the "Choosing a song" setting says.
     fn tap(&mut self, songs: Vec<Song>, i: usize) {
         match self.prefs.tap_action {
             1 => self.cmds.push(Cmd::Play { songs: vec![songs[i].clone()], start: 0, shuffle: false }),
@@ -1587,6 +1635,14 @@ impl App {
             _ => {}
         }
         self.settings.invalidate();
+    }
+
+    /// A change of the sound was kept (a band, a level, a preset). On the equalizer screen, the first
+    /// one asks the engine for its shallow buffer (true), so the ones after it are heard at once and
+    /// without a dip. Opening the screen alone asks nothing: the output stays as it was until something
+    /// is really changed.
+    pub fn sound_edited(&mut self) -> bool {
+        self.screen == Screen::Equalizer && !std::mem::replace(&mut self.tuning, true)
     }
 
     fn eq_step(&mut self, up: bool) {

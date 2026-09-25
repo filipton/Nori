@@ -1802,6 +1802,7 @@ dependencies = [
  "nori-db",
  "nori-model",
  "nori-player",
+ "nori-testdir",
  "parking_lot",
  "rusqlite",
  "uniffi",
@@ -1864,6 +1865,7 @@ dependencies = [
  "jpeg-decoder",
  "md-5",
  "nori-core",
+ "nori-testdir",
  "parking_lot",
  "png",
  "zune-core",
@@ -1875,6 +1877,7 @@ name = "nori-db"
 version = "0.3.3"
 dependencies = [
  "nori-model",
+ "nori-testdir",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1886,11 +1889,13 @@ dependencies = [
 name = "nori-devices"
 version = "0.3.3"
 dependencies = [
+ "async-trait",
  "nori-db",
  "nori-model",
  "nori-net",
  "nori-player",
  "nori-settings",
+ "nori-testdir",
  "rusqlite",
  "serde_json",
  "uniffi",
@@ -1904,6 +1909,7 @@ dependencies = [
  "libc",
  "nori-core",
  "nori-player",
+ "nori-testdir",
  "parking_lot",
  "symphonia",
 ]
@@ -2056,6 +2062,7 @@ dependencies = [
  "nori-look",
  "nori-model",
  "nori-player",
+ "nori-testdir",
  "nori-words",
  "parking_lot",
  "rusqlite",
@@ -2064,6 +2071,10 @@ dependencies = [
  "thiserror 2.0.20",
  "uniffi",
 ]
+
+[[package]]
+name = "nori-testdir"
+version = "0.3.3"
 
 [[package]]
 name = "nori-text"

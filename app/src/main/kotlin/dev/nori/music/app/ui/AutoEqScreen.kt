@@ -26,7 +26,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
 
 /**
- * The AutoEQ headphone database. The 850 kB index is downloaded once on request; after that searching
+ * The AutoEQ headphone database. The 850 kB index is kept by the core on Wi-Fi, or downloaded here on request; after that searching
  * 8000+ measurements is a local query, and only the chosen preset is fetched.
  */
 @Composable

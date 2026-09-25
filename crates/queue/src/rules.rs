@@ -74,6 +74,7 @@ static ERRORS: Mutex<ErrorRun> = Mutex::new(ErrorRun::new());
 /// user's settings decide whether it is used, and whether a failure skips.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_error(kind: PlaybackError, offload_refused: bool, bridge_ready: bool) -> OnError {
+    *LAST_ERROR.lock() = Some(kind);
     let (skip, bridge) = prefs(|p| (p.skip_on_error, p.bridge_offline));
     let has_next = crate::playlist::with(|p| p.next().is_some());
     ERRORS.lock().failed(kind, offload_refused, bridge && bridge_ready, skip, has_next)
@@ -83,6 +84,17 @@ pub fn queue_error(kind: PlaybackError, offload_refused: bool, bridge_ready: boo
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_bridged() {
     ERRORS.lock().played();
+    *LAST_ERROR.lock() = None;
+}
+
+/// What the last song that would not play failed of, until music plays again: for a player that stops
+/// by itself after a run of them (nori-engine's `Event::Stopped`) to say why, as the ExoPlayer path's
+/// error says it. None when the stop was anything else (the sleep timer's end of a song).
+static LAST_ERROR: Mutex<Option<PlaybackError>> = Mutex::new(None);
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn queue_last_error() -> Option<PlaybackError> {
+    *LAST_ERROR.lock()
 }
 
 /// The offline bridge could not take a network failure over: whether to skip it like any other.
@@ -99,6 +111,7 @@ pub fn queue_bridge_failed() -> bool {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_playing() {
     ERRORS.lock().played();
+    *LAST_ERROR.lock() = None;
 }
 
 

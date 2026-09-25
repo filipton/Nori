@@ -75,18 +75,31 @@ impl HeardAt {
     }
 }
 
-/// Which queue row the now playing page shows while the ear is on another song than the player (a held
-/// ending, a mix): the ear's `heard` row, or none when the player's own current row stands. When the
-/// queue was just read again (`reread`), the row is found by the song's id in the new list (`ids_now`),
-/// since positions moved with the edit; a song no longer there, or one that is the player's own song
-/// (`playing`), shows as the player says.
-///
-/// Twin of the `heardIndex` worked out in `PlayerConnection.publish` (core/.../playback/PlayerConnection.kt),
-/// which Android keeps: it runs on each player event, and its lists are the ones Compose draws.
-pub fn shown_index<'a>(heard: Option<usize>, reread: bool, ids_before: &[&'a str], ids_now: &[&'a str], playing: Option<&str>) -> Option<usize> {
+/// Which row of the page's list the now playing page shows while the ear is on another song than the
+/// player (a held ending, a mix): `heard` is the heard tracker's row in the core's queue (`queue`), which
+/// has already chosen between the copies of a song queued twice; `page` is what the page lists and
+/// `playing` the player's own song. As a rule the page lists the core's queue and the row is the
+/// tracker's. While the player's list trails the core's after a change the page lists the player's, and
+/// the row is the heard song's copy there nearest the tracker's row (the earlier one of two as near).
+/// None - the player's own row stands - when there is no heard row, the page does not have the song, or
+/// it is the song the player is on.
+pub fn shown_row<Q: AsRef<str>, P: AsRef<str>>(heard: Option<usize>, queue: &[Q], page: &[P], playing: Option<&str>) -> Option<usize> {
     let at = heard?;
-    let at = if reread { ids_now.iter().position(|id| Some(id) == ids_before.get(at))? } else { at };
-    (ids_now.get(at).copied() != playing).then_some(at)
+    let id = queue.get(at)?.as_ref();
+    let row = if page.get(at).is_some_and(|p| p.as_ref() == id) {
+        at
+    } else {
+        page.iter().enumerate().filter(|(_, p)| p.as_ref() == id).min_by_key(|(i, _)| i.abs_diff(at))?.0
+    };
+    (Some(id) != playing).then_some(row)
+}
+
+/// [`shown_row`] over the core's own queue, for a platform: `heard` as the heard door gave it (-1: the
+/// player's own word stands), `page` the ids the page lists; -1 when the player's own row stands.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn heard_shown_row(heard: i32, page: Vec<String>, playing: Option<String>) -> i32 {
+    let heard = usize::try_from(heard).ok();
+    crate::playlist::with(|p| shown_row(heard, p.ids(), &page, playing.as_deref())).map_or(-1, |r| r as i32)
 }
 
 /// The tracker, and the revision of the core's queue it was last given (crates/queue/src/playlist.rs).
@@ -121,8 +134,14 @@ impl HeardClock {
     /// followed to yet (`nori_player::heard::Playhead`).
     pub fn position(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64, shown: Option<usize>) -> HeardAt {
         let s = self.seen(now_ms, playing, on, next, position_ms);
-        let ms = self.head.show(&self.t, s, shown, now_ms);
+        let ms = self.head.show_for(&self.t, s, shown, now_ms, on, position_ms, playing);
         at(s, ms)
+    }
+
+    /// The listener asked for a place (a seek): the bar shows the next reading as it is, even a moment
+    /// back in the same song (`nori_player::heard::Playhead::jumped`).
+    pub fn jumped(&mut self) {
+        self.head.jumped();
     }
 
     /// Where the seek bar is while nothing can be asked (the app reconnecting to the player): the last place
@@ -144,4 +163,43 @@ impl HeardClock {
 
 fn at(s: Seen, ms: i64) -> HeardAt {
     HeardAt { index: s.index, changed: s.changed, ms }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shown_row;
+
+    const Q: [&str; 5] = ["a", "b", "c", "b", "d"];
+
+    #[test]
+    fn the_page_listing_the_core_queue_shows_the_tracker_row() {
+        // The tracker chose the second "b": the page shows that copy, not the first.
+        assert_eq!(shown_row(Some(3), &Q, &Q, Some("d")), Some(3));
+        assert_eq!(shown_row(Some(1), &Q, &Q, Some("c")), Some(1));
+    }
+
+    #[test]
+    fn nothing_heard_or_the_player_own_song_leaves_the_player_row() {
+        assert_eq!(shown_row(None, &Q, &Q, Some("a")), None);
+        assert_eq!(shown_row(Some(2), &Q, &Q, Some("c")), None, "the ear is on the player's song");
+        assert_eq!(shown_row(Some(9), &Q, &Q, None), None, "past the end of the queue");
+    }
+
+    #[test]
+    fn a_trailing_page_finds_the_nearest_copy() {
+        // The player's list has not had "x" put in front yet: the heard "b" at 3 is at 2 there, and of
+        // the two copies of it the one nearest the tracker's.
+        let page = ["a", "b", "c", "b", "d"];
+        let queue = ["x", "a", "b", "c", "b", "d"];
+        assert_eq!(shown_row(Some(4), &queue, &page, Some("d")), Some(3));
+        assert_eq!(shown_row(Some(2), &queue, &page, Some("c")), Some(1));
+        // Two copies as near: the earlier.
+        assert_eq!(shown_row(Some(2), &["b", "a", "b"][..], &["b", "a", "c", "a", "b"][..], None), Some(0));
+    }
+
+    #[test]
+    fn a_page_without_the_song_leaves_the_player_row() {
+        assert_eq!(shown_row(Some(4), &Q, &["a", "b", "c"][..], None), None);
+        assert_eq!(shown_row::<&str, &str>(Some(0), &Q, &[], None), None);
+    }
 }

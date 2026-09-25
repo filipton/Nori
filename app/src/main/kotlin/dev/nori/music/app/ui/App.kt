@@ -251,7 +251,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     } +
                     (actions.lastLyrics ?: (player2.lyrics.value.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
                         """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
-                            """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""
+                            """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsWordLines":${f.lyrics.lines.count { it.words.isNotEmpty() }},"lyricsSource":"${f.source}","""
                     }.orEmpty() +
                     // What the screen shows, mark included - not the snapshot the queue was painted with,
                     // which is what a favourite toggled this session no longer agrees with.

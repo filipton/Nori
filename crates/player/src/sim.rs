@@ -218,11 +218,20 @@ pub struct Track {
     pub album: Option<String>,
     pub number: i32,
     pub audio: Audio,
+    /// The length the server gives, ms, when it is not the audio's own (a server rounds, an estimate is
+    /// off): what the planner plans with.
+    pub listed_ms: Option<i64>,
 }
 
 impl Track {
     pub fn new(id: &str, audio: Audio) -> Track {
-        Track { id: id.to_string(), album: None, number: 0, audio }
+        Track { id: id.to_string(), album: None, number: 0, audio, listed_ms: None }
+    }
+
+    /// The same, listed by the server as `ms` long.
+    pub fn listed_as(mut self, ms: i64) -> Track {
+        self.listed_ms = Some(ms);
+        self
     }
 
     /// Track `number` of `album`: two in a row of one album are an album played in order.
@@ -240,7 +249,7 @@ impl Track {
         WindowSong {
             id: self.id.clone(),
             title: self.id.clone(),
-            duration_ms: self.duration_ms(),
+            duration_ms: self.listed_ms.unwrap_or_else(|| self.duration_ms()),
             album_id: self.album.clone(),
             disc: 1,
             track: self.number,

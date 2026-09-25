@@ -11,6 +11,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import dev.nori.music.net.Http
@@ -96,10 +97,13 @@ class MotionPlayer(
     /** Plays [url] on a loop, from where it was if it is the one already loaded. */
     fun play(url: String) {
         val p = player ?: build().also { player = it }
-        if (url != loaded || p.playbackState == Player.STATE_IDLE) {
+        if (url != loaded || p.mediaItemCount == 0) {
             loaded = url
             _ready.value = null
             p.setMediaSource(HlsMediaSource.Factory(bytes).createMediaSource(MediaItem.fromUri(url)))
+            p.prepare()
+        } else if (p.playbackState == Player.STATE_IDLE) {
+            // Rested (see [rest]) or failed: the same video again from the frame it stopped on.
             p.prepare()
         }
         p.play()
@@ -108,6 +112,14 @@ class MotionPlayer(
     /** Holds the frame on screen; nothing decodes while paused. */
     fun pause() {
         player?.pause()
+    }
+
+    /**
+     * Lets the decoder go but keeps the video and its place, and the frame on the surface: for a long
+     * pause, where a paused decoder still costs wakeups. [play] carries on from the same frame.
+     */
+    fun rest() {
+        player?.let { it.pause(); it.stop() }
     }
 
     /** Lets the ExoPlayer and its decoder go. The next [play] builds a new one. */
@@ -121,7 +133,18 @@ class MotionPlayer(
         live--
     }
 
-    private fun build(): ExoPlayer = ExoPlayer.Builder(context).build().apply {
+    private fun build(): ExoPlayer = ExoPlayer.Builder(context)
+        // A few seconds ahead, not media3's 50 s: the loop comes out of the cache on disk (motion_load_control).
+        .setLoadControl(
+            dev.nori.music.ffi.motionLoadControl().let { c ->
+                DefaultLoadControl.Builder().setBufferDurationsMs(c[0].toInt(), c[1].toInt(), c[2].toInt(), c[3].toInt())
+                    .setTargetBufferBytes(c[4].toInt()).setPrioritizeTimeOverSizeThresholds(false).build()
+            }
+        )
+        // The playback thread sleeps until a frame is due instead of looking every 10 ms: a loop of a
+        // 24-frame video woke it a hundred times a second, far more often than there was a frame to show.
+        .experimentalSetDynamicSchedulingEnabled(true)
+        .build().apply {
         // No sound at all: nothing is decoded for the audio track, and the volume is nought besides.
         volume = 0f
         repeatMode = Player.REPEAT_MODE_ONE

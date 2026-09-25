@@ -101,7 +101,7 @@ pub fn words_bit_perfect(device: Option<String>, on: bool, sample_rate: u32, bit
         (d, _) if on => format!("On: {}, {:?} kHz, {bits}-bit.", d.as_deref().unwrap_or("null"), sample_rate as f64 / 1000.0),
         (d, Some(why)) => format!("{}: {why}", d.as_deref().unwrap_or("USB DAC")),
         (Some(d), None) if supported => format!("{d} connected. Starts with the music."),
-        (Some(d), None) => format!("{d} connected, but this phone can't do bit perfect with it."),
+        (Some(d), None) => format!("{d} connected, but this device can't do bit perfect with it."),
         (None, None) => "Sends the file to a USB DAC unchanged. Skips the equalizer and volume levelling. Android 14 and later.".into(),
     }
 }
@@ -338,7 +338,7 @@ pub enum Note {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn words_note(note: Note) -> String {
     match note {
-        Note::NoIndex => "No songs on this phone yet. Settings, then Library and lists, then Update.",
+        Note::NoIndex => "No songs on this device yet. Settings, then Library and lists, then Update.",
         Note::NoPlaylists => "No playlists yet",
         Note::NoStations => "No stations yet",
         Note::NothingDownloaded => "Nothing downloaded yet",
@@ -381,7 +381,7 @@ pub fn words_widget_idle() -> String {
 /// After an M3U import: how many of its entries were found in the index and went into `playlist`.
 pub fn m3u_imported(found: usize, entries: usize, playlist: &str) -> String {
     if found == 0 {
-        format!("None of the {entries} entries are on this phone yet. Update the offline search first.")
+        format!("None of the {entries} entries are on this device yet. Update the offline search first.")
     } else {
         format!("Imported {found} of {entries} tracks into {playlist}")
     }
@@ -487,6 +487,8 @@ pub struct UiWords {
     pub reorder: String,
     pub later: String,
     pub sooner: String,
+    /// Between the seek bar's times while an AutoMix or a crossfade is being heard; shown in capitals.
+    pub mixing: String,
     // Mixes, smart playlists and listening.
     pub new_mix: String,
     pub new_smart_playlist: String,
@@ -546,6 +548,7 @@ pub struct UiWords {
     pub autoeq_about: String,
     pub download_the_list: String,
     pub refresh_list: String,
+    pub autoeq_no_curve: String,
     pub autoeq_credit: String,
     pub devices: String,
     pub autoeq_auto: String,
@@ -697,6 +700,7 @@ pub fn words_ui() -> UiWords {
         reorder: w("Reorder"),
         later: w("Later"),
         sooner: w("Sooner"),
+        mixing: w("Mixing"),
         new_mix: w("New mix"),
         new_smart_playlist: w("New smart playlist"),
         ready_made: w("Ready made"),
@@ -742,15 +746,16 @@ pub fn words_ui() -> UiWords {
         save_as_profile: w("Save current settings as a profile"),
         crossfeed: w("Crossfeed"),
         import_preset: w("Import preset"),
-        import_preset_hint: w("Paste an AutoEQ ParametricEQ.txt or an Equalizer APO config."),
+        import_preset_hint: w("Paste an AutoEQ ParametricEQ.txt or GraphicEQ.txt, or an Equalizer APO config."),
         import_preset_example: w("Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70"),
         no_filters_found: w("No filters found in that text"),
         frequency: w("Frequency"),
         remove_band: w("Remove band"),
         headphone_presets: w("Headphone presets"),
-        autoeq_about: w("AutoEQ measures headphones and publishes a correction curve for each. Downloading the list is one 850 kB request to github.com; after that, searching happens on this device."),
+        autoeq_about: w("AutoEQ measures headphones and publishes a correction curve for each. The list is one 850 kB request to github.com, made by itself on Wi-Fi while Keep the AutoEQ list is on; after that, searching happens on this device."),
         download_the_list: w("Download the list"),
         refresh_list: w("Refresh list"),
+        autoeq_no_curve: w("AutoEQ has no curve for that one, so it's left out of the list from now on."),
         autoeq_credit: w("Curves by the AutoEQ project (jaakkopasanen/AutoEq). Tapping one replaces the equalizer's bands."),
         devices: w("Devices"),
         autoeq_auto: w("Apply AutoEQ automatically"),
@@ -874,7 +879,7 @@ pub fn words_about_android(version: String, versions: String, debug: bool, sha: 
     let build = format!("{} {sha}  ·  {abi}  ·  Android {release} (API {sdk})", if debug { "debug" } else { "release" });
     let playback = format!("Media3 ExoPlayer{}  ·  OkHttp{}  ·  equalizer, crossfeed and limiter in the Rust core", v("media3"), v("okhttp"));
     let library = format!("SQLite with full-text search through rusqlite{}  ·  Rust core reached through uniffi{}", v("rusqlite"), v("uniffi"));
-    let automix = format!("Beat and key analysis on this phone with RustFFT{}  ·  tempo changes by Signalsmith Stretch{}", v("rustfft"), v("signalsmith-stretch"));
+    let automix = format!("Beat and key analysis on this device with RustFFT{}  ·  tempo changes by Signalsmith Stretch{}", v("rustfft"), v("signalsmith-stretch"));
     let ui = format!("Jetpack Compose and Material 3 (BOM{})  ·  covers fetched, kept and decoded by the Rust core", v("composeBom"));
     let title = format!("Nori {version}");
     let report = format!("{title} ({build})\nPlayback: {playback}\nLibrary: {library}\nAutoMix: {automix}\nInterface: {ui}");
@@ -1016,7 +1021,7 @@ mod tests {
         assert_eq!(words_bit_perfect(dac.clone(), true, 44_100, 24, None, true), "On: Qudelix, 44.1 kHz, 24-bit.");
         assert_eq!(words_bit_perfect(None, false, 0, 0, Some("no 24-bit".into()), false), "USB DAC: no 24-bit");
         assert_eq!(words_bit_perfect(dac.clone(), false, 0, 0, None, true), "Qudelix connected. Starts with the music.");
-        assert_eq!(words_bit_perfect(dac, false, 0, 0, None, false), "Qudelix connected, but this phone can't do bit perfect with it.");
+        assert_eq!(words_bit_perfect(dac, false, 0, 0, None, false), "Qudelix connected, but this device can't do bit perfect with it.");
         assert!(words_bit_perfect(None, false, 0, 0, None, false).starts_with("Sends the file"));
         assert_eq!(words_dac_detail(vec!["44.1 kHz / 24 bit".into(), "48 kHz / 24 bit".into()], None, Some("48 kHz".into())).as_deref(), Some("Offers 44.1 kHz / 24 bit, 48 kHz / 24 bit  ·  output 48 kHz"));
         assert_eq!(words_dac_detail(vec![], None, None), None);
@@ -1039,7 +1044,7 @@ mod tests {
         assert_eq!(words_downloading(12), "Downloading 12 songs");
         assert_eq!(words_downloads_removed(1), "Removed 1 download");
         assert_eq!(words_downloads_removed(3), "Removed 3 downloads");
-        assert_eq!(m3u_imported(0, 4, "Road"), "None of the 4 entries are on this phone yet. Update the offline search first.");
+        assert_eq!(m3u_imported(0, 4, "Road"), "None of the 4 entries are on this device yet. Update the offline search first.");
         assert_eq!(m3u_imported(3, 4, "Road"), "Imported 3 of 4 tracks into Road");
     }
 

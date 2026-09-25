@@ -27,4 +27,14 @@ object TestHooks {
 
     /** Anything that is neither navigation nor settings: "download search:x", "star", "pause", "next". */
     @Volatile var act: ((String) -> Unit)? = null
+
+    /**
+     * Where the lyrics panel's words come from instead of the server and the services, while set: a check
+     * that needs a slower, finer answer to replace a first one (the lyrics race) sets this. Never set
+     * outside a test; the player asks it once per song.
+     */
+    @Volatile var lyrics: ((dev.nori.music.ffi.model.Song) -> kotlinx.coroutines.flow.Flow<dev.nori.music.data.FoundLyrics>)? = null
+
+    /** The lyrics panel logs every reading it takes and the moment it shows (tag norilyrics), for a check frame by frame. */
+    @Volatile @JvmField var traceLyrics = false
 }

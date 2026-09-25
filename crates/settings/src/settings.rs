@@ -124,9 +124,15 @@ pub struct StoredPrefs {
     pub scrobble_percent: i32,
     pub live_search_delay_ms: i32,
     pub taste_model: bool,
+    /// "Look things up online": the switch over everything the app asks a third party for by itself -
+    /// missing lyrics, the AutoEQ list, moving covers - each of which has its own switch under it. On for a
+    /// new install (lyrics and the AutoEQ list are wanted out of the box; moving covers stay off).
     pub third_party_lookups: bool,
     pub profile_per_output: bool,
     pub auto_eq_auto: bool,
+    /// Keep the AutoEQ headphone list on the device: fetched on an unmetered network when it is missing
+    /// or a month old (`nori_devices::autoeq::index_due`). Needs `third_party_lookups`. On by default.
+    pub auto_eq_download: bool,
     pub lyrics_sweep: bool,
     pub soft_sleeve: bool,
     /// Moving covers: an album's motion artwork from Apple Music plays in the player's sleeve, where it
@@ -167,8 +173,8 @@ pub struct StoredPrefs {
     pub swipe_right: i32,
     pub swipe_left: i32,
     pub skip_explicit: bool,
-    /// Which player plays: ExoPlayer (0, the default) or nori-engine (1, the Rust path being measured
-    /// against it). Read when the playback service starts.
+    /// Which player plays: ExoPlayer (0) or nori-engine (1, the default for a new install). An install
+    /// that stored its choice keeps it. Read when the playback service starts.
     pub playback_engine: i32,
     /// `HomeRow` ordinals, in order; a row that is not listed is hidden.
     pub home_rows: Vec<i32>,
@@ -388,9 +394,10 @@ impl Default for StoredPrefs {
             scrobble_percent: 50,
             live_search_delay_ms: 350,
             taste_model: true,
-            third_party_lookups: false,
+            third_party_lookups: true,
             profile_per_output: true,
             auto_eq_auto: false,
+            auto_eq_download: true,
             lyrics_sweep: true,
             soft_sleeve: true,
             motion_artwork: false,
@@ -418,7 +425,7 @@ impl Default for StoredPrefs {
             swipe_right: 1,
             swipe_left: 3,
             skip_explicit: false,
-            playback_engine: 0,
+            playback_engine: 1,
             home_rows: (0..HOME_ROWS.len() as i32).collect(),
             pinned_playlists: Vec::new(),
             list_prefs: HashMap::new(),
@@ -708,8 +715,9 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         live_search_delay_ms: r.int("liveSearchDelayMs", d.live_search_delay_ms),
         profile_per_output: r.flag("profilePerOutput", true),
         auto_eq_auto: r.flag("autoEqAuto", false),
+        auto_eq_download: r.flag("autoEqDownload", true),
         taste_model: r.flag("tasteModel", true),
-        third_party_lookups: r.flag("thirdPartyLookups", false),
+        third_party_lookups: r.flag("thirdPartyLookups", true),
         lyrics_sweep: r.flag("lyricsSweep", true),
         soft_sleeve: r.flag("softSleeve", true),
         motion_artwork: r.flag("motionArtwork", false),
@@ -737,7 +745,7 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         swipe_right: r.ordinal("swipeRight", SWIPE_ACTIONS, d.swipe_right),
         swipe_left: r.ordinal("swipeLeft", SWIPE_ACTIONS, d.swipe_left),
         skip_explicit: r.flag("skipExplicit", false),
-        playback_engine: r.ordinal("playbackEngine", PLAYBACK_ENGINE_NAMES.len() as i32, 0),
+        playback_engine: r.ordinal("playbackEngine", PLAYBACK_ENGINE_NAMES.len() as i32, d.playback_engine),
         home_rows: r.text("homeRows").map_or(d.home_rows, |s| {
             s.split(',').filter_map(|n| HOME_ROWS.iter().position(|r| *r == n)).map(|i| i as i32).collect()
         }),
@@ -773,6 +781,7 @@ pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     flag("skipSilence", p.skip_silence);
     flag("profilePerOutput", p.profile_per_output);
     flag("autoEqAuto", p.auto_eq_auto);
+    flag("autoEqDownload", p.auto_eq_download);
     flag("tasteModel", p.taste_model);
     flag("thirdPartyLookups", p.third_party_lookups);
     flag("lyricsSweep", p.lyrics_sweep);
@@ -912,7 +921,7 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         // The lookups switch covers the lyrics services too, so it takes the lyrics half with it both ways.
         "thirdPartyLookups" => (n.third_party_lookups, n.lyrics_online) = (on, on),
         // Lyrics online need lookups, so switching them on switches lookups on; off leaves the lookups
-        // (update checks) as they are. Stored as "lyricsLrclib", and still answers to it.
+        // (the AutoEQ list, moving covers) as they are. Stored as "lyricsLrclib", and still answers to it.
         "lyricsOnline" | "lyricsLrclib" => (n.lyrics_online, n.third_party_lookups) = (on, on || p.third_party_lookups),
         "lyricsPreferWords" => n.lyrics_prefer_words = on,
         "paxSenixKey" => n.paxsenix_key = value.trim().to_string(),
@@ -931,7 +940,13 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
             n.lyrics_order = on.iter().cloned().chain(rest).collect();
             n.lyrics_on = on;
         }
-        // One service up or down among the ones asked, held and dragged: `NETEASE:-1`.
+        // One service dropped at a place in the ranking, held by its handle and dragged: `NETEASE:3`.
+        "lyricsPlace" => {
+            let (service, to) = value.split_once(':')?;
+            let service = crate::lyrics_sources::LyricsService::named(service)?;
+            n.lyrics_order = crate::lyrics_sources::placed(p, service, to.trim().parse().ok()?);
+        }
+        // One service a place up or down in the ranking (the terminal's keys): `NETEASE:-1`.
         "lyricsMove" => {
             let (service, by) = value.split_once(':')?;
             let service = crate::lyrics_sources::LyricsService::named(service)?;
@@ -988,6 +1003,8 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "autoFillKind" => n.auto_fill_kind = named(&AUTO_FILL_KINDS)?,
         "autoFillBasis" => n.auto_fill_basis = named(&AUTO_FILL_BASES)?,
         "autoEqAuto" => n.auto_eq_auto = on,
+        // The list comes from a third party, so switching it on switches lookups on, as lyrics online do.
+        "autoEqDownload" => (n.auto_eq_download, n.third_party_lookups) = (on, on || p.third_party_lookups),
         "profilePerOutput" => n.profile_per_output = on,
         "skipExplicit" => n.skip_explicit = on,
         "playbackEngine" => n.playback_engine = named(&PLAYBACK_ENGINE_NAMES)?,
@@ -1268,9 +1285,9 @@ pub fn band_label(b: &SoundBand) -> String {
     nori_words::fmt::eq_band_label(b.freq, b.channel == 1, b.channel == 2, low, high, nori_player::dsp::uses_gain(k))
 }
 
-/// Under a saved profile: which devices use it, by name, or that a tap loads it.
+/// Under a saved profile: which devices use it, by name, or that choosing it loads it.
 pub fn profile_use(devices: &[String]) -> String {
-    if devices.is_empty() { "Tap to load".into() } else { format!("Used for {}", devices.join(", ")) }
+    if devices.is_empty() { "Choose to load".into() } else { format!("Used for {}", devices.join(", ")) }
 }
 
 // ---- server profiles ----
@@ -1505,6 +1522,8 @@ pub fn storage_index_files(names: Vec<String>) -> Vec<u32> {
 
 /// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
 /// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
+/// A file with no filters but a `GraphicEQ:` curve (AutoEQ's "GraphicEQ.txt", Wavelet's) is fitted here,
+/// once, with ten parametric filters (`nori_player::eqfit`), so it plays as any parametric preset does.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn parse_eq_preset(text: String) -> EqPreset {
     let mut preset = EqPreset::default();
@@ -1536,6 +1555,12 @@ pub fn parse_eq_preset(text: String) -> EqPreset {
                 continue;
             }
             preset.bands.push(EqBand { kind, freq, gain_db, q: after("Q").unwrap_or(0.71) });
+        }
+    }
+    if preset.bands.is_empty() {
+        if let Some(points) = nori_player::eqfit::parse_graphic(&text) {
+            let fit = nori_player::eqfit::fit_graphic(&points);
+            return EqPreset { preamp_db: fit.preamp_db, bands: fit.bands };
         }
     }
     preset
@@ -1689,7 +1714,10 @@ mod tests {
         assert!(set_by_name(&p, "mono", "1").unwrap().prefs.mono);
         assert!(!set_by_name(&StoredPrefs { mono: true, ..p.clone() }, "mono", "yes").unwrap().prefs.mono);
         assert_eq!(set_by_name(&p, "playbackEngine", "rust").unwrap().prefs.playback_engine, 1, "tools/app.sh set playbackEngine rust");
+        assert_eq!(set_by_name(&p, "playbackEngine", "exoplayer").unwrap().prefs.playback_engine, 0, "tools/app.sh set playbackEngine exoplayer");
         assert_eq!(load(&save(&StoredPrefs { playback_engine: 1, ..p.clone() })).playback_engine, 1, "kept");
+        assert_eq!(load(&save(&StoredPrefs { playback_engine: 0, ..p.clone() })).playback_engine, 0, "an install that stored ExoPlayer keeps it");
+        assert_eq!(load(&HashMap::new()).playback_engine, 1, "a new install plays through nori-engine");
         assert_eq!(set_by_name(&p, "parallelDownloads", "99").unwrap().prefs.parallel_downloads, 10);
         assert_eq!(set_by_name(&p, "coversAhead", "x").unwrap().prefs.covers_ahead, 3, "unreadable keeps the value");
         let cache = set_by_name(&p, "cacheMb", "10").unwrap();
@@ -1725,6 +1753,23 @@ mod tests {
     }
 
     #[test]
+    fn a_new_install_finds_lyrics_and_keeps_the_autoeq_list_but_no_moving_covers() {
+        let fresh = load(&HashMap::new());
+        assert!(fresh.third_party_lookups && fresh.lyrics_online && fresh.auto_eq_download);
+        assert!(!fresh.motion_artwork, "moving covers are heavier and stay off");
+        let asked: Vec<&str> = crate::lyrics_sources::lyrics_lookup(&fresh).services.iter().map(|s| s.name()).collect();
+        assert_eq!(asked, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"], "nine on, four of them asked first");
+        assert_eq!(fresh, StoredPrefs::default());
+        // An install that stored the lookups off keeps them off: no migration.
+        let kept = load(&save(&StoredPrefs { third_party_lookups: false, auto_eq_download: false, ..StoredPrefs::default() }));
+        assert!(!kept.third_party_lookups && !kept.auto_eq_download);
+        let p = StoredPrefs { third_party_lookups: false, auto_eq_download: false, ..StoredPrefs::default() };
+        let on = set_by_name(&p, "autoEqDownload", "true").unwrap().prefs;
+        assert!(on.auto_eq_download && on.third_party_lookups, "the AutoEQ list switches lookups on");
+        assert!(!set_by_name(&on, "autoEqDownload", "false").unwrap().prefs.auto_eq_download);
+    }
+
+    #[test]
     fn the_lyrics_lookup_and_the_lookups_switch_go_together() {
         let p = StoredPrefs::default();
         let on = set_by_name(&p, "lyricsOnline", "true").unwrap().prefs;
@@ -1740,20 +1785,29 @@ mod tests {
     #[test]
     fn lyrics_services_are_switched_ranked_and_kept() {
         let p = StoredPrefs::default();
-        let on = set_by_name(&p, "lyricsService:netease", "true").unwrap().prefs;
-        assert_eq!(on.lyrics_on, ["UNISON", "LRCLIB", "NETEASE"]);
+        let on = set_by_name(&p, "lyricsService:portato", "true").unwrap().prefs;
+        assert_eq!(on.lyrics_on, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB", "PORTATO"]);
+        assert_eq!(on.lyrics_order, p.lyrics_order, "a switch never moves a service");
+        let off = set_by_name(&on, "lyricsService:paxsenix", "false").unwrap().prefs;
+        assert_eq!((off.lyrics_order.clone(), off.lyrics_on.len()), (p.lyrics_order.clone(), 9));
         assert!(set_by_name(&p, "lyricsService:nobody", "true").is_none(), "no such service");
+        let at = |o: &[String], n: &str| o.iter().position(|x| x == n).unwrap();
         let moved = set_by_name(&on, "lyricsMove", "LRCLIB:-1").unwrap().prefs;
-        assert_eq!(crate::lyrics_sources::switched_on(&moved).iter().map(|s| s.name()).collect::<Vec<_>>(), ["UNISON", "LRCLIB", "NETEASE"], "LRCLIB passes NetEase");
+        assert_eq!(at(&moved.lyrics_order, "LRCLIB"), at(&on.lyrics_order, "LRCLIB") - 1, "one place, whoever is above it");
+        let placed = set_by_name(&on, "lyricsPlace", "LRCLIB:0").unwrap().prefs;
+        assert_eq!(crate::lyrics_sources::switched_on(&placed)[0].name(), "LRCLIB", "dropped first, asked first");
+        assert_eq!(placed.lyrics_on, on.lyrics_on);
+        assert!(set_by_name(&on, "lyricsPlace", "LRCLIB:x").is_none());
         let only = set_by_name(&p, "lyricsSources", "lrclib, kugou").unwrap().prefs;
         assert_eq!(only.lyrics_on, ["LRCLIB", "KUGOU"]);
         assert_eq!(only.lyrics_order[..2], ["LRCLIB", "KUGOU"]);
         let back = set_by_name(&only, "lyricsSources", "default").unwrap().prefs;
         assert_eq!((back.lyrics_on, back.lyrics_order), (p.lyrics_on.clone(), p.lyrics_order.clone()));
-        let keyed = set_by_name(&only, "paxSenixKey", "  k  ").unwrap().prefs;
+        let keyed = set_by_name(&placed, "paxSenixKey", "  k  ").unwrap().prefs;
         let back = load(&save(&keyed));
         assert_eq!((back.lyrics_on, back.lyrics_order, back.paxsenix_key), (keyed.lyrics_on.clone(), keyed.lyrics_order.clone(), "k".to_string()));
-        assert_eq!(load(&HashMap::new()).lyrics_on, ["UNISON", "LRCLIB"], "nothing stored: the open ones");
+        assert_eq!(load(&HashMap::new()).lyrics_on, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"], "nothing stored: the defaults");
+        assert_eq!(load(&HashMap::new()).lyrics_order, crate::lyrics_sources::default_order());
     }
 
     #[test]
@@ -1857,7 +1911,7 @@ mod tests {
         assert_eq!(b(2, 0), "1k ↗");
         assert_eq!(b(9, 2), "1k R");
         assert_eq!(b(6, 0), "1k ∿");
-        assert_eq!(profile_use(&[]), "Tap to load");
+        assert_eq!(profile_use(&[]), "Choose to load");
         assert_eq!(profile_use(&["Qudelix".into(), "Phone speaker".into()]), "Used for Qudelix, Phone speaker");
     }
 

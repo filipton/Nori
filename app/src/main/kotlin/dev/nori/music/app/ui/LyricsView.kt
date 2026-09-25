@@ -30,13 +30,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
@@ -130,17 +128,21 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         val found = (load as? Load.Ready)?.data?.takeIf { it.lyrics.lines.isNotEmpty() }
         // The perf build's watch hears which song's lyrics went up; no other build has a recorder.
         dev.nori.music.app.PerfHooks.recorder?.let { r -> LaunchedEffect(found) { if (found != null) loaded.songId?.let(r::lyricsShown) } }
-        val phase: Any = found ?: if (load is Load.Loading) LyricsPhase.LOADING else LyricsPhase.NONE
-        FrameCrossfade(phase, LYRICS_FADE, Modifier.fillMaxSize().weight(1f)) { p ->
+        val phase: Any = found?.let { Words(loaded.songId, it) } ?: if (load is Load.Loading) LyricsPhase.LOADING else LyricsPhase.NONE
+        // Where the words on screen are, so finer words for the same song take their place line for line.
+        val anchor = remember { LyricsAnchor() }
+        FrameCrossfade(
+            phase, LYRICS_FADE, Modifier.fillMaxSize().weight(1f),
+            // The lyrics race put finer words up for the same song (timed by the word where they were
+            // timed by the line): the same page, so they cross-fade in place, starting where the words
+            // shown were, rather than going out and rising in from below as a new song's do.
+            timesFor = { from, to -> if (from is Words && to is Words && from.song == to.song) LYRICS_SWAP else null },
+        ) { p ->
             when (p) {
                 // The words on their way out (a new song's, or its loader, took over) stay as they were
                 // left: the playhead is the next song's now, and following it jumped them back to the
                 // top in one frame while they faded.
-                is dev.nori.music.data.FoundLyrics -> {
-                    // The song these words are for: they came in only under it.
-                    val song = remember(p) { loaded.songId }
-                    LyricsBody(vm, p, song, playing, following = p === phase)
-                }
+                is Words -> LyricsBody(vm, p.found, p.song, playing, following = p == phase, anchor)
                 // In the middle, where "No lyrics" would be: it is waiting, not a line of words yet.
                 // The dots only come for a wait long enough to see: lyrics already kept arrive well
                 // inside it, and a song change then goes from one song's words straight to the next's
@@ -170,6 +172,54 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
 
 private enum class LyricsPhase { LOADING, NONE }
 
+/** Lyrics to show and the song they are for: another song's words are another page. */
+private data class Words(val song: String?, val found: dev.nori.music.data.FoundLyrics)
+
+/**
+ * The words being followed on screen: their song, lines, list and lit line, kept by the body that follows
+ * them. Finer words for the same song start from it, so the line on screen stays where it is.
+ */
+private class LyricsAnchor {
+    var song: String? = null
+    var lyrics: dev.nori.music.ffi.model.Lyrics? = null
+    var list: androidx.compose.foundation.lazy.LazyListState? = null
+    var active = -1
+
+    /**
+     * Where [lyrics] for [song] should start so that the line shown is where it was: the new line matching
+     * the lit one (or the first on screen, when the lit one is scrolled away) and its place in pixels; null
+     * when there is nothing to carry over (another song, nothing shown yet).
+     */
+    fun carry(song: String?, lyrics: dev.nori.music.ffi.model.Lyrics): Pair<Int, Int>? {
+        val old = this.lyrics ?: return null
+        val list = this.list ?: return null
+        if (song == null || song != this.song || old === lyrics || lyrics.lines.isEmpty()) return null
+        val seen = list.layoutInfo.visibleItemsInfo
+        val ref = seen.firstOrNull { it.index == active } ?: seen.firstOrNull() ?: return null
+        val starts = LongArray(old.lines.size) { old.lines[it].startMs }
+        val next = LongArray(lyrics.lines.size) { lyrics.lines[it].startMs }
+        return matchingLine(starts, ref.index, next, old.synced && lyrics.synced) to ref.offset
+    }
+}
+
+/**
+ * The line of the new lyrics ([next], each line's start) that stands for line [at] of the old ones
+ * ([old]): the one starting nearest to it (the earlier of two as near), or the same number when either
+ * is not timed. Services split a song's words into lines their own way, so the numbers need not agree.
+ */
+internal fun matchingLine(old: LongArray, at: Int, next: LongArray, timed: Boolean): Int {
+    if (next.isEmpty()) return 0
+    val i = at.coerceIn(0, maxOf(old.size - 1, 0))
+    if (!timed || old.isEmpty() || old[i] < 0) return at.coerceIn(0, next.size - 1)
+    var best = 0
+    for (k in next.indices) if (kotlin.math.abs(next[k] - old[i]) < kotlin.math.abs(next[best] - old[i])) best = k
+    return best
+}
+
+/** A display frame as the core counts them for the sweep (a sixtieth of a second), and the leeway a frame's timing is given. */
+private const val CORE_FRAME_NS = 16_666_667L
+private const val FRAME_SLACK_NS = 2_000_000L
+
 /** How long lyrics may take before the loader starts to show, and how long it then takes to fade in. */
 private const val LOADER_AFTER_MS = 350L
 private const val LOADER_FADE_MS = 300f
@@ -177,13 +227,16 @@ private const val LOADER_FADE_MS = 300f
 /** Loader, words and "No lyrics" into each other: the words leaving fade where they stand, the new ones rise in. */
 private val LYRICS_FADE = FadeTimes(inMs = 380f, outMs = 200f, delayMs = 80f, riseMs = 420f)
 
+/** Finer words for the same song over the ones shown: a plain cross-fade in place, the two together throughout. */
+private val LYRICS_SWAP = FadeTimes(inMs = 320f, outMs = 320f)
+
 /** The header's title and thumbnail, from one song to the next, as the player page's title changes. */
 private val HEADER_FADE = FadeTimes(inMs = 220f, outMs = 160f)
 
 
 /** The words of one song, in time with it. */
 @Composable
-private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, song: String?, playing: Boolean, following: Boolean) {
+private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, song: String?, playing: Boolean, following: Boolean, anchor: LyricsAnchor) {
     val lyrics = found.lyrics
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
@@ -202,6 +255,18 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     // What is on screen, as the clock packed it: the line lit, its change and how far it is sung. Written
     // only when that changes; only the draw phase of the active line reads the sung part.
     var frame by remember(clock) { mutableLongStateOf(clock.shown()) }
+    // The line lit and how long its change takes, written only when they change. Derived from [frame]
+    // instead, every frame of a sweep made the composition check them again - a recomposition pass per
+    // frame that found nothing to do, and on a phone the biggest part of the main thread's time.
+    val lit = remember(clock) { mutableIntStateOf(LyricsClock.active(frame)) }
+    val glide = remember(clock) { mutableIntStateOf(LyricsClock.glideMs(frame)) }
+    val show: (Long) -> Unit = remember(clock) {
+        { f ->
+            frame = f
+            LyricsClock.active(f).let { if (it != lit.intValue) lit.intValue = it }
+            LyricsClock.glideMs(f).let { if (it != glide.intValue) glide.intValue = it }
+        }
+    }
     // Keyed on the clock, so on the next song this loop times the new lines, not the old. One call per
     // look: the clock says what to draw, whether it changed, and how long to sleep - a number of display
     // frames while sweeping, otherwise until the next line takes over; never, for words that are not timed.
@@ -221,28 +286,38 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
         // song's first second read here put these words back before their first line - scrolled to
         // the top in one frame as they began to fade out.
         var step = clock.at(vm.positionIn(song) ?: return@LaunchedEffect, sweep, lively, force = true)
-        frame = LyricsClock.frame(step)
+        show(LyricsClock.frame(step))
         shownMs = clock.shownMs()
         lastMs[0] = shownMs
         if (hasBacking) backingSung = clock.backingSung()
+        var drawnAt = 0L
         while (playing && live && isActive) {
             val wait = LyricsClock.wait(step)
             if (wait == 0) break
             // Display frames while the fill moves; asleep between words and after a line is sung, when
             // nothing would be drawn anyway.
-            if (sweep && !LyricsClock.still(step)) repeat(wait) { withFrameMillis { } } else delay(wait.toLong())
-            step = clock.at(vm.positionIn(song) ?: break, sweep, lively, force = false)
+            // Counted in time as well as in frames: a frame is a sixtieth of a second to the core, and on a
+            // 120 Hz screen counting display frames drew the sweep twice as often as it asked for - every
+            // frame of the whole screen, the page's blur included, for as long as a line was sung.
+            if (sweep && !LyricsClock.still(step)) {
+                var now = withFrameNanos { it }
+                while (now - drawnAt < wait * CORE_FRAME_NS - FRAME_SLACK_NS) now = withFrameNanos { it }
+                drawnAt = now
+            } else { delay(wait.toLong()); drawnAt = 0L }
+            val read = vm.positionIn(song) ?: break
+            step = clock.at(read, sweep, lively, force = false)
+            if (dev.nori.music.app.TestHooks.traceLyrics) android.util.Log.d("norilyrics", "${android.os.SystemClock.uptimeMillis()} read=$read shown=${clock.shownMs()} mixing=${vm.mixing.value} player=${vm.playerPositionMs}")
             if (LyricsClock.redraw(step)) {
-                frame = LyricsClock.frame(step)
+                show(LyricsClock.frame(step))
                 shownMs = clock.shownMs()
                 lastMs[0] = shownMs
                 if (hasBacking) backingSung = clock.backingSung()
             }
         }
     }
-    val active by remember(clock) { derivedStateOf { LyricsClock.active(frame) } }
+    val active by lit
     // How long the change into the current line takes; the scroll and every line's fade use the same.
-    val glideMs by remember(clock) { derivedStateOf { LyricsClock.glideMs(frame) } }
+    val glideMs by glide
 
     val style = when (prefs.lyricsSize) { 0 -> MaterialTheme.typography.titleMedium; 2 -> MaterialTheme.typography.headlineMedium; else -> MaterialTheme.typography.headlineSmall }
     // The page's colours, read while drawing: the player's page cross-fades under the words, and that
@@ -254,7 +329,13 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     val peek = remember(clock) { { lastMs[0] } }
     val translated = remember(look) { ColorProducer { look.color(CoverLook.ON_80) } }
     val accent = remember(look) { ColorProducer { look.color(CoverLook.ACCENT) } }
-    val list = rememberLazyListState()
+    // Finer words for the same song start with the line that was on screen where it was (see LyricsAnchor):
+    // asked for before the list is first measured, so its first frame is already there.
+    val list = remember {
+        androidx.compose.foundation.lazy.LazyListState().also { l -> anchor.carry(song, lyrics)?.let { (i, y) -> l.requestScrollToItem(i, -y) } }
+    }
+    // The words being followed are the anchor for any finer ones that come for the song.
+    if (following) androidx.compose.runtime.SideEffect { anchor.song = song; anchor.lyrics = lyrics; anchor.list = list; anchor.active = active }
     // Whether the song is a duet at all: only then does either side keep a lane clear.
     val duet = remember(lyrics) { lyrics.lines.any { it.voice.toInt() == 1 } }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -287,6 +368,9 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
             // Before the first line (a new song, an intro), or lyrics that are not timed: back to the top.
             // The list outlives a song, so without this the next song opened where the last one ended.
             if (active < 0) { if (list.firstVisibleItemIndex != 0 || list.firstVisibleItemScrollOffset != 0) list.scrollToItem(0); return@LaunchedEffect }
+            // Not measured yet (the words have only just come): look after the first measure, which is
+            // where finer words for the same song were put, rather than jumping from nowhere.
+            if (list.layoutInfo.visibleItemsInfo.isEmpty()) withFrameNanos { }
             val here = list.layoutInfo.visibleItemsInfo.firstOrNull { it.index == active }
             if (returning) {
                 returning = false
@@ -334,7 +418,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                 val right = line.voice.toInt() == 1
                 val align = if (right) TextAlign.End else TextAlign.Start
                 Column(
-                    Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(clock.tap(i)); frame = clock.shown(); shownMs = clock.shownMs() }
+                    Modifier.fillMaxWidth().clickable(enabled = lyrics.synced) { vm.seekTo(clock.tap(i)); show(clock.shown()); shownMs = clock.shownMs() }
                         .padding(vertical = 8.dp)
                         .padding(start = if (duet && right) DUET_LANE else 0.dp, end = if (duet && !right) DUET_LANE else 0.dp),
                     horizontalAlignment = if (right) Alignment.End else Alignment.Start,
@@ -511,6 +595,12 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
 /** A text laid out once, with the outline of each sung piece and its box, so drawing a frame makes nothing new. */
 private class Laid(val layout: TextLayoutResult, val pieces: Array<Path>) {
     val boxes: Array<Rect> = Array(pieces.size) { pieces[it].getBounds() }
+    private val n = layout.layoutInput.text.length
+    /** Each character's row, and where the fill stands at its start and at its end, asked of the layout once, the first time the line is sung. */
+    val row by lazy(LazyThreadSafetyMode.NONE) { IntArray(n) { layout.getLineForOffset(it) } }
+    val from by lazy(LazyThreadSafetyMode.NONE) { FloatArray(n) { layout.getHorizontalPosition(it, true) } }
+    val to by lazy(LazyThreadSafetyMode.NONE) { FloatArray(n) { i -> if (i + 1 < n && row[i + 1] == row[i]) layout.getHorizontalPosition(i + 1, true) else layout.getLineRight(row[i]) } }
+    val rtl by lazy(LazyThreadSafetyMode.NONE) { BooleanArray(n) { layout.getParagraphDirection(it) == ResolvedTextDirection.Rtl } }
 }
 
 /**
@@ -530,6 +620,16 @@ private class Brushes(private val feather: Float, private val blur: Float) {
     private var lightBrush: Brush? = null
     private var glowColour = 0
     private var glow: Shadow? = null
+    private var awayColour = 0
+    private var awayBy = 0f
+    private var glowAway: Shadow? = null
+
+    /** [glow] set [by] pixels to the right of its text: the glow alone, from text drawn that far to the left. */
+    fun glowAway(colour: Color, by: Float): Shadow {
+        val c = colour.toArgb()
+        return glowAway?.takeIf { c == awayColour && by == awayBy }
+            ?: Shadow(colour, androidx.compose.ui.geometry.Offset(by, 0f), blur).also { glowAway = it; awayColour = c; awayBy = by }
+    }
 
     /** Bright before [x] and clear after it (the other way round for right-to-left), softly in between. */
     fun edge(colour: Color, x: Float, rtl: Boolean): Brush {
@@ -619,7 +719,7 @@ private fun SungText(
             val at = if (over > 0f) sung() else 0f
             val shine = if (over > 0f) brushes.glow(colour.copy(alpha = colour.alpha * SUNG_GLOW_ALPHA * over)) else null
             if (!lively || words.isEmpty() || !stirring(words, peek())) {
-                drawSung(l, at, base, lit, shine, spread, brushes)
+                drawSung(d, at, base, lit, shine, spread, brushes)
                 return@drawWithContent
             }
             val now = ms()
@@ -629,10 +729,20 @@ private fun SungText(
                 if (lift(words[k], now) > 0f || glow(words[k], now) > 0f) moving.addPath(d.pieces[k])
                 k++
             }
-            clipPath(moving, ClipOp.Difference) { drawSung(l, at, base, lit, shine, spread, brushes) }
+            // The glow first, for the whole line and unclipped: the pieces are boxes, not the letters'
+            // outlines (getPathForRange gives boxes), and a glow clipped to them stopped in a straight
+            // edge round every word that moved. A shadow colour that is not opaque keeps its own alpha,
+            // so it is drawn on its own, from text set outside the layer with its shadow set back. Still
+            // one blurred draw a frame.
+            // The letters after it say Shadow.None, not null: null keeps the text paint's last shadow,
+            // which is how the box-clipped copies of the glow came to be drawn at all.
+            if (over > 0f) {
+                val away = size.width + spread * 4f
+                drawSung(d, at, Color.Transparent, lit, brushes.glowAway(colour.copy(alpha = colour.alpha * SUNG_GLOW_ALPHA * over), away), spread, brushes, away)
+            }
+            clipPath(moving, ClipOp.Difference) { drawSung(d, at, base, lit, Shadow.None, spread, brushes) }
             // Each moving piece on its own, moved as it is sung, clipped to the piece in its own moved
-            // space, so it carries its letters and nothing of its neighbours'. Its glow is the one drawn
-            // with the rest: only the letters are clipped out of that, not the light around them.
+            // space, so it carries its letters and nothing of its neighbours'.
             k = 0
             while (k < words.size) {
                 val w = words[k]
@@ -646,7 +756,7 @@ private fun SungText(
                         if (g > 0f) scale(1f + SWELL * g, 1f + SWELL * g, box.center)
                     }) {
                         if (g > 0f) halo(box, g, lit, spread, brushes)
-                        clipPath(piece) { drawSung(l, at, base, lit, null, spread, brushes) }
+                        clipPath(piece) { drawSung(d, at, base, lit, Shadow.None, spread, brushes) }
                     }
                 }
                 k++
@@ -672,8 +782,20 @@ private fun stirring(words: List<LyricWord>, ms: Long): Boolean {
  * row fades the other way. The clips reach [spread] past the text where nothing else is, so the glow is
  * not cut off at the line's edges.
  */
-private fun DrawScope.drawSung(l: TextLayoutResult, at: Float, base: Color, lit: Color, glow: Shadow?, spread: Float, brushes: Brushes) {
-    if (base.alpha > 0f) drawText(l, color = base)
+private fun DrawScope.drawSung(d: Laid, at: Float, base: Color, lit: Color, glow: Shadow?, spread: Float, brushes: Brushes, away: Float = 0f) {
+    // [away]: only the glow is wanted. The text is drawn that far to the left, out of the layer, and its
+    // shadow is set back by as much (see Brushes.glowAway), so what lands here is the glow and no letters.
+    if (away > 0f) {
+        withTransform({ translate(-away, 0f) }) { drawSungAt(d, at, Color.Transparent, lit, glow, spread, brushes, away) }
+        return
+    }
+    drawSungAt(d, at, base, lit, glow, spread, brushes, 0f)
+}
+
+/** [drawSung] with its clips moved [clipDx] to the right: where a glow set back from its text lands. */
+private fun DrawScope.drawSungAt(d: Laid, at: Float, base: Color, lit: Color, glow: Shadow?, spread: Float, brushes: Brushes, clipDx: Float) {
+    val l = d.layout
+    if (base.alpha > 0f) drawText(l, color = base, shadow = Shadow.None)
     val n = l.layoutInput.text.length
     if (lit.alpha <= 0f || at <= 0f || n == 0) return
     if (at >= n) {
@@ -681,16 +803,16 @@ private fun DrawScope.drawSung(l: TextLayoutResult, at: Float, base: Color, lit:
         return
     }
     val index = at.toInt().coerceIn(0, n - 1)
-    val row = l.getLineForOffset(index)
-    val from = l.getHorizontalPosition(index, true)
-    val to = if (index + 1 < n && l.getLineForOffset(index + 1) == row) l.getHorizontalPosition(index + 1, true) else l.getLineRight(row)
+    val row = d.row[index]
+    val from = d.from[index]
+    val to = d.to[index]
     val x = from + (to - from) * (at - index)
     val top = l.getLineTop(row)
-    if (row > 0) clipRect(-spread, -spread, size.width + spread, top) { drawText(l, color = lit, shadow = glow) }
-    val rtl = l.getParagraphDirection(index) == ResolvedTextDirection.Rtl
+    if (row > 0) clipRect(clipDx - spread, -spread, clipDx + size.width + spread, top) { drawText(l, color = lit, shadow = glow) }
+    val rtl = d.rtl[index]
     val bottom = if (row == l.lineCount - 1) size.height + spread else l.getLineBottom(row)
     // The edge is made opaque and faded by the draw's alpha, so a line dimming does not make it again.
-    clipRect(-spread, if (row == 0) -spread else top, size.width + spread, bottom) {
+    clipRect(clipDx - spread, if (row == 0) -spread else top, clipDx + size.width + spread, bottom) {
         drawText(l, brush = brushes.edge(lit.copy(alpha = 1f), x, rtl), alpha = lit.alpha, shadow = glow)
     }
 }

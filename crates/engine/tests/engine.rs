@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{Stepper, Virtual};
-use nori_engine::{App, AudioOutput, Body, ByteSource, Config, Device, DeviceWatch, Engine, Event, Feed, Library, Located, OutputFacts, OutputFormat, OutputKind, Recent, Settings, Source, State, Store};
+use nori_engine::{App, AudioOutput, Body, ByteSource, Config, Device, DeviceWatch, Engine, Event, Feed, Library, Located, OutputFacts, OutputFormat, OutputKind, Recent, Settings, ShallowDepth, Source, State, Store};
 use nori_player::automix::analysis::Analyzer;
 use nori_player::automix::synth::Rng;
 use nori_player::automix::ANALYSIS_VERSION;
@@ -147,26 +147,28 @@ impl ByteSource for Server {
 }
 
 /// The test's queue: a playlist, and the songs the user's settings skip on arrival (explicit ones).
+/// The playlist is shared with the test, which edits it as a user would and then tells the engine.
 struct TestQueue {
-    list: Playlist,
+    list: Arc<Mutex<Playlist>>,
     skip: Vec<String>,
 }
 
 impl nori_engine::Queue for TestQueue {
     fn read<R>(&self, f: impl FnOnce(&Playlist) -> R) -> R {
-        f(&self.list)
+        f(&self.list.lock())
     }
 
     fn moved_to(&mut self, index: usize) {
-        self.list.moved_to(index);
+        self.list.lock().moved_to(index);
     }
 
     fn set_repeat(&mut self, mode: u8) {
-        self.list.set_repeat(mode);
+        self.list.lock().set_repeat(mode);
     }
 
     fn skips(&self, index: usize) -> bool {
-        self.skip.contains(&self.list.ids()[index]) && self.list.next_of(index, self.list.repeat()).is_some()
+        let list = self.list.lock();
+        self.skip.contains(&list.ids()[index]) && list.next_of(index, list.repeat()).is_some()
     }
 }
 
@@ -184,6 +186,10 @@ struct Extra {
     /// once played on a real clock that many times faster than the music, and the limits the tests wait
     /// with are in its seconds.
     pace: Option<f64>,
+    /// The device changes its depth in place (`AudioOutput::resizes`), as a phone's AudioTrack does.
+    resizes: bool,
+    /// What the device says it needs while shallow (`AudioOutput::shallow_depth`): a Bluetooth output.
+    depth: Option<ShallowDepth>,
 }
 
 struct Songs {
@@ -289,6 +295,8 @@ struct Recorder {
     flushes: Arc<AtomicU64>,
     /// The engine asked for the device to be kept shallow (the equalizer tuned).
     shallow: Arc<AtomicBool>,
+    resizes: bool,
+    depth: Option<ShallowDepth>,
 }
 
 impl AudioOutput for Recorder {
@@ -336,6 +344,14 @@ impl AudioOutput for Recorder {
         self.shallow.store(on, Ordering::Relaxed);
     }
 
+    fn resizes(&self) -> bool {
+        self.resizes
+    }
+
+    fn shallow_depth(&self) -> Option<ShallowDepth> {
+        self.depth
+    }
+
     fn close(&mut self) {
         self.shut.fetch_add(1, Ordering::Relaxed);
         self.card.lock().feed = None;
@@ -357,6 +373,9 @@ struct Rig {
     die: Arc<AtomicBool>,
     flushes: Arc<AtomicU64>,
     shallow: Arc<AtomicBool>,
+    card: Arc<Mutex<Card>>,
+    /// The queue the engine plays: edit it, then [`Engine::queue_changed`].
+    queue: Arc<Mutex<Playlist>>,
 }
 
 impl Rig {
@@ -373,14 +392,15 @@ impl Rig {
 
     /// Songs as (id, file, length ms), played through a device that takes float or 16-bit samples.
     fn build(files: Vec<(String, Vec<u8>, i64)>, app: impl App + Send + 'static, settings: Settings, extra: Extra) -> Rig {
-        let Extra { float, skip, server, store, idle_release_ms, pace } = extra;
+        let Extra { float, skip, server, store, idle_release_ms, pace, resizes, depth } = extra;
         for (id, f, _) in &files {
             server.files.lock().push((id.clone(), Arc::new(f.clone())));
         }
         let lengths = files.iter().map(|(id, _, ms)| (id.clone(), *ms)).collect();
         let mut list = Playlist::default();
         list.set(files.iter().map(|(id, _, _)| id.clone()).collect(), Some(0), false, 0);
-        let queue = TestQueue { list, skip };
+        let list = Arc::new(Mutex::new(list));
+        let queue = TestQueue { list: list.clone(), skip };
         let heard = Arc::new(Mutex::new(Vec::new()));
         let heard_f = Arc::new(Mutex::new(Vec::new()));
         let underruns = Arc::new(AtomicU64::new(0));
@@ -399,7 +419,7 @@ impl Rig {
             block: Vec::new(),
             floats: Vec::new(),
         }));
-        let out = Recorder { card: card.clone(), opened: Arc::default(), shut: Arc::default(), watch: Arc::default(), flushes: Arc::default(), shallow: Arc::default() };
+        let out = Recorder { card: card.clone(), opened: Arc::default(), shut: Arc::default(), watch: Arc::default(), flushes: Arc::default(), shallow: Arc::default(), resizes, depth };
         let (opened, shut, watch, flushes, shallow) = (out.opened.clone(), out.shut.clone(), out.watch.clone(), out.flushes.clone(), out.shallow.clone());
         let clock = Virtual::default();
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -408,8 +428,8 @@ impl Rig {
         let mut config = Config { memory_mb: 256, settings, ..Config::default() };
         config.idle_release_ms = idle_release_ms.unwrap_or(config.idle_release_ms);
         let engine = Engine::start_on(library, app, queue, Box::new(out), None, config, clock.clone(), move |e| seen.lock().push(e));
-        let time = Stepper::new(clock, card);
-        Rig { engine, time, pace: pace.unwrap_or(20.0), opened, shut, watch, heard, heard_f, underruns, server, events, die, flushes, shallow }
+        let time = Stepper::new(clock, card.clone());
+        Rig { engine, time, pace: pace.unwrap_or(20.0), opened, shut, watch, heard, heard_f, underruns, server, events, die, flushes, shallow, card, queue: list }
     }
 
     /// Times the recorder found too little to play (a gap on a real device), for the failure messages.
@@ -742,8 +762,8 @@ fn an_explicit_song_the_settings_skip_is_never_heard() {
 fn a_song_heard_again_plays_from_the_cache_without_asking_the_network() {
     let a = music(8.0, 18);
     let songs: [(&str, &[i16]); 1] = [("a", &a)];
-    let dir = std::env::temp_dir().join(format!("nori-cache-{}", std::process::id()));
-    let store = Store::open(&dir, 64 << 20, Box::new(Recent::default())).unwrap();
+    let dir = nori_testdir::TempDir::new("cache");
+    let store = Store::open(dir.path(), 64 << 20, Box::new(Recent::default())).unwrap();
     let first = Extra { store: Some(store.clone()), ..Extra::default() };
     let rig = Rig::build(files(&songs), sim::App::new(), Settings::default(), first);
     rig.engine.play_at(0, 0);
@@ -757,7 +777,6 @@ fn a_song_heard_again_plays_from_the_cache_without_asking_the_network() {
     assert!(rig.wait_for(30, Rig::ended), "{:?}", rig.events.lock());
     assert!(rig.server.requests.lock().is_empty(), "{:?}", rig.server.requests.lock());
     assert!(*rig.heard.lock() == a, "the same song, from the disk");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1066,6 +1085,38 @@ fn automix_switched_on_while_playing_mixes_out_of_the_song_playing() {
 }
 
 #[test]
+fn each_song_s_replay_gain_is_on_its_own_samples_through_an_automix() {
+    // A beat-matched, tempo-stretched AutoMix between a song at half its level and one at 0.8 of it: every
+    // sample as the two turned to their volumes first and mixed after, the stretch and its hand-back included.
+    let (a, b) = (music(40.0, 44), music(40.0, 45));
+    let run = |songs: &[(&str, &[i16])], gains: &[(&str, f32)]| {
+        let live = Live::new(TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, echo_out: false, ..prefs_off() });
+        {
+            let mut app = live.0.lock();
+            for t in [measured("a", 120.0, 40_000), measured("b", 123.0, 40_000)] {
+                app.analyses.insert(t.song_id.clone(), t);
+            }
+            for (id, g) in gains {
+                app.gains.insert(id.to_string(), *g);
+            }
+        }
+        let rig = Rig::with_app(songs, live.clone(), Settings::default());
+        rig.engine.play_at(0, 0);
+        assert!(rig.wait_for(30, Rig::ended), "{:?}", rig.events.lock());
+        let log = live.0.lock().log.clone();
+        assert!(log.iter().any(|l| l.contains("transition a -> b: BeatMatched") && l.contains("tempo x0.976")), "{log:?}");
+        let heard = rig.heard.lock().clone();
+        heard
+    };
+    let (qa, qb) = (at(&a, 0.5), at(&b, 0.8));
+    let ideal = run(&[("a", &qa), ("b", &qb)], &[]);
+    let heard = run(&[("a", &a), ("b", &b)], &[("a", 0.5), ("b", 0.8)]);
+    assert_eq!(heard.len(), ideal.len());
+    let off = heard.iter().zip(&ideal).position(|(h, i)| h != i);
+    assert_eq!(off, None, "every sample as a at half its level and b at 0.8 of it, mixed");
+}
+
+#[test]
 fn a_speed_set_while_playing_is_heard() {
     let a = music(30.0, 40);
     let rig = playing(&[("a", &a)], sim::App::new(), Settings::default());
@@ -1214,6 +1265,127 @@ fn the_equalizer_screen_makes_the_output_shallow_at_once_and_deep_again_as_it_cl
     rig.engine.set_tuning(false);
     assert!(rig.wait_for(2, |r| !r.shallow.load(Ordering::Relaxed)), "deep again as the screen closes");
     rig.engine.stop();
+}
+
+/// The equalizer screen opened and closed `rounds` times, 1.5 s apart, over a device that changes its
+/// depth in place, or never (`rounds` 0): the rig, left playing.
+fn tuned_in_place(rounds: usize) -> Rig {
+    let a = music(60.0, 48);
+    let files = vec![("a".to_string(), wav(&a), 60_000)];
+    let rig = Rig::build(files, sim::App::new(), loud_eq(), Extra { pace: Some(1.0), resizes: true, ..Extra::default() });
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
+    for round in 0..rounds {
+        rig.engine.set_tuning(true);
+        assert!(rig.wait_for(2, |r| r.shallow.load(Ordering::Relaxed)), "round {round}: shallow at once");
+        rig.run(1_500);
+        rig.engine.set_tuning(false);
+        assert!(rig.wait_for(2, |r| !r.shallow.load(Ordering::Relaxed)), "round {round}: deep again at once");
+        rig.run(1_500);
+    }
+    rig
+}
+
+#[test]
+fn over_a_device_that_resizes_the_equalizer_screen_opening_and_closing_is_not_heard() {
+    let tuned = tuned_in_place(4);
+    let heard = tuned.heard.lock().clone();
+    let (flushes, waits) = (tuned.flushes.load(Ordering::Relaxed), tuned.waits());
+    tuned.engine.stop();
+    assert_eq!(flushes, 0, "nothing dropped or made again");
+    assert_eq!(waits, 0, "the device never found too little to play");
+    // Sample for sample what a player that never saw the screen played: no dip, no gap, no jump.
+    let plain = tuned_in_place(0);
+    plain.run(12_000);
+    let untouched = plain.heard.lock().clone();
+    plain.engine.stop();
+    let n = heard.len().min(untouched.len());
+    assert!(n > RATE as usize * 2 * 12, "{} s heard", n / 2 / RATE as usize);
+    let off = heard[..n].iter().zip(&untouched[..n]).position(|(a, b)| a != b);
+    assert_eq!(off, None, "the same music, sample for sample");
+}
+
+#[test]
+fn tuned_in_place_a_band_moved_is_made_again_while_the_deep_seconds_remain_and_heard_as_it_is_after() {
+    let rig = tuned_in_place(0);
+    rig.engine.set_tuning(true);
+    assert!(rig.wait_for(2, |r| r.shallow.load(Ordering::Relaxed)));
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    // The ring still holds seconds made with the old bands: those are made again, behind the dip.
+    let mut quieter = loud_eq();
+    quieter.sound.bands[0].gain_db = 3.0;
+    rig.engine.set_settings(quieter.clone());
+    assert!(rig.wait_for(2, |r| r.flushes.load(Ordering::Relaxed) > flushes), "made again at once");
+    // Once the ring is shallow, a band moved is heard as it is: nothing is dropped for it.
+    rig.run(12_000);
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    quieter.sound.bands[0].gain_db = 1.0;
+    rig.engine.set_settings(quieter);
+    rig.run(1_000);
+    assert_eq!(rig.flushes.load(Ordering::Relaxed), flushes, "heard as it is");
+    rig.engine.stop();
+}
+
+#[test]
+fn tuned_in_place_by_a_change_that_came_first_the_change_lands_in_the_shallow_buffer_too() {
+    let rig = tuned_in_place(0);
+    // The equalizer screen's first change reaches the engine a moment before the tuning it turns on:
+    // made again at once, into the deep buffer.
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    let mut changed = loud_eq();
+    changed.sound.bands[0].gain_db = 3.0;
+    rig.engine.set_settings(changed.clone());
+    assert!(rig.wait_for(2, |r| r.flushes.load(Ordering::Relaxed) > flushes), "made again at once");
+    rig.run(200);
+    // Then the tuning: made again once more, into the shallow buffer, as a change made once tuned is.
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    rig.engine.set_tuning(true);
+    assert!(rig.wait_for(2, |r| r.flushes.load(Ordering::Relaxed) > flushes), "made again into the shallow buffer");
+    rig.run(1_000);
+    // And from there a band moved is heard as it is.
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    changed.sound.bands[0].gain_db = 1.0;
+    rig.engine.set_settings(changed);
+    rig.run(1_000);
+    assert_eq!(rig.flushes.load(Ordering::Relaxed), flushes, "heard as it is");
+    // Tuning that follows no change drops nothing (over_a_device_that_resizes_...), nor does it long after one.
+    rig.engine.set_tuning(false);
+    rig.run(3_000);
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    rig.engine.set_tuning(true);
+    rig.run(1_000);
+    assert_eq!(rig.flushes.load(Ordering::Relaxed), flushes, "nothing made again for the tuning alone");
+    rig.engine.stop();
+}
+
+/// Tuned in place over a device that says what it needs while shallow (or nothing), once the deep seconds
+/// have played out: the most music the ring held over two seconds, ms.
+fn tuned_ring_ms(depth: Option<ShallowDepth>) -> u64 {
+    let a = music(40.0, 49);
+    let files = vec![("a".to_string(), wav(&a), 40_000)];
+    let rig = Rig::build(files, sim::App::new(), loud_eq(), Extra { pace: Some(1.0), resizes: true, depth, ..Extra::default() });
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
+    rig.engine.set_tuning(true);
+    assert!(rig.wait_for(2, |r| r.shallow.load(Ordering::Relaxed)));
+    rig.run(14_000);
+    let waits = rig.waits();
+    let mut most = 0;
+    for _ in 0..100 {
+        rig.run(20);
+        most = most.max(rig.card.lock().feed.as_ref().map_or(0, |f| f.available()));
+    }
+    assert_eq!(rig.waits(), waits, "kept fed");
+    rig.engine.stop();
+    most as u64 * 1000 / RATE as u64
+}
+
+#[test]
+fn tuned_over_a_device_that_needs_more_the_ring_is_as_deep_as_one_of_its_top_ups() {
+    let speaker = tuned_ring_ms(None);
+    assert!(speaker <= nori_engine::output::SHALLOW_US as u64 / 1000 + 5, "the speaker's ring as it was: {speaker} ms");
+    let bluetooth = tuned_ring_ms(Some(ShallowDepth { device_us: 550_000, ring_us: 200_000 }));
+    assert!((150..=205).contains(&bluetooth), "a Bluetooth output's ring: {bluetooth} ms");
 }
 
 // ---- skips pressed in a hurry ----
@@ -1465,6 +1637,217 @@ fn automix_switched_on_near_the_end_of_a_song_mixes_out_of_it() {
     assert!(log.iter().any(|l| l.contains("transition a -> b: BeatMatched")), "{log:?}");
     assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
     assert!(rig.heard.lock().len() < a.len() + b.len() - RATE as usize * 2 * 4, "the songs overlap: {log:?}");
+}
+
+// ---- a song queued while another plays ----
+
+/// [`Live`] with a measurer ahead, as the core's: the songs it is asked to measure are measured in the
+/// background (as steady music at 120 BPM, see [`measured`]) and the engine hears of it at its next wake
+/// ([`App::measured`]), when it asks for its plan again.
+#[derive(Clone)]
+struct Measuring {
+    live: Live,
+    /// Asked for and not measured yet.
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+impl Measuring {
+    fn new(prefs: TransitionPrefs) -> Measuring {
+        Measuring { live: Live::new(prefs), asked: Arc::default() }
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.live.0.lock().log.clone()
+    }
+}
+
+impl Host for Measuring {
+    fn plan_for(&mut self, outgoing_id: &str) -> Option<Plan> {
+        self.live.plan_for(outgoing_id)
+    }
+
+    fn wants_analysis(&mut self, _song_id: &str) -> Option<u64> {
+        None
+    }
+
+    fn analysed(&mut self, song_id: &str, analyzer: Analyzer, channels: usize, frames: u64, rate: u32) {
+        self.live.analysed(song_id, analyzer, channels, frames, rate);
+    }
+
+    fn log(&mut self, message: &str) {
+        self.live.log(message);
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.live.now_ms()
+    }
+}
+
+impl App for Measuring {
+    fn clock(&mut self, now_ms: i64) {
+        self.live.clock(now_ms);
+    }
+
+    fn auto_mix(&self) -> bool {
+        self.live.auto_mix()
+    }
+
+    fn window(&mut self, window: Vec<WindowSong>, shuffling: bool) {
+        self.live.window(window, shuffling);
+    }
+
+    fn measure_ahead<S: nori_player::pipeline::Songs>(&mut self, _songs: &mut S, ids: &[String]) {
+        let app = self.live.0.lock();
+        let mut asked = self.asked.lock();
+        for id in ids {
+            if !app.analyses.contains_key(id) && !asked.contains(id) {
+                asked.push(id.clone());
+            }
+        }
+    }
+
+    fn measured(&mut self) -> bool {
+        let asked = std::mem::take(&mut *self.asked.lock());
+        let mut app = self.live.0.lock();
+        for id in &asked {
+            let ms = app.window.iter().find(|s| s.id == *id).map_or(0, |s| s.duration_ms);
+            app.analyses.insert(id.clone(), measured(id, 120.0, ms));
+            app.log.push(format!("measured {id} ahead"));
+        }
+        !asked.is_empty()
+    }
+
+    fn transitions_off(&mut self, off: bool) {
+        self.live.transitions_off(off);
+    }
+
+    fn gain(&mut self, index: usize, id: &str) -> f32 {
+        self.live.gain(index, id)
+    }
+}
+
+/// How a song is queued while `a` plays.
+#[derive(Clone, Copy, PartialEq)]
+enum Queued {
+    /// Play next: straight after the song playing.
+    PlayNext,
+    /// Add to queue: after the song playing and the songs added by hand before it, ahead of the rest of
+    /// the list it was played from.
+    AddToQueue,
+    /// At the very end of the list, as a controller inserts it.
+    AtTheEnd,
+}
+
+/// `a` (a minute) plays with AutoMix on, and `c` after it when `with_c`; `at` of the way into `a`, `b` is
+/// queued as `how` says. Plays to the end: the rig, the app, and the songs in the order the ear reached them.
+fn queued_while_playing(at: f64, with_c: bool, how: Queued) -> (Rig, Measuring, Vec<String>) {
+    queued_while_playing_with(TransitionPrefs { auto_mix: true, auto_mix_max_s: 8, echo_out: false, ..prefs_off() }, at, with_c, how)
+}
+
+fn queued_while_playing_with(prefs: TransitionPrefs, at: f64, with_c: bool, how: Queued) -> (Rig, Measuring, Vec<String>) {
+    let (a, b, c) = (music(60.0, 80), music(30.0, 81), music(30.0, 82));
+    let app = Measuring::new(prefs);
+    let files = [("a", &a), ("b", &b), ("c", &c)].iter().map(|(id, s)| (id.to_string(), wav(s), (s.len() / 2) as i64 * 1000 / RATE as i64)).collect();
+    let rig = Rig::build(files, app.clone(), Settings { auto_mix: prefs.auto_mix, ..Settings::default() }, Extra { pace: Some(5.0), ..Extra::default() });
+    let first: Vec<String> = if with_c { vec!["a".into(), "c".into()] } else { vec!["a".into()] };
+    rig.queue.lock().set(first, Some(0), false, 0);
+    rig.engine.queue_changed();
+    rig.engine.play_at(0, 0);
+    let ms = (at * 60_000.0) as i64;
+    assert!(rig.wait_for(30, |r| r.engine.status().position_ms >= ms), "{:?}", rig.engine.status());
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    {
+        let mut q = rig.queue.lock();
+        match how {
+            Queued::PlayNext => drop(q.add(vec!["b".into()], nori_player::playlist::Hand::Next)),
+            Queued::AddToQueue => drop(q.add(vec!["b".into()], nori_player::playlist::Hand::Last)),
+            Queued::AtTheEnd => {
+                let end = q.len();
+                q.insert(end, vec!["b".into()], nori_player::playlist::Hand::No);
+            }
+        }
+    }
+    rig.engine.queue_changed();
+    assert!(rig.wait_for(120, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), app.log());
+    let order = rig.events.lock().iter().filter_map(|e| if let Event::Song { id, .. } = e { Some(id.clone()) } else { None }).collect();
+    let made_again = rig.flushes.load(Ordering::Relaxed) != flushes;
+    assert_eq!(made_again, app.log().iter().any(|l| l.contains("the ending of a is made again")), "the output is emptied only to make the ending again: {:?}", app.log());
+    (rig, app, order)
+}
+
+/// `from -> to` was mixed as AutoMix plans a mix between two measured songs, `to` measured before.
+fn mixed(app: &Measuring, from: &str, to: &str) {
+    let log = app.log();
+    let line = format!("transition {from} -> {to}: BeatMatched");
+    let planned = log.iter().rposition(|l| l.contains(&format!("transition {from} -> ")));
+    assert!(planned.is_some_and(|k| log[k].contains(&line)), "the last plan out of {from} is a mix into {to}: {log:?}");
+    let measured_at = log.iter().position(|l| l == &format!("measured {to} ahead"));
+    let first_mix = log.iter().position(|l| l.contains(&line));
+    assert!(measured_at.is_some() && measured_at < first_mix, "{to} measured before the mix was planned: {log:?}");
+}
+
+fn made_again(app: &Measuring) -> bool {
+    app.log().iter().any(|l| l.contains("the ending of a is made again"))
+}
+
+#[test]
+fn a_song_queued_early_in_a_song_is_mixed_into() {
+    // Nothing of a's ending is made yet at 30 %: planned again, and nothing made again.
+    for how in [Queued::PlayNext, Queued::AddToQueue] {
+        for with_c in [false, true] {
+            let (_rig, app, order) = queued_while_playing(0.3, with_c, how);
+            mixed(&app, "a", "b");
+            assert_eq!(order, if with_c { vec!["a", "b", "c"] } else { vec!["a", "b"] }, "{:?}", app.log());
+            if with_c {
+                mixed(&app, "b", "c");
+            }
+            assert!(!made_again(&app), "{:?}", app.log());
+        }
+    }
+}
+
+#[test]
+fn a_song_queued_late_in_the_last_song_is_mixed_into_its_ending_made_again() {
+    // At 80 % the output holds a's ending already, made to end the music: made again, into b.
+    for how in [Queued::PlayNext, Queued::AddToQueue] {
+        let (_rig, app, order) = queued_while_playing(0.8, false, how);
+        mixed(&app, "a", "b");
+        assert_eq!(order, vec!["a", "b"], "{:?}", app.log());
+        assert!(made_again(&app), "the ending in the output was made for nothing after a: {:?}", app.log());
+    }
+}
+
+#[test]
+fn a_song_queued_late_ahead_of_the_next_one_is_mixed_into() {
+    // Before a's mix into c is made (a four-minute song's 80 %): b takes c's place.
+    for how in [Queued::PlayNext, Queued::AddToQueue] {
+        let (_rig, app, order) = queued_while_playing(0.65, true, how);
+        mixed(&app, "a", "b");
+        mixed(&app, "b", "c");
+        assert_eq!(order, vec!["a", "b", "c"], "{:?}", app.log());
+    }
+}
+
+#[test]
+fn a_song_queued_behind_the_next_one_leaves_the_ending_made_for_it_alone() {
+    // a's mix into c is made and held; b goes in after c, and nothing is made again.
+    let (_rig, app, order) = queued_while_playing(0.72, true, Queued::AtTheEnd);
+    mixed(&app, "a", "c");
+    mixed(&app, "c", "b");
+    assert_eq!(order, vec!["a", "c", "b"], "{:?}", app.log());
+    assert!(!made_again(&app), "{:?}", app.log());
+    assert!(app.log().iter().any(|l| l.contains("holding the ending")), "{:?}", app.log());
+}
+
+#[test]
+fn a_song_played_next_after_the_player_read_on_gaplessly_into_the_old_next_one_is_played() {
+    // Gapless, 55 s into a minute: the output holds a's end and c's start after it. b is played next:
+    // c's start is made again as b's, where the ear is, and c follows b.
+    let (rig, app, order) = queued_while_playing_with(prefs_off(), 55.0 / 60.0, true, Queued::PlayNext);
+    assert_eq!(order, vec!["a", "b", "c"], "{:?}", app.log());
+    assert!(app.log().iter().any(|l| l.contains("the ending of a is made again: another song follows it now")), "{:?}", app.log());
+    let heard = rig.heard.lock().len() as f64 / 2.0 / RATE as f64;
+    assert!((heard - 120.0).abs() < 0.2, "every song whole, one after the other: {heard:.2} s");
 }
 
 #[test]

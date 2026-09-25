@@ -89,7 +89,7 @@ class Nori private constructor(private val context: Context) {
     /** A player for the moving cover; the screen's view model makes one when it first shows one. */
     fun motionPlayer(onGone: (String) -> Unit) = dev.nori.music.playback.MotionPlayer(context, http, sources, onGone)
     /** Each output device's own sound; built when the playback service first sees a device. */
-    val deviceSound by lazy { dev.nori.music.playback.DeviceSound(settings, { core }, { http }) }
+    val deviceSound by lazy { dev.nori.music.playback.DeviceSound(settings, { core }, { client }, { http.metered }) }
     val player = PlayerConnection(context, this)
 
     /** True while requests go to the profile's second address; stream quality is capped then. */
@@ -106,6 +106,18 @@ class Nori private constructor(private val context: Context) {
         val t = android.os.SystemClock.elapsedRealtime()
         core; http; sources
         android.util.Log.i("nori", "core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms")
+    }
+
+    /**
+     * The AutoEQ headphone list kept on the device. The core decides whether it is due (switched on, an
+     * unmetered network, missing or a month old) and does nothing otherwise, so this is called when the app
+     * starts and when the network turns unmetered, never on a timer. How many headphones it now offers,
+     * or null when nothing was fetched.
+     */
+    suspend fun keepAutoEqList(): UInt? = withContext(Dispatchers.IO) {
+        runCatching { client.autoeqUpdate(false, http.metered) }
+            .onFailure { android.util.Log.w("nori", "autoeq list: ${it.message}") }
+            .getOrNull()
     }
 
     /**

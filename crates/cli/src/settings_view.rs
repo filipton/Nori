@@ -6,7 +6,7 @@
 
 use nori_core::fmt;
 use nori_core::settings::{EqLevel, SoundBand, StoredPrefs, EQ_RANGES};
-use nori_core::settings_schema::{self, SettingRow, SettingsFacts, SettingsGroup, SettingsPage, SettingsSection};
+use nori_core::settings_schema::{self, Capability, SettingRow, SettingsFacts, SettingsGroup, SettingsPage, SettingsSection};
 
 use crate::app::{Cmd, Overlay, Screen, Sel, SoundToolCmd};
 
@@ -83,7 +83,13 @@ impl SettingsView {
             let page = match id.as_str() {
                 OWN => own_page(&self.own),
                 "about" => about_page(),
-                _ => settings_schema::page(&id, prefs, &self.facts).unwrap_or(SettingsPage { title: id.clone(), sections: Vec::new() }),
+                _ => {
+                    // What a terminal cannot do (swipes, the system's effects panel, a USB DAC driven by
+                    // the system, offload, a second engine, moving covers): those rows are not listed.
+                    self.facts.lacks = Capability::ALL.to_vec();
+                    let page = settings_schema::page(&id, prefs, &self.facts).unwrap_or(SettingsPage { title: id.clone(), sections: Vec::new() });
+                    with_subpages(page, prefs, &self.facts)
+                }
             };
             self.page = Some(page);
             self.page_of = Some(id);
@@ -218,7 +224,8 @@ impl SettingsView {
                 let at = at.rem_euclid(colours.len() as isize) as usize;
                 vec![Cmd::Setting(name, colours[at].to_string())]
             }
-            SettingRow::Ranked { id, on: true, .. } => vec![Cmd::Setting("lyricsMove".into(), format!("{id}:{}", if up { 1 } else { -1 }))],
+            // A lyrics service a place down (→) or up (←) the one list, on or off.
+            SettingRow::Ranked { id, .. } => vec![Cmd::Setting("lyricsMove".into(), format!("{id}:{}", if up { 1 } else { -1 }))],
             _ => Vec::new(),
         }
     }
@@ -241,6 +248,28 @@ impl SettingsView {
         }
         self.row.at = at;
     }
+}
+
+/// A page with the pages its rows open (`page:<id>`, the lyrics sources) drawn under it instead: a
+/// terminal has room for them, and one list to move through is easier than a page within a page.
+fn with_subpages(mut page: SettingsPage, prefs: &StoredPrefs, facts: &SettingsFacts) -> SettingsPage {
+    let mut subs = Vec::new();
+    for s in &mut page.sections {
+        s.rows.retain(|r| match r {
+            SettingRow::Link { action, .. } if action.starts_with("page:") => {
+                subs.push(action["page:".len()..].to_string());
+                false
+            }
+            _ => true,
+        });
+    }
+    page.sections.retain(|s| !s.rows.is_empty());
+    for id in subs {
+        if let Some(sub) = settings_schema::page(&id, prefs, facts) {
+            page.sections.extend(sub.sections.into_iter().map(|s| SettingsSection { title: format!("{} · {}", sub.title, s.title), rows: s.rows }));
+        }
+    }
+    page
 }
 
 /// A slider's step: a fortieth of its range, in half decibels for the dB ranges.
@@ -408,23 +437,29 @@ impl EqRow {
         }
     }
 
-    /// ← or →.
+    /// ← or →; nothing when the value would stay as it is (held at the end of its range), so a key
+    /// held there asks nothing of the settings or the engine.
     pub fn step(&self, p: &StoredPrefs, up: bool) -> Option<Cmd> {
         let d = if up { 0.5 } else { -0.5 };
         let r = EQ_RANGES;
+        let level = |level: EqLevel, was: f32, to: f32| (to != was).then_some(Cmd::Level(level, to));
         match *self {
             EqRow::Enabled => (p.eq_enabled != up).then_some(Cmd::Setting("eq".into(), up.to_string())),
             EqRow::Mono => (p.mono != up).then_some(Cmd::Setting("mono".into(), up.to_string())),
             EqRow::Limiter => (p.limiter != up).then_some(Cmd::Setting("limiter".into(), up.to_string())),
             EqRow::AutoPreamp => (p.eq_preamp_db.is_none() != up).then_some(Cmd::Sound(SoundToolCmd::AutoPreamp(up))),
-            EqRow::Preamp => Some(Cmd::Level(EqLevel::Preamp, (p.eq_preamp_db.unwrap_or(0.0) + d).clamp(r.preamp.min, r.preamp.max))),
+            EqRow::Preamp => {
+                let was = p.eq_preamp_db.unwrap_or(0.0);
+                level(EqLevel::Preamp, was, (was + d).clamp(r.preamp.min, r.preamp.max))
+            }
             EqRow::Band(i) => {
                 let b = *p.eq_bands.get(i)?;
-                Some(Cmd::Band(i as u32, SoundBand { gain_db: (b.gain_db + d).clamp(r.gain.min, r.gain.max), ..b }))
+                let gain_db = (b.gain_db + d).clamp(r.gain.min, r.gain.max);
+                (gain_db != b.gain_db).then_some(Cmd::Band(i as u32, SoundBand { gain_db, ..b }))
             }
-            EqRow::Balance => Some(Cmd::Level(EqLevel::Balance, (p.balance + d / 10.0).clamp(r.balance.min, r.balance.max))),
-            EqRow::Crossfeed => Some(Cmd::Level(EqLevel::Crossfeed, (p.crossfeed_db.max(if up { 0.5 } else { 0.0 }) + d).clamp(r.crossfeed.min, r.crossfeed.max))),
-            EqRow::Ceiling => Some(Cmd::Level(EqLevel::Limiter, (p.limiter_threshold_db + d).clamp(r.limiter.min, r.limiter.max))),
+            EqRow::Balance => level(EqLevel::Balance, p.balance, (p.balance + d / 10.0).clamp(r.balance.min, r.balance.max)),
+            EqRow::Crossfeed => level(EqLevel::Crossfeed, p.crossfeed_db, (p.crossfeed_db.max(if up { 0.5 } else { 0.0 }) + d).clamp(r.crossfeed.min, r.crossfeed.max)),
+            EqRow::Ceiling => level(EqLevel::Limiter, p.limiter_threshold_db, (p.limiter_threshold_db + d).clamp(r.limiter.min, r.limiter.max)),
             EqRow::Presets | EqRow::AddBand | EqRow::Reset => None,
         }
     }
@@ -448,7 +483,7 @@ mod tests {
     use super::*;
 
     fn every_row(prefs: &StoredPrefs) -> Vec<(String, SettingRow)> {
-        let facts = SettingsFacts::default();
+        let facts = SettingsFacts { lacks: Capability::ALL.to_vec(), ..SettingsFacts::default() };
         let mut out = Vec::new();
         for g in settings_schema::settings_groups() {
             if let Some(p) = settings_schema::page(&g.id, prefs, &facts) {
@@ -519,7 +554,33 @@ mod tests {
         let Some(Cmd::Band(0, b)) = EqRow::Band(0).step(&prefs, true) else { panic!() };
         assert_eq!(b.gain_db, prefs.eq_bands[0].gain_db + 0.5);
         let loud = StoredPrefs { eq_bands: prefs.eq_bands.iter().map(|b| SoundBand { gain_db: 12.0, ..*b }).collect(), ..prefs.clone() };
-        let Some(Cmd::Band(_, b)) = EqRow::Band(0).step(&loud, true) else { panic!() };
-        assert_eq!(b.gain_db, 12.0, "held in the core's range");
+        assert_eq!(EqRow::Band(0).step(&loud, true), None, "held at the top of the core's range: nothing asked");
+        let Some(Cmd::Band(_, b)) = EqRow::Band(0).step(&loud, false) else { panic!() };
+        assert_eq!(b.gain_db, 11.5);
+        let flat = StoredPrefs { crossfeed_db: 0.0, ..prefs.clone() };
+        assert_eq!(EqRow::Crossfeed.step(&flat, false), None, "crossfeed off stays off");
+    }
+
+    #[test]
+    fn the_lyrics_sources_are_listed_under_the_lyrics_page_and_move_on_or_off() {
+        let prefs = StoredPrefs { lyrics_online: true, third_party_lookups: true, ..StoredPrefs::default() };
+        let mut v = SettingsView::default();
+        v.group.at = v.groups().iter().position(|g| g.id == "lyrics").unwrap();
+        v.pane = 1;
+        let page = v.page(&prefs).clone();
+        let lines = SettingsView::lines(&page);
+        assert!(lines.iter().all(|l| !matches!(l, Line::Row(SettingRow::Link { action, .. }) if action.starts_with("page:"))), "no row opens a page the terminal cannot");
+        let ranked: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| matches!(l, Line::Row(SettingRow::Ranked { .. }))).map(|(i, _)| i).collect();
+        assert_eq!(ranked.len(), 16);
+        assert!(lines.iter().any(|l| matches!(l, Line::Title(t) if t.starts_with("Lyrics sources"))));
+        // One that is off moves with the arrows, and Enter switches it where it stands.
+        let off = *ranked.iter().find(|i| matches!(lines[**i], Line::Row(SettingRow::Ranked { on: false, .. }))).unwrap();
+        let Line::Row(SettingRow::Ranked { id, name, .. }) = lines[off] else { unreachable!() };
+        let (id, name) = (id.clone(), name.clone());
+        v.row.at = off;
+        assert!(v.adjustable());
+        assert!(matches!(&v.step(&prefs, false)[..], [Cmd::Setting(n, value)] if n == "lyricsMove" && *value == format!("{id}:-1")));
+        let Some(Opened::Cmds(c)) = v.open(&prefs, true, true) else { panic!() };
+        assert!(matches!(&c[..], [Cmd::Setting(n, value)] if *n == name && value == "true"));
     }
 }

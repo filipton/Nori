@@ -1205,6 +1205,9 @@ impl Timeline {
 /// Something happened, at `wall_ms`: it goes on the timeline of the stretch under way.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_note(wall_ms: i64, note: PerfNote) {
+    if matches!(note, PerfNote::Engine { .. }) {
+        crate::invariants::engine_changed(wall_ms);
+    }
     let why = offload_reason();
     timeline().note(wall_ms, note, why);
 }
@@ -1216,9 +1219,26 @@ pub fn perf_note_settings(wall_ms: i64) {
     timeline().settings(wall_ms, nori_settings::settings::save(&p));
 }
 
+/// Something the core decided that a report should show (the lyrics chosen for a song, with their
+/// score), on the timeline of the stretch under way. Only while the perf build's watch is on: every other
+/// build keeps nothing.
+pub fn note_core(kind: &str, line: &str) {
+    if !crate::invariants::on() {
+        return;
+    }
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+    timeline().push(t, kind, line.chars().take(600).collect());
+}
+
 /// An invariant that did not hold (invariants.rs), on the timeline of the stretch under way.
 pub(crate) fn note_invariant(wall_ms: i64, line: &str) {
     timeline().push(wall_ms, "invariant", line.chars().take(600).collect());
+}
+
+/// Something the output said of itself (the equalizer screen's shallow track: how deep, and why), on the
+/// timeline of the stretch under way under `kind`.
+pub(crate) fn note_output(wall_ms: i64, kind: &str, line: &str) {
+    timeline().push(wall_ms, kind, line.chars().take(400).collect());
 }
 
 /// "21:05:12", for the invariants' own list.

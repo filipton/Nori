@@ -10,8 +10,9 @@
 //!
 //! Without `--wav` it plays on the default sound card and reads commands: `play`, `pause`, `next`,
 //! `prev`, `seek <s>`, `crossfade <s>|off`, `automix on|off`, `gain off|track|album|auto`, `pos`,
-//! `positions on|off`, `search <q>`, `queue`, `quit`. With `--wav` it renders the queue to a file, as a
-//! sound card would have played it, and exits at the end.
+//! `positions on|off`, `set <name> <value>`, `tuning on|off`, `band <i> <dB>`, `search <q>`, `queue`,
+//! `quit`. With `--wav` it renders the queue to a file, as a sound card would have played it, and
+//! exits at the end.
 
 use std::future::Future;
 use std::io::BufRead;
@@ -349,6 +350,8 @@ pub fn main(argv: Vec<String>) {
                 Event::Title(t) => println!("on air: {t}"),
                 // The terminal client has no downloads to bridge with: the error run's rules stop it.
                 Event::Bridge => println!("stopped: the network is gone"),
+                Event::Mixing(on) => println!("{}", if on { "mixing" } else { "mixed" }),
+                Event::Placed { index, ms } => println!("  {} at {} (another path)", shown.title(index), clock(ms)),
             }
         }
     });
@@ -392,7 +395,43 @@ pub fn main(argv: Vec<String>) {
             "pos" => {
                 let s = cli.engine.status();
                 let name = s.index.map_or_else(|| "nothing".into(), |i| songs.title(i));
-                println!("{:?}: {} at {}{}", s.state, name, clock(s.position_now()), if s.mixing { " (mixing)" } else { "" });
+                println!("{:?}: {} at {}{}; underruns {}", s.state, name, clock(s.position_now()), if s.mixing { " (mixing)" } else { "" }, s.underruns);
+            }
+            // Any setting by its name, as the settings screen changes it: `set eq true`.
+            "set" => {
+                let (name, value) = rest.split_once(' ').unwrap_or((rest, ""));
+                match nori_core::settings_schema::setting_set(name.to_string(), value.to_string()) {
+                    Some(c) => {
+                        cli.prefs = c.prefs;
+                        if c.effect & (APPLY_AUDIO | SOUND) != 0 {
+                            cli.engine.set_settings(settings(&cli.prefs));
+                        }
+                        println!("{name} = {value}");
+                    }
+                    None => println!("{name}: not a setting"),
+                }
+            }
+            // The equalizer screen's shallow buffer, as the full-screen client asks for it while bands move.
+            "tuning" => cli.engine.set_tuning(rest != "off"),
+            // A band moved as the equalizer screen moves it: `band <index> <dB>`.
+            "band" => {
+                let mut it = rest.split_whitespace();
+                let (Some(Ok(i)), Some(Ok(db))) = (it.next().map(str::parse::<u32>), it.next().map(str::parse::<f32>)) else {
+                    println!("band <index> <dB>");
+                    continue;
+                };
+                let p = cli.kept();
+                let Some(b) = p.eq_bands.get(i as usize).copied() else {
+                    println!("no band {i}");
+                    continue;
+                };
+                if let Some((effect, _)) = nori_core::settings_store::edit_band(i, nori_core::settings::SoundBand { gain_db: db, ..b }) {
+                    let p = cli.kept();
+                    cli.prefs = p;
+                    if effect & (APPLY_AUDIO | SOUND) != 0 {
+                        cli.engine.set_settings(settings(&cli.prefs));
+                    }
+                }
             }
             "positions" => cli.engine.position_updates((rest != "off").then(|| Duration::from_secs(1))),
             "search" => match cli.search(rest) {
@@ -417,7 +456,7 @@ pub fn main(argv: Vec<String>) {
             }
             "q" | "quit" | "exit" => break,
             "" => {}
-            _ => println!("play, pause, next, prev, seek <s>, crossfade <s>|off, automix on|off, gain off|track|album|auto, pos, positions on|off, search <q>, queue, quit"),
+            _ => println!("play, pause, next, prev, seek <s>, crossfade <s>|off, automix on|off, gain off|track|album|auto, pos, positions on|off, set <name> <value>, tuning on|off, band <i> <dB>, search <q>, queue, quit"),
         }
     }
     cli.engine.stop();

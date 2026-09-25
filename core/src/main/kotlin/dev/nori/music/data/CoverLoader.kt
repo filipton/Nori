@@ -85,7 +85,12 @@ class CoverLoader private constructor(context: Context) {
             override fun onActivityStopped(activity: Activity) {
                 // The loader may have been made after an activity started, which is then not counted.
                 started = maxOf(0, started - 1)
-                if (started == 0) CoverPixels.show(loader, false)
+                if (started == 0) {
+                    CoverPixels.show(loader, false)
+                    // Only the most recent covers are kept while nothing is drawn (`cover_rules`' hidden share):
+                    // those still on the page left are held by their views anyway; the pages scrolled past go.
+                    memory.trimToSize((memory.maxSize() * Covers.rules.hiddenShare).toInt())
+                }
             }
 
             override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}

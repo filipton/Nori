@@ -22,6 +22,15 @@ const MAX_RATIO: f64 = 2.0;
 const MAX_OUT: usize = (BLOCK as f64 / MIN_RATIO) as usize + 8;
 /// Crossfade from the stretched to the plain signal, frames.
 const XFADE: usize = 1024;
+/// Signalsmith Stretch's analysis hop in the preset used, seconds (`presetCheaper`: 40 ms).
+const SIGNALSMITH_HOP_S: f64 = 0.04;
+/// How far from 1 a ratio must be for Signalsmith Stretch to follow it cleanly, in frames the input moves per hop
+/// more or less than the output. Closer than two frames it takes the input to have moved by exactly one hop, and
+/// the phases it carries over are that many frames wrong on every hop: on noise the stretched song lost 1 to 2.6 dB
+/// (0.9992 to 0.9995: two songs a tenth of a BPM apart, and the last stretch of every ramp back to 1), which came
+/// back as a step where the stretch handed over to the plain song. A ratio that close is played at 1, or this far
+/// out; 1.25 frames a hop is 0.07 % of tempo at 44.1 kHz, 11 ms over a sixteen-second mix.
+const SIGNALSMITH_CLEAR_FRAMES: f64 = 2.5;
 pub const MAX_CHANNELS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,6 +82,8 @@ pub struct Stretcher {
     raw_left: usize,
     latency: usize,
     stage: Vec<f32>,
+    /// Signalsmith Stretch's analysis hop, frames; 0 for varispeed.
+    hop: f64,
 }
 
 #[inline]
@@ -146,6 +157,8 @@ impl Stretcher {
             Engine::Signalsmith(s) => s.input_latency() + s.output_latency(),
             Engine::Vari(_) => 0,
         };
+        // As the library works it out: `sampleRate*0.04` taken as an int.
+        let hop = if keep_pitch { (rate.max(8000) as f64 * SIGNALSMITH_HOP_S).floor() } else { 0.0 };
         Stretcher {
             ch,
             engine,
@@ -167,6 +180,7 @@ impl Stretcher {
             raw_left: 0,
             latency,
             stage: vec![0.0; MAX_OUT * ch],
+            hop,
         }
     }
 
@@ -211,13 +225,27 @@ impl Stretcher {
     /// much later. Indexing by what was emitted would stretch `output_latency` frames too many at the old rate.
     fn ratio_now(&self) -> f64 {
         let at = (self.synth + self.lead).saturating_sub(self.drop_total);
-        if at < self.hold {
+        let r = if at < self.hold {
             self.ratio0
         } else if at < self.hold + self.ramp {
             let x = (at - self.hold) as f64 / self.ramp as f64;
             self.ratio0 + (1.0 - self.ratio0) * x
         } else {
             1.0
+        };
+        self.clear(r)
+    }
+
+    /// `r`, or where it is too close to 1 for the engine (see [`SIGNALSMITH_CLEAR_FRAMES`]) the nearer of 1 and the
+    /// closest ratio it follows cleanly.
+    fn clear(&self, r: f64) -> f64 {
+        let off = (r - 1.0) * self.hop;
+        if off == 0.0 || off.abs() >= SIGNALSMITH_CLEAR_FRAMES {
+            r
+        } else if off.abs() < SIGNALSMITH_CLEAR_FRAMES / 2.0 {
+            1.0
+        } else {
+            1.0 + off.signum() * SIGNALSMITH_CLEAR_FRAMES / self.hop
         }
     }
 
@@ -440,6 +468,60 @@ mod tests {
         out
     }
 
+    /// Noise through a stretch of `ratio` held for `hold` s and ramped back over `ramp` s, then handed over: its
+    /// level every 100 ms against the noise's own, dB.
+    fn noise_levels(keep: bool, ratio: f64, hold: f64, ramp: f64) -> Vec<f64> {
+        let rate = 44100;
+        let mut s = Stretcher::new(rate, 2, keep);
+        s.configure(ratio, (hold * rate as f64) as u64, (ramp * rate as f64) as u64);
+        let mut r = crate::automix::synth::Rng(5);
+        let x: Vec<f32> = (0..((hold + ramp + 3.0) * rate as f64) as usize * 2).map(|_| (r.next() * 0.3) as f32).collect();
+        let mut out = Vec::new();
+        let mut buf = vec![0f32; 2048 * 2];
+        let mut pos = 0;
+        while pos < x.len() {
+            let end = (pos + 512 * 2).min(x.len());
+            if s.bypassed() {
+                out.extend_from_slice(&x[pos..end]);
+                pos = end;
+                continue;
+            }
+            let (u, m) = s.process(&x[pos..end], &mut buf);
+            out.extend_from_slice(&buf[..m * 2]);
+            pos += u * 2;
+            if s.bypassed() {
+                loop {
+                    let m = s.drain(&mut buf);
+                    out.extend_from_slice(&buf[..m * 2]);
+                    if m * 2 < buf.len() {
+                        break;
+                    }
+                }
+            }
+        }
+        let power = |v: &[f32]| v.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / v.len() as f64;
+        let own = power(&x);
+        out.chunks(4410 * 2).filter(|c| c.len() == 4410 * 2).map(|c| 10.0 * (power(c) / own).log10()).collect()
+    }
+
+    #[test]
+    fn a_stretch_close_to_one_keeps_the_level() {
+        // Two songs a tenth of a BPM apart, and every ramp's last stretch back to 1: Signalsmith Stretch lost up
+        // to 2.6 dB there, back as a step where the stretch handed over.
+        for ratio in [0.9995, 1.0005, 0.9992, 0.9998, 0.9990, 0.9986, 0.976] {
+            let l = noise_levels(true, ratio, 6.0, 0.0);
+            let held = &l[5..55];
+            let (lo, mean) = (held.iter().cloned().fold(f64::MAX, f64::min), held.iter().sum::<f64>() / held.len() as f64);
+            assert!(mean > -0.35 && lo > -0.6, "ratio {ratio}: {mean:.2} dB on average, down to {lo:.2}");
+        }
+        // Ramped back from a real stretch: no dip on the way (it was 3 dB for a tenth of a second, 1.2 dB over
+        // 100 ms), no step at the hand-over. What is left is the engine settling at 1, under 1 dB for 100 ms.
+        let l = noise_levels(true, 0.976, 4.0, 4.0);
+        let step = l.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+        let lo = l.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(step < 0.8 && lo > -0.85, "a ramp back to 1 moves {step:.2} dB in 100 ms, down to {lo:.2} dB: {l:.2?}");
+    }
+
     #[test]
     fn direct_mode_is_a_copy() {
         for keep in [true, false] {
@@ -519,7 +601,8 @@ mod tests {
     /// Single-sample impulses: at a constant ratio every one comes out within a few frames of input / ratio.
     #[test]
     fn the_timeline_is_sample_accurate() {
-        for (keep, ratio) in [(true, 1.0001f64), (true, 1.03), (true, 1.06), (true, 0.95), (false, 1.02), (false, 0.98)] {
+        // 1.0015: the closest to 1 Signalsmith Stretch is let run at (see `SIGNALSMITH_CLEAR_FRAMES`).
+        for (keep, ratio) in [(true, 1.0015f64), (true, 1.03), (true, 1.06), (true, 0.95), (false, 1.02), (false, 0.98)] {
             let mut s = Stretcher::new(44100, 2, keep);
             s.configure(ratio, 1 << 40, 0);
             let every = 11025;

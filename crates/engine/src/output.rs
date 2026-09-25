@@ -91,10 +91,25 @@ pub trait AudioOutput: Send {
     }
     /// Whether the device should hold no more than a fraction of a second of music from now on (the
     /// equalizer is being tuned, and a band moved is to be heard at once) or its deep buffer again. Told
-    /// just before the flush that comes with it ([`AudioOutput::flush`]), and before the device is
-    /// started; the ring is kept as shallow then ([`SHALLOW_US`]). A device whose buffer is a few
-    /// milliseconds anyway has nothing to do.
+    /// just before the flush that comes with it ([`AudioOutput::flush`]), or with none for a device that
+    /// [`AudioOutput::resizes`], and before the device is started; the ring is kept as shallow then
+    /// ([`SHALLOW_US`]). A device whose buffer is a few milliseconds anyway has nothing to do.
     fn shallow(&mut self, _on: bool) {}
+    /// Whether [`AudioOutput::shallow`] takes effect at once over the same device, which keeps what it
+    /// holds and plays on (a phone's AudioTrack, whose buffer size moves inside the one it was opened
+    /// with). The engine then changes its ring's depth in place too, with no flush and no dip, so the
+    /// equalizer screen opening or closing is not heard; otherwise both are made again behind a dip.
+    fn resizes(&self) -> bool {
+        false
+    }
+    /// How deep a device kept shallow found it must be for where it plays, once it knows: a Bluetooth
+    /// output has a latency and pulls of its own far beyond a phone speaker's, and a track kept as shallow
+    /// as for the speaker runs dry there. The engine keeps its ring at least [`ShallowDepth::ring_us`]
+    /// while tuned, and counts [`ShallowDepth::device_us`] as the shallow device's when it tells a band
+    /// moved that is heard as it is from one made again. None: [`SHALLOW_US`] and the device's own say.
+    fn shallow_depth(&self) -> Option<ShallowDepth> {
+        None
+    }
     /// The device stopped taking music and could not be opened again (a sound server that died): asked
     /// by the engine whenever it looks, and woken for with [`Feed::wake_engine`]. The engine then stops,
     /// says so, and lets the output go, so the next play opens a new one where the music was.
@@ -112,6 +127,16 @@ pub const WAKE_LOW_US: i64 = LOW_US - 250_000;
 /// with a device kept as shallow ([`AudioOutput::shallow`]), a band moved is heard within a quarter of a
 /// second. The engine is woken to top it up when half of it is left.
 pub const SHALLOW_US: i64 = 80_000;
+/// What a device kept shallow needs ([`AudioOutput::shallow_depth`]), µs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShallowDepth {
+    /// The most music the device holds while shallow, counted as its clock counts it (the output's own
+    /// latency in it).
+    pub device_us: i64,
+    /// The ring that keeps it fed: what one of the device's top-ups takes from it.
+    pub ring_us: i64,
+}
+
 /// The ring's room beyond the sink's deep buffer: the resampler's rounding and a device's first pull.
 const SLACK_US: i64 = 2_000_000;
 
@@ -342,6 +367,11 @@ pub(crate) struct RingTrack {
 }
 
 impl RingTrack {
+    /// What the device found it needs while shallow ([`AudioOutput::shallow_depth`]).
+    pub(crate) fn shallow_depth(&self) -> Option<ShallowDepth> {
+        self.output.shallow_depth()
+    }
+
     pub(crate) fn new(output: Box<dyn AudioOutput>) -> RingTrack {
         RingTrack {
             output,
@@ -622,6 +652,10 @@ impl Track for RingTrack {
 
     fn source_bits(&mut self, bits: u32) {
         self.bits = bits;
+    }
+
+    fn resizes(&self) -> bool {
+        self.output.resizes()
     }
 
     fn depth(&mut self, capacity_us: i64) {

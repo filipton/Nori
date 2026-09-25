@@ -397,9 +397,7 @@ mod tests {
     #[test]
     fn a_slider_edits_the_kept_settings_in_place() {
         let _turn = OPEN.lock();
-        let dir = std::env::temp_dir().join(format!("nori-settings-edit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("settings-edit");
         settings_open(dir.join("nori.db").display().to_string()).unwrap();
         let band = current().unwrap().eq_bands[2];
         let (effect, kept) = edit_band(2, SoundBand { gain_db: 99.0, ..band }).unwrap();
@@ -414,15 +412,12 @@ mod tests {
         assert_eq!(edit_level(EqLevel::Balance, -0.6), Some((SOUND, -0.6)), "a drag step");
         assert_eq!(edit_level(EqLevel::ReplayGainPreamp, 20.0), Some((APPLY_GAIN, 6.0)), "the overall level, held in range");
         assert_eq!(current().unwrap().preamp_db, 6.0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_change_by_name_is_kept_where_it_is_made_and_answered_once() {
         let _turn = OPEN.lock();
-        let dir = std::env::temp_dir().join(format!("nori-settings-by-name-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("settings-by-name");
         settings_open(dir.join("nori.db").display().to_string()).unwrap();
         let c = edit_by_name("limiter", "true").unwrap();
         assert!(c.prefs.limiter && current().unwrap().limiter, "kept, with nothing put back");
@@ -453,15 +448,12 @@ mod tests {
         assert!(matches!(settings_sound_tool(SoundTool::Import { text: "nothing here".into() }), Err(SoundError::NoFilters(_))));
         assert_eq!(current().unwrap().eq_bands.len(), n - 1, "a failed import changes nothing");
         assert_eq!(settings_sound_tool(SoundTool::RemoveBand { index: 999 }).unwrap(), None, "no band there: nothing changed");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_defaults_first_then_the_database_is_the_settings() {
         let _turn = OPEN.lock();
-        let dir = std::env::temp_dir().join(format!("nori-settings-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("settings");
         let path = dir.join("nori.db").display().to_string();
         assert_eq!(settings_open(path.clone()).unwrap(), StoredPrefs::default());
         let mut p = current().unwrap();
@@ -469,6 +461,5 @@ mod tests {
         // Written straight away here rather than through the background thread.
         write(&mut KEPT.read().as_ref().unwrap().db.lock(), &p).unwrap();
         assert_eq!(settings_open(path).unwrap().fade_ms, 400, "what was saved comes back");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

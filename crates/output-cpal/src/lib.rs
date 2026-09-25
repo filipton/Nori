@@ -11,7 +11,7 @@
 //! WASAPI; ALSA cannot tell), with the kind cpal describes it as, so each device can have its own sound.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Device, DeviceType, ErrorKind, InterfaceType, SampleFormat, Stream, StreamConfig};
@@ -22,7 +22,17 @@ pub struct CpalOutput {
     wanted: Option<String>,
     device: Option<Device>,
     config: Option<(StreamConfig, SampleFormat)>,
+    /// The periods the device takes, in frames, when it says (`cpal::SupportedBufferSize::Range`).
+    periods: Option<(u32, u32)>,
+    /// The engine's feed, shared with the stream's callback: kept here too, so the stream can be built
+    /// again with another period ([`AudioOutput::shallow`]). Only the one callback running ever locks it.
+    feed: Option<Arc<Mutex<Feed>>>,
     stream: Option<Stream>,
+    /// Whether the engine wants the device playing (the stream is started) or paused.
+    playing: bool,
+    /// The equalizer is being tuned: the ring holds only the engine's shallow 80 ms, so the device is
+    /// asked for a period well inside that ([`SHALLOW_PERIOD_MS`]).
+    shallow: bool,
     /// How far ahead of the ear the device's last pull was, µs, as the device reported it.
     latency_us: Arc<AtomicU64>,
     /// Told which device the music goes to.
@@ -72,7 +82,19 @@ fn described(device: &Device) -> Option<nori_engine::Device> {
 impl CpalOutput {
     /// The system's default output device.
     pub fn new() -> CpalOutput {
-        CpalOutput { wanted: None, device: None, config: None, stream: None, latency_us: Arc::new(AtomicU64::new(0)), watch: None, volume: Volume::default() }
+        CpalOutput {
+            wanted: None,
+            device: None,
+            config: None,
+            periods: None,
+            feed: None,
+            stream: None,
+            playing: false,
+            shallow: false,
+            latency_us: Arc::new(AtomicU64::new(0)),
+            watch: None,
+            volume: Volume::default(),
+        }
     }
 
     /// The handle the listener's volume is set through, for as long as the output lives.
@@ -122,6 +144,95 @@ fn rank(f: SampleFormat) -> Option<u8> {
 /// The period asked of the device, ms: long enough that the sound path sleeps between callbacks, short
 /// enough that a pause or a seek is heard at once.
 const PERIOD_MS: u32 = 100;
+/// The period while the equalizer is tuned. The ring then holds 80 ms and the engine tops it up when
+/// half is left: a 100 ms period took more than the ring held at every pull, and every pull came up
+/// short (about ten gaps a second). A tenth of the ring a pull leaves the engine room to wake.
+const SHALLOW_PERIOD_MS: u32 = 10;
+
+/// The device's period for `rate`, as close to `ms` as the device allows.
+fn buffer_size(rate: u32, ms: u32, periods: Option<(u32, u32)>) -> BufferSize {
+    match periods {
+        Some((min, max)) => BufferSize::Fixed((rate * ms / 1000).clamp(min, max)),
+        None => BufferSize::Default,
+    }
+}
+
+impl CpalOutput {
+    fn period_ms(&self) -> u32 {
+        if self.shallow {
+            SHALLOW_PERIOD_MS
+        } else {
+            PERIOD_MS
+        }
+    }
+
+    /// The stream, built on the device with the config and the feed as they are now; paused.
+    fn build(&self) -> Result<Stream, String> {
+        let (Some(device), Some((config, format)), Some(feed)) = (&self.device, &self.config, &self.feed) else { return Err("not open".into()) };
+        let latency = self.latency_us.clone();
+        let (volume, volume_i16) = (self.volume.clone(), self.volume.clone());
+        let (feed, feed_i16) = (feed.clone(), feed.clone());
+        let note = move |info: &cpal::OutputCallbackInfo| {
+            let t = info.timestamp();
+            latency.store(t.playback.saturating_duration_since(t.callback).as_micros() as u64, Ordering::Relaxed);
+        };
+        // The system moved the stream to another default device: the engine hears which.
+        let watch = self.watch.clone().filter(|_| self.wanted.is_none());
+        let err = move |e: cpal::Error| {
+            if e.kind() == ErrorKind::DeviceChanged {
+                if let (Some(w), Some(d)) = (&watch, cpal::default_host().default_output_device().as_ref().and_then(described)) {
+                    w(d);
+                }
+                return;
+            }
+            eprintln!("nori: the output stream failed: {e}");
+        };
+        // The feed's lock is taken only by the stream playing: another is only ever built paused, and
+        // started once the one before it stopped. It never waits; were it held, the buffer is silence.
+        let stream = match format {
+            SampleFormat::F32 => device.build_output_stream(
+                *config,
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                    match feed.try_lock() {
+                        Ok(mut f) => {
+                            f.pull(data);
+                        }
+                        Err(_) => data.fill(0.0),
+                    }
+                    let v = volume.get();
+                    if v != 1.0 {
+                        data.iter_mut().for_each(|s| *s *= v);
+                    }
+                    note(info);
+                },
+                err,
+                None,
+            ),
+            _ => device.build_output_stream(
+                *config,
+                move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
+                    match feed_i16.try_lock() {
+                        Ok(mut f) => {
+                            f.pull_i16(data);
+                        }
+                        Err(_) => data.fill(0),
+                    }
+                    let v = volume_i16.get();
+                    if v != 1.0 {
+                        data.iter_mut().for_each(|s| *s = (*s as f32 * v) as i16);
+                    }
+                    note(info);
+                },
+                err,
+                None,
+            ),
+        }
+        .map_err(|e| e.to_string())?;
+        // cpal hands streams over paused; the engine resumes it when music is due.
+        let _ = stream.pause();
+        Ok(stream)
+    }
+}
 
 impl AudioOutput for CpalOutput {
     fn open(&mut self, want: OutputFormat) -> Result<OutputFormat, String> {
@@ -143,11 +254,11 @@ impl AudioOutput for CpalOutput {
         }
         // A period of about [`PERIOD_MS`] where the device allows one: the sound server's default is a few ms, so
         // its thread and the callback wake hundreds of times a second for music the engine made seconds ago.
-        let frames = chosen.sample_rate() * PERIOD_MS / 1000;
-        let buffer_size = match *chosen.buffer_size() {
-            cpal::SupportedBufferSize::Range { min, max } if max >= min => BufferSize::Fixed(frames.clamp(min, max)),
-            _ => BufferSize::Default,
+        self.periods = match *chosen.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } if max >= min => Some((min, max)),
+            _ => None,
         };
+        let buffer_size = buffer_size(chosen.sample_rate(), self.period_ms(), self.periods);
         let config = StreamConfig { channels: chosen.channels(), sample_rate: chosen.sample_rate(), buffer_size };
         let got = OutputFormat { rate: config.sample_rate, channels: config.channels as usize, bits: 0 };
         if let (Some(w), Some(d)) = (&self.watch, described(&device)) {
@@ -158,67 +269,26 @@ impl AudioOutput for CpalOutput {
         Ok(got)
     }
 
-    fn start(&mut self, mut feed: Feed) -> Result<(), String> {
-        let (Some(device), Some((config, format))) = (&self.device, &self.config) else { return Err("not open".into()) };
-        let latency = self.latency_us.clone();
-        let (volume, volume_i16) = (self.volume.clone(), self.volume.clone());
-        let note = move |info: &cpal::OutputCallbackInfo| {
-            let t = info.timestamp();
-            latency.store(t.playback.saturating_duration_since(t.callback).as_micros() as u64, Ordering::Relaxed);
-        };
-        // The system moved the stream to another default device: the engine hears which.
-        let watch = self.watch.clone().filter(|_| self.wanted.is_none());
-        let err = move |e: cpal::Error| {
-            if e.kind() == ErrorKind::DeviceChanged {
-                if let (Some(w), Some(d)) = (&watch, cpal::default_host().default_output_device().as_ref().and_then(described)) {
-                    w(d);
-                }
-                return;
-            }
-            eprintln!("nori: the output stream failed: {e}");
-        };
-        let stream = match format {
-            SampleFormat::F32 => device.build_output_stream(
-                config.clone(),
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    feed.pull(data);
-                    let v = volume.get();
-                    if v != 1.0 {
-                        data.iter_mut().for_each(|s| *s *= v);
-                    }
-                    note(info);
-                },
-                err,
-                None,
-            ),
-            _ => device.build_output_stream(
-                config.clone(),
-                move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                    feed.pull_i16(data);
-                    let v = volume_i16.get();
-                    if v != 1.0 {
-                        data.iter_mut().for_each(|s| *s = (*s as f32 * v) as i16);
-                    }
-                    note(info);
-                },
-                err,
-                None,
-            ),
+    fn start(&mut self, feed: Feed) -> Result<(), String> {
+        self.stream = None;
+        self.feed = Some(Arc::new(Mutex::new(feed)));
+        let stream = self.build()?;
+        if self.playing {
+            let _ = stream.play();
         }
-        .map_err(|e| e.to_string())?;
-        // cpal hands streams over paused; the engine resumes it when music is due.
-        let _ = stream.pause();
         self.stream = Some(stream);
         Ok(())
     }
 
     fn pause(&mut self) {
+        self.playing = false;
         if let Some(s) = &self.stream {
             let _ = s.pause();
         }
     }
 
     fn resume(&mut self) {
+        self.playing = true;
         if let Some(s) = &self.stream {
             if let Err(e) = s.play() {
                 eprintln!("nori: the output would not start: {e}");
@@ -240,8 +310,38 @@ impl AudioOutput for CpalOutput {
         device.supported_output_configs().is_ok_and(|mut c| c.any(|r| r.sample_format() == SampleFormat::F32))
     }
 
+    /// The equalizer is tuned (or no longer): the stream is built again with the period that fits the
+    /// ring. The engine says so just before it drops what the ring holds, behind its dip, so the short
+    /// stop of the old stream is not heard as more than that dip.
+    fn shallow(&mut self, on: bool) {
+        if on == self.shallow {
+            return;
+        }
+        self.shallow = on;
+        let period = self.period_ms();
+        let Some((config, _)) = &mut self.config else { return };
+        config.buffer_size = buffer_size(config.sample_rate, period, self.periods);
+        if self.stream.is_none() {
+            return;
+        }
+        // The old stream goes first (dropped, it lets go of its device and stops pulling), then the new
+        // one is opened; the engine drops what the ring holds right after this, so the music heard next is
+        // made again anyway.
+        self.stream = None;
+        match self.build() {
+            Ok(new) => {
+                if self.playing {
+                    let _ = new.play();
+                }
+                self.stream = Some(new);
+            }
+            Err(e) => eprintln!("nori: the output would not open with a period of {period} ms: {e}"),
+        }
+    }
+
     fn close(&mut self) {
         self.stream = None;
+        self.feed = None;
         self.device = None;
     }
 }

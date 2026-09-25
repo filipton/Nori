@@ -99,16 +99,6 @@ fn precaching() {
 }
 
 #[test]
-fn the_row_the_ear_is_on() {
-    for r in rows("shown") {
-        let heard = maybe::<i64>(r[0]).and_then(|h| usize::try_from(h).ok());
-        let (before, now) = (list(r[2]), list(r[3]));
-        let playing = (r[4] != "-").then_some(r[4]);
-        assert_eq!(heard::shown_index(heard, flag(r[1]), &before, &now, playing), maybe(r[5]), "{r:?}");
-    }
-}
-
-#[test]
 fn the_heard_word_reads_back() {
     for at in [
         heard::HeardAt { index: None, changed: false, ms: 0 },

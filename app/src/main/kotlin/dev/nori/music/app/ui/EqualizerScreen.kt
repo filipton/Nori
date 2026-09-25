@@ -77,13 +77,29 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     // Low-latency mode costs a rebuild of the audio output, which is a small drop in the sound. Opening
     // this screen to look is not a reason to pay it - the first change to a band is. That used to happen
     // on entry, and on a DAC it was a noticeable break in the music just for opening the page.
-    val tuned = remember { mutableStateOf(false) }
+    //
+    // And only while this screen is in sight. The page stays composed under the player when the player is
+    // opened over it, so "this screen is composed" held the shallow buffer - with its wakeups and a burst
+    // of CPU that can starve it - for as long as the player was open, and gave it up with a gap in the
+    // sound on some later close. Covered, left or with the app in the background, the deep buffer comes
+    // back, and a new change is needed before it is traded again. The service owns the switch (it passes
+    // on only real changes, and drops it when the app lets go of it); this screen only says what it wants.
+    val sheet = LocalPlayerSheet.current
+    var resumed by remember { mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    val covered by remember(sheet) { androidx.compose.runtime.derivedStateOf { sheet.isOpen || sheet.progress.value > 0f } }
+    val inSight = resumed && !covered
+    val touched = remember { mutableStateOf(false) }
     val settled = remember { mutableStateOf(false) }
     LaunchedEffect(p.eqBands, p.eqPreampDb, p.crossfeedDb, p.balance) {
         if (!settled.value) { settled.value = true; return@LaunchedEffect }
-        if (!tuned.value && p.eqEnabled) { tuned.value = true; vm.setTuning(true) }
+        if (inSight && p.eqEnabled) touched.value = true
     }
-    DisposableEffect(Unit) { onDispose { if (tuned.value) vm.setTuning(false) } }
+    LaunchedEffect(inSight) { if (!inSight) touched.value = false }
+    val want = inSight && touched.value && p.eqEnabled
+    val sent = remember { booleanArrayOf(false) }
+    LaunchedEffect(want) { if (want != sent[0]) { sent[0] = want; vm.setTuning(want) } }
+    DisposableEffect(Unit) { onDispose { if (sent[0]) { sent[0] = false; vm.setTuning(false) } } }
 
     if (importing) ImportDialog(vm) { importing = false }
     p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }

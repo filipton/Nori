@@ -81,7 +81,7 @@ go, and the stretch says how many.
 | offload | entered, or left and why (the player's own reason, or the setting that keeps it off) |
 | underruns | the output's underrun count grew, with the reading before, between which and this one they first appeared |
 | error | a song or the output failed, in the player's words |
-| tuning | the equalizer screen's tuning mode (a shallow buffer) on or off |
+| tuning | the equalizer screen's tuning mode (a shallow buffer) on or off; on the Rust engine also the size the track took for the output it plays on and why (`shallow 550 ms for Bluetooth: its latency is 200 ms, its pulls are 200 ms`), and any growth after it ran dry |
 
 A buffer much smaller than asked, or power saving asked and not given, is what makes a writer wake more
 often than the design says: the Rust player's writer then tops the track up once per half of what it
@@ -123,6 +123,127 @@ While the app is on screen, Android hands every frame's timings to that thread
 screen. That is a small cost per frame drawn, in the screen-on stretches only.
 
 The benchmark buttons are real work: their cost lands in the stretch under way.
+
+## Where the memory goes
+
+The phone reports (a Galaxy S22, motion artwork on) show 210-240 MB PSS with the screen off and
+280-440 MB with the player open. On the emulator, with the screen off, Nori reads 197 MB against 114-138 MB
+for the other clients. What holds it, read from the code, and what was done:
+
+| What | Size | Engine | Done |
+|---|---|---|---|
+| The moving cover's ExoPlayer: media3's default `DefaultLoadControl`, 50 s ahead, looping, up to 1080 px HLS in the Java heap | tens of MB with the player open (50 s at 5-10 Mbit/s is 30-60 MB) | both | `motion_load_control`: 4-8 s, at most 4 MB. The loop comes from the disk cache, so this costs no network |
+| Decoded covers (`CoverLoader`, hardware Bitmaps, counted under Graphics) | up to 15 % of the memory class: 29 MB on the emulator (192 MB), 38 MB on a 256 MB phone | both | a quarter stays while no screen is in sight (`cover_rules().hidden_share`). Covers still on the page are held by their views anyway |
+| Page colours (`CoverPalette`): 128 entries, each with a 128 px ARGB wash | up to 8 MB (native heap) | both | an LRU capped at 2 MB, about 30 washes |
+| The music's buffer (`load_control`): a quarter of the memory class, at most 48 MB, the whole song in one burst | the song ahead (ExoPlayer drops what it has played); on the Rust engine the whole song, played part included | both | kept: one network wake per song is the battery design. The Rust loader could drop what it has played (it needs chunked storage, since `Vec::drain` keeps the allocation), but a seek back then needs the network |
+| The Rust engine's ring: 12 s of f32 | 4.2 MB at 44.1 kHz stereo, 9.2 MB at 96 kHz | Rust | kept: storing i16 for a 16-bit device would halve it, but the fades run on the samples as they are pulled |
+| The AudioTrack: 11.5 s | 2 MB i16, 4 MB float (shared memory) | Rust | kept (the burst design) |
+| SQLite: two connections at the default 2 MB page cache, no mmap | at most 4 MB, filled only by reads | both | kept |
+| Lyrics timing (4 sets), the covers' native memory cache (0 on Android), the loader's threads (rest after 20 s) | < 1 MB | both | nothing to do |
+| Thread stacks | virtual; only the pages a thread touches count | both | nothing to gain |
+| libnorimusic.so (8.0 MB arm64: fat LTO, one codegen unit, stripped, opt-level 3) | file-backed; only the touched pages count, and they are reclaimable | both | kept: `opt-level = "s"` would slow the decoders and the DSP, and `panic = "abort"` would end the app on a panic uniffi now turns into an exception |
+
+`tools/meminfo.sh <label>` prints one line of `dumpsys meminfo` (total PSS, Java heap, native heap, code,
+stack, graphics, other), plus the PSS of libnorimusic.so and the thread count. Use it for the
+before/after table in each state (cold start, library, a scrolled album grid, player open, lyrics, screen
+off) on both engines (`tools/app.sh engine rust`). That table is still to be measured.
+
+## What the open player costs
+
+The phone reports (a Galaxy S22 at 120 Hz, Android 16) had the open player at 60-86 % of a core, 400-500
+wakeups/s and 190-310 mAh/h, and "other page" at 20 % and 241 wakeups/s. What drew, found on the emulator
+with `tools/cost.sh` (below), the test bridge's `states` and simpleperf:
+
+- **Word-synced lyrics** redrew on every display frame while a word moved (the core asks for one frame,
+  meaning a sixtieth of a second, and the loop counted display frames: 120 a second on the S22), and every
+  one of those frames also re-ran the composition: `active` and `glideMs` were `derivedStateOf` over the
+  frame state, so the composition had to check them each frame, found nothing, and cost the main thread
+  a recomposition pass per frame anyway. The fill also asked the text layout for the same horizontal
+  positions on every frame. Now the loop waits for the time the core asked for, not the number of display
+  frames (60 redraws a second at most, the same on a 60 Hz screen); the line lit and its glide are states
+  written only when they change; the positions are worked out once per laid-out line.
+- **The playing bars** beside the song on an album or playlist page ticked on every display frame for as
+  long as the page was open: that is the "other page" cost. They now step about twenty times a second.
+- **The moving cover** plays at its own 24 frames a second (Apple's HLS says `FRAME-RATE=24.000`); nothing
+  else redraws with it. Its playback thread no longer wakes every 10 ms (`experimentalSetDynamicScheduling`).
+  With the music paused it stops on the frame it shows, and after 5 s lets its decoder go (the frame stays;
+  playing again carries on from it): a cover looping over a paused song redrew the screen 24 times a second.
+- **The equalizer's shallow buffer** stayed on for as long as the equalizer page stayed composed, and the
+  page stays composed under the player: opening the player after moving a band kept a 160 ms AudioTrack
+  (and the CPU that feeds it) for the whole time the player was open, and each later switch back reopened
+  the output, a gap in the sound. That is the user's stutter while opening and closing the player
+  (perf11, 10:10-10:11). Now the page asks for it only while it is in sight (resumed and not covered by
+  the player) and after a band has moved, and the service owns the switch: it passes on only real
+  changes, and drops it when the app's controller goes.
+- Checked and left as they were: the static sleeve, the soft sleeve's blur and the page wash (static, 6 fps
+  from the seek bar alone), line-synced lyrics (a glide when a line changes, nothing between), the title
+  marquee (two passes, then it rests), MIXING (a fade in and out, nothing between) and the mini player
+  (nothing ticks: 0 frames on Home).
+
+Emulator (x86_64, 60 Hz, debug build: interpreted, so the main thread's share is higher than a release
+build's), 30 s per state, before and after:
+
+| State | CPU % before | after | wakeups/s before | after | fps before | after | GCs/min before | after |
+|---|---|---|---|---|---|---|---|---|
+| Player open, static cover | 7.2 | 4.0 | 91 | 249 (a precache running) | 6.2 | 5.6 | 0 | 4 |
+| Player open, moving cover, music playing | 33-41 | 41-46 | 1026-1073 | 1020-1069 | 31-33 | 28-33 | 2-4 | 0 |
+| Player open, moving cover, music paused | 6.5 | 0 | 123 | 0 | 0 | 0 | 0 | 0 |
+| Lyrics, line-synced | 20.9 | 7.6 | 296 | 164 | 15 | 15 | 0 | 0 |
+| Lyrics, word-synced | 52.0 | 38-41 | 681 | 596-624 | 64 | 61-63 | 2 | 0-2 |
+| Album page, playing row (other page) | 19.2 | 12.6 | 366 | 260 | 36 | 22.5 | 2 | 0 |
+| Home, mini player | 0.4 | - | 0 | - | 0 | - | 0 | - |
+
+The emulator's display is 60 Hz, so the lyrics' biggest win is not in the table: on a 120 Hz phone the
+word-synced page drew twice as many frames as here, and now draws the same number. The moving cover's cost
+on the emulator is its software video path (the goldfish decoder's HwBinder and MediaCodec threads) and
+varies by ±10 % from run to run; the phone decodes in hardware. With the player toggled open and shut ten
+times on each engine, with AutoMix and the equalizer on (and with the shallow buffer forced on), the
+emulator counted no underruns: the gap on the phone was the output reopened, not a starved track.
+
+The shallow buffer's switches on the Rust engine are now in place, both ways: the AudioTrack is opened
+deep once, in power saving mode, and the equalizer screen only moves the part of it that may be filled
+(`AudioTrack.setBufferSizeInFrames`, crates/android track.rs `Writer::resize`); the engine changes its ring's
+depth with it (`AudioOutput::resizes`), with no flush, no dip and nothing made again. The trade-off:
+- **Made shallow**, the track and the ring still hold the seconds made before (up to the 11.5 s buffer and a
+  10 s burst). They play out as they are; a band moved before they have is made again behind the 30 ms dip
+  every change of the sound takes outside the screen (`Worker::apply`, `TUNED_HELD_US`), and every band
+  moved after it is heard as it is. Opening the screen and closing it without moving anything is silent.
+- **Made deep**, the track is filled up from the engine's next burst: the same buffer, mode and ten-second
+  wakes as before the screen opened, so the battery is what it was.
+- **Latency while tuned**: the track stays on the output power saving chose when it was built (the deep
+  buffer mixer, on a phone that has one; the emulator has only the primary output). A smaller size does not
+  move it or change that output's periods, so its own latency (tens of ms on most phones) is added to the
+  ring's 40-80 ms and the track's 80-160 ms, where the old shallow track went to the normal mixer. The
+  sound server reads no more per period than before; the writer only tops the track up more often. The
+  start threshold is kept inside the size (Android 12 on), or a flush while shallow would wait for more
+  than the track may take.
+- **How shallow is the output's to say.** The first cut shrank the track to 160 ms wherever it played, and
+  on a Galaxy S22 with Sony WH-1000XM6 headphones it ran dry about every 300 ms (62 underruns in a few
+  minutes, against one on the speaker). The platform lets `setBufferSizeInFrames` go down to 16 frames
+  whatever the output needs, where a track opened anew is given at least `getMinBufferSize` for it; and the
+  writer's clock counts music from the play head the device presents, so a Bluetooth link's own couple of
+  hundred milliseconds counted as the track's: a 160 ms track on it held nothing. The shallow size is now
+  topped up while it still holds the output's latency (`getLatency` less the buffer), the least a new track
+  there is given and a wake's lateness, with a quarter of that again on top (`shallow_marks`; the speaker
+  keeps its 80/160 ms). While shallow the writer also watches the latency it sees (play head against what
+  was presented) and `getUnderrunCount`, and grows for either, never shrinking again on that output. The
+  engine keeps its ring as deep as one of those top-ups (`AudioOutput::shallow_depth`). On Bluetooth a band
+  moved is heard about half a second later, most of it the headphones' own latency.
+- **The change that turns tuning on** reaches the engine a moment before the tuning does (the settings go
+  straight to the core; the tuning goes through the screen, the session and the service), so it was made
+  again into the deep buffer, and only the next change landed in the shallow one: which of the two a profile
+  picked on the device list met was down to timing. Tuning that comes within a second of the music made
+  again now makes it again once more, into the shallow buffer (`TUNED_AFTER_RESOUND_MS`).
+- Tested on the simulated track (crates/android `the_equalizer_screen_opening_and_closing_is_not_heard_either_way`:
+  six rounds each way over a jittery mixer and a late writer, every frame heard in order, no silence over
+  5 ms, never reopened or flushed) and in the engine (crates/engine `over_a_device_that_resizes_...`: the
+  music sample for sample what an untouched player played). Over a Bluetooth-like output (bursts of 100-200 ms
+  taken at once, 200 ms of latency) the track never runs dry when the output says what it is
+  (`tuned_over_bluetooth_...`), and stops within a few underruns when it says nothing
+  (`tuned_over_an_output_that_says_nothing_...`).
+
+`tools/cost.sh LABEL [SECONDS]` measures a state as it is on screen: CPU of a core and wakeups from
+`/proc/<pid>/task/*` (context switches), frames from `dumpsys gfxinfo`, GCs from the test bridge's `gc`.
 
 ## A fair battery test
 

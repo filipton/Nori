@@ -40,11 +40,12 @@ pub struct Options {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: nori-cli [--data DIR] [--device NAME] [--no-images] [--no-mouse] [--no-mpris] [--offline]\n\
+        "usage: nori-cli [--data DIR] [--device NAME] [--no-images] [--no-mouse] [--no-mpris] [--offline] [--debug]\n\
          \x20               [--url URL --user USER --password PASSWORD]\n\
          \x20      nori-cli --script ... (the non-interactive player; nori-cli --script --help)\n\
          \x20      nori-cli --devices\n\
-         The url, user and password may also come from NORI_URL, NORI_USER and NORI_PASSWORD."
+         The url, user and password may also come from NORI_URL, NORI_USER and NORI_PASSWORD.\n\
+         --debug (or NORI_DEBUG=1) writes every event, frame and picture sent to nori.log in the data directory."
     );
     std::process::exit(2)
 }
@@ -71,6 +72,9 @@ fn main() {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
     let mut o = Options { data: data_dir(), device: None, images: None, mouse: None, login: None, offline: false, mpris: true };
     let (mut url, mut user, mut password) = (env("NORI_URL"), env("NORI_USER"), env("NORI_PASSWORD"));
+    if env("NORI_DEBUG").is_some_and(|v| v != "0") {
+        term::set_debug(true);
+    }
     let mut it = args.into_iter();
     while let Some(k) = it.next() {
         let mut v = || it.next().unwrap_or_else(|| usage());
@@ -83,6 +87,7 @@ fn main() {
             "--mouse" => o.mouse = Some(true),
             "--no-mpris" => o.mpris = false,
             "--offline" => o.offline = true,
+            "--debug" => term::set_debug(true),
             "--url" => url = Some(v()),
             "--user" => user = Some(v()),
             "--password" => password = Some(v()),

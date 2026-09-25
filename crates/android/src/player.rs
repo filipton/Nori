@@ -40,7 +40,7 @@ use nori_engine::{Body, ByteSource, Coded, Coding, Config, Device, Engine, Event
 use nori_player::transitions::WindowSong;
 use parking_lot::Mutex;
 
-use crate::track::{mono_ns, packed24, HeadCount, Opened, Opener, Shared, Sink, TrackOutput, CHUNK_BYTES};
+use crate::track::{mono_ns, packed24, sample_bytes, HeadCount, Opened, Opener, Route, Shared, Sink, TrackOutput, CHUNK_BYTES};
 use crate::{java_string, native, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
@@ -118,6 +118,20 @@ struct TrackMethods {
     head: JMethodID,
     release: JMethodID,
     buffer_frames: JMethodID,
+    set_buffer_frames: JMethodID,
+    /// `setStartThresholdInFrames`, which Android 12 added: none before it.
+    set_start_threshold: Option<JMethodID>,
+    underruns: JMethodID,
+    capacity_frames: JMethodID,
+    routed_device: JMethodID,
+    /// `AudioTrack.getMinBufferSize(int, int, int)`, static.
+    min_buffer_size: JStaticMethodID,
+    /// `AudioTrack.getLatency()`, which is hidden (on the list of those apps may still call, as ExoPlayer
+    /// does): none where the platform refuses it.
+    latency: Option<JMethodID>,
+    /// `AudioDeviceInfo.getType()`.
+    device_type: JMethodID,
+    class: GlobalRef,
 }
 
 static JAVA: OnceLock<Java> = OnceLock::new();
@@ -133,6 +147,11 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
     cleared(env);
     let end_of_stream = env.get_method_id(&track, "setOffloadEndOfStream", "()V");
     cleared(env);
+    let start_threshold = env.get_method_id(&track, "setStartThresholdInFrames", "(I)I").ok();
+    cleared(env);
+    let latency = env.get_method_id(&track, "getLatency", "()I").ok();
+    cleared(env);
+    let device_info = env.find_class("android/media/AudioDeviceInfo")?;
     let offload = match (delay_padding, end_of_stream) {
         (Ok(delay_padding), Ok(end_of_stream)) => Some(OffloadMethods { delay_padding, end_of_stream }),
         _ => None,
@@ -164,6 +183,15 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
             head: env.get_method_id(&track, "getPlaybackHeadPosition", "()I")?,
             release: env.get_method_id(&track, "release", "()V")?,
             buffer_frames: env.get_method_id(&track, "getBufferSizeInFrames", "()I")?,
+            set_buffer_frames: env.get_method_id(&track, "setBufferSizeInFrames", "(I)I")?,
+            set_start_threshold: start_threshold,
+            underruns: env.get_method_id(&track, "getUnderrunCount", "()I")?,
+            capacity_frames: env.get_method_id(&track, "getBufferCapacityInFrames", "()I")?,
+            routed_device: env.get_method_id(&track, "getRoutedDevice", "()Landroid/media/AudioDeviceInfo;")?,
+            min_buffer_size: env.get_static_method_id(&track, "getMinBufferSize", "(III)I")?,
+            latency,
+            device_type: env.get_method_id(&device_info, "getType", "()I")?,
+            class: env.new_global_ref(&track)?,
         },
         timestamp_new: env.get_method_id(&timestamp, "<init>", "()V")?,
         frame_position: env.get_field_id(&timestamp, "framePosition", "J")?,
@@ -211,6 +239,11 @@ struct JavaTrack {
     since_ns: i64,
     /// Released already: dropping it does not release it again.
     released: bool,
+    /// Its sample rate, for the start threshold kept inside its size.
+    rate: u32,
+    /// Its channels and `AudioFormat.ENCODING_*`, for the least a new track there is given.
+    channels: usize,
+    encoding: i32,
 }
 
 /// A track dropped without being released - its writer thread would not start, or panicked - is released
@@ -319,9 +352,110 @@ impl Sink for JavaTrack {
         head.ok().map(|h| (self.head.read(h as u32), mono_ns()))
     }
 
+    /// `setBufferSizeInFrames`, which keeps the track playing and what it holds, and the start threshold
+    /// (Android 12 on) kept inside the new size: a quarter of a second, as the track was opened with, or
+    /// all of a size smaller than that, so a flush while shallow does not wait for more than it may hold.
+    fn resize(&mut self, frames: u64) -> u64 {
+        let Some((java, mut env)) = env() else { return frames };
+        let asked = frames.min(i32::MAX as u64) as i32;
+        // SAFETY: AudioTrack.setBufferSizeInFrames(int), looked up with this signature.
+        let given = unsafe { env.call_method_unchecked(&self.track, java.track.set_buffer_frames, ReturnType::Primitive(Primitive::Int), &[JValue::Int(asked).as_jni()]) }.and_then(|v| v.i());
+        cleared(&mut env);
+        let given = match given {
+            Ok(n) if n > 0 => n,
+            other => {
+                log(&format!("the AudioTrack kept its size: setBufferSizeInFrames({asked}) answered {other:?}"));
+                // SAFETY: AudioTrack.getBufferSizeInFrames(), looked up with this signature.
+                let now = unsafe { env.call_method_unchecked(&self.track, java.track.buffer_frames, ReturnType::Primitive(Primitive::Int), &[]) }.and_then(|v| v.i());
+                cleared(&mut env);
+                return now.unwrap_or(asked).max(1) as u64;
+            }
+        };
+        if let Some(m) = java.track.set_start_threshold {
+            let threshold = (self.rate as i32 / 4).min(given).max(1);
+            // SAFETY: AudioTrack.setStartThresholdInFrames(int), looked up with this signature.
+            let _ = unsafe { env.call_method_unchecked(&self.track, m, ReturnType::Primitive(Primitive::Int), &[JValue::Int(threshold).as_jni()]) };
+            cleared(&mut env);
+        }
+        given as u64
+    }
+
+    /// The least a new track of this format is given where music plays now, the latency of that output
+    /// past this track, and what kind of output it is.
+    fn route(&mut self) -> Route {
+        let Some((java, mut env)) = env() else { return Route::default() };
+        let int = |env: &mut JNIEnv, m: JMethodID| -> Option<i32> {
+            // SAFETY: a method of AudioTrack looked up with the signature `()I`.
+            let v = unsafe { env.call_method_unchecked(&self.track, m, ReturnType::Primitive(Primitive::Int), &[]) }.and_then(|v| v.i());
+            cleared(env);
+            v.ok()
+        };
+        let mask = if self.channels == 1 { CHANNEL_OUT_MONO } else { CHANNEL_OUT_STEREO };
+        let args = [JValue::Int(self.rate as i32).as_jni(), JValue::Int(mask).as_jni(), JValue::Int(self.encoding).as_jni()];
+        let class = <&JClass>::from(java.track.class.as_obj());
+        // SAFETY: AudioTrack.getMinBufferSize(int, int, int), static, looked up with this signature.
+        let min_bytes = unsafe { env.call_static_method_unchecked(class, java.track.min_buffer_size, ReturnType::Primitive(Primitive::Int), &args) }.and_then(|v| v.i());
+        cleared(&mut env);
+        let frame = self.channels * sample_bytes(self.encoding == ENCODING_PCM_FLOAT, self.encoding == ENCODING_PCM_24BIT_PACKED);
+        let min_frames = min_bytes.ok().filter(|&b| b > 0).map(|b| b as u64 / frame.max(1) as u64);
+        // getLatency is the output's latency and the whole buffer the track was opened with, in ms.
+        let latency_frames = match (java.track.latency.and_then(|m| int(&mut env, m)), int(&mut env, java.track.capacity_frames)) {
+            (Some(ms), Some(cap)) if ms > 0 && cap > 0 => Some((ms as i64 - cap as i64 * 1000 / self.rate.max(1) as i64).max(0) as u64 * self.rate as u64 / 1000),
+            _ => None,
+        };
+        // SAFETY: AudioTrack.getRoutedDevice(), looked up with this signature.
+        let device = unsafe { env.call_method_unchecked(&self.track, java.track.routed_device, ReturnType::Object, &[]) }.and_then(|v| v.l());
+        cleared(&mut env);
+        let name = match device {
+            Ok(d) if !d.is_null() => {
+                // SAFETY: AudioDeviceInfo.getType(), looked up with this signature, on an AudioDeviceInfo.
+                let kind = unsafe { env.call_method_unchecked(&d, java.track.device_type, ReturnType::Primitive(Primitive::Int), &[]) }.and_then(|v| v.i());
+                cleared(&mut env);
+                let _ = env.delete_local_ref(d);
+                kind.ok().map(device_words)
+            }
+            _ => None,
+        };
+        Route { min_frames, latency_frames, name }
+    }
+
+    fn underruns(&mut self) -> Option<u64> {
+        let (java, mut env) = env()?;
+        // SAFETY: AudioTrack.getUnderrunCount(), looked up with this signature.
+        let n = unsafe { env.call_method_unchecked(&self.track, java.track.underruns, ReturnType::Primitive(Primitive::Int), &[]) }.and_then(|v| v.i());
+        cleared(&mut env);
+        n.ok().filter(|&n| n >= 0).map(|n| n as u64)
+    }
+
+    fn consumed(&mut self) -> Option<u64> {
+        let (java, mut env) = env()?;
+        // SAFETY: AudioTrack.getPlaybackHeadPosition(), looked up with this signature.
+        let head = unsafe { env.call_method_unchecked(&self.track, java.track.head, ReturnType::Primitive(Primitive::Int), &[]).and_then(|v| v.i()) };
+        cleared(&mut env);
+        head.ok().map(|h| self.head.read(h as u32))
+    }
+
     fn release(&mut self) {
         self.void(|t| t.release);
         self.released = true;
+    }
+}
+
+/// `AudioFormat.CHANNEL_OUT_MONO` and `CHANNEL_OUT_STEREO`.
+const CHANNEL_OUT_MONO: i32 = 4;
+const CHANNEL_OUT_STEREO: i32 = 12;
+
+/// An `AudioDeviceInfo.TYPE_*` in the log's words.
+fn device_words(kind: i32) -> &'static str {
+    match kind {
+        1 => "the earpiece",
+        2 => "the phone speaker",
+        3..=5 => "wired headphones",
+        7 | 8 | 26 | 27 | 30 => "Bluetooth",
+        23 => "a hearing aid",
+        9 | 10 => "HDMI",
+        11 | 12 | 22 => "USB",
+        _ => "this output",
     }
 }
 
@@ -748,6 +882,9 @@ impl Opener for JavaOpener {
                 head: HeadCount::default(),
                 since_ns: mono_ns(),
                 released: false,
+                rate: format.rate,
+                channels: format.channels,
+                encoding,
             };
             Ok(Ok(Opened { sink: Box::new(sink), frames, starts_full: self.sdk < 31 }))
         });
@@ -918,6 +1055,8 @@ const EVENT_BUFFERING: i32 = 5;
 const EVENT_LOOPED: i32 = 6;
 const EVENT_TITLE: i32 = 7;
 const EVENT_BRIDGE: i32 = 8;
+const EVENT_MIXING: i32 = 9;
+const EVENT_PLACED: i32 = 10;
 
 impl Events {
     fn push(&self, e: Event) {
@@ -929,6 +1068,7 @@ impl Events {
             Event::Buffering(on) => log(if *on { "waits for the song's bytes" } else { "the song's bytes came" }),
             Event::Looped { index, .. } => log(&format!("song {index} again (repeat one)")),
             Event::Bridge => log("the network would not bring the song: the offline bridge takes over"),
+            Event::Placed { index, ms } => log(&format!("song {index} goes on at {ms} ms on another path")),
             _ => {}
         }
         let jumps = match &e {
@@ -941,6 +1081,9 @@ impl Events {
             Event::Looped { index, id, .. } => (EVENT_LOOPED, index as i32, id),
             Event::Title(t) => (EVENT_TITLE, -1, t),
             Event::Bridge => (EVENT_BRIDGE, -1, String::new()),
+            Event::Mixing(on) => (EVENT_MIXING, on as i32, String::new()),
+            // The place is read from the status when the player builds its state again: only the index here.
+            Event::Placed { index, .. } => (EVENT_PLACED, index as i32, String::new()),
             Event::Error { id, message } => (EVENT_ERROR, -1, if id.is_empty() { message } else { format!("{id}: {message}") }),
             Event::Output { name } => (EVENT_OUTPUT, -1, name),
             Event::Stopped => (EVENT_STOPPED, -1, String::new()),
@@ -1146,10 +1289,8 @@ extern "system" fn position_ms(h: jlong) -> jlong {
     // the song's id.
     let (at, switching, now) = p.engine.status_with(|s| (s.at, s.switching, s.position_now()));
     let jumped = *p.jumped.lock();
-    match jumped {
-        Some((ms, when)) if at < when || switching => ms,
-        _ => now.max(0),
-    }
+    let jump = jumped.map(|(ms, when)| (ms, when.elapsed().as_millis() as i64));
+    nori_player::transport::shown_place(jump, jumped.is_none_or(|(_, when)| at >= when), switching, now)
 }
 
 extern "system" fn mixing(h: jlong) -> jboolean {

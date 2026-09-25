@@ -32,6 +32,9 @@ crates/look/    Rust, platform-free: how a page looks and moves. The colours a p
                 and redraw pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
 crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
                 decimal separator is handed in once), with Java's rounding.
+crates/testdir/ Rust, tests only (a dev-dependency, package nori-testdir): `TempDir`, a directory of a test's
+                own under the temp directory, uniquely named and removed when the guard drops, a panicking
+                test's too. Every test that writes files takes one; none calls `std::env::temp_dir()` itself.
 crates/core/    Rust, platform-free: the top of the app's state, an rlib a desktop or terminal client links
                 as it is (package nori-core, lib `nori_core`). It holds what ties the crates below together:
                 the `Core` a platform opens per server profile (lib.rs: the database handle, the server's
@@ -87,8 +90,10 @@ crates/lyrics/  Rust, platform-free: lyrics (package nori-lyrics): the server's 
                 one shape with every word timed, backing vocals and duet sides (lyrics.rs); every format
                 the services answer in (formats.rs: lyricsfile, TTML, YRC, KRC, QRC and the cache's own;
                 json.rs; html.rs; each tested on a sample in testdata/); the sixteen services, asked
-                through the core's Transport (services.rs, LRCLIB's in lrclib.rs); asking them together,
-                ranked, bounded and remembered in the response cache (race.rs); and the lyrics page's
+                through the core's Transport (services.rs, LRCLIB's in lrclib.rs); the credits
+                at an answer's ends stripped (credits.rs); each answer scored against the song and the
+                other answers (trust.rs); the services asked in waves, the best chosen, bounded and remembered in the response
+                cache with its score (race.rs); and the lyrics page's
                 clock (look.rs). Depends on nori-model, nori-net, nori-words, nori-settings and nori-look.
 crates/devices/ Rust, platform-free: the output side (package nori-devices): the platform's output devices
                 as the player's and the ones known (outputs.rs), which sound each device gets (profiles.rs)
@@ -182,11 +187,12 @@ crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.
 core/           Android library, no UI: net/, data/ (Library = the repository; CoverLoader, the covers'
                 Bitmaps), playback/ (media3 service, DAC, scrobbling; RustAudio.kt puts the core's
                 decoder ahead of MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
-                speed/pitch and silence skipping; RustPlayer.kt is the second path, nori-engine as a
-                media3 player, chosen by the "Playback engine" setting at service start - ExoPlayer
-                stays the default until the Rust one measures at least as well),
+                speed/pitch and silence skipping; RustPlayer.kt is nori-engine as a
+                media3 player, the default path for a new install; the "Playback engine" setting, read at
+                service start, still chooses ExoPlayer instead),
                 downloads/, settings/, Nori.kt (object graph)
-app/            the UI only: vm/ (ViewModels, all logic and state) and ui/ (Compose, draws state)
+app/            the UI only: vm/ (ViewModels: the screens' state, asked of the core and held for Compose)
+                and ui/ (Compose, draws state)
 tools/          dev-server.sh: a local Navidrome with generated music for testing
 ```
 
@@ -196,12 +202,38 @@ output, so a desktop app gets the same behaviour without writing it again. The A
 decodes, outputs, and asks.
 
 The boundary that matters: `ui/` may be thrown away and rewritten. It reads ViewModel state and
-calls ViewModel functions, and may call the core's pure functions (words, numbers, looks) directly;
+calls ViewModel functions, and may call the core's pure functions (numbers, looks) directly;
 it never touches `Nori`, media3, OkHttp or the core's state. Covers it draws with `Cover` (or
 `rememberCover`), over `CoverLoader` (core/.../data), which is to it what an image library would be.
 `core/` must never know a UI exists.
-Everything a second client (a desktop app) would need to behave the same - every decision, rule,
-word, colour and piece of state - lives in the crates; the Kotlin is a front end.
+## What the Rust core is (and is not)
+
+The Rust crates are the **backend**: the parts every client needs to behave the same and that are no
+UI of their own. A client (Android, the terminal client, a future desktop app) is a front end that
+asks the core and draws in its own way, with its own words.
+
+In the core:
+- playback and sound: decoding, the sound chain, AutoMix, transitions, offload, the engine;
+- the queue, the library, search, the Subsonic API, the database, downloads, caches, scrobbling;
+- lyrics and covers as data: fetching, matching, scoring, caching, decoding;
+- the settings **model**: keys, types, defaults, ranges and options as values, validation, storage,
+  and what a change does to the player - never how a settings screen looks or what it says;
+- shared computation that measured better in Rust (cover colours, seek-bar pacing, lyric timing:
+  numbers in, numbers out; see docs/clients.md "Measured: what stays where").
+
+Not in the core, but each client's own:
+- anything displayed as text: labels, sentences, confirmations, settings titles and descriptions,
+  number and time formatting for display. On Android these live in string resources so they can be
+  translated; the terminal client words things its own way;
+- screen structure: settings pages, sections, rows, their order and which are shown, search over them;
+- layout, drawing, gestures and animation.
+
+A new setting is added to the model in nori-settings and to each client's screen. Being moved out
+(2026-09-25): the settings schema (`settings_schema.rs`), and nori-words / nori-text, whose text
+belongs in the clients; until done, add nothing new to them.
+
+Prefer fewer boundary crossings: the client should not call into Rust just to get a string or a
+label.
 
 ## Build and test
 
@@ -301,11 +333,10 @@ there: a screenshot proves a screen renders, not that the feature works.
 
 ## Where the work stopped
 
-`docs/handoff.md` says what is half-finished and what to be careful of: the player still differs from
-Apple Music in five measurable ways, the Apple design research was cut short, and there is a list of
-the traps that make this app easy to test wrongly (a sleeping device answers with stale screenshots,
-the media session's position does not move while music plays, and so on). Read it before picking up
-the UI work.
+`docs/handoff.md` says what is half-finished and what to be careful of: what was closed lately, what
+is not done (its "Not done" list), and the traps that make this app easy to test wrongly (a sleeping
+device answers with stale screenshots, the media session's position does not move while music plays,
+and so on). Read it before picking up the UI work.
 
 ## Look
 
@@ -314,9 +345,10 @@ radii, spacing, type scale and the few shapes (`PillButton`, `Chip`, `SearchFiel
 `SectionHeader`, `LargeTitle`) that every screen is built from. Use them instead of dropping a raw
 `Button`, `FilterChip`, `OutlinedTextField` or `Divider` into a screen.
 
-The rule the whole thing exists for: **artwork bleeds into the page**. `CoverColors.kt` takes the
-average colour of a cover's own bottom rows and `HeroPage` starts the page wash from exactly that
-colour, so there is no line where the picture ends. Do not go further and imitate Apple's liquid
+The rule the whole thing exists for: **artwork bleeds into the page**. nori-look (crates/look/src/cover.rs)
+takes the average colour of a cover's own bottom rows, `CoverColors.kt` only asks for it and caches the
+answer, and `HeroPage` starts the page wash from exactly that colour, so there is no line where the
+picture ends. Do not go further and imitate Apple's liquid
 glass - copied wholesale onto Android it looks wrong, and the owner has said so.
 
 Everything visual stays static: gradients are values, scroll effects are read in the draw phase

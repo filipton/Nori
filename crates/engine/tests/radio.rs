@@ -11,14 +11,16 @@
 mod common;
 
 use std::io::Read;
-use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::f64::consts::PI;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use common::card::{Card, Pull};
 use common::{Stepper, Virtual};
 use nori_engine::{Body, ByteSource, Config, Engine, Library, Located, OutputFormat, SharedQueue, Source};
+use nori_player::decode::{lend_platform_aac, Fault, PlatformDecoder};
 use nori_player::sim;
 use nori_player::transitions::WindowSong;
 
@@ -26,17 +28,16 @@ fn ffmpeg() -> bool {
     Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success())
 }
 
-fn dir() -> PathBuf {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let d = std::env::temp_dir().join(format!("nori-radio-{}-{nanos}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// A directory of the call's own, gone with the guard.
+fn dir() -> nori_testdir::TempDir {
+    nori_testdir::TempDir::new("radio")
 }
 
 /// A tone of `hz` for `secs` at `rate` and `channels`, encoded by ffmpeg with `codec` into a stream of
 /// container `format`, as a station sends it (no Xing or LAME header, no end to wait for).
 fn tone(hz: u32, secs: f64, rate: u32, channels: u32, codec: &[&str], format: &str) -> Vec<u8> {
-    let out = dir().join(format!("tone.{format}"));
+    let d = dir();
+    let out = d.join(format!("tone.{format}"));
     let ok = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &format!("sine=frequency={hz}:sample_rate={rate}:duration={secs}")])
         .args(["-ac", &channels.to_string()])
@@ -46,11 +47,36 @@ fn tone(hz: u32, secs: f64, rate: u32, channels: u32, codec: &[&str], format: &s
         .status()
         .is_ok_and(|s| s.success());
     assert!(ok, "ffmpeg made a {format} tone");
-    std::fs::read(out).unwrap()
+    std::fs::read(&out).unwrap()
 }
 
 fn mp3(hz: u32, secs: f64, rate: u32, channels: u32) -> Vec<u8> {
     tone(hz, secs, rate, channels, &["-c:a", "libmp3lame", "-b:a", "96k", "-write_xing", "0"], "mp3")
+}
+
+/// [`mp3`] as a station sends it on from one song to the next: no ID3 tag in front of it.
+fn mp3_bare(hz: u32, secs: f64, rate: u32, channels: u32) -> Vec<u8> {
+    tone(hz, secs, rate, channels, &["-c:a", "libmp3lame", "-b:a", "96k", "-write_xing", "0", "-id3v2_version", "0"], "mp3")
+}
+
+/// `n` bytes of noise, as a station's server may put between two songs (or a relay, when it drops
+/// some): random, with sync words of every MPEG version and layer strewn through it, so a reader that
+/// looks for a frame finds plenty of false ones.
+fn junk(n: usize, seed: u32) -> Vec<u8> {
+    let mut x = seed.max(1);
+    let mut v: Vec<u8> = (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
+    for (i, at) in (0..n.saturating_sub(4)).step_by(97).enumerate() {
+        v[at] = 0xff;
+        v[at + 1] = [0xfb, 0xf3, 0xe3, 0xfa, 0xf2][i % 5];
+    }
+    v
 }
 
 // ---- the station ----
@@ -193,7 +219,8 @@ fn assert_pitch(what: &str, heard: &[f32], f: OutputFormat, want: f64) {
 
 /// ffmpeg's decode of `bytes` at `rate` and `channels`, interleaved float.
 fn reference(bytes: &[u8], rate: u32, channels: usize) -> Vec<f32> {
-    let input = dir().join("in.bin");
+    let d = dir();
+    let input = d.join("in.bin");
     std::fs::write(&input, bytes).unwrap();
     let out = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-i"])
@@ -301,20 +328,201 @@ fn the_next_station_at_another_rate_plays_at_its_own_pitch() {
     assert_pitch("the second station", &heard, f, 1000.0);
 }
 
+/// The HE-AAC capture's access units, as its ADTS frames hold them, and ffmpeg's decode of it (SBR and
+/// all, 44.1 kHz stereo, 2048 frames a unit): what [`Reference`] plays.
+static REFERENCE: OnceLock<(Vec<Vec<u8>>, Vec<f32>)> = OnceLock::new();
+/// A unit [`Reference`] was handed that is not the capture's next.
+static STRAY_UNIT: AtomicBool = AtomicBool::new(false);
+
+/// A platform's HE-AAC decoder as the engine drives it (Android's MediaCodec, on the device), standing
+/// in on the host with ffmpeg's decode of the one stream it is lent for: every unit handed to it is
+/// checked to be the capture's next, and what comes out is ffmpeg's decode of that unit.
+struct Reference {
+    next: Option<usize>,
+}
+
+impl PlatformDecoder for Reference {
+    fn decode(&mut self, unit: &[u8], out: &mut Vec<f32>) -> Result<(usize, u32), Fault> {
+        let (units, pcm) = REFERENCE.get().expect("lent only once made");
+        // The first unit may be any (the reader may begin a frame or two in), and a station that ends is
+        // connected to again, from its first: found, then followed.
+        let at = |i: usize| units.get(i).is_some_and(|u| u == unit);
+        let Some(i) = self.next.filter(|&i| at(i)).or_else(|| (0..units.len()).find(|&i| at(i))) else {
+            STRAY_UNIT.store(true, Ordering::Relaxed);
+            return Err(Fault::BadPacket);
+        };
+        self.next = Some(i + 1);
+        out.extend_from_slice(&pcm[(i * 4096).min(pcm.len())..((i + 1) * 4096).min(pcm.len())]);
+        Ok((2, 44_100))
+    }
+
+    fn reset(&mut self) {
+        self.next = None;
+    }
+}
+
+/// The ADTS frames' payloads (after the header and its CRC) of `bytes`.
+fn adts_units(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut units = Vec::new();
+    let mut at = 0;
+    while at + 7 <= bytes.len() && bytes[at] == 0xff && bytes[at + 1] & 0xf6 == 0xf0 {
+        let len = ((bytes[at + 3] as usize & 3) << 11) | (bytes[at + 4] as usize) << 3 | (bytes[at + 5] as usize) >> 5;
+        let header = if bytes[at + 1] & 1 == 0 { 9 } else { 7 };
+        if at + len > bytes.len() {
+            break;
+        }
+        units.push(bytes[at + header..at + len].to_vec());
+        at += len;
+    }
+    units
+}
+
+/// The share of `x`'s energy (mono, at `rate`) above `hz`, over a few windows of 4096: a plain DFT.
+fn energy_above(x: &[f32], rate: u32, hz: f64) -> f64 {
+    let n = 4096;
+    let (mut high, mut all) = (0.0, 0.0);
+    for w in x.chunks_exact(n).step_by(8).take(6) {
+        let hann: Vec<f64> = w.iter().enumerate().map(|(i, v)| *v as f64 * (0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())).collect();
+        for k in 1..n / 2 {
+            let (step_re, step_im) = ((2.0 * PI * k as f64 / n as f64).cos(), -(2.0 * PI * k as f64 / n as f64).sin());
+            let (mut re, mut im, mut c, mut s) = (0.0, 0.0, 1.0f64, 0.0f64);
+            for v in &hann {
+                re += v * c;
+                im += v * s;
+                (c, s) = (c * step_re - s * step_im, c * step_im + s * step_re);
+            }
+            let e = re * re + im * im;
+            all += e;
+            if k as f64 * rate as f64 / n as f64 > hz {
+                high += e;
+            }
+        }
+    }
+    high / all.max(1e-30)
+}
+
 #[test]
-fn an_he_aac_station_plays_at_its_own_pitch() {
+fn an_he_aac_station_plays_its_core_here_and_whole_through_the_platforms_decoder() {
     // SomaFM's Groove Salad at 32 kbps: ADTS saying AAC-LC at 22.05 kHz, stereo, SBR inside. symphonia
-    // has no SBR, so what plays is the core at the rate the stream states: the right pitch, a quarter of
-    // the band (the platform's own decoder plays the whole on Android's ExoPlayer path).
+    // has no SBR, so on its own (a desktop client that lends no decoder) the core plays at the rate the
+    // stream states: the right pitch, nothing above 11 kHz.
     let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/he-aac-32k.aac")).unwrap();
     let (f, heard) = play(bytes.clone(), 4.0);
     assert_eq!((f.rate, f.channels), (22_050, 2), "opened at the core's rate, which is what comes out");
     if !ffmpeg() {
-        eprintln!("no ffmpeg: the pitch is not compared");
+        eprintln!("no ffmpeg: the pitch is not compared, the platform's decoder not stood in for");
         return;
     }
     // ffmpeg decodes the SBR too, at 44.1 kHz; brought down to the core's rate the two are one waveform.
     let theirs = mono(&reference(&bytes, f.rate, f.channels), f.channels);
     let c = likeness(&mono(&heard, f.channels), &theirs, 1024);
     assert!(c > 0.95, "the same music at the same pitch: likeness {c:.3}");
+
+    // A platform that lends its HE-AAC decoder (Android's MediaCodec) gets every unit of the stream, in
+    // order, and the card is opened at the rate it plays at, 44.1 kHz, with the SBR's band above the
+    // core's 11 kHz in it.
+    let whole = reference(&bytes, 44_100, 2);
+    REFERENCE.set((adts_units(&bytes), whole.clone())).unwrap();
+    lend_platform_aac(|setup| {
+        // Lent for the capture alone: other AAC stations of the tests running alongside stay as they are.
+        ((setup.rate, setup.channels) == (22_050, 2)).then(|| Box::new(Reference { next: None }) as Box<dyn PlatformDecoder>)
+    });
+    let (f, heard) = play(bytes.clone(), 4.0);
+    assert!(!STRAY_UNIT.load(Ordering::Relaxed), "every unit handed over was the stream's next");
+    assert_eq!((f.rate, f.channels), (44_100, 2), "opened at the rate the platform's decoder plays at");
+    let ours = mono(&heard, 2);
+    let c = likeness(&ours, &mono(&whole, 2), 4096);
+    assert!(c > 0.99, "ffmpeg's decode, as it came out: likeness {c:.3}");
+    let core = energy_above(&theirs, 22_050, 10_000.0);
+    let high = energy_above(&ours, 44_100, 11_025.0);
+    eprintln!("energy above 11.025 kHz: {:.2e} of it (the core's above 10 kHz: {core:.2e})", high);
+    assert!(high > 1e-3, "the band above the core's is heard: {high:.2e} of the energy");
+}
+
+/// Runs `test` on a thread of its own and fails if it has not finished within `secs` of real time: an
+/// engine that hangs on what it is fed fails here rather than holding the test run up for ever.
+fn within(secs: u64, test: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let t = std::thread::spawn(move || {
+        test();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(Duration::from_secs(secs)) {
+        Ok(()) => t.join().unwrap(),
+        // The thread panicked: its panic is the failure.
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => std::panic::resume_unwind(t.join().unwrap_err()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("hung: not done in {secs} s"),
+    }
+}
+
+/// The longest stretch of `heard` (mono) quieter than -40 dBFS, seconds, in windows of 10 ms.
+fn longest_silence(heard: &[f32], f: OutputFormat) -> f64 {
+    let m = mono(heard, f.channels);
+    let w = f.rate as usize / 100;
+    let (mut run, mut longest) = (0usize, 0usize);
+    for c in m.chunks_exact(w) {
+        let rms = (c.iter().map(|v| v * v).sum::<f32>() / w as f32).sqrt();
+        run = if rms < 0.01 { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest as f64 / 100.0
+}
+
+#[test]
+fn an_mp3_station_that_changes_its_rate_and_channels_plays_on_at_its_own_pitch() {
+    if !ffmpeg() {
+        eprintln!("no ffmpeg: skipped");
+        return;
+    }
+    // Three songs as one station sends them: 44.1 kHz stereo, 48 kHz mono, 22.05 kHz (MPEG-2) stereo,
+    // each a tone of its own, joined in the middle of a frame, with noise full of false frame headers
+    // between them. The card stays open at the first song's format; the others are converted to it, at
+    // their own pitch. (A station that ends is connected to again, so a reader stopped at the first
+    // change plays the first song over and over: the tones tell the songs apart.)
+    within(120, || {
+        let mut bytes = mp3_bare(1000, 3.0, 44_100, 2)[1001..].to_vec();
+        bytes.extend_from_slice(&junk(3000, 7));
+        bytes.extend_from_slice(&mp3_bare(1500, 3.0, 48_000, 1));
+        bytes.extend_from_slice(&junk(5000, 11));
+        bytes.extend_from_slice(&mp3_bare(700, 3.0, 22_050, 2));
+        let (f, heard) = play(bytes, 8.5);
+        assert_eq!((f.rate, f.channels), (44_100, 2));
+        let p = pitches(&heard, f, 0);
+        assert!(p.len() >= 8, "it plays on through both changes: {p:?}");
+        // Seconds 2 and 5 hold a change (and the songs' own silent edges); every other one is its song's tone.
+        for (s, want) in [(1, 1000.0), (3, 1500.0), (4, 1500.0), (6, 700.0), (7, 700.0)] {
+            assert!((p[s] - want).abs() < want * 0.005, "{:.1} Hz in second {s}, not {want}: {p:?}", p[s]);
+        }
+        // No gap beyond the songs' own edges (the encoder's delay and padding, some 50 ms each side).
+        let gap = longest_silence(&heard[f.channels * f.rate as usize / 2..], f);
+        assert!(gap <= 0.15, "a {gap} s gap");
+    });
+}
+
+#[test]
+fn an_mp3_station_of_noise_and_broken_frames_never_hangs_the_engine() {
+    if !ffmpeg() {
+        eprintln!("no ffmpeg: skipped");
+        return;
+    }
+    // A long stretch of noise (more than the engine asks to have before it reads), a frame cut short, a
+    // second song at another rate, and the stream ending in the middle of a frame: the engine plays what
+    // music there is and goes on, within the real time allowed.
+    within(120, || {
+        let first = mp3_bare(1000, 2.0, 44_100, 2);
+        let second = mp3_bare(1500, 2.0, 32_000, 1);
+        let mut bytes = first[1001..].to_vec();
+        bytes.extend_from_slice(&junk(200_000, 3));
+        bytes.extend_from_slice(&second[..300]);
+        bytes.extend_from_slice(&second[..second.len() - 150]);
+        let rig = Rig::new(vec![("radio:1", bytes)]);
+        let (f, heard) = rig.hear(3.5);
+        assert_eq!((f.rate, f.channels), (44_100, 2));
+        let m = mono(&heard, f.channels);
+        let r = f.rate as usize;
+        let first_hz = hz(&m[r / 2..3 * r / 2], f.rate);
+        // Past the first song and whatever of the noise decodes as noise: the second song's tone.
+        let second_hz = hz(&m[5 * r / 2..7 * r / 2], f.rate);
+        assert!((first_hz - 1000.0).abs() < 5.0 && (second_hz - 1500.0).abs() < 7.5, "both songs at their own pitch: {first_hz} then {second_hz}");
+    });
 }

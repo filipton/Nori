@@ -426,37 +426,9 @@ fn karaoke(text: &str, line: impl Fn(&str) -> Option<Timed>) -> Vec<Timed> {
     lines
 }
 
-/// Words on a label that says a line is a credit: "Lyrics by:", "Composer:", "OP:".
-const CREDIT_WORDS: &[&str] = &[
-    "lyric", "lyrics", "lyricist", "written", "writer", "writers", "words", "music", "composer", "composers", "composed", "composition",
-    "producer", "producers", "produced", "production", "arranger", "arranged", "arrangement", "mixed", "mixing", "mix", "mastered",
-    "mastering", "recorded", "recording", "engineer", "engineered", "vocals", "vocal", "publisher", "published", "op", "sp", "isrc",
-];
-
-/// NetEase and KuGou open (and KuGou sometimes closes) the words with credits timed as if they were sung:
-/// "作词 : …", "Composed by: …", and KuGou's "Artist - Title". A label before a colon counts when it is
-/// short and either not in Latin letters (作词, 编曲) or names a credit in English.
-fn is_credit(text: &str, title: &str) -> bool {
-    let t = text.trim();
-    if let Some((label, value)) = t.split_once([':', '：']) {
-        let label = label.trim();
-        let lower = label.to_lowercase();
-        let named = lower.split(|c: char| !c.is_alphabetic()).any(|w| CREDIT_WORDS.contains(&w));
-        let native = !label.is_empty() && label.chars().count() <= 8 && !label.chars().any(|c| c.is_ascii_alphanumeric());
-        if !value.trim().is_empty() && label.chars().count() <= 24 && (named || native) {
-            return true;
-        }
-    }
-    let title = title.trim().to_lowercase();
-    !title.is_empty() && t.contains(" - ") && t.to_lowercase().contains(&title)
-}
-
-/// Drops credit lines from the top (up to a dozen, until the first sung line) and the bottom (a few).
+/// Drops the credits NetEase, KuGou and QQ Music open and close their words with (credits.rs).
 pub(crate) fn strip_credits<T>(lines: &mut Vec<T>, text: impl Fn(&T) -> &str, title: &str) {
-    let head = lines.iter().take(12).take_while(|l| is_credit(text(l), title) || text(l).trim().is_empty()).count();
-    lines.drain(..head);
-    let tail = lines.iter().rev().take(6).take_while(|l| is_credit(text(l), "") || text(l).trim().is_empty()).count();
-    lines.truncate(lines.len() - tail);
+    crate::credits::strip_lines(lines, text, title, "");
 }
 
 /// NetEase Cloud Music's lyrics: YRC (word by word, times from the start of the song) when the song has
@@ -827,7 +799,7 @@ mod tests {
         // Lines that merely contain a colon, further in, are sung words.
         let sung = from_netease("", "[00:01.00]First line\n[00:02.00]She said: stay\n", "");
         assert_eq!(sung.lines.len(), 2);
-        assert!(is_credit("Radiohead - Creep", "creep") && !is_credit("Creep", "creep") && is_credit("编曲：某人", ""));
+        assert!(crate::credits::is_credit("编曲：某人", "", ""));
     }
 
     /// Packs KRC text the way KuGou's download API does: zlib, XOR with the key, `krc1`, base64.

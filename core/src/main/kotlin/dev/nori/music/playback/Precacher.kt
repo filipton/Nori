@@ -9,8 +9,10 @@ import java.util.concurrent.Future
 
 /**
  * Fetches whole upcoming tracks into the stream cache right when a track starts, which is a moment
- * the radio is awake anyway; when their turn comes they play from disk and the modem stays asleep.
- * One track at a time, in queue order, abandoned as soon as the queue moves on. Provider tracks from
+ * the radio is awake anyway, and when the queue is edited (a song queued next is fetched while there is
+ * time to measure and mix it); when their turn comes they play from disk and the modem stays asleep.
+ * One track at a time, in queue order, abandoned as soon as the queue moves on; asked again for the
+ * songs it is fetching, it carries on. Provider tracks from
  * octo-fiesta are never fetched ahead: asking for one makes the server download it.
  *
  * A song the player is writing into the cache right then is left to the player: it is fetching it
@@ -21,6 +23,8 @@ import java.util.concurrent.Future
 class Precacher(private val sources: MediaSources) {
     private val worker = Executors.newSingleThreadExecutor { Thread(it, "nori-precache").apply { priority = Thread.MIN_PRIORITY } }
     private var running: Future<*>? = null
+    /** The songs [running] fetches, by cache key. */
+    private var fetching: List<String> = emptyList()
     @Volatile private var writer: CacheWriter? = null
 
     /**
@@ -29,8 +33,12 @@ class Precacher(private val sources: MediaSources) {
      * into the rolling cache too keeps it twice.
      */
     fun update(songs: List<dev.nori.music.ffi.net.Fetch>) {
+        // Asked again with the songs it is fetching (a queue edit behind them): it carries on.
+        val keys = songs.map { it.key }
+        if (keys.isNotEmpty() && keys == fetching && running?.isDone == false) return
         cancel()
         if (songs.isEmpty()) return
+        fetching = keys
         running = worker.submit {
             for (song in songs) {
                 if (Thread.currentThread().isInterrupted) return@submit
@@ -61,6 +69,7 @@ class Precacher(private val sources: MediaSources) {
     }.getOrDefault(false)
 
     fun cancel() {
+        fetching = emptyList()
         writer?.cancel()
         running?.cancel(true)
         running = null

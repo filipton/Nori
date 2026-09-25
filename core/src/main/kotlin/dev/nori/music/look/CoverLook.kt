@@ -114,6 +114,17 @@ object CoverLook {
 
     @JvmStatic @CriticalNative external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
 
+    // The seek bar's pace (nori_look::motion::SeekPace), through [SeekPace]: a handle and primitives.
+    @JvmStatic @CriticalNative external fun seekPaceNew(): Long
+    @JvmStatic @CriticalNative external fun seekPaceFree(h: Long)
+    @JvmStatic @CriticalNative external fun seekPaceSync(h: Long, positionMs: Long, durationMs: Long)
+    @JvmStatic @CriticalNative external fun seekPaceHold(h: Long, bar: Float, positionMs: Long, durationMs: Long)
+    @JvmStatic @CriticalNative external fun seekPaceStep(h: Long, positionMs: Long, durationMs: Long, dtS: Float, widthPx: Float, rate: Float): Int
+    @JvmStatic @CriticalNative external fun seekPaceBar(h: Long): Float
+    @JvmStatic @CriticalNative external fun seekPaceTimes(h: Long): Long
+    @JvmStatic @CriticalNative external fun seekPaceFrom(h: Long): Long
+    @JvmStatic @CriticalNative external fun seekPaceFade(h: Long): Float
+
     /** Which glyph the play button shows (`nori-core stage::transport_glyph`): 0 play, 1 pause, 2 spinner. */
     @JvmStatic @CriticalNative external fun transportGlyph(playing: Boolean, buffering: Boolean, waited: Boolean): Int
 

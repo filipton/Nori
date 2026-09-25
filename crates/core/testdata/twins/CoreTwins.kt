@@ -88,13 +88,6 @@ fun ahead(missing: List<String>, onDevice: (String) -> Boolean): Pair<List<Strin
 
 fun precache(fetchable: List<String>, fetching: Set<String>): List<String> = fetchable.filterNot { it in fetching }
 
-// ---- core/.../playback/PlayerConnection.kt: the row shown while the ear is elsewhere (publish) ----
-
-fun shownIndex(heard: Int?, reread: Boolean, before: List<String>, now: List<String>, playing: String?): Int? =
-    heard?.takeIf { it >= 0 }?.let { i ->
-        if (reread) before.getOrNull(i)?.let { id -> now.indexOfFirst { it == id }.takeIf { it >= 0 } } else i
-    }?.takeIf { now.getOrNull(it) != playing }
-
 // ---- app/.../vm/PlayerViewModel.kt: setVolumeFraction and volumeFraction ----
 
 fun volumeStep(f: Float, max: Int): Int? {
@@ -212,13 +205,6 @@ fun main() {
         listOf("4") to setOf("4"),
         emptyList<String>() to setOf("1"),
     )) row("precache", list(ids), list(fetching.toList()), list(precache(ids, fetching)))
-
-    val before = listOf("a", "b", "c", "d")
-    for (now in listOf(before, listOf("x", "a", "b", "c", "d"), listOf("d", "c"), listOf("a", "c", "d"), emptyList())) {
-        for (heard in listOf(null, -1, 0, 1, 3, 7)) for (reread in listOf(false, true)) for (playing in listOf(null, "a", "c", "x")) {
-            row("shown", heard ?: "-", reread, list(before), list(now), playing ?: "-", shownIndex(heard, reread, before, now, playing) ?: "-")
-        }
-    }
 
     for (max in listOf(-1, 0, 1, 7, 15, 25, 150)) {
         for (f in listOf(-0.5f, 0f, 0.01f, 0.1f, 1f / 3f, 0.5f, 0.5f / 15f * 3f, 1f / 14f, 3f / 14f, 0.99f, 1f, 1.5f, Float.NaN)) {

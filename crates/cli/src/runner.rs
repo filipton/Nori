@@ -27,7 +27,8 @@ fn read_input(tx: Sender<Msg>) {
             Ok(TermEvent::Mouse(m)) => Msg::Mouse(m),
             Ok(TermEvent::Paste(p)) => Msg::Paste(p),
             Ok(TermEvent::Resize(..)) => Msg::Resize,
-            Ok(_) => continue,
+            Ok(TermEvent::FocusGained) => Msg::Focus(true),
+            Ok(TermEvent::FocusLost) => Msg::Focus(false),
             Err(_) => return,
         };
         if tx.send(msg).is_err() {
@@ -43,12 +44,24 @@ const QUERY_MS: u64 = 1000;
 /// A terminal that does not answer leaves the query's reader waiting on stdin, where it would take
 /// the first key pressed: a device-attributes query, which every terminal answers, lets it finish.
 /// Whatever arrives late is read and dropped before the screen starts reading keys.
-fn query_picker() -> Picker {
+///
+/// Under tmux, tmux itself is asked first when it draws sixel (3.4 and later, on a terminal it found
+/// draws sixel: [`crate::term::tmux_draws_sixel`]; it claims sixel on any terminal): it keeps the picture in the pane like its text, and draws it again whenever the pane comes back
+/// on screen. Only when it does not are the pictures passed through to the terminal outside, which
+/// tmux does not keep: those are sent again when the pane is back ([`crate::term::tmux_focus_events`]).
+fn query_picker() -> (Picker, bool) {
     use std::io::Write;
     let t0 = Instant::now();
-    let mut o = ratatui_image::picker::cap_parser::QueryStdioOptions::default();
-    o.timeout = std::time::Duration::from_millis(QUERY_MS);
-    let picker = Picker::from_query_stdio_with_options(o).unwrap_or_else(|_| Picker::halfblocks());
+    let query = || {
+        let mut o = ratatui_image::picker::cap_parser::QueryStdioOptions::default();
+        o.timeout = std::time::Duration::from_millis(QUERY_MS);
+        Picker::from_query_stdio_with_options(o).unwrap_or_else(|_| Picker::halfblocks())
+    };
+    let tmux_sixel = (crate::term::in_tmux() && crate::term::tmux_draws_sixel())
+        .then(|| crate::term::not_tmux(query))
+        .filter(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Sixel);
+    let kept_by_tmux = tmux_sixel.is_some();
+    let picker = tmux_sixel.unwrap_or_else(query);
     if t0.elapsed() >= std::time::Duration::from_millis(QUERY_MS) {
         let mut out = std::io::stdout();
         let _ = out.write_all(b"\x1b[c");
@@ -58,8 +71,9 @@ fn query_picker() -> Picker {
     while event::poll(std::time::Duration::from_millis(30)).unwrap_or(false) {
         let _ = event::read();
     }
-    eprintln!("nori: pictures drawn with {:?}, cells {:?} px, in {:?}", picker.protocol_type(), picker.font_size(), t0.elapsed());
-    picker
+    let by = if kept_by_tmux { " (by tmux)" } else { "" };
+    eprintln!("nori: pictures drawn with {:?}{by}, cells {:?} px, in {:?}", picker.protocol_type(), picker.font_size(), t0.elapsed());
+    (picker, kept_by_tmux)
 }
 
 struct Runner {
@@ -73,7 +87,44 @@ struct Runner {
     tickets: Vec<nori_covers::loader::Ticket>,
     /// The song the screen last showed as heard, so the engine is only asked about it when it moved.
     heard: Option<String>,
+    /// The whole screen, pictures included, is to be written again at the next draw.
+    repaint: bool,
+    /// Whether the terminal (under tmux: the pane) has focus, as its focus reports say.
+    focused: bool,
+    /// The cover changed while the terminal had no focus: sent again when it comes back.
+    unseen_cover: bool,
+    /// What the engine's last events said (the state, the song heard), until its status says the same.
+    said: Said,
 }
+
+/// The engine says a change (an event) before its status shows it: the status is written at the end of
+/// the same wake. Read in between, the status would draw the screen from before the change, and with
+/// nothing else due (a pause) it would stay that way. The events are believed until the status agrees,
+/// and the status is looked at again a moment later.
+#[derive(Default)]
+pub(crate) struct Said {
+    pub(crate) state: Option<nori_engine::State>,
+    pub(crate) song: Option<String>,
+    /// When to read the status again, and how many times it was read without agreeing.
+    again: Option<Instant>,
+    tries: u32,
+}
+
+impl Said {
+    /// None when the status shows what the events said; else the status is behind them, with the song
+    /// they named when the status still has another.
+    pub(crate) fn behind(&self, state: nori_engine::State, id: Option<&str>) -> Option<Option<String>> {
+        let song = self.song.as_deref().filter(|x| id != Some(*x));
+        if self.state.is_none_or(|x| x == state) && song.is_none() {
+            return None;
+        }
+        Some(song.map(String::from))
+    }
+}
+
+/// How soon, and how many times at most, the status is read again after it disagreed with an event.
+const AGAIN_MS: u64 = 20;
+const AGAIN_TRIES: u32 = 50;
 
 pub fn run(o: Options) -> Result<(), String> {
     crate::term::stderr_to(&o.data.join("nori.log"));
@@ -97,7 +148,18 @@ pub fn run(o: Options) -> Result<(), String> {
     let images = o.images.unwrap_or_else(|| own::flag(own::IMAGES, true));
     let mut terminal = crate::term::enter(mouse).map_err(|e| e.to_string())?;
     // Asked before anything reads the terminal: the answer to the query comes in on stdin.
-    let picker = if images { Some(query_picker()) } else { None };
+    let (picker, kept_by_tmux) = match images {
+        true => {
+            let (p, kept) = query_picker();
+            (Some(p), kept)
+        }
+        false => (None, false),
+    };
+    // Passed through tmux (kitty's, iTerm2's, or sixel where tmux draws none), a picture is lost while
+    // the pane is off screen: tmux is to say when it is back.
+    if picker.as_ref().is_some_and(|p| p.protocol_type() != ratatui_image::picker::ProtocolType::Halfblocks) && !kept_by_tmux {
+        crate::term::tmux_focus_events();
+    }
     let (tx, rx) = channel();
     read_input(tx.clone());
     let mut app = App::new(prefs.clone());
@@ -108,7 +170,7 @@ pub fn run(o: Options) -> Result<(), String> {
     app.protocol = picker.as_ref().map_or("off", |p| protocol_name(p.protocol_type()));
     app.settings.own.data = o.data.display().to_string();
     let art = picker.clone().map(Art::new);
-    let mut r = Runner { http: Http::new(), tx, session: None, art, picker, tickets: Vec::new(), heard: None, o };
+    let mut r = Runner { http: Http::new(), tx, session: None, art, picker, tickets: Vec::new(), heard: None, repaint: false, focused: true, unseen_cover: false, said: Said::default(), o };
     match prefs.servers.iter().find(|s| s.id == prefs.active_server_id).cloned() {
         Some(p) => r.open(&mut app, p),
         None => app.screen = Screen::Login,
@@ -118,6 +180,8 @@ pub fn run(o: Options) -> Result<(), String> {
     }
     let result = r.run(&mut app, &mut terminal, rx);
     if let Some(s) = r.session.take() {
+        // For the log: how often the sound card found nothing to play while music was due.
+        eprintln!("nori: output underruns this run: {}", s.engine.status().underruns);
         s.close();
     }
     crate::term::leave();
@@ -147,6 +211,7 @@ impl Runner {
                 app.unreachable = None;
                 self.session = Some(s);
                 self.heard = None;
+                self.said = Said::default();
                 // Every screen starts again for the new server.
                 let prefs = app.prefs.clone();
                 let keep = (app.mouse, app.images, app.volume, app.protocol, app.offline, app.server.clone(), app.settings.own.data.clone());
@@ -169,12 +234,29 @@ impl Runner {
             }
             if app.dirty {
                 self.follow(app);
+                // What following the engine asked for (the new song's cover) is asked for now, not once
+                // something else happens to wake the loop.
+                self.carry_out(app);
+                if std::mem::take(&mut self.repaint) {
+                    crate::term::debug!("the whole screen written again, pictures included");
+                    // Everything written again: a picture sent while the pane was not shown (tmux passes
+                    // graphics through to whatever window is on screen, and keeps no copy) is sent again.
+                    if let Some(a) = &mut self.art {
+                        a.resend();
+                    }
+                    crate::term::repaint(terminal).map_err(|e| e.to_string())?;
+                }
                 let art = self.art.as_mut();
                 terminal.draw(|f| crate::ui::draw(f, app, art)).map_err(|e| e.to_string())?;
+                crate::term::debug!("drew {:?}: {:?} {:?} at {} ms, song {:?}", app.screen, app.now.state, self.heard, app.now.position_ms, app.song.as_ref().map(|s| &s.title));
                 app.dirty = false;
             }
             let now = Instant::now();
-            let msg = match app.next_wake(now) {
+            let wake = match (app.next_wake(now), self.said.again) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let msg = match wake {
                 Some(at) => rx.recv_timeout(at.saturating_duration_since(now)),
                 None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
             };
@@ -195,8 +277,14 @@ impl Runner {
     }
 
     fn take(&mut self, app: &mut App, m: Msg) {
+        crate::term::debug!("took {}", m.brief());
         match &m {
             Msg::Engine(e @ (Event::Song { .. } | Event::State(_) | Event::Looped { .. })) => {
+                match e {
+                    Event::State(st) => self.said.state = Some(*st),
+                    Event::Song { id, .. } | Event::Looped { id, .. } => self.said.song = Some(id.clone()),
+                    _ => {}
+                }
                 if let Some(s) = &self.session {
                     s.desktop_changed();
                     s.followed(e);
@@ -205,6 +293,15 @@ impl Runner {
             Msg::Cover { art, image, .. } => {
                 if let Some(a) = &mut self.art {
                     a.put(art.clone(), image);
+                }
+                self.unseen_cover |= !self.focused;
+            }
+            Msg::Focus(on) => {
+                self.focused = *on;
+                // Back in view: whatever changed while away is drawn in full. Under tmux a picture sent
+                // while the pane was in another window went to that window, or nowhere.
+                if *on && (std::mem::take(&mut self.unseen_cover) || crate::term::in_tmux()) {
+                    self.repaint = true;
                 }
             }
             Msg::LoggedIn(Ok(p)) => {
@@ -228,21 +325,49 @@ impl Runner {
     /// unless the song heard changed).
     fn follow(&mut self, app: &mut App) {
         let Some(s) = &self.session else { return };
-        let (now, id_changed) = s.engine.status_with(|st| {
+        let said = &self.said;
+        let (now, id_changed, agrees) = s.engine.status_with(|st| {
+            if let Some(song) = said.behind(st.state, st.id.as_deref()) {
+                // Behind the events: the screen keeps what they said (the state, its clock stopped or
+                // started where it was, App::engine), and the song they named, from its start.
+                let changed = song.is_some() && song != self.heard;
+                return (None, changed.then_some(song), false);
+            }
             let changed = st.id.as_deref() != self.heard.as_deref();
             (
-                crate::app::Now { state: st.state, position_ms: st.position_ms, at: st.at, speed: st.speed, mixing: st.mixing, buffering: app.now.buffering },
+                Some(crate::app::Now { state: st.state, position_ms: st.position_ms, at: st.at, speed: st.speed, mixing: st.mixing, buffering: app.now.buffering }),
                 changed.then(|| st.id.clone()),
+                true,
             )
         });
-        app.now = now;
+        let at = Instant::now();
+        if agrees {
+            self.said = Said::default();
+        } else if self.said.tries < AGAIN_TRIES {
+            self.said.tries += 1;
+            self.said.again = Some(at + std::time::Duration::from_millis(AGAIN_MS));
+            crate::term::debug!("the engine's status is behind its events: read again in {AGAIN_MS} ms");
+        } else {
+            // Given up on: what the events said stands until the next event or wake.
+            self.said = Said::default();
+        }
+        match now {
+            Some(now) => app.now = now,
+            None if id_changed.is_some() => {
+                app.now.position_ms = 0;
+                app.now.at = at;
+            }
+            None => {}
+        }
         if let Some(id) = id_changed {
             self.heard = id.clone();
             app.heard(id.and_then(nori_core::queue::queue_song));
         }
         // The queue, copied again only when it changed.
-        let (rev, repeat) = nori_core::playlist::with(|p| (p.rev(), p.repeat()));
-        if app.queue.as_ref().is_none_or(|q| q.rev != rev || q.repeat != repeat) {
+        // The song playing moving on (the engine's own advance) does not count as a change of the list's
+        // revision, so the index is compared too: else "Up next" kept the song just heard at its top.
+        let (rev, repeat, index) = nori_core::playlist::with(|p| (p.rev(), p.repeat(), p.current().map_or(-1, |c| c as i32)));
+        if app.queue.as_ref().is_none_or(|q| q.rev != rev || q.repeat != repeat || q.index != index) {
             let held = app.queue.as_ref().map_or(u64::MAX, |q| q.list_rev);
             let mut v = nori_core::playlist::playlist_view(held);
             if v.songs.is_empty() && v.len > 0 {
@@ -286,6 +411,7 @@ impl Runner {
     }
 
     fn carry(&mut self, app: &mut App, c: Cmd) {
+        crate::term::debug!("carried out {}", c.brief());
         match c {
             Cmd::Quit => {
                 app.quit = true;
@@ -384,22 +510,30 @@ impl Runner {
                 }
                 self.prefs_changed(app);
             }
+            // A sound edit that changed nothing (`None`) asks nothing of the engine. One that did is applied,
+            // and then (the engine takes its commands in order, so it sees the new sound first) the first on
+            // the equalizer screen asks for the shallow buffer.
             Cmd::Level(level, v) => {
                 if let Some((effect, _)) = settings_store::edit_level(level, v) {
                     s.applied(effect);
+                    Self::tune(s, app);
                 }
                 self.prefs_changed(app);
             }
             Cmd::Band(i, band) => {
                 if let Some((effect, _)) = settings_store::edit_band(i, band) {
                     s.applied(effect);
+                    Self::tune(s, app);
                 }
                 self.prefs_changed(app);
             }
             Cmd::Sound(tool) => {
                 if let Some(t) = tool.tool() {
                     match settings_store::settings_sound_tool(t) {
-                        Ok(Some(change)) => s.applied(change.effect),
+                        Ok(Some(change)) => {
+                            s.applied(change.effect);
+                            Self::tune(s, app);
+                        }
                         Ok(None) => {}
                         Err(e) => app.say(format!("{e:?}"), true),
                     }
@@ -429,6 +563,12 @@ impl Runner {
                 }
             }
             Cmd::Quit | Cmd::Mouse(_) | Cmd::Images(_) | Cmd::Login(_) | Cmd::SwitchServer(_) => {}
+        }
+    }
+
+    fn tune(s: &Session, app: &mut App) {
+        if app.sound_edited() {
+            s.engine.set_tuning(true);
         }
     }
 

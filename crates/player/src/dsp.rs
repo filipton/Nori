@@ -125,6 +125,13 @@ impl Biquad {
     }
 }
 
+/// The normalised coefficients `[b0, b1, b2, a1, a2]` the chain runs `band` with at `rate`, for code that
+/// designs filters (`eqfit`) and has to see exactly the response the chain will play.
+pub fn band_coefficients(rate: f64, band: &Band) -> [f64; 5] {
+    let b = Biquad::new(rate, band);
+    [b.b0, b.b1, b.b2, b.a1, b.a2]
+}
+
 /// True for the kinds whose `gain_db` means something; the others are shapes and stay in the chain at any gain.
 pub fn uses_gain(kind: i32) -> bool {
     matches!(kind, PEAKING | LOW_SHELF | HIGH_SHELF | LOW_SHELF_SLOPE | HIGH_SHELF_SLOPE)

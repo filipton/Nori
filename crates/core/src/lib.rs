@@ -656,16 +656,16 @@ impl Core {
         Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
     }
 
-    // ---- AutoEQ headphone database (only fetched when the user opens the browser) ----
+    // ---- AutoEQ headphone database (kept by `Client::autoeq_update`, see profiles.rs) ----
 
-    /// The url of the index the caller should download and hand to [autoeq_store].
+    /// The url of the index a client without the core's transport downloads and hands to [autoeq_store].
     pub fn autoeq_index_url(&self) -> String {
         autoeq::INDEX_URL.to_string()
     }
 
-    /// Parses `INDEX.md` into the local table; returns how many headphones it holds.
+    /// Parses `INDEX.md` into the local table, as fetched now; returns how many headphones it offers.
     pub fn autoeq_store(&self, markdown: String) -> Result<u32> {
-        Ok(autoeq::store(&mut self.db.lock(), &markdown)?)
+        Ok(autoeq::store(&mut self.db.lock(), &markdown, db::now_ms())?)
     }
 
     pub fn autoeq_search(&self, query: String, limit: u32) -> Result<Vec<AutoEqEntry>> {

@@ -51,8 +51,7 @@ fn an_aac_song_in_mp4_is_exactly_as_long_as_it_was_before_it_was_encoded() {
         eprintln!("ffmpeg is not installed: the MP4 gapless test has nothing to test with");
         return;
     }
-    let dir = std::env::temp_dir().join(format!("nori-mp4-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = nori_testdir::TempDir::new("mp4");
     let (m4a, reference) = made(&dir);
     assert_eq!(reference.len(), FRAMES * 2, "ffmpeg cuts to the edit list");
     let ours = decode(&m4a, 0);
@@ -65,5 +64,4 @@ fn an_aac_song_in_mp4_is_exactly_as_long_as_it_was_before_it_was_encoded() {
     assert_eq!(from.len(), (FRAMES - RATE) * 2);
     let worst = from.iter().zip(&ours[RATE * 2..]).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
     assert!(worst <= 4, "a seek into an MP4 lands where the song's time says: {worst}");
-    let _ = std::fs::remove_dir_all(dir);
 }

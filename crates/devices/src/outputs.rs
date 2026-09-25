@@ -265,9 +265,7 @@ mod tests {
         use nori_db::background;
         use nori_settings::settings_store::settings_open;
 
-        let dir = std::env::temp_dir().join(format!("nori-outputs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = nori_testdir::TempDir::new("outputs");
         let path = dir.join("nori.db").display().to_string();
         settings_open(path.clone()).unwrap();
         let speaker = outputs_speaker();
@@ -280,6 +278,5 @@ mod tests {
         rx.recv().unwrap();
         settings_open(path).unwrap();
         assert_eq!(outputs_known(), ["Bluetooth: Buds", speaker.as_str()]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

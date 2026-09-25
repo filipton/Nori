@@ -8,7 +8,8 @@ class NoriApp : Application() {
         super.onCreate()
         // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
         val nori = Nori.get(this)
-        Thread { numberStyle(); nori.warmUp(); forgetCoil() }.start()
+        // Then the AutoEQ list, if the core says it is due (one request on Wi-Fi, once a month at most).
+        Thread { numberStyle(); nori.warmUp(); forgetCoil(); kotlinx.coroutines.runBlocking { nori.keepAutoEqList() } }.start()
     }
 
     /** A new locale changes how the core writes fractions ("12,4 MB"), so it is told again. */

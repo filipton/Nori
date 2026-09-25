@@ -57,6 +57,9 @@ internal class SleeveMotion(
     var calmAt = 0L
 }
 
+/** How long the music stays paused before the moving cover's decoder is let go (its frame stays). */
+private const val MOTION_REST_MS = 5_000L
+
 /** The video's fade back to the still cover: quick, since something is about to move. */
 private const val MOTION_OUT_MS = 160
 
@@ -98,8 +101,12 @@ internal fun MotionDirector(vm: PlayerViewModel, motion: SleeveMotion, sheet: Pl
     // Everything but the finger: a tap that moved nothing does not count as a move ending.
     val calm = live && open && onArtwork && !still && motion.resting
     val want = calm && !motion.touching
+    // The music paused, the picture stops where it is: the frame on screen stays, nothing fades, and
+    // nothing decodes until the music goes on again. A cover looping over a paused song kept the screen
+    // redrawing two dozen times a second for as long as it was left open.
+    val sounding by vm.sounding.collectAsStateWithLifecycle()
     DisposableEffect(motion) { onDispose { vm.motionRelease() } }
-    LaunchedEffect(motion, target, want, live, calm) {
+    LaunchedEffect(motion, target, want, live, calm, sounding) {
         if (calm && !motion.wasCalm) motion.calmAt = android.os.SystemClock.uptimeMillis()
         motion.wasCalm = calm
         if (!live) {
@@ -118,6 +125,14 @@ internal fun MotionDirector(vm: PlayerViewModel, motion: SleeveMotion, sheet: Pl
             return@LaunchedEffect
         }
         if (!want) return@LaunchedEffect
+        if (!sounding) {
+            // Held on the frame it is showing, or, with none showing yet, not started: the still cover.
+            vm.motionPause()
+            // A paused decoder still wakes to be polled; a pause that lasts lets it go, frame kept.
+            delay(MOTION_REST_MS)
+            vm.motionRest()
+            return@LaunchedEffect
+        }
         motion.present = true
         val settle = MOTION_SETTLE_MS - (android.os.SystemClock.uptimeMillis() - motion.calmAt)
         if (settle > 0) delay(settle)

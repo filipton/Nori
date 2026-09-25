@@ -220,6 +220,9 @@ pub struct TransitionEngine<C: Clone> {
     /// The capacity of the hold for this transition, bytes.
     tail_limit: usize,
     tail_len: usize,
+    /// How much of the hold is the song's own audio: less than `tail_len` when the song ended before the
+    /// plan's hold was full and the rest is silence (see `handle_discontinuity`).
+    tail_heard: usize,
     tail_read: usize,
     /// The output timestamp holding began at: everything from here on is inside this engine, unheard.
     held_from_us: i64,
@@ -329,6 +332,7 @@ impl<C: Clone> TransitionEngine<C> {
             tail: Vec::new(),
             tail_limit: 0,
             tail_len: 0,
+            tail_heard: 0,
             tail_read: 0,
             held_from_us: TIME_UNSET,
             held_at: 0,
@@ -959,6 +963,15 @@ impl<C: Clone> TransitionEngine<C> {
                 // The held audio is about to go out as the mix, so it stops counting as played-but-unheard.
                 // What was already reported stands until the sound really catches up with it.
                 self.held_us = 0;
+                // The song ended before the whole of the ending the plan holds came (it is shorter than the
+                // length it was planned with): the rest of the hold is silence, so the mix runs its curves
+                // to their end, the incoming song fading up on its own. Stopped where the held audio ran out,
+                // the incoming song jumped from wherever its fade and loudness match were to full.
+                self.tail_heard = self.tail_len;
+                if p.out_loop_us <= 0 && self.tail_len < self.tail_limit {
+                    self.tail[self.tail_len..self.tail_limit].fill(0);
+                    self.tail_len = self.tail_limit;
+                }
                 self.tail_read = 0;
                 self.mix_out_frame = 0;
                 self.mix_out_frames = ((p.duration_us - late) * out.rate as i64 / 1_000_000).max(0) as usize;
@@ -1247,8 +1260,11 @@ impl<C: Clone> TransitionEngine<C> {
     fn abandon_transition<H: Host>(&mut self, host: &mut H) {
         self.measure_next = false;
         if self.tail_len > 0 && matches!(self.phase, Phase::Hold | Phase::Mix) {
-            let from = if self.phase == Phase::Mix { self.tail_read.min(self.tail_len) } else { 0 };
-            if from < self.tail_len {
+            // Past the start of a mix, only the song's own audio: never the silence a short song's hold was
+            // made up to length with.
+            let end = if self.phase == Phase::Mix { self.tail_heard.min(self.tail_len) } else { self.tail_len };
+            let from = if self.phase == Phase::Mix { self.tail_read.min(end) } else { 0 };
+            if from < end {
                 // At the timestamp it was held at, not at nought: this audio is the ending of the track,
                 // in its own timeline, and the output below reads these to keep the clock. Past the start
                 // of a mix the queue already holds the mix, so the rest follows it.
@@ -1259,7 +1275,7 @@ impl<C: Clone> TransitionEngine<C> {
                 } else {
                     0
                 };
-                let rest = self.tail[from..self.tail_len].to_vec();
+                let rest = self.tail[from..end].to_vec();
                 let c = self.copy_of(&rest);
                 self.enqueue(c, at, self.held_offset_us);
             }
@@ -1460,7 +1476,12 @@ impl<C: Clone> TransitionEngine<C> {
                 self.heard.from_id = None;
             }
         }
-        self.heard.mixing = self.mix_from_us != TIME_UNSET && at >= self.mix_from_us;
+        let mixing = self.mix_from_us != TIME_UNSET && at >= self.mix_from_us;
+        if mixing != self.heard.mixing {
+            // Heard starting or ending: a page that says so is told, as it is of a change of song.
+            self.heard.mixing = mixing;
+            host.heard_changed();
+        }
         self.reported
     }
 
@@ -1518,7 +1539,10 @@ impl<C: Clone> TransitionEngine<C> {
         self.skip_left = 0;
         self.mixed_end_us = TIME_UNSET;
         self.mix_from_us = TIME_UNSET;
-        self.heard.mixing = false;
+        if self.heard.mixing {
+            self.heard.mixing = false;
+            host.heard_changed();
+        }
         self.held_from_us = TIME_UNSET;
         self.held_us = 0;
         self.reported = i64::MIN;

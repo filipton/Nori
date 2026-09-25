@@ -306,11 +306,17 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         return if (PlaybackService.engine == "exoplayer" && (p.crossfadeSec > 0 || p.autoMix)) (maxOf(p.crossfadeSec, p.autoMixMaxS) + 1) * 1000L else 0L
     }
 
-    /** A second after the settings changed: what the engine shows against them (the core's call). */
+    /**
+     * A second after the settings changed: what the engine shows against them (the core's call, which
+     * judges only while playing through an open output, and not just after the service started).
+     */
     private val settingsLook = Runnable {
         if (PlaybackService.engine == null) return@Runnable
         val nori = Nori.get(app)
-        dev.nori.music.ffi.perf.perfWatchSettings(System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain, nori.outputs.usb.value)
+        dev.nori.music.ffi.perf.perfWatchSettings(
+            System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain, nori.outputs.usb.value,
+            playing, PlaybackService.track != null,
+        )
     }
 
     /**
@@ -358,6 +364,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
     /** Something happened: when it moved the app into another state, one stretch ends and the next begins. */
     private fun changed() {
         exoOutput()
+        // Only a screen that can be seen is held to the song heard (see the core's Watch::visible).
+        dev.nori.music.ffi.perf.perfWatchVisible(System.currentTimeMillis(), foreground && screenOn, grace())
         dev.nori.music.ffi.perf.perfWatchLook(System.currentTimeMillis(), grace())
         // The service may have started (or stopped) since, and with it the path that plays.
         settings = cfg()

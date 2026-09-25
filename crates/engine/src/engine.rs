@@ -39,7 +39,7 @@ use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
 use nori_player::pcm::Encoding;
-use nori_player::pipeline::{App, Player, Queue, Reading, Songs, Sound};
+use nori_player::pipeline::{App, Player, Queue, Reading, Songs, Sound, Track};
 use nori_player::playlist::Playlist;
 use nori_player::policy::{audio_policy, offload_blocked, AudioPrefs, OutputState};
 use nori_player::queue::previous_restarts;
@@ -137,9 +137,18 @@ pub enum Event {
     Stopped,
     /// A live stream's station announced what it plays now (ICY), as the ear reaches it.
     Title(String),
+    /// A mix (AutoMix, a crossfade) began to be heard (`true`), or is over (`false`): said as the engine
+    /// wakes to feed the output, which it does four times a second through a mix, so a screen can say so
+    /// without asking.
+    Mixing(bool),
     /// A song would not play for want of the network, and the app's offline bridge is to take over (the
     /// queue's rules said so): playback waits there, paused, for the bridge's jump.
     Bridge,
+    /// The song heard went from the output's decoder to the CPU or back (the settings changed, or the
+    /// chip's track failed), nobody having asked for a jump: the place is `ms` in queue index `index` now,
+    /// said once the status has it. A client that runs its own clock on from the engine's last word
+    /// (media3's controllers do, until a play, pause or seek says the place again) takes it from here.
+    Placed { index: usize, ms: i64 },
 }
 
 /// The engine as it last looked, for a screen to read at any time without waking it.
@@ -544,6 +553,8 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> {
     /// When the music is to be made again ([`Worker::resound_soon`]), and when it last was.
     resound_due: Option<i64>,
     resounded_at: i64,
+    /// The music changed path without a jump asked for: [`Event::Placed`] is said at the next report.
+    placed_due: bool,
 }
 
 /// Less than this left to play while a song's bytes are on their way is a stall a screen shows.
@@ -555,6 +566,18 @@ const TEAR_DOWNS: u32 = 2;
 const RESOUND_DIP_MS: i64 = 30;
 /// Changes to the sound that come quicker than this (a slider dragged) are made heard together.
 const RESOUND_EVERY_MS: i64 = 150;
+/// The most music the ring and the device may hold while the equalizer is tuned for a band moved to be
+/// heard as it is: the shallow ring's and the shallow track's, with room for the device's own latency.
+/// More is left from the deep buffer, and is made again.
+const TUNED_HELD_US: i64 = 400_000;
+/// Beyond the shallow ring and the shallow device, what [`TUNED_HELD_US`] leaves for the device's own
+/// latency: the measure for a device that found it needs more than a phone speaker's shallow track.
+const TUNED_SLACK_US: i64 = 160_000;
+/// The equalizer screen turns tuning on at the first change made on it, which reaches the engine a
+/// moment before the tuning does and is made again into the deep buffer. Tuning that comes within this
+/// of the music made again makes it again once more, so that first change lands in the shallow buffer as
+/// every later one does, whichever of the two came first.
+const TUNED_AFTER_RESOUND_MS: i64 = 1_000;
 /// A device holding more music than this (a phone's track holds seconds) holds enough of the old
 /// ReplayGain level to be heard: the music is made again, as for any other change of the sound.
 const HELD_US: i64 = 250_000;
@@ -603,6 +626,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             entering: None,
             offload_now: false,
             resound_due: None,
+            placed_due: false,
             resounded_at: i64::MIN / 2,
         };
         w.apply(settings);
@@ -626,6 +650,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             let now = self.now();
             self.due(now);
             self.follow_gain();
+            self.follow_depth();
             if self.p.app.measured() {
                 self.replan();
             }
@@ -707,6 +732,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
                     off.play();
                 }
                 self.offload_heard = false;
+                // The song placed on the track again for a jump (a seek, the chip taking it over from
+                // the CPU) is not repeat one starting it again: no loop is said for it.
+                self.heard_seq = 0;
                 self.p.queue.moved_to(i);
                 return;
             }
@@ -777,6 +805,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         let playing = self.state == State::Playing && self.pause_at.is_none();
         self.leave_offload();
         self.p.jump(index, ms);
+        self.placed_due = true;
         if playing {
             self.p.resume();
             self.p.sink.track.ramp(None, 1.0, 0);
@@ -933,6 +962,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
                 self.p.queue_changed();
                 self.follow_held();
                 self.follow_queue();
+                // Another song may follow the one playing now: its ending is planned again, and made
+                // again where the output holds it made for the song that followed before.
+                self.replan();
             }
             Command::Repeat(m) => {
                 self.p.set_repeat(m);
@@ -953,8 +985,23 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
     /// output's depth, which on a phone's AudioTrack is a rebuild and a gap; here it is a dip, so the
     /// shallow buffer comes at once (a band moved is heard at once from the first touch) and the deep one
     /// comes back as the screen closes.
+    ///
+    /// Over an output that [`AudioOutput::resizes`] (a phone's AudioTrack) neither is heard: the ring and
+    /// the device change their depth in place, nothing is dropped or made again. Made shallow, what they
+    /// hold plays out; a band moved before it has is made again behind the dip every change of the sound
+    /// takes outside the screen ([`Worker::apply`]), and from then on is heard as it is.
     fn tune(&mut self, on: bool) {
         self.p.set_tuning(on);
+        if self.p.sink.track.resizes() {
+            self.follow_depth();
+            // The change that turned tuning on was made again into the deep buffer a moment ago: again,
+            // into the shallow one, as a change made once tuned is. Otherwise which buffer it landed in
+            // was down to whether the change or the tuning reached the engine first.
+            if self.p.chain.tuning && self.now() - self.resounded_at <= TUNED_AFTER_RESOUND_MS && self.held_us() > self.tuned_held_us() {
+                self.resound_soon();
+            }
+            return;
+        }
         let wanted = if self.p.chain.tuning { self.p.shallow_us } else { nori_player::burst::BUFFER_US };
         if self.p.sink.capacity_us != wanted {
             self.resound_soon();
@@ -1046,7 +1093,8 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         }
         if heard_differently && !restarted {
             // While the equalizer is tuned the output is shallow already: a band moved is heard as it is.
-            let tuned = self.p.chain.tuning && self.p.sink.capacity_us == self.p.shallow_us;
+            // Made shallow in place, it may still hold seconds from before: those are made again once.
+            let tuned = self.p.chain.tuning && self.p.sink.capacity_us == self.p.shallow_us && self.held_us() <= self.tuned_held_us();
             match self.entering.as_mut() {
                 // Handed to the output's decoder where the ear is, or made again there if it stays here.
                 Some(e) => e.2 = true,
@@ -1071,6 +1119,12 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         }
         let Some((cur, ear_ms)) = self.p.ear() else { return };
         let id = self.p.id_at(cur);
+        if self.p.read_astray(cur) {
+            // Read on gaplessly into a song the queue no longer has next (one was queued before it).
+            self.p.app.log(&format!("the ending of {id} is made again: another song follows it now"));
+            self.resound_soon();
+            return;
+        }
         let now = self.now();
         self.p.app.clock(now);
         let plan = self.p.app.plan_for(&id);
@@ -1111,9 +1165,11 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             }
             if self.offloading() {
                 let playing = self.state == State::Playing && self.pause_at.is_none();
-                if let Some((i, ms)) = self.leave_offload() {
+                let now = self.now();
+                if let Some((i, ms)) = self.off.as_mut().and_then(|o| o.leave(now)) {
                     self.p.app.log("offload given up: the CPU plays on from here");
                     self.p.jump(i, ms);
+                    self.placed_due = true;
                     if playing {
                         self.p.resume();
                         self.p.sink.track.ramp(None, 1.0, 0);
@@ -1163,6 +1219,35 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         } else if resound {
             self.resound_soon();
         }
+    }
+
+    /// The most music the ring and the device hold once tuned for a band moved to be heard as it is:
+    /// [`TUNED_HELD_US`], or the shallow ring's, the shallow device's as it found it needs (a Bluetooth
+    /// output's latency in it) and some slack.
+    fn tuned_held_us(&self) -> i64 {
+        let device = self.p.sink.track.shallow_depth().map_or(0, |d| d.device_us);
+        TUNED_HELD_US.max(device + self.p.shallow_us + TUNED_SLACK_US)
+    }
+
+    /// While tuned over a device that resizes in place, the ring is kept as deep as the device found it
+    /// needs to be fed from ([`AudioOutput::shallow_depth`]): never shallower than [`SHALLOW_US`]. The
+    /// device says so from its own thread once it has looked at where it plays, or grown after running
+    /// dry; one atomic read a wake, and only while tuned.
+    fn follow_depth(&mut self) {
+        if !self.p.chain.tuning || !self.p.sink.track.resizes() {
+            return;
+        }
+        let ring = self.p.sink.track.shallow_depth().map_or(SHALLOW_US, |d| d.ring_us.max(SHALLOW_US));
+        if ring != self.p.shallow_us {
+            self.p.app.log(&format!("the shallow ring follows the device: {} ms", ring / 1000));
+            self.p.set_shallow_us(ring);
+        }
+    }
+
+    /// Music made and not yet heard: what the ring holds and what the device does, µs.
+    fn held_us(&self) -> i64 {
+        let track = &self.p.sink.track;
+        track.filled_us() + track.latency_us()
     }
 
     /// Something that changes what the music sounds like changed while the CPU plays it: what the output
@@ -1426,6 +1511,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             self.p.pause();
             let ms = self.p.position_ms();
             self.jump(i, ms);
+            self.placed_due = true;
             // The chip's track comes up from silence with the dip.
             self.ramp(Some(0.0), 0.0, 0);
             return;
@@ -1704,8 +1790,10 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             }
         }
         self.loops = self.p.loops;
-        {
+        let mixing = self.p.mixing();
+        let mixing_was = {
             let mut s = self.status.lock();
+            let was = s.mixing;
             s.state = self.state;
             if s.index != index {
                 s.index = index;
@@ -1714,13 +1802,21 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.position_ms = ms;
             s.at = Instant::now();
             s.speed = self.p.speed().0;
-            s.mixing = self.p.mixing();
+            s.mixing = mixing;
             s.underruns = self.p.sink.track.underruns();
             s.releases = self.releases;
             s.switching = self.switch_at.is_some();
             s.chain = self.p.sink.chain_in();
             s.gain_reduction_db = self.p.sink.meter_db;
             s.offloaded = false;
+            was
+        };
+        if mixing != mixing_was {
+            (self.events)(Event::Mixing(mixing));
+        }
+        if let Some(i) = index.filter(|_| self.placed_due) {
+            self.placed_due = false;
+            (self.events)(Event::Placed { index: i, ms });
         }
         if let (Some(every), Some(i), State::Playing) = (self.positions, index, self.state) {
             if now >= self.next_position {
@@ -1755,8 +1851,9 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             self.p.errors.played();
             self.p.app.playing();
         }
-        {
+        let mixing_was = {
             let mut s = self.status.lock();
+            let was = s.mixing;
             s.state = self.state;
             if s.index != Some(i) {
                 s.index = Some(i);
@@ -1771,6 +1868,13 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.chain = false;
             s.gain_reduction_db = 0.0;
             s.offloaded = true;
+            was
+        };
+        if mixing_was {
+            (self.events)(Event::Mixing(false));
+        }
+        if std::mem::take(&mut self.placed_due) {
+            (self.events)(Event::Placed { index: i, ms });
         }
         if let (Some(every), State::Playing) = (self.positions, self.state) {
             if now >= self.next_position {

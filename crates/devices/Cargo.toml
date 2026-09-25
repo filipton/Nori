@@ -22,3 +22,7 @@ nori-net = { path = "../net" }
 # Which sound a device gets is read from the settings, and the known devices are kept beside them.
 nori-settings = { path = "../settings" }
 nori-player = { path = "../player" }
+
+[dev-dependencies]
+async-trait = "0.1"
+nori-testdir = { path = "../testdir" }

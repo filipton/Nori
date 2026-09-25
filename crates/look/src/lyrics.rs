@@ -62,6 +62,18 @@ const WORD_MS_MAX: i64 = 2_000;
 /// One press of "Sooner" or "Later", for the few songs whose timings are wrong.
 pub const NUDGE_STEP_MS: i64 = 250;
 
+/// A tapped line is sought to its first moment, and a player lands a seek where it can: a frame, a
+/// packet or a keyframe early, or on a playhead that ran on from the tap for a moment and was then set
+/// back to where the seek really landed. Readings up to this far before the tapped line still count as
+/// being on it...
+pub const LAND_EARLY_MS: i64 = 1_000;
+/// ...and the words never go back while the player catches up with what is on screen, by up to this much...
+pub const LAND_HOLD_MS: i64 = 1_500;
+/// ...for this long into the tapped line; after that the player's word is the truth again.
+pub const LANDING_MS: i64 = 3_000;
+/// No tap being landed.
+const NOT_LANDING: i64 = i64::MIN;
+
 /// How long the words stay where a finger left them before they come back to the line being sung.
 pub const READING_MS: i64 = 4_000;
 
@@ -381,12 +393,14 @@ pub struct LyricClock {
     timing: LyricTiming,
     shown: AtomicI64,
     nudge: AtomicI64,
+    /// The start of the line last tapped, while the player lands there ([`NOT_LANDING`] otherwise).
+    landing: AtomicI64,
 }
 
 impl LyricClock {
     /// Starts showing the moment `position_ms`, un-nudged.
     pub fn new(timing: LyricTiming, position_ms: i64) -> Self {
-        LyricClock { timing, shown: AtomicI64::new(position_ms), nudge: AtomicI64::new(0) }
+        LyricClock { timing, shown: AtomicI64::new(position_ms), nudge: AtomicI64::new(0), landing: AtomicI64::new(NOT_LANDING) }
     }
 
     pub fn timing(&self) -> &LyricTiming {
@@ -399,7 +413,7 @@ impl LyricClock {
     /// first look after starting or resuming.
     pub fn advance(&self, position_ms: i64, sweep: bool, lively: bool, force: bool) -> Step {
         let sweep = sweep && self.timing.sweeps();
-        let t = position_ms + self.nudge.load(Relaxed);
+        let t = self.landed(position_ms + self.nudge.load(Relaxed));
         let redraw = force || self.timing.moved(self.shown.load(Relaxed), t, sweep, lively);
         if redraw {
             self.shown.store(t, Relaxed);
@@ -431,11 +445,36 @@ impl LyricClock {
     }
 
     /// A tap on `line`: shows it at once and returns where the player should seek to, which is the line's
-    /// timestamp less the nudge, so the words land where they are drawn.
+    /// timestamp less the nudge, so the words land where they are drawn. Until the player is clearly
+    /// playing the line, a reading a little before it (a seek landed early, a playhead set back after
+    /// running on) shows what is on screen rather than the line before or its words emptied again: the
+    /// tapped line becomes the one sung, its first word fills from the start, and nothing goes back.
     pub fn tap(&self, line: usize) -> i64 {
         let Some(&start) = self.timing.starts.get(line) else { return self.shown.load(Relaxed).max(0) };
         self.shown.store(start, Relaxed);
+        self.landing.store(start, Relaxed);
         (start - self.nudge.load(Relaxed)).max(0)
+    }
+
+    /// The moment to show for a reading `t`, while a tap is being landed: see [`LyricClock::tap`].
+    fn landed(&self, t: i64) -> i64 {
+        let at = self.landing.load(Relaxed);
+        if at == NOT_LANDING {
+            return t;
+        }
+        let shown = self.shown.load(Relaxed);
+        if t >= shown {
+            if t - at > LANDING_MS {
+                self.landing.store(NOT_LANDING, Relaxed);
+            }
+            return t;
+        }
+        if t >= at - LAND_EARLY_MS && shown - t <= LAND_HOLD_MS {
+            return shown;
+        }
+        // Well before it, or far behind what is shown: somewhere else altogether (another seek).
+        self.landing.store(NOT_LANDING, Relaxed);
+        t
     }
 
     /// `dir` > 0 moves the words sooner, < 0 later, 0 puts them back; returns the nudge in ms. Picked up
@@ -645,6 +684,51 @@ mod tests {
         let c = LyricClock::new(LyricTiming::new(true, false, lines(&[1000, 5000])), 0);
         assert_eq!(c.advance(0, true, false, false).wait, 500);
         assert_eq!(c.advance(4400, true, false, false).wait, 290);
+    }
+
+    #[test]
+    fn a_tapped_line_is_the_one_sung_even_when_the_seek_lands_just_before_it() {
+        // Line 1 starts at 5000 with its first word from 5000 to 5400; line 0 is sung before it.
+        let timing = LyricTiming::new(
+            true,
+            true,
+            vec![
+                Line { start_ms: 1000, len: 10, words: vec![w(1000, 4000, 0, 10)], ..Default::default() },
+                Line { start_ms: 5000, len: 8, words: vec![w(5000, 5400, 0, 4), w(5400, 6000, 4, 8)], ..Default::default() },
+                Line { start_ms: 9000, len: 3, words: vec![w(9000, 9500, 0, 3)], ..Default::default() },
+            ],
+        );
+        let c = LyricClock::new(timing, 4500);
+        assert_eq!(c.advance(4500, true, false, true).frame.active, 0);
+        assert_eq!(c.tap(1), 5000);
+        assert_eq!(c.shown(), Frame { active: 1, glide_ms: 620, sung: 0.0 });
+        // The seek landed 26 ms early (an MP3 frame): still the tapped line, its words not yet begun, and
+        // not the line before for a frame.
+        let s = c.advance(4974, true, false, false);
+        assert_eq!((s.frame.active, s.frame.sung), (1, 0.0));
+        assert_eq!(c.shown_ms(), 5000);
+        // As the music reaches the line, its first word fills from the start.
+        let s = c.advance(5100, true, false, false);
+        assert_eq!((s.frame.active, s.frame.sung), (1, 1.0));
+        // The player's count ran on from the tap and is set back to where the seek really landed: the fill
+        // holds where it is until the music catches up, rather than emptying and filling again.
+        let s = c.advance(5000, true, false, false);
+        assert_eq!((s.frame.active, s.frame.sung), (1, 1.0), "never back to the start of the line");
+        assert!(!s.redraw);
+        let s = c.advance(5200, true, false, false);
+        assert_eq!((s.frame.active, s.frame.sung), (1, 2.0));
+        // Once well into the line the player's word is the truth again: a seek back is shown as it is.
+        c.advance(8100, true, false, false);
+        assert_eq!(c.advance(4500, true, false, false).frame.active, 0);
+        // A seek somewhere else entirely during a landing is shown at once.
+        c.tap(1);
+        assert_eq!(c.advance(1500, true, false, false).frame.active, 0, "well before the tapped line");
+        c.tap(1);
+        assert_eq!(c.advance(9100, true, false, false).frame.active, 2, "later is always shown");
+        // A tap on the first line, landed a little early, is not "before the lyrics".
+        let c = LyricClock::new(LyricTiming::new(true, true, vec![Line { start_ms: 800, len: 4, words: vec![w(800, 1200, 0, 4)], ..Default::default() }]), 30_000);
+        assert_eq!(c.tap(0), 800);
+        assert_eq!(c.advance(0, true, false, false).frame.active, 0, "seek to 800 landed at 0");
     }
 
     #[test]

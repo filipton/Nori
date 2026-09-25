@@ -20,7 +20,15 @@ import kotlinx.coroutines.withContext
  * memory, so reopening a page costs nothing. The core works it out off the main thread.
  */
 private object CoverPalette {
-    val cache = LruCache<String, PagePalette>(128)
+    /**
+     * By bytes, not by count: a page with a wash carries a 128 px ARGB picture (64 KB), and 128 of them
+     * held 8 MB for pages long closed. 2 MB keeps the last thirty or so covers' washes, and many more
+     * pages without one.
+     */
+    val cache = object : LruCache<String, PagePalette>(2 * 1024 * 1024) {
+        override fun sizeOf(key: String, value: PagePalette): Int =
+            1024 + (value.wash?.let { it.width * it.height * 4 } ?: 0)
+    }
 
     /**
      * One lock per cover and theme (both its pages, plain and on black, are measured together), so a

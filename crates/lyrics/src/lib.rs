@@ -5,6 +5,7 @@
 //! and the lyrics page's clock asked every frame (look.rs). The requests go out through the core's
 //! Transport and the answers are kept in the core's response cache, both handed in by the core.
 
+pub mod credits;
 pub mod fit;
 pub mod formats;
 pub mod html;
@@ -14,3 +15,4 @@ pub mod lrclib;
 pub mod lyrics;
 pub mod race;
 pub mod services;
+pub mod trust;

@@ -21,7 +21,7 @@ use std::thread::Thread;
 
 use nori_player::automix::resample::Resampler;
 use nori_player::automix::PCM_FLOAT;
-use nori_player::decode::{Codec, Decoder, MP3_DECODER_DELAY};
+use nori_player::decode::{he_aac, Codec, Decoder, MP3_DECODER_DELAY};
 use nori_player::pcm::{Encoding, Format};
 use nori_player::pipeline::Reading;
 use nori_player::queue::PlaybackError;
@@ -33,8 +33,10 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
+use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, Timestamp};
 
+use crate::mpeg::Frames;
 use crate::source::Loader;
 
 /// What an Opus stream plays in again after a seek, as the decoder drops it (80 ms, RFC 7845).
@@ -162,10 +164,45 @@ fn codec_of(id: AudioCodecId) -> Option<Codec> {
     })
 }
 
+/// Where a song's packets come from: symphonia's reader for its container, or, for a live MP3 stream,
+/// the frames found and checked in `mpeg.rs`.
+enum Packets {
+    Container(Box<dyn FormatReader + 'static>),
+    Mpeg(Frames),
+}
+
+impl Packets {
+    /// The next packet; none at the end. An I/O error of kind `WouldBlock` is a read that gave up for
+    /// now (it looked through as much as it may in one go): ask again once the bytes are there.
+    fn next_packet(&mut self) -> symphonia::core::errors::Result<Option<Packet>> {
+        match self {
+            Packets::Container(r) => r.next_packet(),
+            Packets::Mpeg(f) => f.next_packet(),
+        }
+    }
+
+    fn container(&mut self) -> Option<&mut Box<dyn FormatReader + 'static>> {
+        match self {
+            Packets::Container(r) => Some(r),
+            Packets::Mpeg(_) => None,
+        }
+    }
+}
+
+/// A read that gave up for now, rather than failed.
+fn for_now(e: &SymphoniaError) -> bool {
+    matches!(e, SymphoniaError::IoError(e) if e.kind() == io::ErrorKind::WouldBlock)
+}
+
+/// Packets read in one call that gave nothing to hear (skipped, broken, dropped before a seek's place)
+/// before the call gives up for now: the engine asks again, so a stream of nothing but broken packets
+/// never holds its thread.
+const IDLE_PACKETS: u32 = 64;
+
 /// One song being read: its container, its decoder, and the buffer the last packet decoded into, in
 /// the encoding asked for (float for high quality output).
 struct Stream {
-    reader: Box<dyn FormatReader + 'static>,
+    reader: Packets,
     track: u32,
     inner: Inner,
     codec: Option<Codec>,
@@ -233,7 +270,10 @@ impl Stream {
     /// `whole`: every byte of `source` is here, so the MP4 boxes that hold the gapless numbers can be
     /// read wherever they are without waiting for the network. `packets`: read undecoded, for an output
     /// that decodes them itself.
-    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, packets: bool) -> Result<Stream, String> {
+    /// `core_only`: an HE-AAC stream is decoded here, its core alone, rather than by the platform's decoder
+    /// (measuring a song ahead needs no more).
+    #[allow(clippy::too_many_arguments)]
+    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
         let gapless = if whole { crate::mp4::gapless(&mut source).ok().flatten() } else { None };
         let byte_len = source.byte_len();
         source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -256,6 +296,7 @@ impl Stream {
         let delay_known = track.delay.is_some();
         let inner = match (codec, Pcm::of(params.codec)) {
             _ if packets => Inner::Raw,
+            (Some(Codec::Aac), _) if !core_only => Inner::Coded(Decoder::whole_aac(rate, channels, params.extra_data.as_deref())?),
             (Some(c), _) => Inner::Coded(decoder(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
             (None, Some(p)) => Inner::Pcm(p),
             _ => return Err(format!("{:?} is not decoded here", params.codec)),
@@ -294,10 +335,8 @@ impl Stream {
             CodedSong { coded: Coded { coding, rate, channels }, bitrate, delay, padding, setup: setup.clone(), from_frame: 0 }
         });
         let compression = match (codec, Pcm::of(params.codec)) {
-            (Some(Codec::Aac), _) => match coding(codec, setup.as_deref(), rate) {
-                Some(_) => "AAC-LC",
-                None => "HE-AAC",
-            },
+            (Some(Codec::Aac), _) if he_aac(setup.as_deref(), rate) => "HE-AAC",
+            (Some(Codec::Aac), _) => "AAC-LC",
             (Some(Codec::Mp3), _) => "MP3",
             (Some(Codec::Flac), _) => "FLAC",
             (Some(Codec::Vorbis), _) => "Vorbis",
@@ -308,6 +347,16 @@ impl Stream {
         };
         let max_frames = codec.map_or(8192, Codec::max_frames);
         let id = track.id;
+        // A live MP3 stream (a station: no length, no duration, read from where it is) is read frame by
+        // frame here, checked, so that it plays on through noise and into a next song of another rate or
+        // channel count. A song of the library whose server does not say its length (sent as it is
+        // transcoded) is not one: it is seeked, as the CPU taking it over from the chip seeks it.
+        let live = byte_len.is_none() && duration_ms.is_none() && from_ms == 0;
+        let reader = if live && !packets && params.codec == CODEC_ID_MP3 {
+            Packets::Mpeg(Frames::new(reader.into_inner(), id))
+        } else {
+            Packets::Container(reader)
+        };
         let width = encoding.width();
         let mut d = Stream {
             reader,
@@ -340,8 +389,16 @@ impl Stream {
             d.primed = d.next_packet();
             return Ok(d);
         }
-        // The first packet says for certain what comes out (an AAC stream's real rate, say).
+        // The first packet says for certain what comes out (an AAC stream's real rate, say). A read that
+        // gave up for now (noise at the start of a station) is asked again, as often as a station's
+        // first bytes could need.
         d.primed = d.next();
+        for _ in 0..64 {
+            if !d.primed || !d.buf.is_empty() {
+                break;
+            }
+            d.primed = d.next();
+        }
         if let Inner::Coded(dec) = &d.inner {
             d.format.rate = dec.rate();
             d.format.channels = dec.channels();
@@ -357,7 +414,7 @@ impl Stream {
             Some((delay, _)) => SeekTo::Timestamp { ts: Timestamp::new((ms * self.format.rate as i64 / 1000 + delay - AAC_WARM_UP).max(0)), track_id: self.track },
             None => SeekTo::Time { time: Time::from_millis(ms), track_id: Some(self.track) },
         };
-        let seeked = self.reader.seek(SeekMode::Accurate, to).map_err(|e| e.to_string())?;
+        let seeked = self.reader.container().ok_or("a live stream is not seeked")?.seek(SeekMode::Accurate, to).map_err(|e| e.to_string())?;
         self.skip_to = match self.mp4 {
             Some(_) => ms * self.format.rate as i64 / 1000,
             None => seeked.required_ts.get(),
@@ -430,9 +487,21 @@ impl Stream {
     /// Decodes the next packet with anything in it into `buf`; false at the end of the song.
     fn next(&mut self) -> bool {
         let (ch, enc) = (self.format.channels, self.format.encoding);
+        let mut idle = 0;
         loop {
+            // Nothing to hear for a while: given up for now, with nothing in the buffer.
+            if idle == IDLE_PACKETS {
+                self.buf.clear();
+                return true;
+            }
+            idle += 1;
             let packet = match self.reader.next_packet() {
                 Ok(Some(p)) => p,
+                // Looked through as much as one read may without finding a packet (noise on a station).
+                Err(e) if for_now(&e) => {
+                    self.buf.clear();
+                    return true;
+                }
                 // The next stream of a chained Ogg one (a station's next song): read on in it.
                 Err(SymphoniaError::ResetRequired) if self.chain_on() => continue,
                 // The end, or a stream that cannot be read any further: either way the song is over.
@@ -528,7 +597,8 @@ impl Stream {
     /// A chained Ogg stream began its next logical stream (an Ogg station's next song, with headers of
     /// its own): its track and a decoder for it, read on at the format told. False when it cannot be.
     fn chain_on(&mut self) -> bool {
-        let Some(track) = self.reader.default_track(TrackType::Audio) else { return false };
+        let Some(reader) = self.reader.container() else { return false };
+        let Some(track) = reader.default_track(TrackType::Audio) else { return false };
         let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else { return false };
         let (Some(codec), Some(rate)) = (codec_of(params.codec), params.sample_rate) else { return false };
         let channels = params.channels.as_ref().map_or(2, |c| c.count()).max(1);
@@ -588,9 +658,12 @@ impl Stream {
 /// measuring a song ahead of time. `each` answers whether to go on. False when it was not read to its
 /// end, or was stopped.
 pub(crate) fn decode_whole(source: Box<dyn MediaSource>, hint: Option<&str>, mut each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
-    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, true, false)?;
+    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, true, false, true)?;
     let mut floats: Vec<f32> = Vec::new();
     while s.fill() {
+        if s.buffer().is_empty() {
+            continue;
+        }
         floats.clear();
         floats.extend(s.buffer().chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));
         if !each(s.format.rate, s.format.channels, &floats) {
@@ -718,13 +791,13 @@ impl Demuxed {
     /// to `encoding`. `duration_ms` is the song's tagged length, for a container that does not say its
     /// own. For bytes that are all here (a file): nothing is waited for.
     pub fn open(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding) -> Result<Demuxed, String> {
-        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true, false)?;
+        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true, false, false)?;
         Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
     }
 
     /// [`Demuxed::open`], read as packets and not decoded ([`Demuxed::packet`]).
     pub fn open_packets(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>) -> Result<Demuxed, String> {
-        let s = Stream::open(source, hint, from_ms, duration_ms, Encoding::Pcm16, true, true)?;
+        let s = Stream::open(source, hint, from_ms, duration_ms, Encoding::Pcm16, true, true, false)?;
         Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
     }
 
@@ -776,7 +849,7 @@ impl Demuxed {
 
     fn start(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, packets: bool) -> Demuxed {
         if loader.complete() {
-            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true, packets) {
+            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true, packets, false) {
                 Ok(s) => State::Open(Box::new(s)),
                 Err(why) => State::Failed(PlaybackError::Other, why),
             };
@@ -788,7 +861,7 @@ impl Demuxed {
             // An MP4's gapless numbers may sit at its very end: it is read once all of it is here (a
             // song that fits one burst, as most do), rather than fetched from the end and again.
             let whole = hint.as_deref().is_some_and(mp4_like) && l.wait_whole();
-            let opened = Stream::open(Box::new(l.reader()), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets);
+            let opened = Stream::open(Box::new(l.reader()), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
             let mut done = o.done.lock();
             done.0 = Some(opened);
             if let Some(t) = done.1.take() {

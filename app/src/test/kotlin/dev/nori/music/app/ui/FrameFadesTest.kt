@@ -73,4 +73,39 @@ class FrameFadesTest {
     @Test fun `the ease is the same both ways`() {
         for (i in 0..10) assertEquals(1f - fadeEase(1f - i / 10f), fadeEase(i / 10f), 1e-6f)
     }
+
+    @Test fun `a change with its own times cross-fades in place with no wait and no rise`() {
+        val swap = FadeTimes(inMs = 320f, outMs = 320f)
+        val f = FrameFades("song1 lines", { it }, times) { from, to -> if (from.startsWith("song1") && to.startsWith("song1")) swap else null }
+        f.show("song1 words")
+        f.step(16.7f)
+        val old = f.pieces.first { it.value == "song1 lines" }
+        val new = f.current!!
+        assertTrue("the new words come in on the first frame: ${new.level}", new.level > 0f)
+        assertEquals(1f, new.rise)
+        // The two together throughout: halfway, each is halfway.
+        f.step(143.3f)
+        assertEquals(0.5f, new.level, 0.01f)
+        assertEquals(0.5f, old.level, 0.01f)
+        repeat(12) { f.step(16.7f) }
+        assertEquals(listOf("song1 words" to 1f), f.levels())
+        // Another song still goes as it always did: a wait, then a rise.
+        f.show("song2 words")
+        f.step(16.7f)
+        assertEquals(0f, f.current!!.level)
+        assertEquals(0f, f.current!!.rise)
+    }
+
+    @Test fun `finer lyrics carry the line on screen over by its time`() {
+        val lines = longArrayOf(0, 4_000, 8_000, 12_000, 16_000)
+        // Split differently: the line starting nearest to the old one's start.
+        val finer = longArrayOf(0, 2_000, 4_100, 6_000, 7_900, 10_000, 12_050)
+        assertEquals(2, matchingLine(lines, 1, finer, timed = true))
+        assertEquals(4, matchingLine(lines, 2, finer, timed = true))
+        assertEquals(6, matchingLine(lines, 4, finer, timed = true))
+        // Untimed words keep the same number, inside the new list.
+        assertEquals(3, matchingLine(lines, 3, finer, timed = false))
+        assertEquals(1, matchingLine(lines, 4, longArrayOf(-1, -1), timed = false))
+        assertEquals(0, matchingLine(lines, 4, longArrayOf(), timed = true))
+    }
 }

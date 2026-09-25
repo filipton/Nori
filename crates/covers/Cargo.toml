@@ -25,5 +25,6 @@ image-webp = "0.2"
 gif = { version = "0.14", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+nori-testdir = { path = "../testdir" }
 # The transport the loader tests stand in for the network with.
 async-trait = "0.1"
