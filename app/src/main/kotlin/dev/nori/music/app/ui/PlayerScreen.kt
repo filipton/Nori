@@ -170,7 +170,6 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // drawn inside the sheet, then sat a whole sheet's travel below the cover all the way up.
     val player = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var sleeveHeight by remember { mutableFloatStateOf(0f) }
-    var sleepMenu by remember { mutableStateOf(false) }
     // The transport's way of asking the sleeve to change record; see SleeveSlide.
     val slide = remember { SleeveSlide() }
     // Where the page's colours are between records while one is moving; see PageShift.
@@ -743,21 +742,6 @@ private const val SLEEVE = 0.74f
  * blurred tail behind it.
  */
 private const val SLEEVE_UNDER_TEXT = 0.095f
-
-/** Drag it down, or tap it, to put the player away. */
-@Composable
-private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
-    val onBack = sheet::close
-    Box(
-        modifier.fillMaxWidth().dragsSheet(sheet).padding(vertical = 10.dp),
-        Alignment.Center,
-    ) {
-        // Clickable inside the drag detector, not outside it, or the tap never arrives.
-        Box(Modifier.clickable(onClick = onBack).padding(8.dp)) {
-            Box(Modifier.width(38.dp).height(5.dp).background(colour, CircleShape))
-        }
-    }
-}
 
 /**
  * The artwork full-bleed: edge to edge, square corners, no shadow - the sleeve it is. Its bottom

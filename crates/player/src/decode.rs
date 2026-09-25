@@ -29,6 +29,7 @@ pub enum Codec {
 }
 
 impl Codec {
+    #[cfg(any(test, feature = "synth"))]
     pub fn from_mime(mime: &str) -> Option<Codec> {
         Some(match mime {
             "audio/mpeg" => Codec::Mp3,
@@ -338,6 +339,7 @@ impl Decoder {
     }
 
     /// Whether the platform's decoder decodes this stream.
+    #[cfg(any(test, feature = "synth"))]
     pub fn on_platform(&self) -> bool {
         matches!(self.inner, Engine::Platform(_))
     }
@@ -356,11 +358,13 @@ impl Decoder {
 
     /// Decodes `packet` into `out` (interleaved), returning the frames written. A packet that does not
     /// fit is kept: [`Fault::NeedRoom`] says how many samples it needs, and `take_*` hands it over.
+    #[cfg(any(test, feature = "synth"))]
     pub fn decode_i16(&mut self, packet: &[u8], out: &mut [i16]) -> Result<usize, Fault> {
         self.decode(packet)?;
         self.take_i16(out)
     }
 
+    #[cfg(any(test, feature = "synth"))]
     pub fn decode_f32(&mut self, packet: &[u8], out: &mut [f32]) -> Result<usize, Fault> {
         self.decode(packet)?;
         self.take_f32(out)
@@ -536,11 +540,6 @@ mod tests {
         assert_eq!(Codec::from_mime("audio/mpeg"), Some(Codec::Mp3));
         assert_eq!(Codec::from_mime("audio/ac3"), None, "the platform's decoder takes what this cannot");
         assert_eq!(Codec::from_id(0), None);
-    }
-
-    #[test]
-    fn every_codec_opens_without_setup_data_where_it_needs_none() {
-        assert!(Decoder::new(Codec::Mp3, 44_100, 2, None, true).is_ok());
     }
 
     #[test]

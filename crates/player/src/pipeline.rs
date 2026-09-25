@@ -252,6 +252,7 @@ impl<T: Track> Sink<T> {
     }
 
     /// The buffer size the track is opened with, bytes.
+    #[cfg(any(test, feature = "synth"))]
     pub fn buffer_bytes(&self) -> usize {
         self.format.map_or(0, |f| f.bytes(self.capacity_us))
     }
@@ -783,8 +784,6 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     pub chain: Chain,
     pub sound: Sound,
     pub tracker: HeardTracker,
-    /// How close to the end of the song being read the player must be before it reads the next.
-    pub read_ahead_us: i64,
     /// Whether the songs coming up are measured whenever the queue moves (with AutoMix on).
     pub measure_on_move: bool,
     /// ReplayGain stands down: the output takes the samples as they are (bit-perfect). Changed through
@@ -861,7 +860,6 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             chain: Chain::default(),
             sound: Sound::default(),
             tracker: HeardTracker::new(),
-            read_ahead_us: READ_AHEAD_US,
             measure_on_move: true,
             gain_off: false,
             chain_kept: false,
@@ -1055,6 +1053,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     }
 
     /// Plays queue index `i` from its start.
+    #[cfg(any(test, feature = "synth"))]
     pub fn play_from(&mut self, i: usize) {
         self.jump(i, 0);
         self.resume();
@@ -1752,7 +1751,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
                 self.next = None;
                 return false;
             }
-            if self.position_us == POSITION_NOT_SET || self.position_us < end - self.read_ahead_us {
+            if self.position_us == POSITION_NOT_SET || self.position_us < end - READ_AHEAD_US {
                 return false;
             }
             // Still opening, or its first bytes on their way: the song before plays out meanwhile, and

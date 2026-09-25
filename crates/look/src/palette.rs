@@ -416,7 +416,10 @@ mod tests {
     #[test]
     fn many_colours_are_cut_to_at_most_sixteen() {
         let px: Vec<u32> = (0..160 * 160).map(|i| rgb((i * 7 % 256) as i32, (i * 13 % 256) as i32, (i * 29 % 256) as i32)).collect();
+        let scaled = scale_down(&px, 160, 160);
+        let swatches = quantize(scaled.as_deref().unwrap_or(&px), 16);
+        assert!((2..=16).contains(&swatches.len()), "{} colours kept of thousands", swatches.len());
         let p = generate(&px, 160, 160, 16);
-        assert!(p.dominant.is_some() && p.vibrant.is_some());
+        assert!(p.dominant.is_some() && p.vibrant.is_some(), "{p:?}");
     }
 }

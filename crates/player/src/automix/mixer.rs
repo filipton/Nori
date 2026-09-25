@@ -27,7 +27,7 @@ const LP_STEP: u64 = 16;
 /// The sweep fades its filter in over this long, so starting the filter never clicks.
 const LP_ENTRY_MS: f64 = 50.0;
 
-/// Layout of the flat parameter array (`automix_mixer_params`, JNI `configure`). Times in ms, relative to the start.
+/// Layout of the flat parameter array ([`params`], [`Mixer::configure`]). Times in ms, relative to the start.
 pub mod param {
     pub const DURATION: usize = 0;
     pub const CURVE: usize = 1;
@@ -551,7 +551,6 @@ mod tests {
             echo_feedback: 0.5,
             echo_wet_db: -6.0,
             out_loop_ms: -1,
-            in_loop_ms: -1,
             hp_start_ms: -1,
             hp_end_ms: -1,
             hp_from_hz: 0.0,

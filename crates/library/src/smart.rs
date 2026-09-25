@@ -815,7 +815,6 @@ fn default_definitions() -> Vec<SmartPlaylist> {
 }
 
 /// Checks a definition without running it; the error says where and what (`match.rules[1].op: ...`).
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_validate(json: String) -> Result<()> {
     parse(&json).map(|_| ())
 }

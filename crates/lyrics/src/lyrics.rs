@@ -133,7 +133,6 @@ fn stamp(tag: &str) -> Option<i64> {
 }
 
 /// LRC or plain lyrics text, from a third-party provider, into the app's lyrics shape.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_from_lrc(text: String) -> Lyrics {
     from_lrc(&text)
 }

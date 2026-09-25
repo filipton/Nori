@@ -1,6 +1,6 @@
-//! The sound settings' answers the platform asks for: the pre-amp in effect, the built-in curves, which
-//! parts of the chain may run, ReplayGain's volume, what an output device gets and a DAC's mode. The
-//! chain itself (`nori_player::dsp`) runs inside the player, which is handed the settings as they change.
+//! The sound settings' answers the platform asks for: the pre-amp in effect, the built-in curves and which
+//! parts of the chain may run. The chain itself (`nori_player::dsp`) runs inside the player, which is
+//! handed the settings as they change.
 
 pub use nori_player::dsp::*;
 
@@ -19,27 +19,6 @@ pub fn eq_presets() -> Vec<nori_model::NamedPreset> {
 }
 
 /// Which parts of the chain may run, from the settings and the output; see `nori_player::policy`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn audio_policy(prefs: nori_model::AudioPrefs, output: nori_model::OutputState) -> nori_model::AudioPolicy {
     nori_player::policy::audio_policy(&prefs, &output)
-}
-
-/// The volume a track plays at under ReplayGain, 0..1; see `nori_player::policy::replay_gain`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn replay_gain_volume(
-    mode: nori_model::GainMode, tags: Option<nori_model::GainTags>, in_album_run: bool, preamp_db: f32, untagged_db: f32, radio: bool, bit_perfect: bool,
-) -> f32 {
-    nori_player::policy::replay_gain(mode, tags.as_ref(), in_album_run, preamp_db, untagged_db, radio, bit_perfect)
-}
-
-/// What an output device gets as music moves to it; see `nori_player::device`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_arrival(arrival: nori_model::Arrival) -> nori_model::ArrivalPlan {
-    nori_player::device::on_arrival(arrival)
-}
-
-/// Which of a DAC's modes plays a song untouched, or why none can; see `nori_player::dac`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn dac_choice(enabled: bool, modes: Vec<nori_model::DacMode>, playing: nori_model::DacMode) -> nori_model::DacChoice {
-    nori_player::dac::choose(enabled, &modes, playing)
 }

@@ -32,7 +32,7 @@ use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, Tra
 use nori_covers::{Alpha, Config, DecodeError, Decoder, Loader, Paint, Target, Ticket};
 use parking_lot::Mutex;
 
-use crate::{native, with_str, Class};
+use crate::{cleared, native, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/look/CoverPixels",
@@ -103,14 +103,6 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
         rgb565,
         hardware,
     })
-}
-
-/// Whatever Java threw is written to the log and cleared: a loader thread has nobody to throw it to.
-fn cleared(env: &mut JNIEnv) {
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
 }
 
 /// A decoded cover as Kotlin gets it: the Bitmap, and how many bytes it holds.

@@ -86,7 +86,10 @@ impl Client {
         let synced = server.as_ref().is_some_and(|l| l.synced);
         self.lyrics_lookup(id, has_lines, synced, screen).await
     }
+}
 
+/// Asked only in Rust, so not exported to Kotlin.
+impl Client {
     /// What to show once the server's own lyrics are in (`server_has_lines`, `server_synced` describe
     /// them; the platform shows them itself): the lyrics services the settings switch on, asked together,
     /// each better answer handed to `shown` as it comes. The server's synced lyrics win and nothing is
@@ -222,7 +225,6 @@ pub(crate) mod tests {
         let asked = fake.asked();
         assert!(asked[0].contains("track_name=Dogs&"));
         assert!(asked[1].starts_with("https://lrclib.net/api/search?track_name=Dogs&artist_name=Pink+Floyd"));
-        assert!(c.core.cache_get("lyrics|LRCLIB|Pink Floyd|Dogs (Remastered)|1024".into()).unwrap().is_some());
         // Kept: no request the second time.
         let again = run(&c, &song(), false, false, &lrclib());
         assert_eq!(again[0].lyrics.lines[0].text, "close synced");
@@ -241,9 +243,8 @@ pub(crate) mod tests {
         fake.answer("[]");
         let none = run(&c, &s, false, false, &lrclib());
         assert!(none[0].lyrics.lines.is_empty() && none[0].origin == LyricsOrigin::Server);
-        assert_eq!(c.core.cache_get("lyrics|LRCLIB|Pink Floyd|Plain|1024".into()).unwrap(), Some(vec![]), "the miss is kept");
         run(&c, &s, false, false, &lrclib());
-        assert_eq!(fake.asked().len(), 2, "and fresh for a week");
+        assert_eq!(fake.asked().len(), 2, "the miss is kept, and fresh for a week: {:?}", fake.asked());
     }
 
     #[test]
@@ -269,6 +270,8 @@ pub(crate) mod tests {
         let s = Song { title: "Offline".into(), ..song() };
         fake.fail(FailureKind::UnknownHost);
         assert_eq!(run(&c, &s, false, false, &lrclib())[0].origin, LyricsOrigin::Server);
-        assert!(c.core.cache_get("lyrics|LRCLIB|Pink Floyd|Offline|1024".into()).unwrap().is_none());
+        // Not kept: nothing of it in the lyrics' cache (the service rests a while instead, and is asked
+        // again after).
+        assert_eq!(c.core.lyrics_cache_bytes(), 0, "the failure was kept as an answer");
     }
 }

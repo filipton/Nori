@@ -604,11 +604,6 @@ pub fn notice_facts<R>(f: impl FnOnce(&Notice) -> R) -> R {
     with(|t| f(&t.notice))
 }
 
-/// The notification's bar, in thousandths.
-pub fn notice_permille() -> i32 {
-    with(|t| t.notice.permille)
-}
-
 /// How a finished batch went, for its notification's title: which one applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SummaryTitle {
@@ -844,7 +839,6 @@ pub struct DownloadSections {
 }
 
 /// A download's phase for the screen: 0 waiting (or nothing), 1 downloading, 2 failed, 3 done.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_phase(id: String) -> i32 {
     with(|t| t.marks.get(&id).map_or(0, |m| m.0 as i32))
 }

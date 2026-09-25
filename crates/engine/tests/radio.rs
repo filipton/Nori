@@ -136,7 +136,7 @@ impl Library for Radio {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
         let bytes = self.0.iter().find(|(i, _)| i == id).map(|(_, b)| b.clone()).ok_or("no such station")?;
         // Android hands no hint for a station: the bytes say what they are.
-        Ok(Located { source: Source::Live { url: id.into(), bytes: Arc::new(Station(bytes)) }, hint: None, duration_ms: None })
+        Ok(Located { source: Source::Live { url: id.into(), bytes: Arc::new(Station(bytes)) }, hint: None, duration_ms: None, estimated: false })
     }
 
     fn about(&self, id: &str) -> WindowSong {

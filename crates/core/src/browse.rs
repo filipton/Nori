@@ -22,13 +22,6 @@ impl Core {
         Ok(HistoryPage { exhausted: (entries.len() as u32) < HISTORY_PAGE, entries })
     }
 
-    /// The listening stats of the last `days` days up to now; 0 means everything.
-    pub fn stats_days(&self, days: u32) -> Result<ListeningStats> {
-        let now = db::now_ms();
-        let from = if days == 0 { 0 } else { now - days as i64 * DAY_MS };
-        Ok(history::summary(&self.db.lock(), from, now, STATS_TOP)?)
-    }
-
     /// [`Core::stats_days`] with what the listening page reads out of them.
     pub fn stats_page(&self, days: u32) -> Result<StatsPage> {
         Ok(StatsPage::new(self.stats_days(days)?))
@@ -43,6 +36,16 @@ impl Core {
             Ok(Decade { start, song_count: r.get(1)? })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// The listening stats of the last `days` days up to now; 0 means everything.
+    pub fn stats_days(&self, days: u32) -> Result<ListeningStats> {
+        let now = db::now_ms();
+        let from = if days == 0 { 0 } else { now - days as i64 * DAY_MS };
+        Ok(history::summary(&self.db.lock(), from, now, STATS_TOP)?)
     }
 }
 

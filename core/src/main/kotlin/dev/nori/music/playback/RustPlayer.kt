@@ -40,8 +40,7 @@ internal object RustPlayerJni {
     /** [float] is the high quality output setting; [memoryMb] the app's memory class. 0 when it could not start. */
     @JvmStatic external fun create(sdk: Int, float: Boolean, memoryMb: Int): Long
     @JvmStatic external fun destroy(h: Long)
-    /** Both answer the jump's number, which the song events it leads to carry ([eventJumps]). */
-    @JvmStatic @CriticalNative external fun playAt(h: Long, index: Int, ms: Long): Long
+    /** Answers the jump's number, which the song events it leads to carry ([eventJumps]). */
     @JvmStatic @CriticalNative external fun goTo(h: Long, index: Int, ms: Long): Long
     @JvmStatic @CriticalNative external fun pauseAtEnd(h: Long, on: Boolean)
     @JvmStatic @CriticalNative external fun play(h: Long)
@@ -665,7 +664,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
 
     private val audio = context.getSystemService(AudioManager::class.java)
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-        .setAudioAttributes(android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build())
+        .setAudioAttributes(PLATFORM_ATTRIBUTES)
         .setOnAudioFocusChangeListener({ change -> onFocus(change) }, main)
         .build()
     private var focused = false

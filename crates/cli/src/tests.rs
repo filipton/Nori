@@ -518,8 +518,7 @@ fn the_clock_stops_where_it_was_when_the_engine_says_paused() {
     a.handle(Msg::Engine(nori_engine::Event::State(State::Paused)));
     let at = a.now.position(Instant::now());
     assert!((14_900..16_000).contains(&at), "stopped about 15 s in, not back at 10 s: {at}");
-    std::thread::sleep(Duration::from_millis(20));
-    assert_eq!(a.now.position(Instant::now()), at, "paused: the clock stands");
+    assert_eq!(a.now.position(Instant::now() + Duration::from_secs(60)), at, "paused: the clock stands, a minute on too");
 }
 
 #[test]

@@ -327,11 +327,6 @@ impl Clock {
         self.latency_frames(now_ns) * 1_000_000 / rate
     }
 
-    /// Frames waiting in the track (or pulled for it) and not yet heard.
-    fn fill(&self, now_ns: i64) -> u64 {
-        self.latency_frames(now_ns)
-    }
-
     /// Frames the track took and has not played yet: what it holds, without what is pulled and still
     /// waiting to go in. What the next top-up is timed by.
     fn in_track(&self, now_ns: i64) -> u64 {
@@ -761,7 +756,7 @@ impl<R: Ring> Writer<R> {
                 self.sink.stop();
                 self.drained = true;
             }
-            return Some(ms(self.clock.fill(now_ns), self.rate) + 1);
+            return Some(ms(self.clock.latency_frames(now_ns), self.rate) + 1);
         }
         // The ring had less than the track has room for. Between bursts that is only the engine decoding
         // the next one, and the track has plenty; while filling, or low, the engine is still decoding its
@@ -790,7 +785,7 @@ impl<R: Ring> Writer<R> {
             if self.staged.1 > 0 && !self.write_staged(now_ns) {
                 return true;
             }
-            let room = self.capacity.saturating_sub(self.clock.fill(now_ns));
+            let room = self.capacity.saturating_sub(self.clock.latency_frames(now_ns));
             if room == 0 {
                 return true;
             }
@@ -2211,7 +2206,7 @@ mod tests {
 
     impl nori_engine::Library for Songs {
         fn locate(&mut self, id: &str) -> Result<nori_engine::Located, String> {
-            Ok(nori_engine::Located { source: nori_engine::Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some("wav".into()), duration_ms: Some(3_000) })
+            Ok(nori_engine::Located { source: nori_engine::Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some("wav".into()), duration_ms: Some(3_000), estimated: false })
         }
         fn about(&self, id: &str) -> nori_player::transitions::WindowSong {
             nori_player::transitions::WindowSong { id: id.to_string(), title: id.to_string(), duration_ms: 3_000, ..Default::default() }

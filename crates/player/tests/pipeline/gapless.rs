@@ -100,6 +100,7 @@ fn a_ten_minute_song_and_its_crossfade_take_no_time() {
     let mix = reference_mix(&a_run[..overlap], &b_run[..overlap], &blind_plan(600_000, 600_000, 12.0));
     assert!(heard[at..at + overlap] == mix[..], "the mix is the mixer's, starting on the planned sample");
     assert!(heard[at + overlap..] == b_run[overlap..frames(42.0) * 2], "then b alone, exactly where the overlap left it");
-    // In a debug build: this is the whole point of a virtual clock.
-    assert!(started.elapsed().as_secs_f64() < 10.0, "took {:?}", started.elapsed());
+    // The whole point of a virtual clock: twenty minutes of music on a real one would take twenty minutes.
+    // Far above what it takes on a busy machine, far below what a clock that waited would.
+    assert!(started.elapsed().as_secs_f64() < 60.0, "twenty minutes of music took {:?} of real time", started.elapsed());
 }

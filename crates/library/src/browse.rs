@@ -327,7 +327,6 @@ pub const SONG_SORTS: [(&str, &str, bool); 7] = [
     ("LONGEST", "duration", true),
 ];
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_sorts() -> Vec<SongSortOption> {
     SONG_SORTS.iter().map(|(name, key, descending)| SongSortOption { name: (*name).into(), key: (*key).into(), descending: *descending }).collect()
 }

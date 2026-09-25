@@ -21,6 +21,7 @@ pub(crate) fn lend() {
 
 /// The AudioSpecificConfig of an AAC-LC stream at `rate` with `channels` (what an ADTS header says, as
 /// MediaCodec wants it in `csd-0`); none for a rate AAC has no index for.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn lc_config(rate: u32, channels: usize) -> Option<[u8; 2]> {
     const RATES: [u32; 13] = [96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000, 7_350];
     let index = RATES.iter().position(|&r| r == rate)? as u16;
@@ -30,6 +31,7 @@ pub(crate) fn lc_config(rate: u32, channels: usize) -> Option<[u8; 2]> {
 }
 
 /// Frames of 16-bit or float PCM in `bytes`, appended to `out` as floats.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub(crate) fn append_pcm(bytes: &[u8], float: bool, out: &mut Vec<f32>) {
     if float {
         out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])));

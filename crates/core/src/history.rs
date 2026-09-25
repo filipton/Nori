@@ -9,13 +9,15 @@ pub use nori_library::history::*;
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    /// Call once per listen, when the track ends or is left. `tz_offset_ms` is the local UTC offset at
-    /// `started_ms`; the core has no time zone of its own and the hour and weekday charts are local time.
-    /// Returns false when nothing was recorded (provider track, or heard under 2 s).
-    pub fn history_record(&self, song: Song, started_ms: i64, heard_ms: i64, tz_offset_ms: i32) -> Result<bool> {
-        Ok(record(&mut self.db.lock(), &song, started_ms, heard_ms, tz_offset_ms, db::now_ms())?)
+    /// Forgets every listen and with it the taste model. Mix exclusions and smart playlists stay.
+    pub fn history_clear(&self) -> Result<()> {
+        self.db.lock().execute_batch("DELETE FROM plays WHERE server=sid(); DELETE FROM song_stats WHERE server=sid();")?;
+        Ok(())
     }
+}
 
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
     /// Newest first. Songs that are no longer in the index (server change) are left out.
     pub fn history_recent(&self, limit: u32, offset: u32, include_skipped: bool) -> Result<Vec<HistoryEntry>> {
         let c = self.db.lock();
@@ -25,17 +27,6 @@ impl Core {
         )?;
         let rows = st.query_map(params![include_skipped, limit, offset], |r| Ok(entry(r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().flatten().collect())
-    }
-
-    /// Forgets every listen and with it the taste model. Mix exclusions and smart playlists stay.
-    pub fn history_clear(&self) -> Result<()> {
-        self.db.lock().execute_batch("DELETE FROM plays WHERE server=sid(); DELETE FROM song_stats WHERE server=sid();")?;
-        Ok(())
-    }
-
-    /// The year-in-review numbers for `from_ms <= started < to_ms`, with `top` entries per top list.
-    pub fn stats_summary(&self, from_ms: i64, to_ms: i64, top: u32) -> Result<ListeningStats> {
-        Ok(summary(&self.db.lock(), from_ms, to_ms, top)?)
     }
 
     /// Stats of the given songs in one call (a list screen asks for its visible page). Songs never played are left out.
@@ -51,6 +42,23 @@ impl Core {
             Ok(SongStat { song_id: r.get(0)?, plays: r.get(1)?, skips: r.get(2)?, last_played_ms: r.get(3)?, heard_ms_total: r.get(4)?, taste: taste(&song, r.get(5)?, now) })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
+
+/// Only the tests record a listen or sum a period this way: the app records through nori-queue's scrobbling
+/// and reads `stats_page`.
+#[cfg(test)]
+impl Core {
+    /// Call once per listen, when the track ends or is left. `tz_offset_ms` is the local UTC offset at
+    /// `started_ms`; the core has no time zone of its own and the hour and weekday charts are local time.
+    /// Returns false when nothing was recorded (provider track, or heard under 2 s).
+    pub fn history_record(&self, song: Song, started_ms: i64, heard_ms: i64, tz_offset_ms: i32) -> Result<bool> {
+        Ok(record(&mut self.db.lock(), &song, started_ms, heard_ms, tz_offset_ms, db::now_ms())?)
+    }
+
+    /// The year-in-review numbers for `from_ms <= started < to_ms`, with `top` entries per top list.
+    pub fn stats_summary(&self, from_ms: i64, to_ms: i64, top: u32) -> Result<ListeningStats> {
+        Ok(summary(&self.db.lock(), from_ms, to_ms, top)?)
     }
 }
 

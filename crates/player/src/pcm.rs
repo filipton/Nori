@@ -16,14 +16,6 @@ impl Encoding {
     pub const PCM_16: i32 = 2;
     pub const FLOAT: i32 = 4;
 
-    pub fn from_media3(v: i32) -> Option<Encoding> {
-        match v {
-            Self::PCM_16 => Some(Encoding::Pcm16),
-            Self::FLOAT => Some(Encoding::Float),
-            _ => None,
-        }
-    }
-
     pub fn media3(self) -> i32 {
         match self {
             Encoding::Pcm16 => Self::PCM_16,

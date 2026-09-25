@@ -40,6 +40,15 @@ impl Server {
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
     }
+
+    /// Waits until `n` requests have reached the server, failing the test rather than hanging it.
+    fn wait_calls(&self, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while self.calls() < n {
+            assert!(std::time::Instant::now() < deadline, "{} requests reached the server, not {n}: {:?}", self.calls(), self.asked.lock());
+            std::thread::yield_now();
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -114,17 +123,16 @@ fn a_cancelled_request_is_never_fetched_and_never_answered() {
     let tx2 = tx.clone();
     // The one worker is held on the first cover; the second waits behind it and is let go.
     let first = loader.request("http://s/a", 8, 8, move |r| tx.send(r).unwrap());
-    while server.calls() == 0 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(1);
     let second = loader.request("http://s/b", 8, 8, move |r| tx2.send(r).unwrap());
     second.cancel();
     server.release();
     assert!(answers(&rx, 1)[0].is_ok());
     // Something after it still gets through, and the cancelled one was never asked for.
     assert!(loader.load("http://s/c", 8, 8).is_ok());
-    assert_eq!(server.calls(), 2);
-    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    assert_eq!(*server.asked.lock(), ["http://s/a", "http://s/c"], "b was never fetched");
+    // The one worker took c after anything queued before it: b would have been answered by now.
+    assert!(rx.try_recv().is_err(), "the cancelled request was answered");
     first.detach();
 }
 
@@ -135,16 +143,19 @@ fn one_view_letting_go_leaves_the_cover_to_the_others() {
     let loader = Loader::new(config(None, 1), server.clone());
     let (tx, rx) = mpsc::channel();
     let busy = loader.request("http://s/busy", 8, 8, |_| {});
-    while server.calls() == 0 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(1);
     let tx2 = tx.clone();
     let gone = loader.request(PHOTO, 8, 8, move |r| tx.send(r).unwrap());
     let kept = loader.request(PHOTO, 8, 8, move |r| tx2.send(r).unwrap());
     drop(gone);
     server.release();
-    assert_eq!(answers(&rx, 1).len(), 1);
-    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+    let got = answers(&rx, 1).remove(0).expect("the view still there gets the cover");
+    assert_eq!((got.width, got.height), (8, 8));
+    // The one worker answers a cover's views together, and has moved on to another: the view that went
+    // would have been called back by now.
+    loader.load("http://s/after", 8, 8).unwrap();
+    assert!(rx.try_recv().is_err(), "the view that let go was called back");
+    assert_eq!(*server.asked.lock(), ["http://s/busy", PHOTO, "http://s/after"], "one fetch for the two views");
     drop((busy, kept));
 }
 
@@ -189,9 +200,7 @@ fn dropping_the_loader_answers_whoever_still_waits() {
     let loader = Loader::new(config(None, 1), server.clone());
     let (tx, rx) = mpsc::channel();
     let _held = loader.request("http://s/a", 8, 8, |_| {});
-    while server.calls() == 0 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(1);
     let _waiting = loader.request("http://s/b", 8, 8, move |r| tx.send(r).unwrap());
     drop(loader);
     assert_eq!(answers(&rx, 1)[0], Err(Error::Closed));
@@ -263,16 +272,14 @@ fn a_view_that_leaves_while_its_cover_is_fetched_is_never_called_back_nor_decode
     let loader = Loader::with_paint(Config { memory_bytes: 0, ..config(None, 1) }, server.clone(), Counted(painted.clone()));
     let (tx, rx) = mpsc::channel::<()>();
     let ticket = loader.request(PHOTO, 8, 8, move |_| tx.send(()).unwrap());
-    while server.calls() == 0 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(1);
     // The bytes are on their way; the view goes.
     drop(ticket);
     server.release();
-    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "no call back");
-    // The worker is free again, and it never decoded the cover nobody wanted.
+    // The worker is free again (so done with the cover that was left), and it never decoded it.
     loader.load("http://s/next", 8, 8).unwrap();
-    assert_eq!(painted.load(Ordering::SeqCst), 1);
+    assert!(rx.try_recv().is_err(), "the view that left was called back");
+    assert_eq!(painted.load(Ordering::SeqCst), 1, "decoded only the cover still wanted");
 }
 
 #[test]
@@ -284,9 +291,7 @@ fn a_warm_up_fetches_onto_the_disk_once_and_decodes_nothing() {
     server.hold();
     // The one worker is busy with a view; a warm-up and another view queue behind it.
     let busy = loader.request("http://s/busy", 8, 8, |_| {});
-    while server.calls() == 0 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(1);
     loader.warm(PHOTO);
     loader.warm("http://s/rest/getCoverArt.view?u=a&id=ext-deezer-1&size=320");
     let late = loader.request("http://s/late", 8, 8, |_| {});
@@ -300,15 +305,22 @@ fn a_warm_up_fetches_onto_the_disk_once_and_decodes_nothing() {
     // warmed one was not decoded.
     assert_eq!(*server.asked.lock(), ["http://s/busy", "http://s/late", PHOTO]);
     assert_eq!(painted.load(Ordering::SeqCst), 2);
-    // Already on the disk: warmed again, it is not fetched again.
+    // Already on the disk: warmed again, it is not fetched again. Warm-ups are taken in turn, so once a
+    // new one warmed after it is on the disk, that one has been seen to.
     loader.warm(PHOTO);
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(server.calls(), 3);
+    let then = "http://s/rest/getCoverArt.view?u=a&id=al-2&size=320";
+    loader.warm(then);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !loader.disk().unwrap().contains(Key::of(then)) {
+        assert!(std::time::Instant::now() < deadline, "the second warm-up came");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(*server.asked.lock(), ["http://s/busy", "http://s/late", PHOTO, then], "the warmed cover not fetched again");
     // Read back as bytes, as a page's colours are worked out from them.
     let mut bytes = Vec::new();
     loader.read(PHOTO, &mut bytes).unwrap();
     assert_eq!(bytes, server.body);
-    assert_eq!(server.calls(), 3);
+    assert_eq!(server.calls(), 4, "read from the disk, not fetched: {:?}", server.asked.lock());
     drop((busy, late));
     drop(loader);
 }
@@ -341,8 +353,12 @@ fn a_cover_that_panics_is_its_own_error_and_every_cover_after_it_still_comes() {
         assert_eq!(loader.load(PHOTO, 8, 8), Ok((8, 8)));
     }
     // A call back that panics costs its own cover, not the worker.
-    let t = loader.request(PHOTO, 9, 9, |_| panic!("a client bug"));
-    std::thread::sleep(Duration::from_millis(100));
+    let (tx, rx) = mpsc::channel();
+    let t = loader.request(PHOTO, 9, 9, move |_| {
+        tx.send(()).unwrap();
+        panic!("a client bug")
+    });
+    rx.recv_timeout(Duration::from_secs(10)).expect("the call back ran");
     drop(t);
     assert_eq!(loader.load(PHOTO, 10, 10), Ok((10, 10)));
     drop(loader);
@@ -410,9 +426,7 @@ fn three_at_once(loader: &Loader<Threads>, server: &Server) {
             loader.request(&format!("http://s/{i}"), 8, 8, move |r| tx.send(r).unwrap())
         })
         .collect();
-    while server.calls() < calls + 3 {
-        std::thread::yield_now();
-    }
+    server.wait_calls(calls + 3);
     server.release();
     for _ in 0..3 {
         rx.recv_timeout(Duration::from_secs(10)).expect("an answer").unwrap();
@@ -441,10 +455,11 @@ fn a_resting_loader_ends_its_threads_and_the_next_cover_starts_one_again() {
 fn a_loader_no_cover_is_asked_of_for_a_while_rests() {
     let server = Server::new(200);
     let (alive, rests) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let config = Config { memory_bytes: 0, idle: Duration::from_millis(200), ..config(None, 3) };
+    let config = Config { memory_bytes: 0, idle: Duration::from_millis(500), ..config(None, 3) };
     let loader = Loader::with_paint(config, server.clone(), Threads { alive: alive.clone(), rests: rests.clone() });
     three_at_once(&loader, &server);
-    // Covers asked for closer together than that keep the threads.
+    // Covers asked for closer together than that (a tenth of it: a machine this busy is not a phone) keep
+    // the threads.
     for i in 0..5 {
         std::thread::sleep(Duration::from_millis(50));
         loader.load(&format!("http://s/soon-{i}"), 8, 8).unwrap();

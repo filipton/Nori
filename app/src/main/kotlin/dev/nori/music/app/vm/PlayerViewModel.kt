@@ -177,7 +177,6 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     fun skipTo(index: Int) = player.skipTo(index)
     fun remove(index: Int) = player.remove(index)
     fun move(from: Int, to: Int) = player.move(from, to)
-    fun clearQueue() = player.clear()
     fun toggleShuffle() = player.setShuffle(!state.value.shuffle)
     fun cycleRepeat() = player.cycleRepeat()
     fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = player.sleep(minutes, endOfTrack, songs)

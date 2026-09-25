@@ -1,7 +1,7 @@
 //! "Better beat detection" as the terminal client gets it: the same core path as every client, over nori-http. With
-//! `NORI_BEAT_THIS_NET=1` it fetches the authors' checkpoint from their server, checks it, converts it and keeps the
-//! weights, and prints what that cost; without it there is nothing to run (it needs the network).
-//! `NORI_BEAT_THIS_NET=1 cargo test --release -p nori-cli --features neural-beats --test beat_model -- --nocapture`
+//! `--ignored` it fetches the authors' checkpoint from their server, checks it, converts it and keeps the
+//! weights, and prints what that cost; it needs the network, so it is not part of a plain `cargo test`.
+//! `cargo test --release -p nori-cli --features neural-beats --test beat_model -- --ignored --nocapture`
 #![cfg(feature = "neural-beats")]
 
 use nori_core::beat_model::{self, State};
@@ -9,11 +9,8 @@ use nori_core::client::Client;
 use nori_core::Core;
 
 #[test]
+#[ignore = "downloads 8 MB from the authors' server"]
 fn the_weights_come_from_the_authors() {
-    if std::env::var("NORI_BEAT_THIS_NET").is_err() {
-        eprintln!("NORI_BEAT_THIS_NET not set: skipped (it downloads 8 MB)");
-        return;
-    }
     let dir = nori_testdir::TempDir::new("beat-model");
     let core = Core::new(dir.join("nori.db").to_string_lossy().into_owned(), "test".into()).unwrap();
     let mut prefs = nori_core::settings_store::settings_open(dir.join("app.db").to_string_lossy().into_owned()).unwrap();

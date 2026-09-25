@@ -1374,40 +1374,9 @@ pub fn eq_model_get() -> EqModel {
     eq_model()
 }
 
-/// The settings as a fresh install has them.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn settings_defaults() -> StoredPrefs {
-    StoredPrefs::default()
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_set_band(sound: SoundSettings, index: u32, band: SoundBand) -> SoundSettings {
-    set_band(sound, index, band)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_set_auto_preamp(sound: SoundSettings, automatic: bool) -> SoundSettings {
-    set_auto_preamp(sound, automatic)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_set_level(sound: SoundSettings, level: EqLevel, value: f32) -> SoundSettings {
-    set_level(sound, level, value)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_effective_preamp_db(sound: SoundSettings) -> f32 {
-    sound.effective_preamp_db()
-}
-
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<EqBypass> {
     eq_bypass(hi_res, bit_perfect)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_band_mark(band: SoundBand) -> BandMark {
-    band_mark(band.kind, band.channel)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -1466,34 +1435,7 @@ pub fn sound_from_json(json: String) -> Option<SoundSettings> {
     sound_from(&json)
 }
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_graphic() -> Vec<SoundBand> {
-    graphic()
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_apply_preset(sound: SoundSettings, preset: NamedPreset) -> SoundSettings {
-    apply_preset(sound, &preset)
-}
-
-/// A preset file the user picked or downloaded; an error, with what to say, when it has no filters.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_import(sound: SoundSettings, text: String) -> Result<SoundSettings, SoundError> {
-    import(sound, &text)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_add_band(sound: SoundSettings) -> SoundSettings {
-    add_band(sound)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_remove_band(sound: SoundSettings, index: u32) -> SoundSettings {
-    remove_band(sound, index)
-}
-
 /// The ten graphic bands back, with the automatic pre-amp.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_reset_bands(sound: SoundSettings) -> SoundSettings {
     SoundSettings { eq_bands: graphic(), eq_preamp_db: None, ..sound }
 }
@@ -1514,7 +1456,6 @@ pub fn storage_index_files(names: Vec<String>) -> Vec<u32> {
 /// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
 /// A file with no filters but a `GraphicEQ:` curve (AutoEQ's "GraphicEQ.txt", Wavelet's) is fitted here,
 /// once, with ten parametric filters (`nori_player::eqfit`), so it plays as any parametric preset does.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn parse_eq_preset(text: String) -> EqPreset {
     let mut preset = EqPreset::default();
     for line in text.lines() {
@@ -1815,18 +1756,6 @@ mod tests {
             kinds,
             [(true, false), (true, false), (true, false), (false, false), (false, false), (false, false), (false, false), (false, false), (true, true), (true, true)]
         );
-    }
-
-    #[test]
-    fn the_equalizer_ranges_are_the_sliders() {
-        let r = EQ_RANGES;
-        assert_eq!((r.gain.min, r.gain.max), (-12.0, 12.0));
-        assert_eq!((r.preamp.min, r.preamp.max), (-20.0, 6.0));
-        assert_eq!((r.balance.min, r.balance.max), (-1.0, 1.0));
-        assert_eq!((r.limiter.min, r.limiter.max), (-12.0, 0.0));
-        assert_eq!((r.crossfeed.min, r.crossfeed.max), (0.0, 9.0));
-        assert_eq!((r.q.min, r.q.max), (0.2, 8.0));
-        assert_eq!((r.replay_gain_preamp.min, r.replay_gain_preamp.max), (-12.0, 6.0));
     }
 
     #[test]

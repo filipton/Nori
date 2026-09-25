@@ -11,7 +11,7 @@ use nori_player::pcm::Encoding;
 use nori_player::pipeline::Songs;
 use nori_player::transitions::WindowSong;
 
-use crate::arriving::Taker;
+use crate::arriving::Listening;
 use crate::demux::Demuxed;
 use crate::source::{ByteSource, Keep, Loader};
 use crate::store::Store;
@@ -36,6 +36,11 @@ pub struct Located {
     pub source: Source,
     pub hint: Option<String>,
     pub duration_ms: Option<i64>,
+    /// The length in bytes the server answers with is only its estimate: a transcode it makes as it
+    /// sends it (Navidrome's `estimateContentLength`). Nothing is then asked for past what is on its way
+    /// (`Demuxed::load`): the server would transcode the whole song before answering. The song's length
+    /// is `duration_ms` until its bytes end.
+    pub estimated: bool,
 }
 
 /// The client's side of the songs: where each id is, and what is known of it.
@@ -58,7 +63,7 @@ pub trait Library: Send + 'static {
     /// first: AutoMix's measuring, on the same bytes in the same burst. None by default, and whenever
     /// nothing is to be measured. It must not hold the fetch up (`crate::arriving::Listening`'s `wait`
     /// off): the song may be played while it comes.
-    fn taker(&self, _id: &str, _hint: Option<&str>) -> Option<Box<dyn Taker>> {
+    fn taker(&self, _id: &str, _hint: Option<&str>) -> Option<Listening> {
         None
     }
 }
@@ -89,7 +94,7 @@ impl<L: Library> Sources<L> {
     /// hearing it as it comes), holding at most `budget` bytes (none: its window's cap); the most recently
     /// used is kept last.
     #[allow(clippy::too_many_arguments)]
-    fn loader(&mut self, id: &str, url: &str, bytes: &Arc<dyn ByteSource>, duration_ms: Option<i64>, keep: Option<(&Arc<Store>, &str)>, budget: Option<u64>, taker: impl FnOnce() -> Option<Box<dyn Taker>>) -> Arc<Loader> {
+    fn loader(&mut self, id: &str, url: &str, bytes: &Arc<dyn ByteSource>, duration_ms: Option<i64>, keep: Option<(&Arc<Store>, &str)>, budget: Option<u64>, taker: impl FnOnce() -> Option<Listening>) -> Arc<Loader> {
         // One that gave up is not asked again: the song is fetched anew, the network may be back.
         self.loaders.retain(|(i, l)| i != id || l.error().is_none());
         if let Some(k) = self.loaders.iter().position(|(i, _)| i == id) {
@@ -140,11 +145,11 @@ impl<L: Library> Sources<L> {
             Source::Cached { store, key, .. } if self.loading(id).is_none() && store.cached(key).is_some() => file(&store.cached(key).expect("checked")),
             Source::Url { url, bytes } => {
                 let loader = self.loader(id, url, bytes, at.duration_ms, None, budget, || None);
-                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms))
+                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, at.estimated))
             }
             Source::Cached { url, bytes, store, key } => {
                 let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)), budget, || None);
-                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms))
+                Ok(Demuxed::load_packets(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, at.estimated))
             }
             Source::Live { .. } => Err("a live stream is decoded here".into()),
         }
@@ -162,7 +167,7 @@ impl<L: Library> Sources<L> {
 
     /// What hears `id` as it is fetched ahead, when a loader is to start for it: asked of the library
     /// only then, since a loader running already has it or went without.
-    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Box<dyn Taker>> {
+    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Listening> {
         self.loading(id).is_none().then(|| self.library.taker(id, hint)).flatten()
     }
 
@@ -195,16 +200,16 @@ impl<L: Library> Songs for Sources<L> {
             // Opened to be played: whatever it was limited to while it waited, it has the whole cap now.
             Source::Url { url, bytes } => {
                 let loader = self.loader(id, url, bytes, at.duration_ms, None, None, || None);
-                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, self.encoding))
+                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, at.estimated, self.encoding))
             }
             Source::Cached { url, bytes, store, key } => {
                 let loader = self.loader(id, url, bytes, at.duration_ms, Some((store, key)), None, || None);
-                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, self.encoding))
+                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), from_ms, at.duration_ms, at.estimated, self.encoding))
             }
             // A live stream starts where the station is now, whatever place was asked for.
             Source::Live { url, bytes } => {
                 let loader = self.live(id, url, bytes);
-                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), 0, None, self.encoding))
+                Ok(Demuxed::load(loader, self.engine.clone(), at.hint.as_deref(), 0, None, false, self.encoding))
             }
         }
     }
@@ -219,12 +224,12 @@ impl<L: Library> Songs for Sources<L> {
             return;
         }
         match self.library.locate(id) {
-            Ok(Located { source: Source::Url { url, bytes }, duration_ms, hint }) => {
+            Ok(Located { source: Source::Url { url, bytes }, duration_ms, hint, .. }) => {
                 let budget = self.left_for(id);
                 let taker = self.taker(id, hint.as_deref());
                 self.loader(id, &url, &bytes, duration_ms, None, Some(budget), || taker);
             }
-            Ok(Located { source: Source::Cached { url, bytes, store, key }, duration_ms, hint }) if store.cached(&key).is_none() => {
+            Ok(Located { source: Source::Cached { url, bytes, store, key }, duration_ms, hint, .. }) if store.cached(&key).is_none() => {
                 let budget = self.left_for(id);
                 let taker = self.taker(id, hint.as_deref());
                 self.loader(id, &url, &bytes, duration_ms, Some((&store, &key)), Some(budget), || taker);

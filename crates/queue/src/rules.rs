@@ -46,7 +46,6 @@ const UPCOMING: usize = 8;
 /// The songs coming up that are fetched ahead now, on a metered network or not: the count is the
 /// user's setting for that network, and a crossfade or AutoMix brings the next song in early
 /// (`nori_player::queue::precache_range`). Empty: nothing to fetch.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_precache(metered: bool) -> Vec<String> {
     let (count, mixing) = prefs(|p| {
         (q::precache_count(metered, p.precache_wifi, p.precache_mobile), q::mixing(nori_automix::planner::transitions_off(), p.crossfade_sec, p.auto_mix))
@@ -59,7 +58,6 @@ pub fn queue_precache(metered: bool) -> Vec<String> {
 
 /// The songs coming up (the one playing first) to measure for AutoMix, those that can be measured at
 /// all; none while AutoMix is off.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_measure() -> Vec<String> {
     let n = prefs(|p| q::measure_ahead(p.auto_mix));
     crate::playlist::with(|p| p.upcoming().take(UPCOMING).take(n).map(|i| &p.ids()[i]).filter(|id| crate::queue::analysable(id)).cloned().collect())
@@ -72,7 +70,6 @@ static ERRORS: Mutex<ErrorRun> = Mutex::new(ErrorRun::new());
 /// A song would not play: what to do (`nori_player::queue::on_error`, with the run of failures counted
 /// here). `bridge_ready` whether the platform has an offline bridge to hand a network failure to; the
 /// user's settings decide whether it is used, and whether a failure skips.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_error(kind: PlaybackError, offload_refused: bool, bridge_ready: bool) -> OnError {
     *LAST_ERROR.lock() = Some(kind);
     let (skip, bridge) = prefs(|p| (p.skip_on_error, p.bridge_offline));
@@ -81,7 +78,6 @@ pub fn queue_error(kind: PlaybackError, offload_refused: bool, bridge_ready: boo
 }
 
 /// The offline bridge took a network failure over: the run of failures is broken.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_bridged() {
     ERRORS.lock().played();
     *LAST_ERROR.lock() = None;
@@ -156,7 +152,6 @@ pub fn sleep_set(songs: u32, end_of_track: bool) -> bool {
 }
 
 /// The song changed: whether the sleep timer now pauses at the end of this one.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sleep_song_changed() -> bool {
     let mut left = SLEEP_LEFT.lock();
     let (still, pause) = t::sleep_song_changed(*left);
@@ -223,7 +218,6 @@ pub fn playback_timings() -> PlaybackTimings {
 }
 
 /// How much the player reads ahead: [min buffer ms, max ms, to start ms, to resume ms, target bytes].
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn load_control(memory_class_mb: u32) -> Vec<i64> {
     t::load_control(memory_class_mb).to_vec()
 }

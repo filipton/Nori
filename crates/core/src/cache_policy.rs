@@ -278,6 +278,16 @@ impl Client {
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
+    /// Asks the server, nothing stored: the reads that must be current.
+    pub async fn read_now(&self, read: Read) -> NetResult<Page> {
+        let sp = spec(read);
+        let body = self.fetch(sp.endpoint, sp.params).await?;
+        self.parse(sp.parser, body)
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Client {
     /// The stored answer for `read`, parsed, and whether it is young enough to skip the server. A stored
     /// answer that no longer parses is not shown, and the server is asked. Reads that are never stored
     /// come back empty and not fresh.
@@ -311,13 +321,6 @@ impl Client {
         let page = if stored_digest != Some(digest(&body)) { Some(self.parse(sp.parser, body.clone())?) } else { None };
         self.core.cache_put(k, body)?;
         Ok(page)
-    }
-
-    /// Asks the server, nothing stored: the reads that must be current.
-    pub async fn read_now(&self, read: Read) -> NetResult<Page> {
-        let sp = spec(read);
-        let body = self.fetch(sp.endpoint, sp.params).await?;
-        self.parse(sp.parser, body)
     }
 }
 

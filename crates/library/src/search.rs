@@ -39,7 +39,6 @@ fn distinct<T>(list: Vec<T>, id: impl Fn(&T) -> &str) -> Vec<T> {
 
 /// The server's answer, ready to show. A merged provider result may repeat an id, and lists are keyed by
 /// id, so only the first of each is kept.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn search_split(result: SearchResult) -> SearchSplit {
     split(SearchResult {
         artists: distinct(result.artists, |a| &a.id),

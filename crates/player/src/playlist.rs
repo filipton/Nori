@@ -377,23 +377,6 @@ impl Playlist {
         self.rev += 1;
     }
 
-    /// The player's list as it is, for a change made there rather than here. Songs still at the same
-    /// place keep how they came in.
-    pub fn adopt(&mut self, ids: Vec<String>, current: Option<usize>, order: Option<Vec<usize>>) {
-        let hand = ids.iter().enumerate().map(|(i, id)| if self.ids.get(i) == Some(id) { self.hand(i) } else { Hand::No }).collect();
-        let n = ids.len();
-        if self.ids != ids {
-            self.list_rev += 1;
-        }
-        self.ids = ids;
-        self.hand = hand;
-        self.parked = None;
-        self.cur = current.filter(|&c| c < n);
-        self.shuffling = order.as_ref().is_some_and(|o| o.len() == n && n > 0);
-        self.order = if self.shuffling { order.unwrap_or_default() } else { Vec::new() };
-        self.rev += 1;
-    }
-
     /// The offline bridge is playing: downloads stand in for the queue until the server is back.
     pub fn bridging(&self) -> bool {
         self.hand.contains(&Hand::Bridge)

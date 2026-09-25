@@ -69,15 +69,20 @@ fn beat_wav(seed: u32) -> Vec<u8> {
 }
 
 /// The server: each song's file by the id in its address, every byte sent counted per song. A song named
-/// in `slow` comes a quarter megabyte at a time, each piece a little late, so it is still coming when
-/// the test acts.
+/// in `slow` comes a quarter megabyte at a time, and its first body stops at [`HELD_AT`] until the player
+/// has asked to take it over from the fetching ahead: it is still coming when the test acts, however
+/// long the engine takes to act on it.
 #[derive(Default)]
 struct Net {
     files: HashMap<String, Arc<Vec<u8>>>,
     sent: Arc<Mutex<HashMap<String, u64>>>,
     requests: Mutex<Vec<(String, u64)>>,
     slow: Mutex<Option<String>>,
+    store: Option<Arc<Store>>,
 }
+
+/// Where a slow song's first body waits for the player.
+const HELD_AT: u64 = 512 << 10;
 
 fn id_of(url: &str) -> String {
     url.split("&id=").nth(1).unwrap_or("").split('&').next().unwrap_or("").to_string()
@@ -88,16 +93,21 @@ struct Counted {
     inner: Cursor<Arc<Vec<u8>>>,
     sent: Arc<Mutex<HashMap<String, u64>>>,
     slow: bool,
+    /// Held at [`HELD_AT`] until this store's player takes the song over.
+    held: Option<Arc<Store>>,
 }
 
 impl Read for Counted {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let want = if self.slow {
-            std::thread::sleep(Duration::from_millis(20));
-            buf.len().min(256 << 10)
-        } else {
-            buf.len()
-        };
+        if let Some(store) = self.held.as_ref().filter(|_| self.inner.position() >= HELD_AT) {
+            let until = Instant::now() + Duration::from_secs(60);
+            while !store.taken_over(&format!("{}:0", self.id)) {
+                assert!(Instant::now() < until, "the player never took {} over from the fetching ahead", self.id);
+                std::thread::park_timeout(Duration::from_millis(2));
+            }
+            self.held = None;
+        }
+        let want = if self.slow { buf.len().min(256 << 10) } else { buf.len() };
         let data = self.inner.get_ref().clone();
         let at = self.inner.position() as usize;
         let n = want.min(data.len() - at);
@@ -117,7 +127,8 @@ impl ByteSource for Net {
         let mut inner = Cursor::new(file);
         inner.set_position(from);
         let slow = self.slow.lock().as_deref() == Some(id.as_str());
-        Ok(Body { start: from, len: Some(len), reader: Box::new(Counted { id, inner, sent: self.sent.clone(), slow }) })
+        let held = self.store.clone().filter(|_| slow && from == 0);
+        Ok(Body { start: from, len: Some(len), reader: Box::new(Counted { id, inner, sent: self.sent.clone(), slow, held }) })
     }
 }
 
@@ -144,7 +155,7 @@ impl Rig {
         prefs.precache_wifi = 2;
         nori_core::settings_store::settings_put(prefs.clone());
         let store = Store::open(dir.join("music"), 512 << 20, Box::new(CoreOrder)).unwrap();
-        let mut net = Net::default();
+        let mut net = Net { store: Some(store.clone()), ..Net::default() };
         let songs: Vec<Song> = ids.iter().map(|id| Song { id: id.to_string(), title: id.to_string(), duration: 40, suffix: "wav".into(), ..Default::default() }).collect();
         for (k, id) in ids.iter().enumerate() {
             net.files.insert(id.to_string(), Arc::new(beat_wav(k as u32 * 17)));
@@ -244,12 +255,12 @@ fn every_song_crosses_the_network_once_and_the_songs_fetched_ahead_are_measured_
 
 fn a_song_skipped_to_while_it_is_fetched_ahead_goes_on_from_where_the_fetch_got_to() {
     let rig = Rig::new("one-fetch-skip", &["k1", "k2", "k3", "k4"]);
-    // k3 is fetched ahead as k1 starts, slowly; the listener skips straight to it while it comes.
+    // k3 is fetched ahead as k1 starts and stops part way; the listener skips straight to it while it comes.
     *rig.net.slow.lock() = Some("k3".into());
     rig.engine.play_at(0, 0);
     assert!(rig.until(30, |r| r.engine.status().index == Some(0)), "{:?}", rig.engine.status());
     let until = Instant::now() + Duration::from_secs(60);
-    while rig.sent("k3") < (512 << 10) {
+    while rig.sent("k3") < HELD_AT {
         assert!(Instant::now() < until, "k3 is being fetched ahead");
         std::thread::park_timeout(Duration::from_millis(5));
     }

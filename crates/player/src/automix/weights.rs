@@ -162,6 +162,7 @@ mod tests {
     /// `NORI_BEAT_THIS_CKPT=small0.ckpt NORI_BEAT_THIS=beat-this-small0-v1.onnx cargo test --release -p nori-player
     /// --features neural-beats official_weights -- --nocapture`
     #[test]
+    #[ignore = "needs the authors' checkpoint in NORI_BEAT_THIS_CKPT"]
     fn official_weights_give_the_shipped_outputs() {
         let Ok(ckpt) = std::env::var("NORI_BEAT_THIS_CKPT") else {
             eprintln!("no checkpoint in NORI_BEAT_THIS_CKPT: skipped");

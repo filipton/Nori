@@ -72,8 +72,6 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private var connecting = false
     private val pending = ArrayList<(MediaController) -> Unit>()
 
-    @Volatile private var lastBuffered = 0L
-
     /**
      * Where the seek bar is. Through a transition the player runs ahead of the ear (the held ending is
      * counted as played so the next track arrives in time to be mixed in); the sink says what is really
@@ -162,8 +160,6 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     /** The player's own place, as the controller runs it on: for the test bridge's traces only. */
     val playerPositionMs: Long get() = controller?.currentPosition ?: -1L
-
-    val bufferedMs: Long get() = controller?.bufferedPosition?.also { lastBuffered = it } ?: lastBuffered
 
     fun connect() {
         if (controller != null || connecting) return

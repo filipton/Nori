@@ -1,16 +1,13 @@
 package dev.nori.music.playback
 
-import dalvik.annotation.optimization.CriticalNative
 import dalvik.annotation.optimization.FastNative
 
-/** The sound settings' two answers the settings ask for as they are read; see crates/android/src/dsp.rs. */
+/** The pre-amp in effect, which the settings ask for as they are read; see crates/android/src/dsp.rs. */
 object Dsp {
     init { System.loadLibrary("norimusic") }
 
     /** The pre-amp in effect (the core's `SoundSettings::effective_preamp_db`); [preampDb] is ignored when [automatic]. */
     @JvmStatic @FastNative external fun effectivePreampDb(eqEnabled: Boolean, preampDb: Float, automatic: Boolean, kinds: IntArray, gains: FloatArray): Float
-    /** Whether anything in the sound chain is switched on; see nori_player::sound::sound_on. */
-    @JvmStatic @CriticalNative external fun soundOn(eqEnabled: Boolean, crossfeedDb: Float, balance: Float, mono: Boolean, limiter: Boolean): Boolean
 }
 
 /**

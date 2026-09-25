@@ -37,21 +37,20 @@ use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
 use nori_engine::ahead::{Ahead, Entry, Keeping};
-use nori_engine::arriving::Taker;
+use nori_engine::arriving::Listening;
 use nori_engine::core::{ahead_songs, is_radio, key_format, measure_as_it_comes, measuring_ahead, settings, CoreApp, CoreQueue};
 use nori_engine::{Body, ByteSource, Coded, Coding, Config, Device, Engine, Event, Library, Located, OffloadOutput, OpenError, OutputFacts, OutputFormat, Source, State, Support};
 use nori_player::transitions::WindowSong;
 use parking_lot::Mutex;
 
 use crate::track::{mono_ns, packed24, sample_bytes, HeadCount, Opened, Opener, Route, Shared, Sink, TrackOutput, CHUNK_BYTES};
-use crate::{java_string, native, with_str, Class};
+use crate::{cleared, java_string, native, with_str, Class};
 
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/RustPlayerJni",
     methods: &[
         native!(c"create", c"(IZI)J", create),
         native!(c"destroy", c"(J)V", destroy),
-        native!(c"playAt", c"(JIJ)J", play_at),
         native!(c"goTo", c"(JIJ)J", go_to),
         native!(c"pauseAtEnd", c"(JZ)V", pause_at_end),
         native!(c"play", c"(J)V", play),
@@ -222,14 +221,6 @@ fn env() -> Option<(&'static Java, JNIEnv<'static>)> {
 /// One line in the app's log.
 fn log(message: &str) {
     nori_core::alog::info(&format!("rust player: {message}"));
-}
-
-/// Whatever Java threw is written to the log and cleared: a native thread has nobody to throw it to.
-fn cleared(env: &mut JNIEnv) {
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
 }
 
 fn bridge(java: &Java) -> &JClass<'static> {
@@ -1114,7 +1105,7 @@ impl Library for AndroidLibrary {
         if is_radio(id) {
             let url = self.stations.lock().iter().find(|(s, _)| s == id).map(|(_, u)| u.clone()).ok_or("a station with no address")?;
             log(&format!("{id} is a station's stream"));
-            return Ok(Located { source: Source::Live { url, bytes: Arc::new(JavaBytes { key: String::new() }) }, hint: None, duration_ms: None });
+            return Ok(Located { source: Source::Live { url, bytes: Arc::new(JavaBytes { key: String::new() }) }, hint: None, duration_ms: None, estimated: false });
         }
         let song = nori_core::queue::queue_song(id.to_string());
         let duration_ms = song.as_ref().map(|s| s.duration as i64 * 1000).filter(|&d| d > 0);
@@ -1128,7 +1119,8 @@ impl Library for AndroidLibrary {
             key_format(&target.key).or_else(|| song.map(|s| s.suffix)).filter(|s| !s.is_empty())
         };
         log(&format!("{id} opens from {} as {}", target.key, hint.as_deref().unwrap_or("whatever it is")));
-        Ok(Located { source: Source::Url { url: target.url, bytes: Arc::new(JavaBytes { key: target.key }) }, hint, duration_ms })
+        let estimated = nori_core::stream::length_estimated(&target.url);
+        Ok(Located { source: Source::Url { url: target.url, bytes: Arc::new(JavaBytes { key: target.key }) }, hint, duration_ms, estimated })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -1145,7 +1137,7 @@ impl Library for AndroidLibrary {
         AHEAD.ask(Arc::new(Media3Cache), Arc::new(AheadBytes), ahead_songs(nori_core::stream::precache_now(), next), Some(measuring_ahead()));
     }
 
-    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Box<dyn Taker>> {
+    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Listening> {
         measure_as_it_comes(id, hint, false)
     }
 }
@@ -1319,18 +1311,10 @@ extern "system" fn destroy(_: JNIEnv, _: JClass, h: jlong) {
     }
 }
 
-/// Answers the jump's number, which the song events it leads to carry ([`event_jumps`]); 0 when nothing
-/// was sent.
-extern "system" fn play_at(h: jlong, index: jint, ms: jlong) -> jlong {
-    let (Some(p), Ok(i)) = (player(h), usize::try_from(index)) else { return 0 };
-    log(&format!("to song {i} at {} ms", ms.max(0)));
-    *p.jumped.lock() = Some((ms.max(0), Instant::now()));
-    p.engine.play_at(i, ms.max(0)) as jlong
-}
-
 /// A seek, a skip or a tap on a song: made at once while music plays, held until play while paused
 /// (nori-engine's rule, `Engine::go_to`).
-/// Answers the jump's number, as [`play_at`] does.
+/// Answers the jump's number, which the song events it leads to carry ([`event_jumps`]); 0 when nothing
+/// was sent.
 extern "system" fn go_to(h: jlong, index: jint, ms: jlong) -> jlong {
     let (Some(p), Ok(i)) = (player(h), usize::try_from(index)) else { return 0 };
     log(&format!("to song {i} at {} ms, playing or not as it was", ms.max(0)));

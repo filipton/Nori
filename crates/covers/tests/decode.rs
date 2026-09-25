@@ -101,7 +101,9 @@ fn one_decoder_serves_picture_after_picture() {
     for name in ["photo.jpg", "alpha.png", "photo.webp", "grey.jpg", "palette.png", "photo.gif", "turned-6.jpg", "photo.jpg"] {
         for side in [7, 12, 30, 64] {
             let px = d.decode(&file(name), side, side, Alpha::Premultiplied).unwrap();
-            assert_eq!(px.len(), side * side * 4);
+            // Nothing of the picture before leaks into the next: the same as a decoder of its own.
+            let fresh = Decoder::new().decode(&file(name), side, side, Alpha::Premultiplied).unwrap();
+            assert!(px == fresh, "{name} at {side}x{side}: a reused decoder gives other pixels than a new one");
         }
     }
 }
@@ -111,7 +113,13 @@ fn a_broken_file_is_an_error_not_a_panic() {
     let mut d = Decoder::new();
     for name in ["photo.jpg", "photo.png", "photo.webp", "alpha.webp", "photo.gif", "turned-6.jpg", "turned-6.webp"] {
         let f = file(name);
-        for cut in [4, 20, f.len() / 2, f.len() - 3] {
+        // Cut inside its headers: nothing to draw, so an error. Cut further on, a decoder may draw what
+        // came, but must not panic.
+        for cut in [4, 20] {
+            assert!(d.decode(&f[..cut], 16, 16, Alpha::Straight).is_err(), "{name} cut at {cut} bytes decoded");
+        }
+        assert!(header(&f[..4]).is_err(), "{name} cut at 4 bytes has a header");
+        for cut in [f.len() / 2, f.len() - 3] {
             let _ = d.decode(&f[..cut], 16, 16, Alpha::Straight);
             let _ = header(&f[..cut]);
         }

@@ -37,7 +37,9 @@ mod eval;
 mod tests;
 
 use crate::types::TrackAnalysis;
-use analysis::{Analyzer, Features};
+#[cfg(any(test, feature = "synth"))]
+use analysis::Analyzer;
+use analysis::Features;
 
 /// Bump when the analysis changes enough that stored rows should be redone.
 pub const ANALYSIS_VERSION: i32 = 9;
@@ -221,6 +223,7 @@ pub fn finish(song_id: &str, f: &Features) -> Analysis {
 }
 
 /// Analyses one whole track of mono samples at `sample_rate`.
+#[cfg(any(test, feature = "synth"))]
 pub fn analyse(song_id: &str, pcm: &[f32], sample_rate: u32) -> Analysis {
     let mut a = Analyzer::new(sample_rate, (pcm.len() as u64 * 1000) / sample_rate.max(1) as u64);
     a.feed(pcm);
@@ -233,6 +236,7 @@ pub const PCM_16: i32 = 2;
 pub const PCM_FLOAT: i32 = 4;
 
 /// Analyses interleaved little-endian PCM bytes, 16-bit or float, as a decoder hands them out.
+#[cfg(any(test, feature = "synth"))]
 pub fn analyse_bytes(song_id: &str, pcm: &[u8], sample_rate: i32, channels: i32, encoding: i32) -> Analysis {
     let ch = channels.clamp(1, 8) as usize;
     let rate = sample_rate.max(1) as u32;

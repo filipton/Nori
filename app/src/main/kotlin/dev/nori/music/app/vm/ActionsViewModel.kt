@@ -210,8 +210,6 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun playNext(songs: List<Song>) { nori.player.playNext(songs); _messages.trySend(say.playingNext) }
     fun enqueue(songs: List<Song>) { nori.player.enqueue(songs); _messages.trySend(say.addedToQueue) }
 
-    fun playAlbum(a: Album, shuffle: Boolean = false) = attempt(null) { nori.player.play(nori.library.albumSongs(a.id), shuffle = shuffle) }
-    fun playPlaylist(p: Playlist) = attempt(null) { nori.player.play(nori.library.playlistSongs(p.id)) }
     fun shuffleAll() = attempt(null) { nori.player.play(nori.library.shuffleAll()) }
 
     /** An endless-ish mix seeded from one song. */
@@ -275,7 +273,6 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
         nori.downloads.remove(songs.map { it.id })
         _messages.trySend(say.downloadsRemoved(songs.size))
     }
-    fun downloadAlbum(a: Album) = attempt(null) { download(nori.library.albumSongs(a.id)) }
     fun removeDownloads(ids: List<String>) = nori.downloads.remove(ids)
 
     /** What each download this session touched is doing; see [dev.nori.music.downloads.Downloads.marks]. */

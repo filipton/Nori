@@ -237,12 +237,6 @@ class PlaylistViewModel(app: Application) : DetailViewModel<PlaylistDetail>(app)
     private val version = MutableStateFlow(0)
     @OptIn(ExperimentalCoroutinesApi::class)
     override fun load(id: String) = version.flatMapLatest { nori.library.playlist(id) }
-
-    fun removeAt(index: Int) = viewModelScope.launch {
-        val pid = id.value ?: return@launch
-        runCatching { nori.library.removeFromPlaylist(pid, index) }
-        version.value++
-    }
 }
 
 class GenreViewModel(app: Application) : DetailViewModel<List<Song>>(app) {

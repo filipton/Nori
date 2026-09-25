@@ -2,7 +2,6 @@
 //! (copied into testdata/twins/CoreTwins.kt) answered on the JVM, written by tools/twins.sh. Every answer
 //! must match exactly; the only floats are volume fractions, compared bit for bit.
 
-use nori_core::automix::ahead;
 use nori_core::rows::{merge_rows, Row};
 use nori_core::{autoeq, car, covers, heard, menus, rules, search, stream_cache};
 
@@ -31,10 +30,6 @@ fn bytes(hex: &str) -> Vec<u8> {
 
 fn list(s: &str) -> Vec<&str> {
     if s == "_" { Vec::new() } else { s.split(',').collect() }
-}
-
-fn flag(s: &str) -> bool {
-    s.parse().unwrap()
 }
 
 fn maybe<T: std::str::FromStr>(s: &str) -> Option<T>
@@ -67,18 +62,6 @@ fn live_search_waits() {
 fn bodies_read_as_the_jvm_reads_them() {
     for r in rows("text") {
         assert_eq!(Some(autoeq::text(&bytes(r[0]))), text(r[1]), "{r:?}");
-    }
-}
-
-#[test]
-fn measuring_ahead() {
-    for r in rows("on_device") {
-        assert_eq!(ahead::whole_on_device(flag(r[0]), r[1].parse().unwrap(), r[2].parse().unwrap()), flag(r[3]), "{r:?}");
-    }
-    for r in rows("ahead") {
-        let here = list(r[1]);
-        let p = ahead::plan(list(r[0]).into_iter().map(String::from).collect(), |id| here.contains(&id));
-        assert_eq!((p.measure.iter().map(String::as_str).collect::<Vec<_>>(), p.waiting), (list(r[2]), r[3].parse().unwrap()), "{r:?}");
     }
 }
 

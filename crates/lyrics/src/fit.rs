@@ -19,7 +19,7 @@ const SPREAD_SHARE: f64 = 0.5;
 const SHARED_WORDS: f64 = 0.5;
 
 /// A line's text as it is compared: lower case, letters and digits only, one space between words.
-fn norm(v: &str) -> String {
+pub(crate) fn norm(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut gap = false;
     for c in v.chars().flat_map(char::to_lowercase) {

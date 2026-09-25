@@ -68,6 +68,7 @@ impl SilenceSkipper {
     }
 
     /// Frames dropped since the last flush.
+    #[cfg(any(test, feature = "synth"))]
     pub fn skipped_frames(&self) -> u64 {
         self.skipped
     }

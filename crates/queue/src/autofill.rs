@@ -55,7 +55,6 @@ fn refill_facts() -> (bool, usize) {
 
 /// The queue moved: whether to fetch songs for its end now ([`Client::autofill`]). A true answer is a
 /// fetch on the wire until [`autofill_arrived`].
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn autofill_start() -> bool {
     let (ok, after) = refill_facts();
     REFILL.lock().start(ok, after)

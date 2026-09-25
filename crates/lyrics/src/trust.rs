@@ -18,7 +18,7 @@ use nori_model::{Lyrics, Song};
 use serde::{Deserialize, Serialize};
 
 use crate::credits::credits_inside;
-use crate::fit::agree;
+use crate::fit::{agree, norm};
 use crate::formats::timing;
 use crate::lrclib::clean;
 
@@ -69,24 +69,6 @@ const W_SHAPE: f64 = 0.15;
 
 /// A part nothing is known about: the service matched the song on its side, which is worth something.
 const UNKNOWN: f64 = 0.7;
-
-/// Lower case, letters and digits only, one space between words.
-fn norm(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    let mut gap = false;
-    for c in v.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            if gap && !out.is_empty() {
-                out.push(' ');
-            }
-            gap = false;
-            out.push(c);
-        } else {
-            gap = true;
-        }
-    }
-    out
-}
 
 fn latin(v: &str) -> bool {
     v.chars().all(|c| !c.is_alphabetic() || c <= '\u{024F}')

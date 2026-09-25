@@ -66,7 +66,6 @@ pub struct StarMarked {
     pub marks: StarMarks,
 }
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn star_mark(kind: Starrable, id: String, on: bool) -> StarMarked {
     let mut m = MARKS.lock();
     let previous = m.get_or_insert_with(HashMap::new).insert(key(kind, &id), on);
@@ -75,7 +74,6 @@ pub fn star_mark(kind: Starrable, id: String, on: bool) -> StarMarked {
 
 /// The server refused a star change (being offline is not refusing: those are kept and sent later), so
 /// the heart must not keep showing it: the mark from before comes back. Returns the marks as they are now.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn star_restore(kind: Starrable, id: String, previous: Option<bool>) -> StarMarks {
     let mut m = MARKS.lock();
     let all = m.get_or_insert_with(HashMap::new);

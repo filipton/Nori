@@ -45,9 +45,6 @@ import dev.nori.music.look.CoverLook
 interface Look {
     fun argb(entry: Int): Int
     fun color(entry: Int): Color = Color(argb(entry))
-
-    /** 0 on a dark page, 1 on paper. */
-    val paper: Float get() = Float.fromBits(argb(CoverLook.PAPER))
 }
 
 /** A look that does not move: a page's own table, looked up. */

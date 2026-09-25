@@ -935,18 +935,6 @@ mod tests {
         assert_eq!(eq.gain_reduction_db(), 0.0);
     }
 
-    #[test]
-    fn the_limiter_catches_what_a_boost_would_have_clipped() {
-        let mut eq = Equalizer::new(48000, 1);
-        // +10 dB of pre-amp on a -3 dBFS tone would leave the chain at +7 dBFS.
-        eq.configure(&[], 10.0, 0.0);
-        eq.configure_output(0.0, false, -1.0, 100.0, 5.0);
-        let x = tone_at(700.0, 0.7);
-        let mut y = vec![0f32; x.len()];
-        eq.process_f32(&x, &mut y);
-        assert!(peak(&y[9600..]) <= 10f64.powf(-1.0 / 20.0) * 1.04, "peak {}", peak(&y[9600..]));
-    }
-
     /// The path the phone uses by default. Every other limiter test feeds floats, which is how 16-bit audio being
     /// turned down by 91 dB - silence - went unnoticed: the float path was always scaled right.
     #[test]

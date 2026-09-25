@@ -299,7 +299,6 @@ pub fn perf_log_add(ended_ms: i64, stretch: PerfStretch) {
 }
 
 /// The stretches that ended at or after `since_ms`, oldest first; a row that does not read is passed over.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_log_rows(since_ms: i64) -> Vec<PerfStretch> {
     let Some(db) = settings_store::app_db() else { return Vec::new() };
     let read = rows(&db.lock(), since_ms);
@@ -934,7 +933,6 @@ pub fn perf_selftest_keep(at_ms: i64, text: String) {
 }
 
 /// The last self test's result, as kept; none before the first.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_selftest_kept() -> Option<String> {
     let db = settings_store::app_db()?;
     let c = db.lock();

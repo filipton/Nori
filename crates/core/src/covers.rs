@@ -69,7 +69,6 @@ fn warmable(art: &str) -> bool {
 
 /// The covers of `arts` (cover ids, in order) to fetch, each at both sizes: provider artwork left out,
 /// each cover once, at most `cap` covers.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn cover_wants(arts: Vec<String>, cap: u32) -> Vec<CoverWant> {
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
@@ -91,13 +90,6 @@ const DOWNLOAD_COVERS: u32 = 500;
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    /// The address of cover `id` at `size` px, as every client asks for it ([`cover_url_into`]).
-    pub fn cover_address(&self, id: String, size: u32) -> String {
-        let mut out = String::new();
-        cover_url_into(&mut out, &self.url_prefix("getCoverArt".into()), &id, size as i32);
-        out
-    }
-
     /// The covers of songs being downloaded (`arts`, their cover ids, in order), as addresses to fetch
     /// onto the disk now and not decode (a cover loader's `warm`): covers are only kept once something
     /// has drawn them, so a song downloaded from a menu, its cover never on screen, would arrive with no
@@ -116,13 +108,22 @@ impl Core {
     }
 }
 
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// The address of cover `id` at `size` px, as every client asks for it ([`cover_url_into`]).
+    pub fn cover_address(&self, id: String, size: u32) -> String {
+        let mut out = String::new();
+        cover_url_into(&mut out, &self.url_prefix("getCoverArt".into()), &id, size as i32);
+        out
+    }
+}
+
 /// The queue positions whose covers to fetch while `index` plays, nearest first: both neighbours first,
 /// as a skip would reach them (`previous` and `next` are what a skip lands on, shuffle included; -1 at an
 /// end), and then outwards in both directions a step at a time, `ahead` steps each way. Backwards as well
 /// as forwards: going back through a queue is as ordinary as going on, and with only the one song behind
 /// warmed, the second swipe back always waited on the server. `ahead` 0 still warms the song behind.
 /// Only positions inside a queue of `len` songs, never the one playing.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn cover_neighbours(index: i32, previous: i32, next: i32, ahead: i32, len: u32) -> Vec<u32> {
     let ahead = ahead.max(0);
     let mut around = vec![previous, next];
@@ -281,14 +282,6 @@ mod tests {
         ] {
             assert_eq!(is_provider_cover(url), provider, "{url}");
         }
-    }
-
-    #[test]
-    fn the_rules_the_app_sizes_and_keeps_covers_by() {
-        let r = cover_rules();
-        assert_eq!((r.row, r.card, r.full), (320, 320, 800));
-        assert_eq!((r.id_param.as_str(), r.size_param.as_str()), ("&id=", "&size="));
-        assert_eq!((r.memory_share, r.disk_bytes, r.hidden_share), (0.15, 268_435_456, 0.25));
     }
 
     #[test]

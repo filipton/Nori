@@ -626,15 +626,9 @@ fun EmptyNote(text: String, modifier: Modifier = Modifier) = Text(
  * asked for, which on a real library is the better part of a second per cover; asking for the next
  * screenful while the current one is being read turns that wait into something already done. They go
  * through the same loader, decoded at the rendition's own size into memory, so a prefetched cover is
- * simply there when its view appears, whatever size that is.
+ * simply there when its view appears, whatever size that is. For a caller that works out [urls] outside
+ * composition, from a scroll observer. Main thread.
  */
-@Composable
-fun PrefetchCovers(urls: List<String?>) {
-    val context = LocalContext.current
-    androidx.compose.runtime.LaunchedEffect(urls) { prefetchCovers(context, urls) }
-}
-
-/** [PrefetchCovers] for a caller that works out [urls] outside composition, from a scroll observer. Main thread. */
 fun prefetchCovers(context: android.content.Context, urls: List<String?>) {
     val loader = dev.nori.music.data.CoverLoader.get(context)
     urls.forEach { url -> if (url != null) loader.prefetch(url) }

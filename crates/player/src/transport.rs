@@ -77,39 +77,6 @@ pub fn fade_step(from: f32, to: f32, start_ms: i64, now_ms: i64, ms: i32) -> (f3
     (crate::policy::fade(from, to, t), t >= 1.0)
 }
 
-/// A switch waiting out its dip. The old sound has to fall before the flush, so the switch runs a
-/// heartbeat after the finger - guarded by what was current when it was asked: anything else moving on
-/// first (a song ending inside the dip) drops it instead of yanking the queue back. A second switch
-/// chains behind the first instead of cancelling it, so the queue steps once per tap, and a pause never
-/// swallows the seek it interrupts. The platform keeps the action itself; this keeps whether it may run.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SwitchQueue {
-    /// The song and queue index current when the waiting switch was asked for.
-    waiting: Option<(Option<String>, i32)>,
-}
-
-impl SwitchQueue {
-    pub const fn new() -> Self {
-        SwitchQueue { waiting: None }
-    }
-
-    /// A switch now waits out its dip, asked on `song` at queue index `index`.
-    pub fn wait(&mut self, song: Option<&str>, index: i32) {
-        self.waiting = Some((song.map(str::to_string), index));
-    }
-
-    /// The waiting switch is due (its dip is down, another control was pressed): whether it runs, which it
-    /// does only if the player is still where it was asked. Either way it no longer waits.
-    pub fn take(&mut self, song: Option<&str>, index: i32) -> bool {
-        self.waiting.take().is_some_and(|(s, i)| s.as_deref() == song && i == index)
-    }
-
-    /// Stopping drops a switch still waiting: starting over is not continuing it.
-    pub fn drop_waiting(&mut self) {
-        self.waiting = None;
-    }
-}
-
 /// A skip asked for while the music is paused is a request for music, not for a different song to sit
 /// paused on: the song changes and starts. Only the user's controls follow this - the player's own skips
 /// (an explicit song, a song that will not play) leave a paused queue paused.
@@ -394,25 +361,6 @@ mod tests {
         assert_eq!(fade_step(1.0, 0.0, 100, 900, 200), (0.0, true), "late ticks stay at the end");
         assert_eq!(fade_step(0.2, 0.8, 100, 50, 200), (0.2, false), "a clock before the start holds");
         assert_eq!(fade_step(1.0, 0.3, 100, 100, 0), (0.3, true), "no length: there at once");
-    }
-
-    #[test]
-    fn a_waiting_switch_runs_only_where_it_was_asked() {
-        let mut q = SwitchQueue::new();
-        assert!(!q.take(Some("a"), 0), "nothing waits");
-        q.wait(Some("a"), 0);
-        assert!(q.take(Some("a"), 0));
-        assert!(!q.take(Some("a"), 0), "taken once");
-        q.wait(Some("a"), 0);
-        assert!(!q.take(Some("b"), 1), "the song moved on inside the dip: dropped");
-        assert!(!q.take(Some("a"), 0));
-        q.wait(Some("a"), 0);
-        assert!(!q.take(Some("a"), 2), "the same song queued twice is another place");
-        q.wait(None, -1);
-        assert!(q.take(None, -1));
-        q.wait(Some("a"), 0);
-        q.drop_waiting();
-        assert!(!q.take(Some("a"), 0), "stopping drops it");
     }
 
     #[test]

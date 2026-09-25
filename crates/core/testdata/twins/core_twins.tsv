@@ -1074,34 +1074,6 @@ text	f5ffbf	efbfbdefbfbdefbfbd
 text	f5ffc0	efbfbdefbfbdefbfbd
 text	f5ff8080	efbfbdefbfbdefbfbdefbfbd
 text	f5ffbf41	efbfbdefbfbdefbfbd41
-on_device	false	-1	0	false
-on_device	false	-1	999	false
-on_device	false	-1	1000	false
-on_device	false	-1	1001	false
-on_device	false	0	0	false
-on_device	false	0	999	false
-on_device	false	0	1000	false
-on_device	false	0	1001	false
-on_device	false	1000	0	false
-on_device	false	1000	999	false
-on_device	false	1000	1000	true
-on_device	false	1000	1001	true
-on_device	true	-1	0	true
-on_device	true	-1	999	true
-on_device	true	-1	1000	true
-on_device	true	-1	1001	true
-on_device	true	0	0	true
-on_device	true	0	999	true
-on_device	true	0	1000	true
-on_device	true	0	1001	true
-on_device	true	1000	0	true
-on_device	true	1000	999	true
-on_device	true	1000	1000	true
-on_device	true	1000	1001	true
-ahead	a,b,c,d,e	b,d,e	b,d,e	2
-ahead	a,c	b,d,e	_	2
-ahead	e,d	b,d,e	e,d	0
-ahead	_	b,d,e	_	0
 volume_step	bf000000	-1	-
 volume_step	00000000	-1	-
 volume_step	3c23d70a	-1	-

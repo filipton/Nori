@@ -1,4 +1,4 @@
-//! The analysis store: rows in, rows out, and the streaming handle Kotlin drives.
+//! The analysis store: rows in, rows out, and a measurement finished into it.
 
 use nori_player::automix::synth::Synth;
 
@@ -22,43 +22,30 @@ fn analysis_is_stored_and_reported_missing() {
 }
 
 #[test]
-fn the_streaming_handle_finishes_into_the_store() {
+fn a_measurement_finishes_into_the_store() {
     let core = Core::new(String::new(), "t".into()).unwrap();
-    // The handle a JNI create would return, built the same way.
     let s = Synth::new(128.0);
     let x = s.render();
-    let h = {
-        let mut a = analysis::Analyzer::new(s.rate, 60_000);
-        a.feed(&x[..s.rate as usize * 10]);
-        store_handle(a)
-    };
-    assert_eq!(core.analysis_finish_stream("x".into(), h).unwrap(), None, "10 s is not a track");
-    let t = {
-        with_handle(h, |a| a.feed(&x));
-        core.analysis_finish_stream("x".into(), h).unwrap().unwrap()
-    };
+    let mut a = analysis::Analyzer::new(s.rate, 60_000);
+    a.feed(&x[..s.rate as usize * 10]);
+    assert_eq!(core.analysis_finish("x", a).unwrap(), None, "10 s is not a track");
+    let mut a = analysis::Analyzer::new(s.rate, 60_000);
+    a.feed(&x);
+    let t = core.analysis_finish("x", a).unwrap().unwrap();
     assert!((t.bpm - 128.0).abs() < 0.05);
     assert_eq!(core.analysis_get("x".into()).unwrap(), Some(t));
-    assert_eq!(core.analysis_finish_stream("x".into(), 0).unwrap(), None);
-    store::free_stream_handle(h);
 }
 
-fn store_handle(a: analysis::Analyzer) -> i64 {
-    store::stream_handle(a, 1)
-}
+/// What the app no longer asks of the core, only its tests: a row put straight in, a whole track measured.
+impl Core {
+    fn analysis_store(&self, analysis: TrackAnalysis) -> Result<()> {
+        Ok(put(&self.db.lock(), &analysis)?)
+    }
 
-fn with_handle(h: i64, f: impl FnOnce(&mut analysis::Analyzer)) {
-    f(&mut store::stream(h).unwrap().analyzer())
-}
-
-
-#[test]
-fn plan_through_the_ffi() {
-    let a = analyse("a", &Synth { secs: 120.0, ..Synth::new(128.0) }.render(), 44100).track;
-    let b = analyse("b", &Synth { secs: 120.0, ..Synth::new(125.0) }.render(), 44100).track;
-    let p = plan_transition(Some(a.clone()), Some(b.clone()), a.duration_ms, b.duration_ms, crate::AutoMixSettings::default());
-    assert_eq!(p.kind, crate::TransitionKind::BeatMatched, "{}", p.reason);
-    assert_eq!(automix_mixer_params(p.clone()).len(), mixer::param::COUNT);
+    fn analysis_run(&self, song_id: String, pcm: Vec<u8>, sample_rate: i32, channels: i32, encoding: i32) -> Result<TrackAnalysis> {
+        let a = analyse_bytes(&song_id, &pcm, sample_rate, channels, encoding).track;
+        Ok(nori_automix::store::put_measured(&self.db.lock(), a)?)
+    }
 }
 
 /// Stored rows go through the database with their grid sources, a classical measurement of the same file keeps

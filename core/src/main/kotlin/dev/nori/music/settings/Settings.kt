@@ -11,7 +11,6 @@ import dev.nori.music.ffi.settings.ServerList
 import dev.nori.music.ffi.settings.SoundBand
 import dev.nori.music.ffi.settings.SoundSettings
 import dev.nori.music.ffi.settings.StoredPrefs
-import dev.nori.music.ffi.settings.eqGraphic
 import dev.nori.music.ffi.settings.serverLabel
 import dev.nori.music.ffi.db.dbFileName
 import dev.nori.music.ffi.settings.settingsOpen
@@ -93,12 +92,7 @@ enum class BandKind {
 enum class BandChannel { BOTH, LEFT, RIGHT }
 
 /** One equalizer filter. The ten default bands are peaking filters an octave apart. */
-data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float, val channel: BandChannel = BandChannel.BOTH) {
-    companion object {
-        /** The ten graphic bands, from the core so the numbers live in one place. */
-        val GRAPHIC: List<Band> by lazy { eqGraphic().map { it.band() } }
-    }
-}
+data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float, val channel: BandChannel = BandChannel.BOTH)
 
 /** One stream quality: [bitRate] 0 and empty [format] mean the original file. */
 data class Quality(val bitRate: Int = 0, val format: String = "")
@@ -293,12 +287,6 @@ data class Prefs(
     val loggedIn get() = server != null
     val serverUrl get() = server?.url.orEmpty()
     val user get() = server?.user.orEmpty()
-
-    /**
-     * Something in the sample domain is switched on. Anything here stops audio offload but not burst playback.
-     * The rule is nori_player::sound::sound_on, worked out once per settings.
-     */
-    val dsp: Boolean by lazy { dev.nori.music.playback.Dsp.soundOn(eqEnabled, crossfeedDb, balance, mono, limiter) }
 
     /** The pre-amp in effect: the one set, or the automatic one (the core's `SoundSettings::effective_preamp_db`), worked out once per settings. */
     val effectivePreampDb: Float by lazy {

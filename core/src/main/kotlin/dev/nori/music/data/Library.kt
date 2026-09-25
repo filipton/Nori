@@ -254,8 +254,6 @@ class Library(
     suspend fun resumeFromServer(): dev.nori.music.ffi.library.ResumePlan = withContext(Dispatchers.IO) { lifted { client.resumeFromServer() } }
 
     suspend fun song(id: String): Song? = call(Read.SongById(id)) { (it as Page.OneSong).v }
-    suspend fun albumSongs(id: String): List<Song> = call(Read.AlbumSongs(id)) { (it as Page.Songs).v }
-    suspend fun playlistSongs(id: String): List<Song> = call(Read.PlaylistSongs(id)) { (it as Page.Songs).v }
 
     // ---- writes: the core sends them, keeps them while offline and drops the reads they make stale ----
 
@@ -282,8 +280,6 @@ class Library(
     suspend fun createPlaylist(name: String, songIds: List<String>) = write(Write.CreatePlaylist(name, songIds))
 
     suspend fun addToPlaylist(id: String, songIds: List<String>) = write(Write.AddToPlaylist(id, songIds))
-
-    suspend fun removeFromPlaylist(id: String, index: Int) = write(Write.RemoveFromPlaylist(id, index))
 
     suspend fun deletePlaylist(id: String) = write(Write.DeletePlaylist(id))
 

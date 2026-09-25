@@ -691,14 +691,6 @@ mod tests {
     }
 
     #[test]
-    fn base64url_reads_what_it_should() {
-        assert_eq!(b64("aGVsbG8").unwrap(), b"hello");
-        assert_eq!(b64("aGVsbG8=").unwrap(), b"hello");
-        assert_eq!(b64(&enc(b"{\"a\":1}")).unwrap(), b"{\"a\":1}");
-        assert!(b64("a b").is_none());
-    }
-
-    #[test]
     fn a_moving_cover_is_found_kept_and_forgotten() {
         use crate::client::tests::{block, client};
         let (c, fake) = client(crate::client::NetProfile { url: "h".into(), ..Default::default() });

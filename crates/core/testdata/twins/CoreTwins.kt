@@ -62,23 +62,6 @@ fun liveDelay(query: String, liveSearchDelayMs: Int): Long = if (query.isBlank()
 
 fun bodyText(body: ByteArray): String = body.decodeToString()
 
-// ---- core/.../playback/AutoMixPrefetch.kt: onDevice (the cache's answers as numbers) and update ----
-
-fun onDevice(downloaded: Boolean, length: Long, cached: Long): Boolean {
-    if (downloaded) return true
-    return length > 0 && cached >= length
-}
-
-fun ahead(missing: List<String>, onDevice: (String) -> Boolean): Pair<List<String>, Int> {
-    val waiting = missing.count { !onDevice(it) }
-    val measured = ArrayList<String>()
-    for (id in missing) {
-        if (!onDevice(id)) continue
-        measured += id
-    }
-    return measured to waiting
-}
-
 // ---- app/.../vm/PlayerViewModel.kt: setVolumeFraction and volumeFraction ----
 
 fun volumeStep(f: Float, max: Int): Int? {
@@ -167,16 +150,6 @@ fun main() {
             val bytes = (listOf(b1, b2) + tail).map { it.toByte() }.toByteArray()
             row("text", bytes.joinToString("") { "%02x".format(it) }, hx(bodyText(bytes)))
         }
-    }
-
-    for (downloaded in listOf(false, true)) for (length in listOf(-1L, 0L, 1_000L)) for (cached in listOf(0L, 999L, 1_000L, 1_001L)) {
-        row("on_device", downloaded, length, cached, onDevice(downloaded, length, cached))
-    }
-
-    val here = setOf("b", "d", "e")
-    for (m in listOf(listOf("a", "b", "c", "d", "e"), listOf("a", "c"), listOf("e", "d"), emptyList())) {
-        val (measured, waiting) = ahead(m) { it in here }
-        row("ahead", list(m), list(here.toList()), list(measured), waiting)
     }
 
     for (max in listOf(-1, 0, 1, 7, 15, 25, 150)) {

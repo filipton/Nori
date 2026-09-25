@@ -142,19 +142,22 @@ impl Core {
         self.autoeq_for_device(name.to_string(), limit).unwrap_or_default()
     }
 
+    /// The AutoEQ browser's search as the screens show it: whether the query is too short to search,
+    /// and the hits (the client words the lines under them).
+    pub fn autoeq_browse(&self, query: String) -> AutoEqFound {
+        let too_short = autoeq_too_short(&query);
+        AutoEqFound { too_short, hits: self.autoeq_find(query) }
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
     /// The AutoEQ browser's search: nothing until two characters are typed, then the first 40 hits.
     pub fn autoeq_find(&self, query: String) -> Vec<AutoEqEntry> {
         if autoeq_too_short(&query) {
             return Vec::new();
         }
         self.autoeq_search(query, 40).unwrap_or_default()
-    }
-
-    /// The AutoEQ browser's search as the screens show it: whether the query is too short to search,
-    /// and the hits (the client words the lines under them).
-    pub fn autoeq_browse(&self, query: String) -> AutoEqFound {
-        let too_short = autoeq_too_short(&query);
-        AutoEqFound { too_short, hits: self.autoeq_find(query) }
     }
 }
 
@@ -413,11 +416,16 @@ pub(crate) mod tests {
 
     #[test]
     fn curves_are_only_looked_for_by_a_devices_own_name() {
+        // A list with a curve in it, so that finding nothing says something. Stored straight away: the
+        // fetch is one per process at a time, and another test fetches.
         let c = core();
-        assert!(c.autoeq_for_output(SPEAKER.into(), 5).is_empty());
-        assert!(c.autoeq_for_output("USB: ".into(), 5).is_empty());
+        let list = "- [Sony WH-1000XM6](./Super%20Review/over-ear/Sony%20WH-1000XM6) by Super Review\n";
+        assert_eq!(autoeq::store(&mut c.db.lock(), list, crate::db::now_ms()).unwrap(), 1);
+        assert_eq!(c.autoeq_for_output("Bluetooth: WH-1000XM6".into(), 5).len(), 1, "a headphone's own name finds its curve");
+        assert!(c.autoeq_for_output(SPEAKER.into(), 5).is_empty(), "the phone's speaker is no headphone");
+        assert!(c.autoeq_for_output("USB: ".into(), 5).is_empty(), "no name, nothing looked for");
         assert_eq!(device_name("Bluetooth: LE_WH-1000XM5"), "LE_WH-1000XM5");
-        assert!(c.autoeq_find("a".into()).is_empty());
+        assert!(c.autoeq_find("a".into()).is_empty(), "a letter is too short to look for");
     }
 
     #[test]

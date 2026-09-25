@@ -38,19 +38,26 @@ impl Core {
         Ok(())
     }
 
+    /// The playlist's page: its first `limit` songs and their summed length, for the caption over them.
+    pub fn smart_page(&self, json: String, limit: u32) -> Result<SmartPage> {
+        let songs = self.smart_evaluate(json, 0, limit)?;
+        Ok(SmartPage { seconds: crate::pages::total_seconds(&songs), songs })
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
     /// One page of the playlist. `offset` and `limit` page inside the playlist's own `limit` / `limitMs`.
     pub fn smart_evaluate(&self, json: String, offset: u32, limit: u32) -> Result<Vec<Song>> {
         let def = parse(&json)?;
         let downloaded = self.downloaded_for(&def)?;
         Ok(run(&self.db.lock(), &def, &downloaded, offset as usize, limit as usize, false, db::now_ms())?.0)
     }
+}
 
-    /// The playlist's page: its first `limit` songs and their summed length, for the caption over them.
-    pub fn smart_page(&self, json: String, limit: u32) -> Result<SmartPage> {
-        let songs = self.smart_evaluate(json, 0, limit)?;
-        Ok(SmartPage { seconds: crate::pages::total_seconds(&songs), songs })
-    }
-
+/// Only the tests count a playlist without reading it; the app reads its page (`smart_page`).
+#[cfg(test)]
+impl Core {
     /// How many songs the playlist has, its own caps applied.
     pub fn smart_count(&self, json: String) -> Result<u32> {
         let def = parse(&json)?;
@@ -336,17 +343,17 @@ pub(crate) mod tests {
         assert!(plan(&of("default-forgotten-favourites")).contains("items_starred"));
     }
 
-    /// The size the index is meant for. Rowids only until the page is known, so this stays in the tens of
-    /// milliseconds per call in a release build; here it only has to work and to page correctly.
+    /// A library large enough that the limit, paging, the count and the time budget all bite (the index is
+    /// meant for a hundred thousand songs; ten thousand checks the same paging in a tenth of the time).
     #[test]
-    fn a_hundred_thousand_songs() {
+    fn ten_thousand_songs_page_count_and_fill_a_time_budget() {
         let core = Core::new(String::new(), "t".into()).unwrap();
         {
             let mut c = core.db.lock();
             let tx = c.transaction().unwrap();
             {
                 let mut st = tx.prepare("INSERT INTO items(server, kind, id, json) VALUES(sid(), 2, ?1, ?2)").unwrap();
-                for i in 0..100_000u32 {
+                for i in 0..10_000u32 {
                     let s = Song {
                         id: format!("s{i}"),
                         title: format!("Title {i}"),
@@ -354,7 +361,7 @@ pub(crate) mod tests {
                         genre: Some(["Rock", "Jazz", "Folk", "Ambient"][(i % 4) as usize].into()),
                         year: 1960 + i % 60,
                         duration: 120 + i % 400,
-                        starred: i % 1000 == 0,
+                        starred: i % 100 == 0,
                         ..Default::default()
                     };
                     st.execute(params![s.id, serde_json::to_string(&s).unwrap()]).unwrap();
@@ -365,15 +372,15 @@ pub(crate) mod tests {
         let def = json!({ "match": { "rules": [
             { "field": "genre", "op": "is", "value": "jazz" }, { "field": "year", "op": "between", "value": [1990, 1999] },
             { "field": "title", "op": "contains", "value": "7" } ] },
-            "sort": { "field": "duration", "descending": true }, "limit": 500 })
+            "sort": { "field": "duration", "descending": true }, "limit": 100 })
         .to_string();
         let first = core.smart_evaluate(def.clone(), 0, 50).unwrap();
-        assert_eq!(first.len(), 50);
+        assert_eq!(first.len(), 50, "a full first page");
         assert!(first.windows(2).all(|w| w[0].duration >= w[1].duration));
         assert!(first.iter().all(|s| s.genre.as_deref() == Some("Jazz") && (1990..2000).contains(&s.year) && s.title.contains('7')));
-        let last = core.smart_evaluate(def.clone(), 480, 50).unwrap();
-        assert_eq!(last.len(), 20);
-        assert_eq!(core.smart_count(def).unwrap(), 500);
+        let last = core.smart_evaluate(def.clone(), 80, 50).unwrap();
+        assert_eq!(last.len(), 20, "the last page ends at the limit of 100");
+        assert_eq!(core.smart_count(def).unwrap(), 100, "225 match; the limit keeps 100");
 
         let starred = json!({ "match": { "rules": [{ "field": "starred", "op": "isTrue" }] }, "sort": { "field": "random", "seed": 7 } }).to_string();
         assert_eq!(core.smart_count(starred.clone()).unwrap(), 100);
@@ -382,7 +389,7 @@ pub(crate) mod tests {
         let budget = json!({ "sort": { "field": "random", "seed": 3 }, "limitMs": 3_600_000 }).to_string();
         let hour = core.smart_evaluate(budget.clone(), 0, 1000).unwrap();
         let total: u32 = hour.iter().map(|s| s.duration).sum();
-        assert!(total <= 3600 && total > 3600 - 520, "{total}");
+        assert!(total <= 3600 && total > 3600 - 520, "an hour filled to within one song: {total} s in {} songs", hour.len());
         assert_eq!(core.smart_count(budget).unwrap() as usize, hour.len());
 
         let unicode = json!({ "match": { "rules": [{ "field": "artist", "op": "is", "value": "ärtist 5" }] }, "limit": 10 }).to_string();

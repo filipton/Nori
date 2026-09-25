@@ -74,7 +74,6 @@ fn blank(kind: TransitionKind, out_start: i64, in_start: i64, duration: i64, rea
         echo_feedback: 0.5,
         echo_wet_db: -6.0,
         out_loop_ms: -1,
-        in_loop_ms: -1,
         hp_start_ms: -1,
         hp_end_ms: -1,
         hp_from_hz: 0.0,
@@ -830,7 +829,6 @@ fn finish_beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, s: &AutoMixSettings
         }
     }
     p.out_loop_ms = out_loop_ms;
-    p.in_loop_ms = -1;
     p.in_gain_db = loudness_trim(Some(a), Some(b), s);
     let mut bits: Vec<String> = notes.iter().filter(|n| !n.is_empty()).map(|n| n.to_string()).collect();
     if apart {

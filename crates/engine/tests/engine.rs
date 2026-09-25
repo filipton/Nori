@@ -28,8 +28,20 @@ use parking_lot::Mutex;
 const RATE: u32 = 44_100;
 
 /// Something like music, never the same twice for different seeds: a few partials and a little noise.
-/// Plain loops: the tests are built without optimisation, and minutes of it are made.
+/// Made once per length and seed for the whole binary: minutes of it are asked for, much of it the same.
 fn music(secs: f64, seed: u64) -> Vec<i16> {
+    type Made = Vec<((u64, u64), Arc<Vec<i16>>)>;
+    static MADE: std::sync::Mutex<Made> = std::sync::Mutex::new(Vec::new());
+    let key = (secs.to_bits(), seed);
+    if let Some((_, m)) = MADE.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return m.to_vec();
+    }
+    let m = Arc::new(make_music(secs, seed));
+    MADE.lock().unwrap().push((key, m.clone()));
+    m.to_vec()
+}
+
+fn make_music(secs: f64, seed: u64) -> Vec<i16> {
     let mut r = Rng(seed);
     let hz = [110.0, 331.0, 1250.0].map(|h| h * (1.0 + seed as f64 * 0.01));
     let n = (secs * RATE as f64) as usize;
@@ -207,7 +219,7 @@ impl Library for Songs {
             Some(store) => Source::Cached { url, bytes, store: store.clone(), key: format!("{id}:0") },
             None => Source::Url { url, bytes },
         };
-        Ok(Located { source, hint: Some("wav".into()), duration_ms })
+        Ok(Located { source, hint: Some("wav".into()), duration_ms, estimated: false })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -1899,10 +1911,16 @@ fn a_song_played_next_after_the_player_read_on_gaplessly_into_the_old_next_one_i
 /// end of the first while its reader sleeps out its timeout.
 #[test]
 fn a_seek_near_the_end_goes_on_through_the_fade_while_songs_opened_for_nothing_give_up() {
-    // Which reader wakes last decides it: a few rounds.
-    for _ in 0..4 {
-        seek_near_the_end_through_the_fade();
-    }
+    // Which reader wakes last decides it: a few rounds, side by side (source.rs's
+    // `readers_that_give_up_leave_the_one_still_waiting_to_be_woken_by_the_bytes` pins the order down).
+    std::thread::scope(|s| {
+        let rounds: Vec<_> = (0..4).map(|_| s.spawn(seek_near_the_end_through_the_fade)).collect();
+        for r in rounds {
+            if let Err(e) = r.join() {
+                std::panic::resume_unwind(e);
+            }
+        }
+    });
 }
 
 fn seek_near_the_end_through_the_fade() {
@@ -1919,6 +1937,8 @@ fn seek_near_the_end_through_the_fade() {
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2), "a plays: {:?} {:?}", rig.engine.status(), rig.events.lock());
     rig.engine.go_to(0, 25_000);
     let heard_b = |r: &Rig| r.events.lock().iter().any(|e| matches!(e, Event::Song { id, .. } if id == "b"));
+    // The fade is a mix like any other: the page says MIXING while it is heard.
+    assert!(rig.wait_for(10, |r| r.engine.status().mixing), "the fade is said to be mixing: {:?} {:?}", rig.engine.status(), rig.events.lock());
     assert!(rig.wait_for(10, heard_b), "b is heard out of the fade: {:?} {:?}", rig.engine.status(), rig.events.lock());
     assert!(rig.wait_for(10, |r| r.engine.status().index == Some(1) && r.engine.status().position_ms > 5_000), "b plays on: {:?}", rig.engine.status());
     assert!(!rig.events.lock().iter().any(|e| matches!(e, Event::Error { .. })), "nothing failed: {:?}", rig.events.lock());
@@ -1992,25 +2012,16 @@ fn a_client_keeping_watch_is_told_what_each_wake_saw_and_nothing_while_it_does_n
     // The engine wakes as the device's buffer runs down, a burst at a time: a minute of music is several.
     assert!(rig.wait_for(30, |r| r.heard.lock().len() > RATE as usize * 2 * 60));
     WATCHING.store(false, Ordering::Relaxed);
-    let seen = SEEN.lock().clone();
-    // Other tests' engines may be told too while it is on, each on its own thread and its own clock: every engine's
-    // looks are in its own time, and one engine (this one) played song 0 on and said the music in its output.
-    let mut threads: Vec<std::thread::ThreadId> = seen.iter().map(|s| s.0).collect();
-    threads.dedup();
-    let by = |t: &std::thread::ThreadId| -> Vec<nori_engine::watch::Seen> {
-        seen.iter().filter(|s| s.0 == *t).map(|s| s.1).filter(|s| s.playing && s.index == Some(0) && !s.offloaded).collect()
-    };
-    assert!(threads.iter().all(|t| by(t).windows(2).all(|w| w[1].now_ms >= w[0].now_ms)), "in each engine's own time");
-    let moved = |m: &Vec<nori_engine::watch::Seen>| {
-        m.len() >= 2 && m.last().unwrap().position_ms > m.first().unwrap().position_ms && m.iter().any(|s| s.in_output_ms > 0)
-    };
-    assert!(threads.iter().any(|t| moved(&by(t))), "the ear moved on between wakes, with music waiting in the output: {seen:?}");
-    // Another test's engine may have asked `wanted` just before it went off and be telling now: a moment of real
-    // time lets those land before the count (not engine timing, so not the rig's clock).
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    let told = SEEN.lock().len();
+    // Other tests' engines may be told too while it is on, each on its own thread: only this one's looks count.
+    let me = rig.time.clock.engine_thread().expect("the engine slept on the test's clock");
+    let mine = || SEEN.lock().iter().filter(|s| s.0 == me).map(|s| s.1).collect::<Vec<_>>();
+    let played: Vec<_> = mine().into_iter().filter(|s| s.playing && s.index == Some(0) && !s.offloaded).collect();
+    assert!(played.windows(2).all(|w| w[1].now_ms >= w[0].now_ms), "in the engine's own time: {played:?}");
+    let moved = played.len() >= 2 && played.last().unwrap().position_ms > played[0].position_ms && played.iter().any(|s| s.in_output_ms > 0);
+    assert!(moved, "the ear moved on between wakes, with music waiting in the output: {played:?}");
+    let told = mine().len();
     rig.run(3_000);
-    assert_eq!(SEEN.lock().len(), told, "not wanted, nothing is made or told");
+    assert_eq!(mine().len(), told, "not wanted, nothing is made or told");
 }
 
 /// As the perf build's settings watch had it (a phone, the equalizer on): whatever else is changed while the

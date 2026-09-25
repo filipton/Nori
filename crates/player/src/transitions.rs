@@ -137,7 +137,6 @@ pub fn engine_plan(p: &TransitionPlan, incoming_id: &str) -> Option<Plan> {
         keep_pitch: p.keep_pitch,
         ramp_us: p.tempo_ramp_ms * 1000,
         out_loop_us: p.out_loop_ms.max(0) * 1000,
-        in_loop_us: p.in_loop_ms.max(0) * 1000,
     })
 }
 

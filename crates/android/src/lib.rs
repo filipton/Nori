@@ -111,6 +111,14 @@ fn watch() {
     });
 }
 
+/// Whatever Java threw is written to the log and cleared: a thread of ours has nobody to throw it to.
+pub(crate) fn cleared(env: &mut JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+}
+
 /// This thread's JNIEnv, the thread attached to the JVM under its own name ("nori-track", "nori-load")
 /// for the rest of its life and detached when it ends. Attached without a name, as the jni crate does it,
 /// the JVM renamed every thread of ours "Thread-NN", and a thread list could not tell them apart.

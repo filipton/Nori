@@ -775,7 +775,6 @@ class Say(private val r: Resources) {
         return AboutFacts(title, build, playback, library, automix, ui, r.getString(R.string.about_report, title, build, playback, library, automix, ui))
     }
 
-    val widgetIdle: String get() = r.getString(R.string.widget_idle)
 
     companion object {
         /** Counts up to this are made once and kept. */

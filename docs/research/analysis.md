@@ -454,8 +454,8 @@ builds (±10 %). **[measured]**
   converted in 37-42 ms, peak RSS 31 MB above the process's before it (the checkpoint, its tensors and the weights
   at once), and the model assembled and loaded in 0.23 s, 65 MB peak for the process. The measurer test
   (`NORI_BEAT_THIS_CKPT=small0.ckpt cargo test --release -p nori-engine --features neural-beats --test core`)
-  serves the checkpoint at the authors' address and passes; `NORI_BEAT_THIS_NET=1 cargo test --release -p nori-cli
-  --features neural-beats --test beat_model` fetches it from their server. **[measured]**
+  serves the checkpoint at the authors' address and passes; `cargo test --release -p nori-cli
+  --features neural-beats --test beat_model -- --ignored` fetches it from their server. **[measured]**
 - **Checked again with the exported file (September 2026, a Ryzen 5 3600, one thread).** The full model's
   reference is final0 exported the same way (fp32, attention fused). The synthetic set has 18 songs now (36 mix
   windows); the real songs are the ten of Radiohead's *Kid A* (FLAC), with the full model's own beats and

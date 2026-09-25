@@ -29,7 +29,7 @@ use nori_player::queue::PlaybackError;
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::well_known::*;
 use symphonia::core::codecs::audio::AudioCodecId;
-use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::errors::{Error as SymphoniaError, SeekErrorKind};
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
@@ -199,6 +199,16 @@ fn for_now(e: &SymphoniaError) -> bool {
     matches!(e, SymphoniaError::IoError(e) if e.kind() == io::ErrorKind::WouldBlock)
 }
 
+/// A seek that found the song over before its place: out of the range the reader knows, or the bytes
+/// ended on the way to it.
+fn past_end(e: &SymphoniaError) -> bool {
+    match e {
+        SymphoniaError::SeekError(SeekErrorKind::OutOfRange) => true,
+        SymphoniaError::IoError(e) => e.kind() == io::ErrorKind::UnexpectedEof,
+        _ => false,
+    }
+}
+
 /// Packets read in one call that gave nothing to hear (skipped, broken, dropped before a seek's place)
 /// before the call gives up for now: the engine asks again, so a stream of nothing but broken packets
 /// never holds its thread.
@@ -277,12 +287,15 @@ impl Stream {
     /// that decodes them itself.
     /// `core_only`: an HE-AAC stream is decoded here, its core alone, rather than by the platform's decoder
     /// (measuring a song ahead needs no more).
+    /// `sized`: the source's length is the song's, so the container reader may measure the song from its
+    /// end and seek by bytes; otherwise it is read in order, as one of no known length ([`Unsized`]).
     #[allow(clippy::too_many_arguments)]
-    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
+    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, sized: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
         let gapless = if whole { crate::mp4::gapless(&mut source).ok().flatten() } else { None };
         let byte_len = source.byte_len();
         source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
         let source = past_id3(source).map_err(|e| e.to_string())?;
+        let source: Box<dyn MediaSource> = if sized { source } else { Box::new(Unsized(source)) };
         let mss = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
         let mut h = Hint::new();
         if let Some(x) = hint {
@@ -302,7 +315,7 @@ impl Stream {
         let inner = match (codec, Pcm::of(params.codec)) {
             _ if packets => Inner::Raw,
             (Some(Codec::Aac), _) if !core_only => Inner::Coded(Decoder::whole_aac(rate, channels, params.extra_data.as_deref())?),
-            (Some(c), _) => Inner::Coded(decoder(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
+            (Some(c), _) => Inner::Coded(Decoder::new(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
             (None, Some(p)) => Inner::Pcm(p),
             _ => return Err(format!("{:?} is not decoded here", params.codec)),
         };
@@ -419,7 +432,18 @@ impl Stream {
             Some((delay, _)) => SeekTo::Timestamp { ts: Timestamp::new((ms * self.format.rate as i64 / 1000 + delay - AAC_WARM_UP).max(0)), track_id: self.track },
             None => SeekTo::Time { time: Time::from_millis(ms), track_id: Some(self.track) },
         };
-        let seeked = self.reader.container().ok_or("a live stream is not seeked")?.seek(SeekMode::Accurate, to).map_err(|e| e.to_string())?;
+        let seeked = match self.reader.container().ok_or("a live stream is not seeked")?.seek(SeekMode::Accurate, to) {
+            Ok(s) => s,
+            // Past the song's end, the bytes read through to it: the length it was given (the server's, or
+            // its container's) was longer than the music. The song is over there, as if played to its end.
+            // A network that failed on the way is an error of its own kind, not this.
+            Err(e) if ms > 0 && past_end(&e) => {
+                self.ended = true;
+                self.frame = None;
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         self.skip_to = match self.mp4 {
             Some(_) => ms * self.format.rate as i64 / 1000,
             None => seeked.required_ts.get(),
@@ -608,7 +632,7 @@ impl Stream {
         let (Some(codec), Some(rate)) = (codec_of(params.codec), params.sample_rate) else { return false };
         let channels = params.channels.as_ref().map_or(2, |c| c.count()).max(1);
         let id = track.id;
-        let Ok(dec) = decoder(codec, rate, channels, params.extra_data.as_deref(), false) else { return false };
+        let Ok(dec) = Decoder::new(codec, rate, channels, params.extra_data.as_deref(), false) else { return false };
         if !matches!(self.inner, Inner::Coded(_)) {
             return false;
         }
@@ -617,11 +641,6 @@ impl Stream {
         self.track = id;
         true
     }
-}
-
-/// A decoder for a song read here.
-fn decoder(codec: Codec, rate: u32, channels: usize, extra: Option<&[u8]>, delay_known: bool) -> Result<Decoder, String> {
-    Decoder::new(codec, rate, channels, extra, delay_known)
 }
 
 impl Stream {
@@ -678,7 +697,7 @@ pub(crate) fn decodes_as_it_comes(hint: Option<&str>) -> bool {
 }
 
 fn decode_from_start(source: Box<dyn MediaSource>, hint: Option<&str>, whole: bool, mut each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
-    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, whole, false, true)?;
+    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, whole, true, false, true)?;
     let mut floats: Vec<f32> = Vec::new();
     while s.fill() {
         if s.buffer().is_empty() {
@@ -769,6 +788,38 @@ impl MediaSource for After {
     }
 }
 
+/// A song whose length is only the server's estimate (a transcode being made as it is sent), as the
+/// container reader is shown it: of no known length, and read in order. A reader shown a length looks
+/// for the song's end there (an Ogg stream's last page, for its duration; an ADTS stream's frames at four
+/// places through it; a FLAC or Ogg seek bisecting by bytes), and each such look is a range the server
+/// answers only once it has transcoded the whole song from its start: tens of seconds before the first
+/// sound. Shown none, the length is the server's tags' until the song is read to its end, which decides
+/// it; a seek reads on to its place from the start as the bytes come, which is no slower than a range
+/// of a transcode still being made.
+struct Unsized(Box<dyn MediaSource>);
+
+impl Read for Unsized {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Seek for Unsized {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.0.seek(to)
+    }
+}
+
+impl MediaSource for Unsized {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
 /// Which of the compressions an output may decode itself `codec` is, by its setup: AAC only as Low
 /// Complexity (object type 2), which is all `AudioFormat.ENCODING_AAC_LC` promises - and not at 24 kHz or
 /// less, where "AAC-LC" is how HE-AAC whose SBR is signalled only inside the stream announces itself
@@ -824,19 +875,19 @@ impl Demuxed {
     /// to `encoding`. `duration_ms` is the song's tagged length, for a container that does not say its
     /// own. For bytes that are all here (a file): nothing is waited for.
     pub fn open(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding) -> Result<Demuxed, String> {
-        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true, false, false)?;
+        let s = Stream::open(source, hint, from_ms, duration_ms, encoding, true, true, false, false)?;
         Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
     }
 
     /// [`Demuxed::open`], read as packets and not decoded ([`Demuxed::packet`]).
     pub fn open_packets(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>) -> Result<Demuxed, String> {
-        let s = Stream::open(source, hint, from_ms, duration_ms, Encoding::Pcm16, true, true, false)?;
+        let s = Stream::open(source, hint, from_ms, duration_ms, Encoding::Pcm16, true, true, true, false)?;
         Ok(Demuxed { state: State::Open(Box::new(s)), loader: None })
     }
 
     /// [`Demuxed::load`], read as packets and not decoded ([`Demuxed::packet`]).
-    pub fn load_packets(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>) -> Demuxed {
-        Demuxed::start(loader, engine, hint, from_ms, duration_ms, Encoding::Pcm16, true)
+    pub fn load_packets(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, estimated: bool) -> Demuxed {
+        Demuxed::start(loader, engine, hint, from_ms, duration_ms, estimated, Encoding::Pcm16, true)
     }
 
     /// What the packets are and how the output cuts them, once the song is open; none when it is read
@@ -876,13 +927,19 @@ impl Demuxed {
     /// The song `loader` is fetching, read from `from_ms`. Unless all of it is here already it is opened
     /// on a thread of its own, since opening reads bytes that may still be on their way; `engine` is
     /// woken when it is open, and again whenever it waited for bytes.
-    pub fn load(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding) -> Demuxed {
-        Demuxed::start(loader, engine, hint, from_ms, duration_ms, encoding, false)
+    ///
+    /// `estimated`: the length the server answers with is only its estimate (a transcode): while the song
+    /// is still coming, the container reader is not shown it ([`Unsized`]), so nothing is asked for past
+    /// what is on its way. Its length is then `duration_ms` until it is read to its end (none when the
+    /// server gives none), and a seek reads on to its place.
+    pub fn load(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, estimated: bool, encoding: Encoding) -> Demuxed {
+        Demuxed::start(loader, engine, hint, from_ms, duration_ms, estimated, encoding, false)
     }
 
-    fn start(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, packets: bool) -> Demuxed {
+    #[allow(clippy::too_many_arguments)]
+    fn start(loader: Arc<Loader>, engine: Thread, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, estimated: bool, encoding: Encoding, packets: bool) -> Demuxed {
         if loader.complete() {
-            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true, packets, false) {
+            let state = match Stream::open(Box::new(loader.reader()), hint, from_ms, duration_ms, encoding, true, true, packets, false) {
                 Ok(s) => State::Open(Box::new(s)),
                 Err(why) => State::Failed(PlaybackError::Other, why),
             };
@@ -894,9 +951,11 @@ impl Demuxed {
             // An MP4's gapless numbers may sit at its very end: it is read once all of it is here (a
             // song that fits one burst, as most do), rather than fetched from the end and again.
             let whole = hint.as_deref().is_some_and(mp4_like) && l.wait_whole();
+            // All of it here, the length is what came.
+            let sized = !estimated || whole;
             let mut seen = l.shortened();
             let reader = || Box::new(l.reader_until(o.abandoned.clone()));
-            let mut opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
+            let mut opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, sized, packets, false);
             // The server's first answer promised an estimated length (a transcode), and the container
             // reader looked for the song's end (an Ogg stream's last page, for its length) where that
             // put it, past the real one: it failed, or took the song for one of unknown length and so
@@ -908,7 +967,7 @@ impl Demuxed {
                     break;
                 }
                 seen = now;
-                opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
+                opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, sized, packets, false);
             }
             let mut done = o.done.lock();
             done.0 = Some(opened);

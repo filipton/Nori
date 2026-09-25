@@ -280,7 +280,6 @@ pub struct HostPort {
 /// means https). Only requests to these get the profile's headers and its Wi-Fi-only rule: third parties
 /// (LRCLIB, AutoEQ) must not receive a reverse-proxy token and are not subject to the server's setting.
 /// None when the address is blank or not an http(s) URL. Parsed once per profile, not per request.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn server_host(address: String) -> Option<HostPort> {
     if address.chars().all(char::is_whitespace) {
         return None;

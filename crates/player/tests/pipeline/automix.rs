@@ -120,7 +120,9 @@ fn the_song_playing_is_measured_as_it_plays_and_kept_only_whole() {
     // ending the planner leaves before (`exit_ms`).
     p.run_for(3_000);
     p.seek(18_000);
-    p.run_until(30_000, |p| p.ended());
+    // Thirty seconds on, well into b: had a partial hearing been kept, it would be there by now.
+    p.run_for(30_000);
+    assert_eq!(p.current_id().as_deref(), Some("b"), "b plays: {:?}", p.app.log);
     assert!(!p.app.analyses.contains_key("b"), "b was heard in part only: {:?}", p.app.log);
 }
 

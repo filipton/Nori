@@ -254,7 +254,10 @@ mod tests {
     #[test]
     fn the_desktop_controls_reach_the_player_and_see_the_song() {
         // A machine without a session bus (a build server) has no desktop to test against.
-        let Ok(client) = Connection::new_session() else { return };
+        let Ok(client) = Connection::new_session() else {
+            eprintln!("no session bus: the desktop controls are not tested here");
+            return;
+        };
         let name = format!("nori_test_{}", std::process::id());
         let asked = Arc::new(Asked::default());
         let m = Mpris::start(&name, asked.clone()).unwrap();

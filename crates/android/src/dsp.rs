@@ -1,6 +1,5 @@
-//! The two answers about the sound chain the settings ask for as they are read: whether the chain has
-//! anything to do, and the pre-amp in effect. The chain itself runs inside the Rust player
-//! (crates/android/src/player.rs).
+//! The answer about the sound chain the settings ask for as they are read: the pre-amp in effect. The
+//! chain itself runs inside the Rust player (crates/android/src/player.rs).
 
 use jni::objects::{JClass, JFloatArray, JIntArray};
 use jni::sys::{jboolean, jfloat};
@@ -12,7 +11,6 @@ pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/Dsp",
     methods: &[
         native!(c"effectivePreampDb", c"(ZFZ[I[F)F", effective_preamp_db),
-        native!(c"soundOn", c"(ZFFZZ)Z", sound_on),
     ],
 };
 
@@ -28,10 +26,4 @@ extern "system" fn effective_preamp_db(
         return 0.0;
     }
     nori_core::settings::effective_preamp_db(eq_enabled != 0, (automatic == 0).then_some(eq_preamp_db), k.into_iter().zip(g))
-}
-
-/// Whether the sound chain has anything to do (see `nori_player::sound::sound_on`). Read once per
-/// settings change, possibly while a screen is drawn, so primitives in and out.
-extern "system" fn sound_on(eq_enabled: jboolean, crossfeed_db: jfloat, balance: jfloat, mono: jboolean, limiter: jboolean) -> jboolean {
-    nori_player::sound::sound_on(eq_enabled != 0, crossfeed_db, balance, mono != 0, limiter != 0) as jboolean
 }

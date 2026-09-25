@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
 
-use crate::arriving::Taker;
+use crate::arriving::Listening;
 use crate::source::{ByteSource, OpenError};
 
 /// How much is read at a time: the loader's own chunk.
@@ -66,7 +66,7 @@ pub trait Entry: Send {
 }
 
 /// What hears a song's bytes as they come (AutoMix's measuring), made per song; none when nothing does.
-pub type Takers = Arc<dyn Fn(&AheadSong) -> Option<Box<dyn Taker>> + Send + Sync>;
+pub type Takers = Arc<dyn Fn(&AheadSong) -> Option<Listening> + Send + Sync>;
 
 /// The fetching ahead.
 #[derive(Default)]
@@ -148,22 +148,25 @@ impl Ahead {
         self.plan.lock().running
     }
 
+    /// Whether the player has asked to take `key` over: for a test to hold a fetch until it has.
+    pub fn taken(&self, key: &str) -> bool {
+        self.plan.lock().taken.contains(key)
+    }
+
     /// The player takes `key` (to play it, or as the next song): it is not fetched here from now on, and
     /// one being fetched here is left where it got to, for the player to go on with; returns once it has
-    /// been let go, after a chunk at most. Whether it was being fetched here.
-    pub fn take_over(&self, key: &str) -> bool {
+    /// been let go, after a chunk at most.
+    pub fn take_over(&self, key: &str) {
         let mut plan = self.plan.lock();
         if !plan.taken.contains(key) {
             plan.taken.insert(key.to_string());
         }
-        let was = plan.current.as_deref() == Some(key);
-        if was {
+        if plan.current.as_deref() == Some(key) {
             self.asked.fetch_add(1, Ordering::AcqRel);
         }
         while plan.current.as_deref() == Some(key) {
             self.cv.wait(&mut plan);
         }
-        was
     }
 
     /// The next song to fetch: the first asked for that is not kept already, being written by someone
@@ -441,7 +444,11 @@ mod tests {
             let s = s.clone();
             move || s.writer_for_player("a:0")
         }));
-        std::thread::sleep(Duration::from_millis(50));
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.taken_over("a:0") {
+            assert!(Instant::now() < until, "the player asked to take a over");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         go.send(()).unwrap();
         let mut w = taking.join().unwrap().expect("the player's entry, where the fetch left it");
         let got = w.written() as usize;

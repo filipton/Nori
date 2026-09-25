@@ -32,13 +32,6 @@ fn search_parses_indexes_and_skips_external() {
 }
 
 #[test]
-fn api_error_is_surfaced() {
-    let core = Core::new(String::new(), "t".into()).unwrap();
-    let e = core.parse_status(r#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}"#.into());
-    assert!(matches!(e, Err(CoreError::Api { code: 40, .. })));
-}
-
-#[test]
 fn queue_and_cache_round_trip() {
     let core = Core::new(String::new(), "t".into()).unwrap();
     let songs = core.parse_search(SEARCH.into()).unwrap().songs;

@@ -61,8 +61,6 @@ pub struct Plan {
     pub ramp_us: i64,
     /// Capture this many µs of outgoing audio and wrap for `duration_us`; 0 = capture the full duration.
     pub out_loop_us: i64,
-    /// After the skip, loop the first this many µs of the incoming track for the rest of the mix; 0 = off.
-    pub in_loop_us: i64,
 }
 
 impl Plan {
@@ -135,23 +133,6 @@ pub struct Heard {
     /// The song whose ending is being mixed out of, and where in it the next song takes over.
     pub from_id: Option<String>,
     pub audible_us: i64,
-}
-
-impl Heard {
-    /// Becomes a copy of `o`, reusing the strings already held: no allocation unless an id grows.
-    pub fn assign(&mut self, o: &Heard) {
-        fn id(slot: &mut Option<String>, o: &Option<String>) {
-            match (slot.as_mut(), o) {
-                (Some(s), Some(v)) => s.clone_from(v),
-                _ => slot.clone_from(o),
-            }
-        }
-        id(&mut self.id, &o.id);
-        id(&mut self.next_id, &o.next_id);
-        id(&mut self.from_id, &o.from_id);
-        (self.us, self.at_ms, self.until_us, self.mixing) = (o.us, o.at_ms, o.until_us, o.mixing);
-        (self.next_from_us, self.next_rate, self.audible_us) = (o.next_from_us, o.next_rate, o.audible_us);
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1463,6 +1444,7 @@ impl<C: Clone> TransitionEngine<C> {
         self.drain(down)
     }
 
+    #[cfg(any(test, feature = "synth"))]
     pub fn has_pending_data(&self) -> bool {
         !self.queue.is_empty()
     }
@@ -1663,7 +1645,6 @@ mod tests {
             keep_pitch: true,
             ramp_us: 0,
             out_loop_us: 0,
-            in_loop_us: 0,
         }
     }
 

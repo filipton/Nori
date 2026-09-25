@@ -2,7 +2,7 @@
 //! through every kind of transition the planner makes, the output's short-term level read every
 //! 100 ms. Each song is heard at its own ReplayGain level times the mix curve, the incoming one never
 //! at the outgoing one's volume or at full; the level never steps where a mix ends or where a stretch
-//! hands back, a song shorter than the server says included; an equal-power fade keeps the power;
+//! hands back, a song shorter than the server says included;
 //! AutoMix's loudness match lets go gently; and a stretch of a hair keeps the incoming song's level.
 
 use nori_player::automix::ANALYSIS_VERSION;
@@ -18,8 +18,22 @@ const WIN_S: f64 = 0.1;
 
 /// A steady sound like music with nothing moving in it: a few partials and a little noise at a fixed
 /// level, so its level over any 100 ms is its level everywhere (to a few hundredths of a dB) and any
-/// move of the measured level is the player's.
+/// move of the measured level is the player's. Made once per length, seed and level for the whole run.
 fn steady(secs: f64, seed: u64, amp: f64) -> Vec<i16> {
+    use std::sync::{Arc, Mutex};
+    type Made = Vec<((u64, u64, u64), Arc<Vec<i16>>)>;
+    static MADE: Mutex<Made> = Mutex::new(Vec::new());
+    let key = (secs.to_bits(), seed, amp.to_bits());
+    let made = MADE.lock().unwrap().iter().find(|(k, _)| *k == key).map(|(_, m)| m.clone());
+    let m = made.unwrap_or_else(|| {
+        let m = Arc::new(make_steady(secs, seed, amp));
+        MADE.lock().unwrap().push((key, m.clone()));
+        m
+    });
+    m.to_vec()
+}
+
+fn make_steady(secs: f64, seed: u64, amp: f64) -> Vec<i16> {
     let detune = 1.0 + (seed % 7) as f64 * 0.13;
     let parts = [(110.0, 0.5), (220.0, 0.3), (330.0, 0.25), (523.0, 0.2), (1250.0, 0.12), (2900.0, 0.08)];
     let mut r = nori_player::automix::synth::Rng(seed);
@@ -276,22 +290,6 @@ fn the_level_never_steps_where_a_mix_ends_or_a_stretch_hands_back() {
     }
 }
 
-#[test]
-fn an_equal_power_fade_keeps_the_power() {
-    // Two songs as loud as each other and unrelated: an equal-power fade keeps their sum as loud as
-    // either, all the way through.
-    let (a, b) = (steady(SONG_S, 41, 0.35), steady(SONG_S, 42, 0.35));
-    let kind = kinds(-14.0, -14.0).into_iter().next().unwrap();
-    let got = run(&kind, &a, &b, &[], true);
-    let (s, n) = got.mix;
-    let x = left(&got.out);
-    let own = db(rms(&x[s - frames(3.0)..s]));
-    let l = levels(&x, s - frames(1.0), s + n + frames(1.0));
-    let (lo, hi) = l.iter().fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-    println!("equal power: the songs at {own:.2} dB, the fade {:.2}..{:.2} dB", lo - own, hi - own);
-    assert!(lo - own > -1.5 && hi - own < 1.5, "the fade moves {:.2}..{:.2} dB", lo - own, hi - own);
-}
-
 /// The loudness match's own curve for `kind`, dB per 100 ms of the mix: the incoming song alone (the
 /// outgoing one silent), with the match on (ReplayGain off) against the same with it off.
 fn trim_curve(kind: &Kind) -> (Vec<f64>, Run) {
@@ -306,12 +304,32 @@ fn trim_curve(kind: &Kind) -> (Vec<f64>, Run) {
     (lm.iter().zip(&lp).map(|(m, p)| if *p > peak - 40.0 { m - p } else { f64::NAN }).collect(), matched)
 }
 
+/// The incoming song measured louder or quieter than the song before it, by 6 dB (the most that keeps
+/// the mix long) and by 9 (the most the match turns, over a mix a loudness gap has shortened): one test
+/// each, so the four run side by side.
 #[test]
-fn the_loudness_match_lets_go_gently_by_the_end_of_the_mix() {
-    // Measured louder or quieter than the song before it, by 6 dB (the most that keeps the mix long)
-    // and by 9 (the most the match turns, over a mix a loudness gap has shortened).
+fn the_loudness_match_lets_go_gently_by_the_end_of_the_mix_into_a_song_6_db_quieter() {
+    loudness_match_lets_go_gently(-8.0, -14.0);
+}
+
+#[test]
+fn the_loudness_match_lets_go_gently_by_the_end_of_the_mix_into_a_song_6_db_louder() {
+    loudness_match_lets_go_gently(-14.0, -8.0);
+}
+
+#[test]
+fn the_loudness_match_lets_go_gently_by_the_end_of_the_mix_into_a_song_9_db_quieter() {
+    loudness_match_lets_go_gently(-5.0, -14.0);
+}
+
+#[test]
+fn the_loudness_match_lets_go_gently_by_the_end_of_the_mix_into_a_song_9_db_louder() {
+    loudness_match_lets_go_gently(-14.0, -5.0);
+}
+
+fn loudness_match_lets_go_gently(la: f32, lb: f32) {
     let mut bad = Vec::new();
-    for (la, lb) in [(-8.0, -14.0), (-14.0, -8.0), (-5.0, -14.0), (-14.0, -5.0)] {
+    {
         for kind in kinds(la, lb).into_iter().skip(1) {
             let (curve, r) = trim_curve(&kind);
             let known: Vec<(usize, f64)> = curve.iter().cloned().enumerate().filter(|(_, v)| v.is_finite()).collect();

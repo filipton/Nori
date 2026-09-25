@@ -1,6 +1,6 @@
 //! A song decoded as its bytes arrive, for whatever wants its samples before it is played (AutoMix's
 //! measuring, `core::measure_as_it_comes`): whoever fetches the song (the fetching ahead, a download, the
-//! loader of the next song) hands each piece to a [`Taker`] as it comes, and a decoder on a thread of the
+//! loader of the next song) hands each piece to a [`Listening`] as it comes, and a decoder on a thread of the
 //! lowest priority reads them from there. The network and the CPU wake together, in the fetch's one
 //! burst, and the song is never read back from the disk and decoded a second time.
 //!
@@ -16,15 +16,6 @@ use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
 use symphonia::core::io::MediaSource;
-
-/// What else is done with a song's bytes as they come, besides keeping them.
-pub trait Taker: Send {
-    /// The song's next bytes, in order from its first.
-    fn take(&mut self, bytes: &[u8]);
-    /// The song's bytes ended: `whole` when every one of them came, in order, and was kept. Dropped
-    /// without this, it is as `end(false)`.
-    fn end(self: Box<Self>, whole: bool);
-}
 
 /// What hears the samples a [`Listening`] decodes.
 pub trait Heard: Send {
@@ -86,8 +77,9 @@ impl Listening {
     }
 }
 
-impl Taker for Listening {
-    fn take(&mut self, mut bytes: &[u8]) {
+impl Listening {
+    /// The song's next bytes, in order from its first.
+    pub fn take(&mut self, mut bytes: &[u8]) {
         let mut s = self.pipe.s.lock();
         while !bytes.is_empty() {
             if s.quit || s.overflowed {
@@ -114,7 +106,9 @@ impl Taker for Listening {
         }
     }
 
-    fn end(mut self: Box<Self>, whole: bool) {
+    /// The song's bytes ended: `whole` when every one of them came, in order, and was kept. Dropped
+    /// without this, it is as `end(false)`.
+    pub fn end(mut self, whole: bool) {
         self.finish(whole);
     }
 }

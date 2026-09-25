@@ -38,8 +38,21 @@ fn ffmpeg() -> bool {
     Command::new("ffmpeg").arg("-version").output().is_ok_and(|o| o.status.success())
 }
 
-/// A tone of `secs` encoded by ffmpeg with `codec` into a file of extension `ext`, its bytes.
+/// A tone of `secs` encoded by ffmpeg with `codec` into a file of extension `ext`, its bytes. Encoded
+/// once per tone and codec for the whole binary: the same few tones are asked for again and again.
 fn made(dir: &Path, name: &str, secs: u32, hz: u32, codec: &[&str], ext: &str) -> Vec<u8> {
+    type Made = Vec<((u32, u32, String), Arc<Vec<u8>>)>;
+    static MADE: std::sync::Mutex<Made> = std::sync::Mutex::new(Vec::new());
+    let key = (secs, hz, format!("{} .{ext}", codec.join(" ")));
+    if let Some((_, m)) = MADE.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return m.to_vec();
+    }
+    let m = Arc::new(encode(dir, name, secs, hz, codec, ext));
+    MADE.lock().unwrap().push((key, m.clone()));
+    m.to_vec()
+}
+
+fn encode(dir: &Path, name: &str, secs: u32, hz: u32, codec: &[&str], ext: &str) -> Vec<u8> {
     let out = dir.join(format!("{name}.{ext}"));
     let ok = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &format!("sine=frequency={hz}:sample_rate=44100:duration={secs}"), "-ac", "2"])
@@ -124,7 +137,7 @@ struct Songs(Arc<Server>, Vec<(String, String, i64)>, Vec<(String, String, i32)>
 impl Library for Songs {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
         let (_, hint, ms) = self.1.iter().find(|(i, _, _)| i == id).cloned().ok_or("no such song")?;
-        Ok(Located { source: Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some(hint), duration_ms: Some(ms) })
+        Ok(Located { source: Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some(hint), duration_ms: Some(ms), estimated: false })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -1200,7 +1213,7 @@ struct Radio;
 
 impl Library for Radio {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
-        Ok(Located { source: Source::Live { url: id.into(), bytes: Arc::new(Station) }, hint: Some("wav".into()), duration_ms: None })
+        Ok(Located { source: Source::Live { url: id.into(), bytes: Arc::new(Station) }, hint: Some("wav".into()), duration_ms: None, estimated: false })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -2029,7 +2042,8 @@ fn automix_switched_on_after_the_equalizer_took_the_song_off_the_chip_mixes() {
     let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
     rig.engine.set_settings(Settings { sound: eq.clone(), ..offload() });
     assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 2 * 44_100), "the CPU took over: {:?}", rig.engine.status());
-    std::thread::sleep(Duration::from_millis(1_000));
+    // A second later, on the test's clock.
+    rig.run(1_000);
     app.0.lock().prefs = Watched::automix().0.lock().prefs;
     rig.engine.set_settings(Settings { sound: eq, ..automix() });
     rig.engine.replan();
@@ -2270,7 +2284,7 @@ struct UnsizedSongs(Arc<Unsized>, Vec<(String, String, i64)>);
 impl Library for UnsizedSongs {
     fn locate(&mut self, id: &str) -> Result<Located, String> {
         let (_, hint, ms) = self.1.iter().find(|(i, _, _)| i == id).cloned().ok_or("no such song")?;
-        Ok(Located { source: Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some(hint), duration_ms: Some(ms) })
+        Ok(Located { source: Source::Url { url: id.to_string(), bytes: self.0.clone() }, hint: Some(hint), duration_ms: Some(ms), estimated: false })
     }
 
     fn about(&self, id: &str) -> WindowSong {

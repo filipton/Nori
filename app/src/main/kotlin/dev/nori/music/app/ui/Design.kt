@@ -109,7 +109,6 @@ object Space {
     val section = 26.dp
 }
 
-val CoverShape = RoundedCornerShape(Radius.cover)
 val CardShape = RoundedCornerShape(Radius.card)
 val TileShape = RoundedCornerShape(Radius.tile)
 val PillShape = RoundedCornerShape(Radius.pill)

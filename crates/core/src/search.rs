@@ -91,11 +91,6 @@ impl SearchSession {
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    /// The offline index's answer to every keystroke, split like the server's (it never holds provider items).
-    pub fn local_search_split(&self, query: String, limit: u32) -> Result<SearchSplit> {
-        Ok(split(self.local_search(query, limit)?))
-    }
-
     /// Remembers a query the user acted on and returns the history as it now is; None, and nothing
     /// remembered, when the query is too short to be one.
     pub fn search_remember_recent(&self, query: String) -> Result<Option<Vec<String>>> {
@@ -104,6 +99,14 @@ impl Core {
         }
         self.search_remember(query)?;
         Ok(Some(self.search_history()?))
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// The offline index's answer to every keystroke, split like the server's (it never holds provider items).
+    pub fn local_search_split(&self, query: String, limit: u32) -> Result<SearchSplit> {
+        Ok(split(self.local_search(query, limit)?))
     }
 }
 

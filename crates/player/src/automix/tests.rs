@@ -8,87 +8,99 @@ fn octave_ok(got: f64, want: f64, tol: f64) -> bool {
     [0.5, 1.0, 2.0].iter().any(|k| (got / (want * k) - 1.0).abs() < tol)
 }
 
+/// `f` over every case at once, one thread each, the answers in the cases' order: a table of synthetic
+/// songs is rendered and analysed side by side rather than one after another, which is most of this
+/// module's time.
+fn each<C: Sync, R: Send>(cases: &[C], f: impl Fn(&C) -> R + Sync) -> Vec<R> {
+    std::thread::scope(|s| cases.iter().map(|c| s.spawn(|| f(c))).collect::<Vec<_>>().into_iter().map(|h| h.join().unwrap()).collect())
+}
+
 /// Tempo accuracy on the synthetic set: click tracks at 90/120/128/174 BPM, straight, swung, and with noise.
 /// Prints the table the report quotes.
 #[test]
 fn tempo_accuracy_on_synthetic_tracks() {
-    let mut acc1 = 0;
-    let mut acc2 = 0;
-    let mut n = 0;
+    let mut cases = Vec::new();
     for bpm in [90.0, 120.0, 128.0, 174.0] {
-        for (name, synth) in [
-            ("plain", Synth::new(bpm)),
-            ("swing", Synth { offbeat: 0.67, ..Synth::new(bpm) }),
-            ("noise", Synth { noise: 0.15, ..Synth::new(bpm) }),
-            ("swing+noise+chords", Synth { offbeat: 0.67, noise: 0.1, chords: vec![(0, false), (5, false)], ..Synth::new(bpm) }),
-        ] {
-            let a = analyse("t", &synth.render(), synth.rate);
-            let t = &a.track;
-            let err = (t.bpm / bpm - 1.0) * 100.0;
-            println!("{bpm:>5} {name:<20} bpm {:>7.2} ({err:+.2} %) raw {:>7.2} conf {:.2} stab {:.2} downbeat {} ({:.2})", t.bpm, a.tempo.raw_bpm, t.bpm_confidence, t.stability, t.downbeat_phase, t.downbeat_confidence);
-            n += 1;
-            if (t.bpm / bpm - 1.0).abs() < 0.04 {
-                acc1 += 1;
-            }
-            if octave_ok(t.bpm, bpm, 0.04) {
-                acc2 += 1;
-            }
-            assert!(octave_ok(t.bpm, bpm, 0.01), "{bpm} {name}: {}", t.bpm);
-            assert!(t.bpm_confidence >= 0.5, "{bpm} {name}: confidence {}", t.bpm_confidence);
-            assert!(t.stability >= 0.6, "{bpm} {name}: stability {}", t.stability);
+        cases.push((bpm, "plain", Synth::new(bpm)));
+        cases.push((bpm, "swing", Synth { offbeat: 0.67, ..Synth::new(bpm) }));
+        cases.push((bpm, "noise", Synth { noise: 0.15, ..Synth::new(bpm) }));
+        cases.push((bpm, "swing+noise+chords", Synth { offbeat: 0.67, noise: 0.1, chords: vec![(0, false), (5, false)], ..Synth::new(bpm) }));
+    }
+    let got = each(&cases, |(_, _, synth)| analyse("t", &synth.render(), synth.rate));
+    let (mut acc1, mut acc2, mut wrong) = (0, 0, Vec::new());
+    for ((bpm, name, _), a) in cases.iter().zip(&got) {
+        let t = &a.track;
+        let err = (t.bpm / bpm - 1.0) * 100.0;
+        let row = format!("{bpm:>5} {name:<20} bpm {:>7.2} ({err:+.2} %) raw {:>7.2} conf {:.2} stab {:.2} downbeat {} ({:.2})", t.bpm, a.tempo.raw_bpm, t.bpm_confidence, t.stability, t.downbeat_phase, t.downbeat_confidence);
+        println!("{row}");
+        acc1 += usize::from((t.bpm / bpm - 1.0).abs() < 0.04);
+        acc2 += usize::from(octave_ok(t.bpm, *bpm, 0.04));
+        if !octave_ok(t.bpm, *bpm, 0.01) || t.bpm_confidence < 0.5 || t.stability < 0.6 {
+            wrong.push(row);
         }
     }
+    let n = cases.len();
     println!("Acc1 {acc1}/{n}, Acc2 {acc2}/{n}");
+    assert!(wrong.is_empty(), "off by more than 1 % (octaves allowed), confidence under 0.5 or stability under 0.6:\n{}", wrong.join("\n"));
     assert!(acc1 >= n - 2, "Acc1 {acc1}/{n}");
 }
 
 #[test]
 fn grid_bpm_is_precise() {
-    for bpm in [90.0, 123.0, 128.0, 140.5] {
+    let bpms = [90.0, 123.0, 128.0, 140.5];
+    let got = each(&bpms, |&bpm| {
         let s = Synth { secs: 90.0, ..Synth::new(bpm) };
-        let t = analyse("t", &s.render(), s.rate).track;
-        assert!((t.bpm - bpm).abs() < 0.05, "{bpm}: {}", t.bpm);
+        analyse("t", &s.render(), s.rate).track.bpm
+    });
+    for (bpm, got) in bpms.iter().zip(got) {
+        assert!((got - bpm).abs() < 0.05, "{bpm} BPM read as {got}");
     }
 }
 
 /// The grid lands on the clicks: `offset + n * period` within a few ms of every true beat.
 #[test]
 fn beat_times_line_up_with_the_clicks() {
-    for bpm in [90.0, 128.0, 174.0] {
-        for first in [0.1, 0.33] {
-            let s = Synth { first_beat: first, lead_silence: 1.5, ..Synth::new(bpm) };
-            let a = analyse("t", &s.render(), s.rate);
-            let t = &a.track;
-            let period = 60_000.0 / t.bpm;
-            let mut worst = 0f64;
-            let mut mean = 0f64;
-            let truth = s.beats();
-            for b in &truth {
-                let ms = b * 1000.0;
-                let n = ((ms - t.beat_offset_ms) / period).round();
-                let d = ms - (t.beat_offset_ms + n * period);
-                worst = worst.max(d.abs());
-                mean += d;
-            }
-            mean /= truth.len() as f64;
-            println!("{bpm} first {first}: grid error mean {mean:+.2} ms, worst {worst:.2} ms");
-            assert!(worst < 8.0, "{bpm}/{first}: grid is {worst} ms off (mean {mean})");
-            assert!(t.beat_offset_ms >= 0.0 && t.beat_offset_ms < period);
+    let cases: Vec<(f64, f64)> = [90.0, 128.0, 174.0].into_iter().flat_map(|bpm| [(bpm, 0.1), (bpm, 0.33)]).collect();
+    let synth = |&(bpm, first): &(f64, f64)| Synth { first_beat: first, lead_silence: 1.5, ..Synth::new(bpm) };
+    let got = each(&cases, |c| {
+        let s = synth(c);
+        analyse("t", &s.render(), s.rate).track
+    });
+    for (c, t) in cases.iter().zip(got) {
+        let (bpm, first) = *c;
+        let period = 60_000.0 / t.bpm;
+        let mut worst = 0f64;
+        let mut mean = 0f64;
+        let truth = synth(c).beats();
+        for b in &truth {
+            let ms = b * 1000.0;
+            let n = ((ms - t.beat_offset_ms) / period).round();
+            let d = ms - (t.beat_offset_ms + n * period);
+            worst = worst.max(d.abs());
+            mean += d;
         }
+        mean /= truth.len() as f64;
+        println!("{bpm} first {first}: grid error mean {mean:+.2} ms, worst {worst:.2} ms");
+        assert!(worst < 8.0, "{bpm}/{first}: grid is {worst} ms off (mean {mean})");
+        assert!(t.beat_offset_ms >= 0.0 && t.beat_offset_ms < period, "{bpm}/{first}: offset {} ms outside one beat of {period} ms", t.beat_offset_ms);
     }
 }
 
 #[test]
 fn downbeats_follow_the_kick() {
-    for phase in 0..4 {
-        let s = Synth { downbeat: phase, chords: vec![(0, false), (7, false), (9, true), (5, false)], ..Synth::new(124.0) };
-        let t = analyse("t", &s.render(), s.rate).track;
+    let phases = [0, 1, 2, 3];
+    let synth = |phase: usize| Synth { downbeat: phase, chords: vec![(0, false), (7, false), (9, true), (5, false)], ..Synth::new(124.0) };
+    let got = each(&phases, |&phase| {
+        let s = synth(phase);
+        analyse("t", &s.render(), s.rate).track
+    });
+    for (phase, t) in phases.into_iter().zip(got) {
         // Beat 0 of the synth is the first grid beat: the offset is its time.
         let period = 60_000.0 / t.bpm;
-        let first_grid = ((s.first_beat * 1000.0 - t.beat_offset_ms) / period).round() as i64;
+        let first_grid = ((synth(phase).first_beat * 1000.0 - t.beat_offset_ms) / period).round() as i64;
         let want = (phase as i64 + first_grid).rem_euclid(4) as i32;
         assert_eq!(t.downbeat_phase, want, "kick on beat {phase}");
-        assert!(t.downbeat_confidence >= 0.5, "confidence {}", t.downbeat_confidence);
+        assert!(t.downbeat_confidence >= 0.5, "kick on beat {phase}: confidence {}", t.downbeat_confidence);
     }
 }
 
@@ -152,12 +164,11 @@ fn overlap_windows_describe_vocals_and_brightness() {
 
 #[test]
 fn the_sample_rate_does_not_matter() {
-    let mut got = Vec::new();
-    for rate in [22050, 32000, 44100, 48000, 96000] {
+    let got = each(&[22050, 32000, 44100, 48000, 96000], |&rate| {
         let s = Synth { rate, chords: vec![(9, true), (2, true)], ..Synth::new(126.0) };
         let t = analyse("t", &s.render(), rate).track;
-        got.push((rate, t.bpm, t.beat_offset_ms, t.key));
-    }
+        (rate, t.bpm, t.beat_offset_ms, t.key)
+    });
     println!("{got:?}");
     for (rate, bpm, offset, key) in &got {
         assert!((bpm - 126.0).abs() < 0.1, "{rate}: {bpm}");
@@ -217,22 +228,28 @@ fn decoder_bytes_in_any_layout() {
 
 #[test]
 fn keys_of_simple_progressions() {
-    for (chords, want) in [
-        (vec![(0, false), (5, false), (7, false), (0, false)], camelot(0, false)), // C F G C
-        (vec![(9, true), (2, true), (4, false), (9, true)], camelot(9, true)),     // Am Dm E Am
-        (vec![(7, false), (0, false), (2, false), (7, false)], camelot(7, false)), // G C D G
-        (vec![(2, true), (7, true), (9, false), (2, true)], camelot(2, true)),     // Dm Gm A Dm
-    ] {
-        let s = Synth { chords, ..Synth::new(110.0) };
-        let t = analyse("t", &s.render(), s.rate).track;
-        println!("key want {} got {} ({:.2})", structure::camelot_name(want), structure::camelot_name(t.key), t.key_confidence);
-        assert_eq!(t.key, want, "got {}", structure::camelot_name(t.key));
-        assert!(t.key_confidence >= 0.3, "confidence {}", t.key_confidence);
+    let cases = [
+        (vec![(0, false), (5, false), (7, false), (0, false)], Some(camelot(0, false))), // C F G C
+        (vec![(9, true), (2, true), (4, false), (9, true)], Some(camelot(9, true))),     // Am Dm E Am
+        (vec![(7, false), (0, false), (2, false), (7, false)], Some(camelot(7, false))), // G C D G
+        (vec![(2, true), (7, true), (9, false), (2, true)], Some(camelot(2, true))),     // Dm Gm A Dm
+        (vec![], None),                                                                  // drums only
+    ];
+    let got = each(&cases, |(chords, _)| {
+        let s = Synth { chords: chords.clone(), ..Synth::new(110.0) };
+        analyse("t", &s.render(), s.rate).track
+    });
+    for ((_, want), t) in cases.iter().zip(got) {
+        match want {
+            Some(want) => {
+                println!("key want {} got {} ({:.2})", structure::camelot_name(*want), structure::camelot_name(t.key), t.key_confidence);
+                assert_eq!(t.key, *want, "want {} got {}", structure::camelot_name(*want), structure::camelot_name(t.key));
+                assert!(t.key_confidence >= 0.3, "{}: confidence {}", structure::camelot_name(*want), t.key_confidence);
+            }
+            // Drums only: no key worth trusting.
+            None => assert!(t.key_confidence < 0.3, "drums got key confidence {}", t.key_confidence),
+        }
     }
-    // Drums only: no key worth trusting.
-    let s = Synth::new(110.0);
-    let t = analyse("t", &s.render(), s.rate).track;
-    assert!(t.key_confidence < 0.3, "drums got key confidence {}", t.key_confidence);
 }
 
 #[test]

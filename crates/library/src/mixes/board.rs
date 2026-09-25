@@ -229,7 +229,6 @@ pub fn mix_tiles(taste: bool) -> Vec<MixTile> {
 }
 
 /// The mixes "For you" offers, in order.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_catalogue() -> Vec<MixSpec> {
     MIXES.iter().map(|s| MixSpec { id: s.id.into(), name: s.name, weekly: s.weekly, refreshable: s.refreshable() }).collect()
 }

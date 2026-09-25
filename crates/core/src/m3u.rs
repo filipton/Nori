@@ -4,7 +4,6 @@ use crate::{model::*, Core, Result};
 
 pub use nori_library::m3u::*;
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// One result per entry, in order; None where the index has nothing that fits. One call for the whole
     /// playlist: exact artist and title first, then the full-text index.

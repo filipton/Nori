@@ -79,10 +79,4 @@ mod tests {
         assert!(is_dark(THEME_DARK, false) && !is_dark(THEME_LIGHT, true));
         assert!(is_dark(9, true), "an unknown setting follows the system");
     }
-
-    #[test]
-    fn the_accents_start_with_the_default() {
-        assert_eq!(ACCENTS[0], 0xFF6750A4);
-        assert_eq!(ACCENTS, [0xFF6750A4, 0xFF1E88E5, 0xFF00897B, 0xFF43A047, 0xFFF4511E, 0xFFE53935, 0xFFD81B60, 0xFF8E24AA]);
-    }
 }

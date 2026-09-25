@@ -7,6 +7,8 @@
 
 use nori_model::Lyrics;
 
+use crate::fit::norm;
+
 /// How far into an answer its opening credits may run...
 const HEAD_MOST: usize = 16;
 /// ...and how far back from its end its closing ones.
@@ -56,24 +58,6 @@ const WATERMARKS: &[&str] = &[
 
 /// Placeholders standing in for words where a song has none, after brackets and stars are gone.
 const INSTRUMENTAL: &[&str] = &["instrumental", "instrumental break", "instrumental outro", "instrumental intro", "music", "inst", "インスト", "연주곡", "間奏", "间奏"];
-
-/// Lower case, letters and digits only, one space between words.
-fn norm(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    let mut gap = false;
-    for c in v.chars().flat_map(char::to_lowercase) {
-        if c.is_alphanumeric() {
-            if gap && !out.is_empty() {
-                out.push(' ');
-            }
-            gap = false;
-            out.push(c);
-        } else {
-            gap = true;
-        }
-    }
-    out
-}
 
 /// "Role: name", the shape every credit list has: a short label before a colon that names a credit in
 /// English, or is written in another script (作词, 編曲, 작사), and something after it.

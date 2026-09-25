@@ -6,6 +6,7 @@ use crate::pcm::Encoding;
 use crate::sonic::Sonic;
 
 /// Below this much output the processed ratio is too noisy to trust; the nominal speed is used.
+#[cfg(any(test, feature = "synth"))]
 const MIN_BYTES_FOR_DURATION_SCALING: u64 = 1024;
 const CLOSE_THRESHOLD: f32 = 0.0001;
 
@@ -22,6 +23,7 @@ pub fn nominal_media_us(speed: f32, playout_us: i64) -> i64 {
 }
 
 /// How long `media_us` of the song takes to play at the nominal `speed`.
+#[cfg(any(test, feature = "synth"))]
 pub fn nominal_playout_us(speed: f32, media_us: i64) -> i64 {
     (media_us as f64 / speed as f64) as i64
 }
@@ -133,6 +135,7 @@ impl SpeedPitch {
         self.drain(out);
     }
 
+    #[cfg(any(test, feature = "synth"))]
     fn processed_input_bytes(&self) -> u64 {
         let pending = match &self.engine {
             Engine::Short(s) => s.pending_input_frames() * self.ch * 2,
@@ -142,21 +145,12 @@ impl SpeedPitch {
     }
 
     /// The media time `playout_us` of played output stands for, as media3 works it out.
+    #[cfg(any(test, feature = "synth"))]
     pub fn media_duration_us(&self, playout_us: i64) -> i64 {
         if self.output_bytes >= MIN_BYTES_FOR_DURATION_SCALING {
             (playout_us as i128 * self.processed_input_bytes() as i128 / self.output_bytes as i128) as i64
         } else {
             nominal_media_us(self.speed, playout_us)
-        }
-    }
-
-    /// The other way round: how long `media_us` of the song takes to play.
-    pub fn playout_duration_us(&self, media_us: i64) -> i64 {
-        let processed = self.processed_input_bytes();
-        if self.output_bytes >= MIN_BYTES_FOR_DURATION_SCALING && processed > 0 {
-            (media_us as i128 * self.output_bytes as i128 / processed as i128) as i64
-        } else {
-            nominal_playout_us(self.speed, media_us)
         }
     }
 }
@@ -210,11 +204,6 @@ mod tests {
         p.process(&sine(3.0, 220.0), &mut out);
         let m = p.media_duration_us(1_000_000);
         assert!((m - 1_500_000).abs() < 20_000, "{m}");
-    }
-
-    #[test]
-    fn at_one_it_is_inactive() {
-        assert!(!SpeedPitch::new(48000, 2, Encoding::Float).active());
     }
 }
 

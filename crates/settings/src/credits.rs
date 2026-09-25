@@ -154,17 +154,23 @@ mod tests {
 
     #[test]
     fn the_core_credits_what_it_is_built_from() {
-        let c = core_credits();
-        assert_eq!(c.len(), 18);
-        assert_eq!((c[0].name.as_str(), c[0].licence.as_str(), c[0].file.as_deref()), ("uniffi", "MPL-2.0", Some("MPL-2.0")));
-        assert_eq!((c[2].name.as_str(), c[2].file.as_deref()), ("SQLite", None));
-        assert_eq!(c[12].name, "AndroidX Palette, ported");
-        assert_eq!(c[13].what, "Decoding cover art: JPEG, PNG, WebP and GIF");
-        let a = android_credits();
-        assert_eq!((a.len(), a[0].name.as_str(), a[4].what.as_str()), (6, "AndroidX Media3", "Every network request"));
-        let d = data_credits();
-        assert_eq!((d[0].licence.as_str(), d[2].name.as_str(), d[2].file.as_deref()), ("OFL-1.1", "LRCLIB", None), "a service has no licence text");
-        let beats = d.iter().find(|c| c.name == "Beat This!").expect("the beat model's authors");
-        assert_eq!((beats.licence.as_str(), beats.file.as_deref()), ("MIT", Some("MIT")));
+        let find = |list: &[Credit], name: &str| list.iter().find(|c| c.name == name).cloned().unwrap_or_else(|| panic!("{name} is credited"));
+        let (c, a, d) = (core_credits(), android_credits(), data_credits());
+        assert_eq!((find(&c, "uniffi").licence.as_str(), find(&c, "uniffi").file.as_deref()), ("MPL-2.0", Some("MPL-2.0")));
+        assert_eq!(find(&c, "SQLite").file, None, "public domain: no licence text");
+        find(&c, "AndroidX Palette, ported");
+        find(&a, "AndroidX Media3");
+        assert_eq!(find(&d, "LRCLIB").file, None, "a service has no licence text");
+        assert_eq!((find(&d, "Beat This!").licence.as_str(), find(&d, "Beat This!").file.as_deref()), ("MIT", Some("MIT")));
+        // Every licence named is bundled for the licences page, and nothing is listed twice.
+        let texts = concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/src/main/assets/licences");
+        let all: Vec<&Credit> = c.iter().chain(&a).chain(&d).collect();
+        let missing: Vec<String> = all.iter().filter_map(|c| c.file.as_ref()).filter(|f| !std::path::Path::new(texts).join(format!("{f}.txt")).is_file()).cloned().collect();
+        assert!(missing.is_empty(), "licence texts named but not in app/src/main/assets/licences: {missing:?}");
+        let mut names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        names.sort_unstable();
+        let twice: Vec<&&str> = names.windows(2).filter(|w| w[0] == w[1]).map(|w| &w[0]).collect();
+        assert!(twice.is_empty(), "credited twice: {twice:?}");
+        assert!(all.iter().all(|c| !c.what.is_empty() && !c.copyright.is_empty() && !c.licence.is_empty()), "every credit says what, whose and under what terms");
     }
 }

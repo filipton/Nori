@@ -80,7 +80,6 @@ fn from_path(path: &str) -> (String, String) {
     (artist, title)
 }
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn m3u_parse(text: String) -> Vec<M3uEntry> {
     let mut out = Vec::new();
     let mut info: Option<(i32, String)> = None;

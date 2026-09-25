@@ -359,11 +359,6 @@ impl<P: Paint> Loader<P> {
         self.inner.bytes(Key::of(url), url, out, &waker)
     }
 
-    /// Lets the decoded covers go, for a client told memory is short. The disk keeps them.
-    pub fn trim_memory(&self) {
-        self.inner.memory.clear();
-    }
-
     /// Lets go of what the loader keeps for covers to come, for a client short of memory: every worker
     /// ends as soon as it has nothing to do, with its decoder's buffers and whatever the platform keeps
     /// per thread, and the painter lets go of its own ([`Paint::rest`]). The next request starts a worker

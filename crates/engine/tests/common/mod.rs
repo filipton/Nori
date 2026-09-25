@@ -22,6 +22,10 @@ use parking_lot::{Condvar, Mutex};
 /// How long, in real time, the time stands still while the engine waits for a song's bytes, per sleep:
 /// longer than any in-memory server takes, however busy the machine.
 pub const BYTES_WAIT: Duration = Duration::from_millis(2_000);
+/// How long the time stands still instead while a server is itself waiting for the time to move (a
+/// transcode coming out at so many bytes a second of the test's clock): only long enough for bytes
+/// already on their way to land, since waiting longer only waits for itself.
+pub const TIME_WAIT: Duration = Duration::from_millis(20);
 /// An engine that has not gone to sleep after this long, in real time, is stuck.
 const STUCK: Duration = Duration::from_secs(120);
 
@@ -36,6 +40,8 @@ struct State {
     /// Sleeps so far, and the one the test stopped waiting for bytes in.
     sleeps: u64,
     gave_up: u64,
+    /// Servers waiting, in [`Virtual::wait_until`], for the time to move.
+    time_waiters: u32,
     /// The engine was woken by the test (a command, its timer, the card's pull) and has not yet taken a
     /// turn since.
     woken: bool,
@@ -47,8 +53,18 @@ struct Shared {
     cv: Condvar,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Virtual(Arc<Shared>);
+
+impl Default for Virtual {
+    /// A new clock at nought. The loader's tries again after a dropped connection wait seconds of real
+    /// time, which this clock cannot see (it would move on, or not, by how the threads fall): on it they
+    /// take a few milliseconds instead, and so none of the test's time.
+    fn default() -> Virtual {
+        nori_engine::source::set_retry_wait_ms(2);
+        Virtual(Arc::default())
+    }
+}
 
 impl Clock for Virtual {
     fn now_ms(&self) -> i64 {
@@ -106,9 +122,10 @@ impl Virtual {
                 if !s.bytes || s.gave_up == s.sleeps {
                     return;
                 }
+                let hold = if s.time_waiters > 0 { TIME_WAIT } else { BYTES_WAIT };
                 match bytes_since {
                     Some((n, t)) if n == s.sleeps => {
-                        if t.elapsed() >= BYTES_WAIT {
+                        if t.elapsed() >= hold {
                             s.gave_up = s.sleeps;
                             return;
                         }
@@ -121,6 +138,24 @@ impl Virtual {
         }
     }
 
+    /// Blocks a server's thread, in real time, until the test's clock reaches `ns`. While it waits, an
+    /// engine waiting for bytes lets the time move after [`TIME_WAIT`] rather than [`BYTES_WAIT`].
+    pub fn wait_until(&self, ns: i64) {
+        let started = Instant::now();
+        let mut s = self.0.s.lock();
+        s.time_waiters += 1;
+        while s.now_ns < ns {
+            assert!(started.elapsed() < STUCK, "the test's clock never reached {ns} ns (it stays at {} ns)", s.now_ns);
+            self.0.cv.wait_for(&mut s, Duration::from_millis(1));
+        }
+        s.time_waiters -= 1;
+    }
+
+    /// The engine's thread, once it has slept on this clock: to tell its doings from other tests' engines.
+    pub fn engine_thread(&self) -> Option<std::thread::ThreadId> {
+        self.0.s.lock().engine.as_ref().map(Thread::id)
+    }
+
     /// When the engine asked to be woken, if it did.
     pub fn deadline_ns(&self) -> Option<i64> {
         self.0.s.lock().deadline_ns
@@ -130,6 +165,7 @@ impl Virtual {
     pub fn move_to(&self, ns: i64) {
         let mut s = self.0.s.lock();
         s.now_ns = s.now_ns.max(ns);
+        self.0.cv.notify_all();
         if s.deadline_ns.is_some_and(|d| d <= s.now_ns) {
             s.deadline_ns = None;
             Self::poke(&mut s);

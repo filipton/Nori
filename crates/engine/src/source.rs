@@ -23,7 +23,7 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 use symphonia::core::io::MediaSource;
 
-use crate::arriving::Taker;
+use crate::arriving::Listening;
 use crate::store::Writer;
 
 /// The stream cache entry a loader writes into, made on the loader's own thread: making it may wait for
@@ -138,6 +138,19 @@ const FAR: u64 = 1024 * 1024;
 pub(crate) const READY: u64 = 256 * 1024;
 /// A dropped connection is tried again this many times before the song counts as failed.
 const RETRIES: u32 = 3;
+/// Half the wait before the first try again, doubled for each after it: 1, 2 and 4 s.
+static RETRY_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(500);
+
+/// For tests on a virtual clock only: the tries again wait `ms` (doubled each time) of real time rather
+/// than seconds, which such a clock could not account for anyway.
+#[doc(hidden)]
+pub fn set_retry_wait_ms(ms: u64) {
+    RETRY_WAIT_MS.store(ms, Ordering::Relaxed);
+}
+
+fn retry_wait(failures: u32) -> Duration {
+    Duration::from_millis(RETRY_WAIT_MS.load(Ordering::Relaxed) << failures)
+}
 /// How long the demuxer waits for bytes before it gives up on the song.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// A live stream is ready to be read when this much is there: two seconds at 128 kbps, and the
@@ -281,7 +294,7 @@ impl Loader {
     /// its entry made as [`Keep`] says, and `taker` hearing the song's bytes as they come, from its first
     /// (AutoMix's measuring, `crate::arriving`): told the song was whole only when every byte of it came
     /// in order, and given up at a jump.
-    pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, budget: Option<u64>, taker: Option<Box<dyn Taker>>) -> Arc<Loader> {
+    pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, budget: Option<u64>, taker: Option<Listening>) -> Arc<Loader> {
         let loaded = Arc::new(Loaded { state: Mutex::new(State { budget, ..State::default() }), cv: Condvar::new() });
         let l = loaded.clone();
         std::thread::Builder::new()
@@ -420,7 +433,7 @@ impl Drop for Loader {
 }
 
 impl Loaded {
-    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, mut taker: Option<Box<dyn Taker>>) {
+    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, mut taker: Option<Listening>) {
         let mut body: Option<Box<dyn Read + Send>> = None;
         let mut chunk = vec![0u8; CHUNK];
         let mut failures = 0;
@@ -552,7 +565,7 @@ impl Loaded {
                             self.wake(&mut s);
                             continue;
                         }
-                        std::thread::sleep(Duration::from_millis(500 << failures));
+                        std::thread::sleep(retry_wait(failures));
                         continue;
                     }
                 }
@@ -635,7 +648,7 @@ impl Loaded {
                             self.wake(&mut s);
                             return;
                         }
-                        std::thread::sleep(Duration::from_millis(500 << failures));
+                        std::thread::sleep(retry_wait(failures));
                         continue;
                     }
                 }
@@ -1083,37 +1096,51 @@ mod tests {
     /// there (a phone's music stopped at the end of a song, the next one never heard).
     #[test]
     fn readers_that_give_up_leave_the_one_still_waiting_to_be_woken_by_the_bytes() {
-        /// Slow to answer at all, so every reader is waiting when the others give up.
-        struct Late(Arc<Counting>);
+        /// Answers only once the test lets it, so every reader is waiting when the others give up.
+        struct Late(Arc<Counting>, Arc<AtomicBool>);
         impl ByteSource for Late {
             fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
-                std::thread::sleep(Duration::from_millis(400));
+                while !self.1.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 self.0.open(url, from)
             }
         }
-        for _ in 0..3 {
-            let l = Loader::start(Arc::new(Late(server(2_000_000))), "song".into(), LOAD, Some(20_000), None);
-            let mut wanted = l.reader();
-            let t = Instant::now();
-            let player = std::thread::spawn(move || {
-                let mut b = [0u8; 16];
-                wanted.read(&mut b).map(|n| (n, t.elapsed()))
-            });
-            let stop = Arc::new(AtomicBool::new(false));
-            let others: Vec<_> = (0..8)
-                .map(|_| {
-                    let mut r = l.reader_until(stop.clone());
-                    std::thread::spawn(move || r.read(&mut [0u8; 16]).is_err())
-                })
-                .collect();
-            std::thread::sleep(Duration::from_millis(100));
-            stop.store(true, Ordering::Release);
-            l.nudge();
-            assert!(others.into_iter().all(|o| o.join().unwrap()), "the readers nobody wants give up");
-            let (n, took) = player.join().unwrap().expect("the bytes");
-            assert_eq!(n, 16);
-            assert!(took < Duration::from_secs(3), "read as the bytes came, not after the timeout: {took:?}");
-        }
+        let blocked = |l: &Loader| l.0.state.lock().blocked;
+        let until = |l: &Loader, n: u32, what: &str| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while blocked(l) != n {
+                assert!(Instant::now() < deadline, "{what}: {} readers blocked, not {n}", blocked(l));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let answer = Arc::new(AtomicBool::new(false));
+        let l = Loader::start(Arc::new(Late(server(2_000_000), answer.clone())), "song".into(), LOAD, Some(20_000), None);
+        let mut wanted = l.reader();
+        let player = std::thread::spawn(move || {
+            let mut b = [0u8; 16];
+            let n = wanted.read(&mut b);
+            (n, Instant::now())
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let others: Vec<_> = (0..8)
+            .map(|_| {
+                let mut r = l.reader_until(stop.clone());
+                std::thread::spawn(move || r.read(&mut [0u8; 16]).is_err())
+            })
+            .collect();
+        until(&l, 9, "the player's reader and eight opened for nothing all wait on the bytes");
+        stop.store(true, Ordering::Release);
+        l.nudge();
+        let gave_up = others.into_iter().map(|o| o.join().unwrap()).filter(|&e| e).count();
+        assert_eq!(gave_up, 8, "the readers nobody wants give up");
+        assert_eq!(blocked(&l), 1, "the player's reader still waits, and is counted as waiting");
+        let answered = Instant::now();
+        answer.store(true, Ordering::Release);
+        let (n, at) = player.join().unwrap();
+        assert_eq!(n.expect("the bytes"), 16);
+        let took = at - answered;
+        assert!(took < Duration::from_secs(3), "read as the bytes came, not after the {READ_TIMEOUT:?} timeout: {took:?}");
     }
 
     #[test]

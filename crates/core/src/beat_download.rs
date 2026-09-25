@@ -130,11 +130,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_digest_is_written_as_the_pin_is() {
-        assert_eq!(hex(&Sha256::digest(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    }
-
-    #[test]
     fn only_the_pinned_checkpoint_is_converted() {
         assert_eq!(make(b"<html>not found</html>").unwrap_err().0, BeatFailure::WrongFile);
         assert_eq!(make(&vec![0u8; CHECKPOINT_BYTES as usize]).unwrap_err().0, BeatFailure::WrongFile);

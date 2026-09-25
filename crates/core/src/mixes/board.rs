@@ -28,36 +28,6 @@ impl Core {
 /// Drawn off the main thread: a mix takes a few milliseconds of the index.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    /// Draws mix `id` unless this period's draw is already here; `again` asks for a different one.
-    /// `today_epoch_day` is the local date as days since 1970-01-01. `fallback` is None on the first call
-    /// and the server's random songs on the call after [MixDraw::NeedsFallback].
-    pub fn mix_draw(&self, id: String, today_epoch_day: i64, again: bool, fallback: Option<Vec<Song>>) -> MixDraw {
-        let Some(spec) = spec_of(&id) else { return MixDraw::Unknown };
-        // Weekly mixes share one seed for seven days so the tile does not churn every midnight.
-        let period = if spec.weekly { today_epoch_day / 7 } else { today_epoch_day };
-        let generation = match self.board(|b| b.drawn.get(spec.id).map(|d| (d.period, d.generation))) {
-            Some((p, _)) if p == period && !again => return MixDraw::Kept,
-            Some((p, g)) if p == period => g + 1,
-            _ => 0,
-        };
-        // Offset weekly seeds so they never collide with the same day's Discover draw.
-        let seed = period * 1_000 + generation + if spec.weekly { 7_000_000 } else { 0 };
-        let songs: Vec<Song> = match fallback {
-            Some(random) => random.into_iter().filter(playable).collect(),
-            None => {
-                let songs: Vec<Song> = draw(&self.db.lock(), spec.kind, seed as u64, db::now_ms()).into_iter().filter(playable).collect();
-                // With no listening history yet the personal mixes are empty: what the server thinks is random stands in.
-                if songs.is_empty() {
-                    return MixDraw::NeedsFallback;
-                }
-                songs
-            }
-        };
-        let drawn = Drawn { songs: distinct(songs), period, generation };
-        self.board(|b| b.drawn.insert(spec.id, drawn));
-        MixDraw::Drawn
-    }
-
     /// Draws whichever mixes are missing or from the last period, in the row's order.
     pub fn mix_warm(&self, today_epoch_day: i64) -> MixWarm {
         let mut out = MixWarm { changed: false, needs_fallback: vec![] };
@@ -107,6 +77,39 @@ impl Core {
             },
             None => MixLookup::NotDrawn,
         })
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// Draws mix `id` unless this period's draw is already here; `again` asks for a different one.
+    /// `today_epoch_day` is the local date as days since 1970-01-01. `fallback` is None on the first call
+    /// and the server's random songs on the call after [MixDraw::NeedsFallback].
+    pub fn mix_draw(&self, id: String, today_epoch_day: i64, again: bool, fallback: Option<Vec<Song>>) -> MixDraw {
+        let Some(spec) = spec_of(&id) else { return MixDraw::Unknown };
+        // Weekly mixes share one seed for seven days so the tile does not churn every midnight.
+        let period = if spec.weekly { today_epoch_day / 7 } else { today_epoch_day };
+        let generation = match self.board(|b| b.drawn.get(spec.id).map(|d| (d.period, d.generation))) {
+            Some((p, _)) if p == period && !again => return MixDraw::Kept,
+            Some((p, g)) if p == period => g + 1,
+            _ => 0,
+        };
+        // Offset weekly seeds so they never collide with the same day's Discover draw.
+        let seed = period * 1_000 + generation + if spec.weekly { 7_000_000 } else { 0 };
+        let songs: Vec<Song> = match fallback {
+            Some(random) => random.into_iter().filter(playable).collect(),
+            None => {
+                let songs: Vec<Song> = draw(&self.db.lock(), spec.kind, seed as u64, db::now_ms()).into_iter().filter(playable).collect();
+                // With no listening history yet the personal mixes are empty: what the server thinks is random stands in.
+                if songs.is_empty() {
+                    return MixDraw::NeedsFallback;
+                }
+                songs
+            }
+        };
+        let drawn = Drawn { songs: distinct(songs), period, generation };
+        self.board(|b| b.drawn.insert(spec.id, drawn));
+        MixDraw::Drawn
     }
 }
 

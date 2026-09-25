@@ -161,7 +161,6 @@ pub fn analysable(id: &str) -> bool {
 
 /// Of the queued songs `ids`, those that can be fetched ahead: not a radio stream, not a provider's
 /// song (fetching one makes the provider download it for the server).
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_fetchable(ids: Vec<String>) -> Vec<String> {
     with(|s| {
         ids.into_iter()

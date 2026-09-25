@@ -246,6 +246,12 @@ impl Store {
         self.ahead.busy()
     }
 
+    /// Whether the player has asked to take `key` over from the fetching ahead: for a test to hold a
+    /// fetch until it has.
+    pub fn taken_over(&self, key: &str) -> bool {
+        self.ahead.taken(key)
+    }
+
     /// The stream cache's limit from now on, and whatever is over it dropped.
     pub fn set_limit(&self, limit: u64) {
         self.held.lock().limit = limit;

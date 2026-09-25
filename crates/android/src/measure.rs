@@ -19,7 +19,7 @@ use jni::{JNIEnv, JavaVM};
 use nori_engine::core::{key_format, Measurer, Shelf, Whole};
 use parking_lot::Mutex;
 
-use crate::{native, Class};
+use crate::{cleared, native, Class};
 
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/MeasureJni",
@@ -61,13 +61,6 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
 fn env() -> Option<(&'static Java, JNIEnv<'static>)> {
     let java = JAVA.get()?;
     Some((java, crate::attached(&java.vm)?))
-}
-
-fn cleared(env: &mut JNIEnv) {
-    if env.exception_check().unwrap_or(false) {
-        let _ = env.exception_describe();
-        let _ = env.exception_clear();
-    }
 }
 
 /// Where media3 keeps a song: asked of Kotlin, which knows its caches.
@@ -189,7 +182,7 @@ extern "system" fn download_take(mut env: JNIEnv, _: JClass, h: jlong, bytes: JB
         return;
     }
     // SAFETY: a handle download_open made and download_end has not taken back.
-    let taker = unsafe { &mut *(h as *mut Box<dyn nori_engine::arriving::Taker>) };
+    let taker = unsafe { &mut *(h as *mut nori_engine::arriving::Listening) };
     let mut buf = std::mem::take(&mut *BUF.lock());
     buf.resize(len as usize, 0);
     // SAFETY: i8 and u8 have the same size and alignment.
@@ -208,7 +201,7 @@ extern "system" fn download_end(_: JNIEnv, _: JClass, h: jlong, whole: jboolean)
         return;
     }
     // SAFETY: a handle download_open made, taken back once.
-    let taker = unsafe { Box::from_raw(h as *mut Box<dyn nori_engine::arriving::Taker>) };
+    let taker = unsafe { Box::from_raw(h as *mut nori_engine::arriving::Listening) };
     taker.end(whole != 0);
 }
 

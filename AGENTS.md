@@ -72,7 +72,7 @@ crates/library/ Rust, platform-free: the music library as the app shows it (pack
                 nori-net and nori-look.
 crates/automix/ Rust, platform-free: AutoMix over the app's database (package nori-automix): the analysis
                 store and the streaming analyser (store.rs), the transition planner the audio path asks
-                (planner.rs), the transition engine's host (host.rs), measuring ahead (ahead.rs) and where the
+                (planner.rs), the transition engine's host (host.rs) and where the
                 optional beat model's weights are and their pins (beat_model.rs).
                 Depends on nori-model, nori-db and nori-player.
 crates/settings/ Rust, platform-free: the settings (package nori-settings): codec, defaults and rules

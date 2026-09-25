@@ -373,7 +373,6 @@ pub fn instant(c: &Connection, seed_song_id: &str, limit: usize, seed: u64, now_
 }
 
 /// Shuffle for a play queue: seeded, and songs of one artist (and, when possible, of one album) are kept apart.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn weighted_shuffle(songs: Vec<Song>, seed: u64) -> Vec<Song> {
     spread(songs, &mut Rng::new(seed), None)
 }
@@ -481,9 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn a_long_queue_shuffles_quickly() {
-        let l: Vec<Song> = (0..20_000).map(|i| song(&i.to_string(), "t", &format!("artist {}", i % 1500), "", "", 0)).collect();
+    fn a_long_queue_shuffles_quickly_and_keeps_its_artists_apart() {
+        // Five thousand songs: a shuffle that compared every song with every other would take seconds here.
+        let l: Vec<Song> = (0..5_000).map(|i| song(&i.to_string(), "t", &format!("artist {}", i % 1500), "", "", 0)).collect();
+        let started = std::time::Instant::now();
         let out = weighted_shuffle(l, 1);
-        assert_eq!((out.len(), adjacent_artists(&out)), (20_000, 0));
+        assert_eq!((out.len(), adjacent_artists(&out)), (5_000, 0));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "5,000 songs took {:?} to shuffle", started.elapsed());
     }
 }

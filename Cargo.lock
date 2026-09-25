@@ -2024,7 +2024,6 @@ version = "0.3.3"
 dependencies = [
  "nori-player",
  "opus-rs",
- "parking_lot",
  "prost",
  "rubato",
  "rustfft",
@@ -2062,7 +2061,6 @@ dependencies = [
  "nori-testdir",
  "parking_lot",
  "rusqlite",
- "serde",
  "serde_json",
  "thiserror 2.0.20",
  "uniffi",

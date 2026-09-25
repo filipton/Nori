@@ -187,7 +187,6 @@ fn read(p: &SmartPlaylist) -> Option<SmartEdit> {
 }
 
 /// A new, empty draft: one rule waiting for a genre, a random order and 100 songs.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_new() -> SmartEdit {
     SmartEdit { id: String::new(), name: String::new(), all: true, rules: vec![default_rule()], sort_field: "random".into(), descending: false, limit: 100 }
 }
@@ -290,14 +289,14 @@ pub fn smart_limit_text(limit: i32) -> String {
     if limit > 0 { limit.to_string() } else { String::new() }
 }
 
-/// The definition the draft stands for.
-#[cfg_attr(feature = "ffi", uniffi::export)]
+/// The definition the draft stands for. The app hands the draft over whole (`smart_edit_prepare`).
+#[cfg(test)]
 pub fn smart_edit_json(edit: SmartEdit) -> String {
     to_json(&edit)
 }
 
 /// Reads back what this editor wrote; None for definitions with nested groups, which the caller keeps as raw JSON.
-#[cfg_attr(feature = "ffi", uniffi::export)]
+#[cfg(test)]
 pub fn smart_edit_read(playlist: SmartPlaylist) -> Option<SmartEdit> {
     read(&playlist)
 }

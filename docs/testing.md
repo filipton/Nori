@@ -7,7 +7,7 @@ notification, audio focus, routing, JNI, the service and a force stop.
 
 | Tier | What | Time | Who runs it |
 | --- | --- | --- | --- |
-| `cargo test -j4 --workspace` | every Rust test | about 1 min (57 s, build warm) | every agent, every change |
+| `cargo test -j4 --workspace` | every Rust test | about 30 s (build warm) | every agent, every change |
 | `tools/smoke.sh` | launch, login, play, pause, seek, next, a queue edit, one AutoMix transition, the equalizer tuned in place, offload on and off, the notification's pause and play, a download played offline, no crash or ANR | aimed at 2-3 min (fixed sleeps: 0; not yet timed on a device) | every agent that touched Android, on its emulator turn |
 | `tools/audio-e2e.sh --only …`, `tools/feature-e2e.sh --only …` | the sections of the area a change touched | a section is 10-90 s | the agent that touched it |
 | `tools/audio-e2e.sh`, `tools/feature-e2e.sh` in full | every device check | not yet timed; the old suites were 11+ and 10+ min with ~590 s of fixed sleeps | the coordinator, once per batch, before a perf APK build |
@@ -84,7 +84,7 @@ is Android glue and stays on the device. 50 moved, 60 stay.
 | still playing after tuning cuts in; shallow buffer in place; deep buffer back in place; track not reopened; still playing after the deep swap (5) | b | audio-e2e `tuning`, smoke `eq` (crates/android track.rs resizes the real AudioTrack) |
 | the deep buffer came back without waiting for a boundary | a | engine.rs `the_equalizer_screen_makes_the_output_shallow_at_once_and_deep_again_as_it_closes` |
 | measuring starts when AutoMix is switched on; the songs coming up are measured (2) | b | audio-e2e `automix` (read out of the media3 cache through measure.rs's JNI) |
-| the mix is planned from what was measured | a | automix.rs `switched_on_it_measures_what_comes_up_and_mixes_on_the_beat`, core automix `plan_through_the_ffi`, core.rs |
+| the mix is planned from what was measured | a | automix.rs `switched_on_it_measures_what_comes_up_and_mixes_on_the_beat`, core.rs |
 | speed runs through the engine's stage; still playing at 1.5x (2) | a | engine.rs `a_speed_set_while_playing_is_heard` |
 | 1.5x plays 6 s as ~9 s of song | a | stages.rs `at_one_and_a_half_times_six_seconds_play_nine_of_the_song_at_its_own_pitch` |
 | pitch alone keeps the pace | a | stages.rs `pitch_alone_keeps_the_pace` |
@@ -142,15 +142,75 @@ is Android glue and stays on the device. 50 moved, 60 stay.
 - A force stop: the service restoring the queue, downloads picking up.
 - The network going and coming (the bridge) and a notification's intent opening a screen.
 
+
 ## cargo test
 
-`cargo test -j4 --workspace` ran in 163 s before this change and 57 s after (test
-run only, build warm). The sound chain and the decoders make minutes of music per test, and unoptimised
-they were most of the time: `[profile.test.package.…]` in Cargo.toml builds nori-player, nori-engine and
-every dependency at opt-level 2 for `cargo test` only (debug builds and the APK are untouched; debug
-assertions and overflow checks stay on): the player's unit tests went from 40 s to 5 s and the pipeline
-tests from 47 s to 16 s. Test binaries run one after another, so crates/engine's engine.rs, paths.rs,
-radio.rs and tempo.rs are now one binary (tests/main.rs, `--test engine`) whose tests run side by side:
-29 s in four binaries, 19 s in one. The slowest left are the pipeline tests (16 s), the engine's (19 s)
-and nori-core's unit tests (11 s, most of it `a_hundred_thousand_songs`). The engine's tests already ran on a virtual clock, with no real
-sleeps; the only waits left are for real threads (the measurer, downloads) and are condition waits.
+`cargo test -j4 --workspace` runs about 1,120 tests in about 30 s once built (the test binaries 28.5 s
+of it). It was 163 s before the sound code was built optimised for tests, 57-89 s after that, and 30 s
+since the tests stopped waiting on real time (2026-09-26). `[profile.test.package.…]` in Cargo.toml
+builds nori-player, nori-engine and every dependency at opt-level 2 for `cargo test` only; debug
+assertions and overflow checks stay on. The workspace's own crates that are not listed there (nori-core,
+the android crate) are unoptimised, so their tests keep their data small.
+
+Test binaries run one after another and the tests inside a binary side by side, so a binary takes as long
+as its slowest test or its total over the cores, whichever is more. The binaries that matter:
+
+| Binary | Tests | Time | Its slowest |
+| --- | --- | --- | --- |
+| crates/engine `--test engine` (engine.rs, paths.rs, radio.rs, tempo.rs, estimated.rs) | 133 | 10 s | offload tests of a few ffmpeg songs, 4-7 s each |
+| crates/player `--test pipeline` | 67 | 4.6 s | levels.rs, 3-4 s each: every kind of transition through two 60 s songs |
+| crates/player lib | 262 | 3.6 s | automix/tests.rs, the synthetic songs analysed side by side |
+| crates/android lib | 28 | 2.8 s | track.rs's one test of the real engine thread on the wall clock |
+| crates/engine `--test one_fetch`, `--test core` | 1 each | 1-2 s | one core and one queue per process, so a binary each |
+| everything else | about 600 | under 1.3 s a binary | |
+
+### What each crate's tests cover
+
+| Crate | What is checked |
+| --- | --- |
+| player | the sound chain sample by sample (decoders, ReplayGain, equalizer, limiter, speed, silence skipping), AutoMix's analysis on synthetic songs with a known tempo, key and structure, the planner, the mixer, and the whole player on a simulated output and virtual clock (`sim`, tests/pipeline): gapless joins, crossfades, levels through a mix, controls, the output |
+| engine | the player for platforms without one, on the virtual clock of tests/common: loading and the loader (source.rs), fetching ahead (ahead.rs), the stream cache, offload onto a simulated chip (paths.rs), radio, tempo, a transcode's estimated length and its 416 (estimated.rs), one fetch per song with AutoMix measuring (one_fetch.rs), downloads and the core (core.rs) |
+| core | the FFI surface over the real SQLite: the index and search, smart playlists, mixes, history, lyrics' race, covers, AutoEQ and device profiles, the Subsonic client against a fake transport, stream addresses, transfers, the Kotlin twins (tests/twins.rs), the active client (tests/active_client.rs) |
+| lyrics | every lyrics format, the services' answers, trust and fitting, the race between services |
+| covers | decoders against Pillow's references, the scaler, the disk and memory caches, the loader's workers |
+| look | colours from a cover (the AndroidX palette port), Compose's colour maths, the lyrics and motion layout |
+| library, queue, settings, transfers, devices, perf | pages, menus, the queue's rules, settings and their store, the download table, AutoEQ, the perf log's report |
+| cli, android, mpris, net, http, db | each client's own glue: the terminal's drawing, the AudioTrack model (track.rs), media controls, requests |
+| testdir | the tests' temp directories, and tests/registered.rs: every file under a crate's `tests/` is in a test binary |
+
+The Kotlin unit tests (`./gradlew :core:testDebugUnitTest :app:testDebugUnitTest`, a minute, no device)
+cover what the Kotlin keeps: formatting, the media3 error reading, the frame fades, and InitOrderTest, which
+reads Nori.kt and Downloads.kt and fails when a field a constructor's thread reaches is declared after the
+line that starts the thread (the start-up NPE of 2026-09-25).
+
+### Reading a failure
+
+- An assert says what was wrong and with what: expected and actual, the song ids, positions in ms or
+  frames, and for the engine the event log (`{:?}` of `rig.events`) or the planner's log (`app.log()`).
+  Read the last event before the failure first: `Error`, `Stopped` or `Bridge` there is the cause, the
+  assert is the symptom.
+- `the engine did not go to sleep` (tests/common) means the engine thread is stuck or spinning, not slow:
+  the limit is 120 s of real time.
+- A test on the virtual clock that fails only under load has a real thread in it that the clock does not
+  see. The clock stands still while the engine waits for bytes (`BYTES_WAIT`, 2 s of real time; 20 ms when
+  a server is itself waiting for the clock through `Virtual::wait_until`). Make the thread wait for a
+  condition, not for time.
+- A test file that is not in any binary never runs: testdir's `every_file_under_a_crates_tests_is_built_into_a_test_binary`
+  names it. crates/engine has `autotests = false`, so a new file there needs a `[[test]]` or a `#[path]`
+  line in tests/main.rs; a new file in crates/player/tests/pipeline needs a `mod` in main.rs.
+
+### Writing one
+
+- No `thread::sleep` as a wait or as proof that something did not happen. Wait for a condition with a
+  deadline that panics saying what did not come; prove "nothing more" with a barrier (the next job on a
+  single worker, a later warm-up) and `try_recv`.
+- On the engine's clock, time moves only when the test moves it (`Rig::run`, `wait_for`, `until`). The
+  loader's tries again after a dropped connection wait 1, 2 and 4 s of real time in the app;
+  `Virtual::default()` shortens them through `nori_engine::source::set_retry_wait_ms`.
+- Songs are made once per binary: `music()` in engine.rs and pipeline/common.rs, `steady()` in levels.rs
+  and the ffmpeg encodes in paths.rs and estimated.rs are cached by length and seed.
+- Anything process-wide (the core's queue, the active client, the AutoEQ fetch, the watch hook) is either
+  its own test binary or held to what the test itself made (the hook's records filtered by the engine's
+  thread id).
+- A table of cases that each take seconds runs its cases on threads of their own (`each` in
+  automix/tests.rs) or is split into one test per row, so they run side by side.

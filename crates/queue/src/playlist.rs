@@ -178,7 +178,6 @@ pub fn playlist_repeat(mode: u8) {
 }
 
 /// The player moved to `index` by itself: a song ended, a seek to another song.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_moved_to(index: i32) {
     if let Ok(i) = usize::try_from(index) {
         LIST.lock().moved_to(i);
@@ -196,7 +195,7 @@ pub enum Onto {
 /// The player moved onto `index` (-1: onto nothing), `looped` by its own repeat. What that means is
 /// `nori_player::queue::arrival`'s call over this queue and the user's "skip explicit songs"; a new song
 /// also breaks a run of songs that would not play.
-#[cfg_attr(feature = "ffi", uniffi::export)]
+#[cfg(test)]
 pub fn playlist_transition(index: i32, looped: bool) -> Onto {
     playlist_moved_to(index);
     let skip_explicit = crate::rules::prefs(|p| p.skip_explicit);
@@ -222,13 +221,11 @@ pub fn playlist_skips(index: usize) -> bool {
 }
 
 /// How many songs still follow the current one in play order, repeat left out.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_after() -> u32 {
     with(|p| p.songs_after() as u32)
 }
 
 /// The songs coming up, the current one first, at most `n`, in play order.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_upcoming(n: u32) -> Vec<String> {
     with(|p| p.upcoming().take(n as usize).map(|i| p.ids()[i].clone()).collect())
 }
@@ -239,7 +236,6 @@ const WINDOW_LEN: usize = 8;
 /// Hands the transition planner its window - the song before the current one, then the current one
 /// and those after it as the player will walk them, repeat included - when it changed. True when it
 /// did, so the platform asks for a new plan.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_window() -> bool {
     let (ids, shuffling) = with(|p| {
         let mut ids = Vec::with_capacity(WINDOW_LEN + 1);
@@ -328,7 +324,6 @@ pub struct PlaylistView {
 /// The queue as the app lists it. `held` is the `list_rev` of the songs the reader already holds: when
 /// the list is still those songs (a shuffle, a song added by hand marked, the current one moved), they
 /// are not copied again. The queue's every change used to send every song of it across.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_view(held: u64) -> PlaylistView {
     let (ids, len, list_rev, order, queued, index, shuffle, repeat, bridging, rev) = with(|p| {
         (
@@ -382,7 +377,6 @@ pub fn playlist_rev() -> u64 {
 
 /// The queue to hand the server (its "play queue", for picking up on another device): the songs, radio
 /// streams left out, and only while the user lets plays be sent to the server at all.
-#[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_to_push() -> Vec<String> {
     if !crate::rules::prefs(|p| p.scrobble) {
         return Vec::new();

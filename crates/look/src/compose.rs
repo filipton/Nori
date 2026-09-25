@@ -204,15 +204,14 @@ mod tests {
 
     #[test]
     fn lerp_is_composes() {
-        let mut wrong = 0;
-        for &(a, b, t, want) in LERPS {
-            let got = lerp(a, b, f32::from_bits(t));
-            if got != want {
-                wrong += 1;
-                eprintln!("lerp({a:08x}, {b:08x}, {}) = {got:08x}, Compose {want:08x}", f32::from_bits(t));
-            }
-        }
-        assert_eq!(wrong, 0);
+        let wrong: Vec<String> = LERPS
+            .iter()
+            .filter_map(|&(a, b, t, want)| {
+                let got = lerp(a, b, f32::from_bits(t));
+                (got != want).then(|| format!("lerp({a:08x}, {b:08x}, {}) = {got:08x}, Compose {want:08x}", f32::from_bits(t)))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{} of {} differ from Compose, the first: {:#?}", wrong.len(), LERPS.len(), &wrong[..wrong.len().min(5)]);
     }
 
     #[test]

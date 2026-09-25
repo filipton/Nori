@@ -8,26 +8,24 @@ pub mod board;
 
 pub use nori_library::mixes::*;
 
-/// All mixes are read-only and take a few milliseconds; call them off the main thread like every other
-/// core call. `seed` picks the draw: keep it to get the same mix again, change it to refresh.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    pub fn mix_quick_picks(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
-        Ok(quick_picks(&self.db.lock(), limit as usize, seed, db::now_ms())?)
+    /// An excluded song never appears in a mix; it still plays, searches and counts like any other.
+    pub fn mix_excluded_set(&self, song_id: String, excluded: bool) -> Result<()> {
+        let c = self.db.lock();
+        if excluded {
+            c.execute("INSERT OR IGNORE INTO mix_excluded(server, song_id) VALUES(sid(), ?1)", [song_id])?;
+        } else {
+            c.execute("DELETE FROM mix_excluded WHERE server=sid() AND song_id=?1", [song_id])?;
+        }
+        Ok(())
     }
+}
 
-    pub fn mix_discover(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
-        Ok(discover(&self.db.lock(), limit as usize, seed, db::now_ms())?)
-    }
-
-    pub fn mix_listen_again(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
-        Ok(listen_again(&self.db.lock(), limit as usize, seed, db::now_ms())?)
-    }
-
-    pub fn mix_top(&self, limit: u32) -> Result<Vec<Song>> {
-        Ok(top(&self.db.lock(), limit as usize, db::now_ms())?)
-    }
-
+/// All mixes are read-only and take a few milliseconds; call them off the main thread like every other
+/// core call. `seed` picks the draw: keep it to get the same mix again, change it to refresh.
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
     /// `genre` is matched without regard to (ASCII) case.
     pub fn mix_genre(&self, genre: String, limit: u32, seed: u64) -> Result<Vec<Song>> {
         let limit = limit as usize;
@@ -49,17 +47,6 @@ impl Core {
         Ok(instant(&self.db.lock(), &seed_song_id, limit as usize, seed, db::now_ms())?)
     }
 
-    /// An excluded song never appears in a mix; it still plays, searches and counts like any other.
-    pub fn mix_excluded_set(&self, song_id: String, excluded: bool) -> Result<()> {
-        let c = self.db.lock();
-        if excluded {
-            c.execute("INSERT OR IGNORE INTO mix_excluded(server, song_id) VALUES(sid(), ?1)", [song_id])?;
-        } else {
-            c.execute("DELETE FROM mix_excluded WHERE server=sid() AND song_id=?1", [song_id])?;
-        }
-        Ok(())
-    }
-
     pub fn mix_excluded_clear(&self) -> Result<()> {
         self.db.lock().execute("DELETE FROM mix_excluded WHERE server=sid()", [])?;
         Ok(())
@@ -71,6 +58,26 @@ impl Core {
         let mut st = c.prepare_cached("SELECT i.json FROM mix_excluded e JOIN items i ON i.server=sid() AND i.kind=2 AND i.id=e.song_id WHERE e.server=sid() ORDER BY i.rowid")?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
+    }
+}
+
+/// Only the tests read these mixes one by one; the app has them drawn through the board (`mix_ensure`).
+#[cfg(test)]
+impl Core {
+    pub fn mix_quick_picks(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
+        Ok(quick_picks(&self.db.lock(), limit as usize, seed, db::now_ms())?)
+    }
+
+    pub fn mix_discover(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
+        Ok(discover(&self.db.lock(), limit as usize, seed, db::now_ms())?)
+    }
+
+    pub fn mix_listen_again(&self, limit: u32, seed: u64) -> Result<Vec<Song>> {
+        Ok(listen_again(&self.db.lock(), limit as usize, seed, db::now_ms())?)
+    }
+
+    pub fn mix_top(&self, limit: u32) -> Result<Vec<Song>> {
+        Ok(top(&self.db.lock(), limit as usize, db::now_ms())?)
     }
 }
 

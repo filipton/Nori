@@ -710,7 +710,7 @@ pub enum TransitionKind {
     EchoOut,
 }
 
-/// The order is the wire format of `automix_mixer_params`; only append.
+/// The order is the number the mixer's parameters carry (`automix::mixer::params`); only append.
 #[cfg(feature = "ffi")]
 #[uniffi::remote(Enum)]
 pub enum FadeCurve {
@@ -769,9 +769,6 @@ pub struct TransitionPlan {
     /// Outro remix: hold captures this many ms and the mixer reads it with wrap for `duration_ms`.
     /// `-1` means capture the full duration with no loop (Apple iOS 27-style intro/outro extend).
     pub out_loop_ms: i64,
-    /// Intro remix: after `in_start_ms`, the first this many ms of the incoming track is looped for the
-    /// rest of the overlap. `-1` means play the incoming stream straight through.
-    pub in_loop_ms: i64,
     /// High-pass sweep on the outgoing track (DJ "filter open"), `-1` when off.
     pub hp_start_ms: i64,
     pub hp_end_ms: i64,

@@ -226,13 +226,4 @@ mod tests {
         assert_eq!(rows(Some(vec![2, 0, 1]), 3, true), QueueRows { order: vec![2, 0, 1], reorderable: false });
         assert_eq!(rows(None, 3, false), QueueRows { order: vec![0, 1, 2], reorderable: true });
     }
-
-    #[test]
-    fn one_stage() {
-        let s = stage();
-        assert_eq!((s.melt, s.spinner_after_ms, s.colour_wait_ms, s.meter_ms), (0.19, 300, 1_200, 120));
-        assert_eq!(s.rub_out.len(), 7);
-        assert_eq!(band_matrix(0.0, 1.0, 1.0, 1.0)[0], 1.0);
-        assert!(player_black(true, false));
-    }
 }

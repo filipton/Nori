@@ -622,7 +622,6 @@ Compose transition state, the JNI door's own packing); two lines kept in Kotlin 
 | `Library.coverUrl` with `Uri.encode` (data/Library.kt): per row, Kotlin faster | `covers::cover_url_into` (into a kept buffer) |
 | `SearchViewModel`'s live search debounce, `isBlank` | `search::live_delay_ms`, `search::kotlin_whitespace` |
 | AutoEQ fetches: `Http.get(..).decodeToString()`, as the app read the index and presets before the core fetched them (`Client::autoeq_update`, `Client::autoeq_curve`, which Android now calls) | `autoeq::fetch_text`, `autoeq::text` (the JVM's UTF-8 repair) |
-| `AutoMixPrefetch.onDevice`, `AutoMixPrefetch.update` (retired: Android measures with nori-engine's `Measurer`) | `automix::ahead::whole_on_device`, `automix::ahead::plan` |
 | `ResizableEvictor.trimLocked` (playback/MediaSources.kt) | `stream_cache::trim` |
 | `PlayerConnection.read` | `heard::HeardAt::unpack` |
 | `PlayerViewModel.setVolumeFraction`, `volumeFraction` | `rules::volume_step`, `rules::volume_fraction` |
@@ -635,7 +634,8 @@ Compose transition state, the JNI door's own packing); two lines kept in Kotlin 
 No longer twins, Android calling the core instead: `Covers.isProvider` (`covers::is_provider_cover`, through
 `CoverPixels.isProvider`) and the precacher's list (`rules::precache_list`, through `Client::precache_targets`).
 Gone with the ExoPlayer path, their twins too: `RustAudioDecoder.setupData`, the AAC codec string and
-packet buffers (`packets.rs`) and `TransitionSink.configure` (`sink.rs`).
+packet buffers (`packets.rs`) and `TransitionSink.configure` (`sink.rs`); and with the retired
+`AutoMixPrefetch.onDevice`/`update` (Android measures with nori-engine's `Measurer`), `automix::ahead`.
 
 What stays in the client with no twin:
 - **Touch gestures and motion**: sleeve and carousel drags, row swipes, the sheet and queue drags, the

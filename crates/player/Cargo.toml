@@ -16,7 +16,6 @@ synth = []
 neural-beats = ["dep:tract-onnx", "dep:prost"]
 
 [dependencies]
-parking_lot = "0.12"
 # AutoMix: the analysis FFT, and Signalsmith Stretch (MIT, C++ built with cc) for tempo changes.
 rustfft = "6"
 signalsmith-stretch = "0.1"

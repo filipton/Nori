@@ -182,7 +182,6 @@ fn holding_and_mixing(a: f32, b: f32) {
         keep_pitch: true,
         ramp_us: 0,
         out_loop_us: 0,
-        in_loop_us: 0,
     };
     let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Sink { bytes: 0 }, App { plan: Some(p), analyse: false });
     e.configure(&mut d, &mut h, stream("a", FMT), 1);

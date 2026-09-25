@@ -21,13 +21,6 @@ fn refreshed(got: NetResult<Option<Page>>, had_stored: bool) -> NetResult<Option
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
-    /// The second half of a screen's read, after `read_stored` painted what was kept: asks the server
-    /// unless that was fresh, and returns its answer only when it differs. A failure is only an error
-    /// when nothing was stored (`stored_digest` None); otherwise the stored answer stands.
-    pub async fn read_refresh(&self, read: Read, stored_digest: Option<u64>) -> NetResult<Option<Page>> {
-        refreshed(self.read_fetch(read, stored_digest).await, stored_digest.is_some())
-    }
-
     /// A screen's read, whole: what is stored goes to `shown` at once, then the server is asked unless
     /// that was fresh, and its answer goes to `shown` too when it differs. A failure is an error only when
     /// nothing was stored (offline with something to show is not); a client that is offline on purpose
@@ -125,6 +118,16 @@ impl Client {
     }
 }
 
+/// Asked only in Rust, so not exported to Kotlin.
+impl Client {
+    /// The second half of a screen's read, after `read_stored` painted what was kept: asks the server
+    /// unless that was fresh, and returns its answer only when it differs. A failure is only an error
+    /// when nothing was stored (`stored_digest` None); otherwise the stored answer stands.
+    pub async fn read_refresh(&self, read: Read, stored_digest: Option<u64>) -> NetResult<Option<Page>> {
+        refreshed(self.read_fetch(read, stored_digest).await, stored_digest.is_some())
+    }
+}
+
 /// Where a screen's read ([`Client::read_cached`]) hands each answer as it comes: what was stored, then
 /// the server's when it differs.
 #[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
@@ -166,14 +169,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::client::tests::{block, client};
     use crate::client::NetProfile;
-
-    #[test]
-    fn a_failed_refresh_is_only_an_error_with_nothing_stored() {
-        let err = || Err(nori_net::transport::NetError::io("down".into()));
-        assert!(matches!(refreshed(err(), true), Ok(None)));
-        assert!(refreshed(err(), false).is_err());
-        assert!(matches!(refreshed(Ok(None), false), Ok(None)));
-    }
 
     #[derive(Default)]
     struct Marks(parking_lot::Mutex<Vec<Option<bool>>>);

@@ -8,6 +8,38 @@ pub use nori_queue::bridge::*;
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
+    /// A song the network would not bring, the core having said it is the bridge's (`queue_error`
+    /// answered `Bridge`, or nori-engine's `Event::Bridge`): a download still queued after it plays, or
+    /// else a bridge starts, and failing both the song is skipped or the music stops, as any failure
+    /// would be. The run of failures is counted here either way.
+    pub fn bridge_take(&self) -> BridgeTake {
+        let next = self.bridge_next_downloaded().unwrap_or(-1);
+        if next >= 0 {
+            crate::rules::queue_bridged();
+            return BridgeTake::Jump { index: next as u32 };
+        }
+        if let Some(edit) = self.bridge_start().ok().flatten() {
+            nori_model::alog::info(&format!("bridge: bridging with {} downloads", edit.songs.len()));
+            crate::rules::queue_bridged();
+            return BridgeTake::Bridged { edit };
+        }
+        if crate::rules::queue_bridge_failed() { BridgeTake::Skip } else { BridgeTake::Stop }
+    }
+
+    /// The bridge has played up to the parked song (`song_arrived` said `BridgeStep::Parked`): with the
+    /// network back (`network_up`) the bridge's songs go and the parked song plays, else more downloads go
+    /// in before it. None when there is nothing to change.
+    pub fn bridge_parked(&self, network_up: bool) -> Option<QueueEdit> {
+        if network_up {
+            playlist::playlist_unbridge()
+        } else {
+            self.bridge_start().ok().flatten()
+        }
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
     /// The server cannot be reached for the song playing: downloads to play instead, the closest to it
     /// first, none already queued. The first time the song and what follows are parked behind them;
     /// while bridging, more go in before the parked song. None when there is nothing downloaded to play.
@@ -36,35 +68,6 @@ impl Core {
             }
         }
         Ok(-1)
-    }
-
-    /// A song the network would not bring, the core having said it is the bridge's (`queue_error`
-    /// answered `Bridge`, or nori-engine's `Event::Bridge`): a download still queued after it plays, or
-    /// else a bridge starts, and failing both the song is skipped or the music stops, as any failure
-    /// would be. The run of failures is counted here either way.
-    pub fn bridge_take(&self) -> BridgeTake {
-        let next = self.bridge_next_downloaded().unwrap_or(-1);
-        if next >= 0 {
-            crate::rules::queue_bridged();
-            return BridgeTake::Jump { index: next as u32 };
-        }
-        if let Some(edit) = self.bridge_start().ok().flatten() {
-            nori_model::alog::info(&format!("bridge: bridging with {} downloads", edit.songs.len()));
-            crate::rules::queue_bridged();
-            return BridgeTake::Bridged { edit };
-        }
-        if crate::rules::queue_bridge_failed() { BridgeTake::Skip } else { BridgeTake::Stop }
-    }
-
-    /// The bridge has played up to the parked song (`song_arrived` said `BridgeStep::Parked`): with the
-    /// network back (`network_up`) the bridge's songs go and the parked song plays, else more downloads go
-    /// in before it. None when there is nothing to change.
-    pub fn bridge_parked(&self, network_up: bool) -> Option<QueueEdit> {
-        if network_up {
-            playlist::playlist_unbridge()
-        } else {
-            self.bridge_start().ok().flatten()
-        }
     }
 }
 

@@ -28,7 +28,7 @@ use nori_core::Core;
 use parking_lot::Mutex;
 
 use crate::ahead::{AheadSong, Takers};
-use crate::arriving::{Heard, Listening, Taker};
+use crate::arriving::{Heard, Listening};
 use crate::engine::Settings;
 use crate::library::{Library, Located, Source};
 use crate::source::{ByteSource, OpenError};
@@ -277,16 +277,17 @@ impl Library for CoreLibrary {
         // A download may have been transcoded: the file says what it is.
         let kept = self.store.as_ref().filter(|_| transfers::held(id) == 2).and_then(|s| s.downloaded(id));
         if let Some(path) = kept {
-            return Ok(Located { source: Source::File(path), hint: None, duration_ms });
+            return Ok(Located { source: Source::File(path), hint: None, duration_ms, estimated: false });
         }
         let target = self.client.resolve(id.to_string(), false, self.metered());
         let hint = key_format(&target.key).or_else(|| song.as_ref().map(|s| s.suffix.clone())).filter(|s| !s.is_empty());
+        let estimated = nori_core::stream::length_estimated(&target.url);
         let (url, bytes) = (target.url, self.bytes.clone());
         let source = match &self.store {
             Some(store) => Source::Cached { url, bytes, store: store.clone(), key: target.key },
             None => Source::Url { url, bytes },
         };
-        Ok(Located { source, hint, duration_ms })
+        Ok(Located { source, hint, duration_ms, estimated })
     }
 
     fn about(&self, id: &str) -> WindowSong {
@@ -305,7 +306,7 @@ impl Library for CoreLibrary {
         store.fetch_ahead(self.bytes.clone(), ahead_songs(self.client.precache_targets(self.metered()), next), Some(measuring_ahead()));
     }
 
-    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Box<dyn Taker>> {
+    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Listening> {
         measure_as_it_comes(id, hint, false)
     }
 }
@@ -851,11 +852,7 @@ impl Measurer {
 
     /// Stores what the streaming analyser measured of the whole of `id`: whether it was stored.
     fn finish(&self, core: &Core, id: &str, stream: nori_core::automix::store::AnalysisStream, expected_ms: i64) -> bool {
-        let handle = stream.into_handle();
-        let stored = core.analysis_finish_whole(id.to_string(), handle, expected_ms);
-        // SAFETY: the handle was made just above and is handed to nobody else.
-        unsafe { nori_core::automix::store::AnalysisStream::free_handle(handle) };
-        let a = stored.ok().flatten();
+        let a = core.analysis_finish_whole(id, stream, expected_ms).ok().flatten();
         nori_core::alog::info(&match &a {
             Some(t) => format!("analysed {id} ahead: {:.2} bpm (conf {:.2}, stab {:.2})", t.bpm, t.bpm_confidence, t.stability),
             None => format!("analysed {id} ahead: not stored: not the whole song, or too short"),
@@ -888,7 +885,7 @@ pub fn measuring_as_they_come() -> bool {
 /// not measured yet, its container can be read as it comes (`hint`: not an MP4, which may keep what it is at
 /// its end), and it is not being measured as it comes already. `wait`: the fetch may wait for the decoder
 /// (fetching ahead, a download); a loader the player may be reading from must not.
-pub fn measure_as_it_comes(id: &str, hint: Option<&str>, wait: bool) -> Option<Box<dyn Taker>> {
+pub fn measure_as_it_comes(id: &str, hint: Option<&str>, wait: bool) -> Option<Listening> {
     if !nori_core::rules::prefs(|p| p.auto_mix) || !nori_core::queue::analysable(id) || !crate::demux::decodes_as_it_comes(hint) {
         return None;
     }
@@ -906,7 +903,7 @@ pub fn measure_as_it_comes(id: &str, hint: Option<&str>, wait: bool) -> Option<B
     let expected_ms = nori_core::queue::queue_song(id.to_string()).map_or(0, |s| s.duration as i64 * 1000);
     let heard = Measuring { id: id.to_string(), core, expected_ms, stream: None, cpu_from: None };
     match Listening::start(hint.map(str::to_string), wait, Box::new(heard)) {
-        Some(l) => Some(Box::new(l)),
+        Some(l) => Some(l),
         None => {
             ARRIVING.lock().retain(|i| i != id);
             None
@@ -938,10 +935,7 @@ impl Heard for Measuring {
         let Measuring { id, core, expected_ms, stream, cpu_from } = *self;
         let stored = match stream {
             Some(stream) if whole => {
-                let handle = stream.into_handle();
-                let a = core.analysis_finish_whole(id.clone(), handle, expected_ms).ok().flatten();
-                // SAFETY: the handle was made just above and is handed to nobody else.
-                unsafe { nori_core::automix::store::AnalysisStream::free_handle(handle) };
+                let a = core.analysis_finish_whole(&id, stream, expected_ms).ok().flatten();
                 let cpu = match (cpu_from, crate::arriving::thread_cpu_ms()) {
                     (Some(a), Some(b)) => format!(", {} ms of CPU", b.saturating_sub(a)),
                     _ => String::new(),
