@@ -180,29 +180,14 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
 }
 
 /**
- * "3:07", or "1:02:03" from an hour (nori-core's `fmt::duration`). Each second's text is made once for
- * the life of the process and kept: the seek bar asks for two of these every second a song plays, and
- * every list row for its song's length, so after the first time through they cost a lookup.
+ * "3:07", or "1:02:03" from an hour ([dev.nori.music.text.Fmt.duration]). Each second's text is made once
+ * for the life of the process and kept: the seek bar asks for two of these every second a song plays, and
+ * every list row for its song's length, so after the first time through they cost an array read.
  */
-fun duration(seconds: Long): String {
-    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.words.duration(seconds)
-    val i = seconds.toInt()
-    return Durations.made[i] ?: dev.nori.music.look.CoverLook.duration(seconds, false).also { Durations.made[i] = it }
-}
+fun duration(seconds: Long): String = dev.nori.music.text.Fmt.duration(seconds)
 
-/** The time left, "-3:07" (nori-core's `fmt::duration_left`): kept the same way. */
-fun durationLeft(seconds: Long): String {
-    if (seconds < 0 || seconds >= Durations.MAX) return dev.nori.music.ffi.words.durationLeft(seconds)
-    val i = seconds.toInt()
-    return Durations.left[i] ?: dev.nori.music.look.CoverLook.duration(seconds, true).also { Durations.left[i] = it }
-}
-
-private object Durations {
-    /** Two hours: a longer mix or audiobook is formatted as it goes. */
-    const val MAX = 7200L
-    val made = arrayOfNulls<String>(MAX.toInt())
-    val left = arrayOfNulls<String>(MAX.toInt())
-}
+/** The time left, "-3:07": kept the same way. */
+fun durationLeft(seconds: Long): String = dev.nori.music.text.Fmt.durationLeft(seconds)
 
 /** What a sideways drag on a song row does: what it uncovers under the row, and what letting go past [SWIPE_ARM] does. */
 class RowSwipe(val icon: ImageVector, val label: String, val action: () -> Unit)
@@ -488,25 +473,27 @@ fun LazyListScope.songRows(
 @Composable
 internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel): RowSwipe? {
     val starred = action == SwipeAction.FAVOURITE && LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
-    // What it says and does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once.
-    val words = SwipeWords.of(action.ordinal, starred) ?: return null
-    return when (val act = words.act) {
-        dev.nori.music.ffi.library.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, words.label) { actions.enqueue(listOf(song)) }
-        dev.nori.music.ffi.library.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, words.label) { actions.playNext(listOf(song)) }
-        dev.nori.music.ffi.library.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, words.label) { actions.download(listOf(song)) }
-        is dev.nori.music.ffi.library.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, words.label) { actions.star(song, act.on) }
+    // What it does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once. What
+    // it says is one of Say's words, read once per locale: a row allocates no text.
+    val act = SwipeActs.of(action.ordinal, starred) ?: return null
+    val label = say.rowSwipe(act)
+    return when (act) {
+        dev.nori.music.ffi.library.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, label) { actions.enqueue(listOf(song)) }
+        dev.nori.music.ffi.library.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, label) { actions.playNext(listOf(song)) }
+        dev.nori.music.ffi.library.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, label) { actions.download(listOf(song)) }
+        is dev.nori.music.ffi.library.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, label) { actions.star(song, act.on) }
     }
 }
 
-/** The core's words for each swipe setting, hearted or not, asked once each. */
-private object SwipeWords {
+/** The core's answer for each swipe setting, hearted or not, asked once each. */
+private object SwipeActs {
     private val made = arrayOfNulls<Any>(16)
     private val NONE = Any()
-    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.library.RowSwipe? {
+    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.library.RowSwipeAct? {
         val i = setting * 2 + if (starred) 1 else 0
         if (i !in made.indices) return null
         val got = made[i] ?: (dev.nori.music.ffi.library.rowSwipe(setting.toUInt(), starred) ?: NONE).also { made[i] = it }
-        return got as? dev.nori.music.ffi.library.RowSwipe
+        return got as? dev.nori.music.ffi.library.RowSwipeAct
     }
 }
 
@@ -611,7 +598,7 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
             is Load.Ready -> content(state.data)
             is Load.Loading -> Box(modifier.fillMaxSize(), Alignment.Center) { LoadingDots() }
             is Load.Failed -> Column(modifier.fillMaxSize().padding(Space.gutter), Arrangement.Center, Alignment.CenterHorizontally) {
-                Text(remember { dev.nori.music.ffi.words.wordsNote(dev.nori.music.ffi.words.Note.COULD_NOT_LOAD) }, style = MaterialTheme.typography.titleLarge)
+                Text(noteText(Note.COULD_NOT_LOAD), style = MaterialTheme.typography.titleLarge)
                 Text(state.message, Modifier.padding(top = 4.dp), color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
             }
         }
@@ -619,13 +606,13 @@ fun <T> LoadBox(load: Load<T>, modifier: Modifier = Modifier, content: @Composab
 }
 
 
-/** One of nori-core's notes (`words_note`), asked once where it is shown. */
+/** One of the app's notes ([Note]), read once where it is shown. */
 @Composable
-fun noteText(note: dev.nori.music.ffi.words.Note): String = remember(note) { dev.nori.music.ffi.words.wordsNote(note) }
+fun noteText(note: Note): String = remember(note) { say.note(note) }
 
-/** Big, quiet type for an empty list, in the core's words. */
+/** Big, quiet type for an empty list. */
 @Composable
-fun EmptyNote(note: dev.nori.music.ffi.words.Note, modifier: Modifier = Modifier) = EmptyNote(noteText(note), modifier)
+fun EmptyNote(note: Note, modifier: Modifier = Modifier) = EmptyNote(noteText(note), modifier)
 
 /** Big, quiet type for an empty list: "Nothing here yet". */
 @Composable

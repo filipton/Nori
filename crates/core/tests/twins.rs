@@ -45,13 +45,6 @@ where
 }
 
 #[test]
-fn provider_covers() {
-    for r in rows("provider") {
-        assert_eq!(covers::is_provider_cover(&text(r[0]).unwrap()), flag(r[1]), "{r:?}");
-    }
-}
-
-#[test]
 fn cover_urls() {
     let mut out = String::new();
     for r in rows("cover_url") {
@@ -86,15 +79,6 @@ fn measuring_ahead() {
         let here = list(r[1]);
         let p = ahead::plan(list(r[0]).into_iter().map(String::from).collect(), |id| here.contains(&id));
         assert_eq!((p.measure.iter().map(String::as_str).collect::<Vec<_>>(), p.waiting), (list(r[2]), r[3].parse().unwrap()), "{r:?}");
-    }
-}
-
-#[test]
-fn precaching() {
-    for r in rows("precache") {
-        let fetching = list(r[1]);
-        let got = rules::precache_list(list(r[0]).into_iter().map(String::from).collect(), |id| fetching.contains(&id));
-        assert_eq!(got.iter().map(String::as_str).collect::<Vec<_>>(), list(r[2]), "{r:?}");
     }
 }
 

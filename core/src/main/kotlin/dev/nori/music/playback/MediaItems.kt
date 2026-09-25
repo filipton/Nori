@@ -55,12 +55,13 @@ fun List<Song>.heldMediaItems(coverUrl: (Song) -> String?): List<MediaItem> = ma
 
 const val RADIO_PREFIX = "radio:"
 
-fun RadioStation.toMediaItem(): MediaItem = MediaItem.Builder()
+/** A station as media3 plays it; [artist] is what it is listed under where a song shows its artist ("Radio"). */
+fun RadioStation.toMediaItem(artist: String): MediaItem = MediaItem.Builder()
     .setMediaId(RADIO_PREFIX + id)
     .setUri(streamUrl)
     .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(Uri.parse(streamUrl)).build())
     .setMediaMetadata(
-        MediaMetadata.Builder().setTitle(name).setArtist(dev.nori.music.ffi.words.wordsRadioArtist()).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
+        MediaMetadata.Builder().setTitle(name).setArtist(artist).setMediaType(MediaMetadata.MEDIA_TYPE_RADIO_STATION)
             .setIsPlayable(true).setIsBrowsable(false).build()
     )
     .build()

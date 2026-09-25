@@ -30,7 +30,7 @@ class TestBridge : BroadcastReceiver() {
             """"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
             """"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},""" +
             """"offloaded":${dev.nori.music.playback.PlaybackService.rustPlayer?.offloaded ?: false},""" +
-            """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten}}"""
+            """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: 0}}"""
     }
 
     private fun watchStates() {

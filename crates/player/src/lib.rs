@@ -12,7 +12,6 @@ pub mod dsp;
 pub mod engine;
 pub mod eqfit;
 pub mod outputs;
-pub mod packets;
 pub mod heard;
 pub mod pcm;
 pub mod seek;
@@ -21,7 +20,6 @@ pub mod playlist;
 pub mod policy;
 pub mod queue;
 pub mod silence;
-pub mod sink;
 #[cfg(any(test, feature = "synth"))]
 pub mod sim;
 pub mod sound;

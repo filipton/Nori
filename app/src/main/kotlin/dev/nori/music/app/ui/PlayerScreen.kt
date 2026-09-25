@@ -589,7 +589,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
                 if (state.bridging) LookText(
-                    remember { dev.nori.music.ffi.words.wordsBridging() }, { live.color(CoverLook.ON_55) },
+                    remember { say.bridging }, { live.color(CoverLook.ON_55) },
                     Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 2.dp),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -648,7 +648,7 @@ private data class PlayerTitleMeta(
 
 private fun playerTitleMeta(song: dev.nori.music.ffi.model.Song?, radio: String?) = song?.let {
     PlayerTitleMeta(it.id, it.title, it.artist, it.album.orEmpty(), it.artistId, it.albumId)
-} ?: PlayerTitleMeta(null, dev.nori.music.ffi.words.wordsPlayerIdle(radio), "", "", null, null)
+} ?: PlayerTitleMeta(null, say.playerIdle(radio), "", "", null, null)
 
 /**
  * Where the sound is going, and one tap to change it. The glyph says which kind of output is carrying
@@ -673,8 +673,9 @@ private fun OutputButton() {
         dev.nori.music.ffi.devices.OutputGlyph.BLUETOOTH -> Icons.Filled.Bluetooth
         dev.nori.music.ffi.devices.OutputGlyph.CAST -> Icons.Filled.Cast
     }
+    val description = remember(o) { say.outputDescription(o.port, o.name) }
     IconButton({ openOutputPicker(context, output) }) {
-        LookIcon(icon, o.description, Modifier.size(27.dp)) { look.color(if (o.elsewhere) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
+        LookIcon(icon, description, Modifier.size(27.dp)) { look.color(if (o.elsewhere) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
     }
 }
 
@@ -707,7 +708,7 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
             )
         }.isSuccess
     ) return
-    android.widget.Toast.makeText(context, dev.nori.music.ffi.words.wordsPlayingThrough(output), android.widget.Toast.LENGTH_SHORT).show()
+    android.widget.Toast.makeText(context, dev.nori.music.ffi.devices.outputLook(output).let { say.playingThrough(say.outputLabel(it.port, it.name)) }, android.widget.Toast.LENGTH_SHORT).show()
 }
 
 /**
@@ -2226,9 +2227,7 @@ private fun SeekTimes(
         // and subtracting one from the other gives a number about fifty years wide, which the
         // rounding then turned into a cheerful "1 min" for every timer ever set.
         if (sleepAt > 0) times.longValue
-        val centre = if (error == null && !sleepAtEndOfTrack && sleepAt <= 0) "" else dev.nori.music.ffi.seekMiddle(
-            error, sleepAtEndOfTrack, if (sleepAt > 0) sleepAt - android.os.SystemClock.elapsedRealtime() else null,
-        )
+        val centre = error ?: if (sleepAtEndOfTrack || sleepAt > 0) say.sleep(sleepAtEndOfTrack, if (sleepAt > 0) sleepAt - android.os.SystemClock.elapsedRealtime() else 0) else ""
         val errorColour = MaterialTheme.colorScheme.error
         Box(Modifier.weight(1f).padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
             LookText(
@@ -2300,7 +2299,7 @@ private fun Queue(vm: PlayerViewModel) {
     // away (the list opens at the playing row, which used to hide them).
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Caption(remember { dev.nori.music.ffi.words.wordsUpNext() }, Modifier.padding(top = 4.dp, bottom = 8.dp))
+            Caption(remember { say.upNext }, Modifier.padding(top = 4.dp, bottom = 8.dp))
             Row(Modifier, Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
                 val shuffleOn = state.shuffle
                 val repeatOn = state.repeat != Repeat.OFF

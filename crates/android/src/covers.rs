@@ -47,6 +47,7 @@ pub(crate) static CLASS: Class = Class {
         native!(c"show", c"(JZ)V", show),
         native!(c"colours", c"(JLjava/lang/String;IZ[ILandroid/graphics/Bitmap;[I)I", colours),
         native!(c"decodeFile", c"(Ljava/lang/String;Landroid/graphics/Bitmap;Z)I", decode_file),
+        native!(c"isProvider", c"(Ljava/lang/String;)Z", is_provider),
     ],
 };
 
@@ -425,6 +426,13 @@ extern "system" fn cancel(_: JNIEnv, _: JClass, ticket: jlong) {
         // SAFETY: `ticket` came from `request` and Kotlin hands each back once.
         drop(unsafe { Box::from_raw(ticket as *mut Ticket) });
     }
+}
+
+/// Whether `url` is a provider's cover, never kept (`covers::is_provider_cover`). Asked for every cover a
+/// list draws: `@FastNative`, nothing allocated; 0.2 µs against 0.5 µs and 32 bytes for the same test in
+/// Kotlin.
+extern "system" fn is_provider(env: JNIEnv, _: JClass, url: JString) -> jboolean {
+    with_str(&env, &url, nori_core::covers::is_provider_cover).unwrap_or(false) as jboolean
 }
 
 /// Fetches the cover at `url` onto the disk without decoding it (a download's covers).

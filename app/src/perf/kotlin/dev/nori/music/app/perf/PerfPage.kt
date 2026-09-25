@@ -49,7 +49,6 @@ import dev.nori.music.app.ui.SectionHeader
 import dev.nori.music.app.ui.Space
 import dev.nori.music.app.ui.say
 import dev.nori.music.ffi.perf.PerfFigures
-import dev.nori.music.ffi.words.PerfWords
 
 /**
  * The Performance page: the states added up, the frames, the stretches themselves with their events
@@ -135,7 +134,7 @@ private fun Stretch(f: PerfFigures, w: PerfWords) {
         Text(f.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (f.events.isNotEmpty()) {
             Text(
-                if (open) w.hideEvents else dev.nori.music.ffi.words.wordsPerfEvents(f.events.size.toUInt()),
+                if (open) w.hideEvents else PerfWords.events(f.events.size),
                 Modifier.clickable { open = !open }.padding(top = 6.dp),
                 style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary,
             )

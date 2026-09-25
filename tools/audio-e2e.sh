@@ -108,7 +108,7 @@ watch_from_now
 # album pair proves nothing either way.
 "$app" play "$song" >/dev/null; sleep 4
 "$app" do "playnext $other" >/dev/null
-# Planned well before the song ends; the Rust engine plans once the next song is opened, a few seconds
+# Planned well before the song ends; the engine plans once the next song is opened, a few seconds
 # after the edit, so the wait is generous rather than tight.
 check "a crossfade is planned for the next boundary" waitfor "transition .*: [A-Z_]+ [0-9]+ ms at" 20
 
@@ -170,65 +170,40 @@ watch_from_now
 "$app" set crossfadeSec 0 >/dev/null
 check "with it off, the planner says so rather than going quiet" waitfor "planFor: off .*crossfadeSec=0" 10
 
-echo "-- a chain rebuild waits for the boundary"
-# Taking the equalizer out of the chain needs a sink rebuild, which used to cut the song
-# mid-track. Now it waits for the next boundary instead - and the swap itself is silent.
-# First a boundary to drain whatever the processing loop left pending, so the waits below
-# can only be satisfied by the toggles that follow.
+echo "-- the equalizer switches without a rebuild"
+# The engine keeps the equalizer in its chain (flat when off), so switching it is heard at once and
+# there is nothing to rebuild: no swap is deferred, and none happens at the boundary. First a boundary
+# to drain whatever the processing loop left pending, so the checks below can only see the toggles.
 "$app" do "playnext $other" >/dev/null; sleep 2
 "$app" do next >/dev/null; sleep 6
 watch_from_now
 "$app" set eq true >/dev/null; sleep 3
 "$app" set eq false >/dev/null; sleep 3
-if [ "$(field engine)" = rust ]; then
-  # The Rust engine keeps the equalizer in its chain (flat when off), so switching it is heard at once
-  # and there is nothing to rebuild: no swap is deferred, and none happens at the boundary.
-  check "taking the EQ out is heard at once, with no swap deferred" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
-  check "still playing after the EQ leaves" playing_audio
-  "$app" do "playnext $other" >/dev/null; sleep 2
-  "$app" do next >/dev/null; sleep 6
-  check "still playing across the boundary" playing_audio
-else
-  check "taking the EQ out waits for the boundary" waitfor "chain swap deferred" 10
-  check "still playing after the EQ leaves" playing_audio
-  "$app" do "playnext $other" >/dev/null; sleep 2
-  "$app" do next >/dev/null; sleep 6
-  check "the swap happens at the boundary" waitfor "chain swap at the boundary" 15
-  check "still playing after the swap" playing_audio
-fi
+check "taking the EQ out is heard at once, with no swap deferred" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
+check "still playing after the EQ leaves" playing_audio
+"$app" do "playnext $other" >/dev/null; sleep 2
+"$app" do next >/dev/null; sleep 6
+check "still playing across the boundary" playing_audio
 
 echo "-- tuning borrows the shallow buffer and returns it"
-# The equalizer screen trades the deep buffer for instant response; leaving it schedules the
-# deep buffer's return at the next boundary. Without that the pipeline stays half a second deep
-# and every transition bows out for want of runway.
-# Both ways, the swap waits for a boundary while music plays: rebuilding the track mid-song is a gap.
+# The equalizer screen trades the deep buffer for instant response, and leaving it takes the deep
+# buffer back. Without that the pipeline stays half a second deep and every transition bows out for
+# want of runway. The engine's track is opened deep once and resized in place, never reopened.
 "$app" set eq true >/dev/null; sleep 2
 watch_from_now
 "$app" do "tuning on" >/dev/null; sleep 2
 "$app" do "playnext $other" >/dev/null; sleep 2
 "$app" do next >/dev/null; sleep 6
 check "still playing after tuning cuts in" playing_audio
-shallow=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
 "$app" do "tuning off" >/dev/null; sleep 2
 "$app" do "playnext $other" >/dev/null; sleep 2
 "$app" do next >/dev/null; sleep 6
-deep=$(grep -oE "buffer=[0-9]+" "$watching" | tail -1 | grep -oE "[0-9]+")
-if [ "$(field engine)" = rust ]; then
-  # The Rust engine's track is opened deep once and resized in place, never reopened: its log says so.
-  check "tuning takes the shallow buffer, in place" bash -c "grep -q 'shallow for the equalizer in place' '$watching'"
-  check "the deep buffer is back, in place" bash -c "grep -q 'deep again in place' '$watching'"
-  check "the track was not reopened for tuning" bash -c "! grep -qE 'rust AudioTrack: .*(160|80) ms' '$watching'"
-else
-  check "tuning takes the shallow buffer ($shallow)" bash -c "[ '${shallow:-0}' -gt 0 ] && [ '${shallow:-0}' -lt 1764000 ]"
-  check "the deep buffer is back after the next boundary ($deep)" bash -c "[ '${deep:-0}' -gt '${shallow:-0}' ]"
-fi
-if [ "$(field engine)" = rust ]; then
-  # The Rust engine takes the deep buffer back as the screen closes (one flush behind a dip), so there is
-  # no swap left for the boundary; the check above already saw it back.
-  check "the deep buffer came back without waiting for a boundary" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
-else
-  check "the deep buffer swap happens at the boundary" waitfor "chain swap at the boundary" 15
-fi
+check "tuning takes the shallow buffer, in place" bash -c "grep -Eq 'shallow [0-9]+ ms.*topped up at' '$watching'"
+check "the deep buffer is back, in place" bash -c "grep -q 'deep again in place' '$watching'"
+check "the track was not reopened for tuning" bash -c "! grep -qE 'rust AudioTrack: .*(160|80) ms' '$watching'"
+# The deep buffer comes back as the screen closes (one flush behind a dip), so there is no swap left
+# for the boundary; the check above already saw it back.
+check "the deep buffer came back without waiting for a boundary" bash -c "! adb logcat -d -s nori:I | grep -q 'chain swap deferred'"
 check "still playing after the deep swap" playing_audio
 
 echo "-- AutoMix"
@@ -243,7 +218,7 @@ check "the mix is planned from what was measured" waitfor "transition .*: [A-Z_]
 echo "-- speed, pitch and silence skipping (nori-player's Sonic and skipper)"
 watch_from_now
 "$app" set speed 1.5 >/dev/null; sleep 3
-check "speed runs through the rust stage" waitfor "speed in chain: x1.5" 15
+check "speed runs through the engine's stage" waitfor "speed in chain: x1.5" 15
 a=$(field positionMs); sleep 6; b=$(field positionMs)
 check "1.5x plays 6 s of wall clock as ~9 s of song ($((b - a)) ms)" bash -c "[ $((b - a)) -ge 7800 ] && [ $((b - a)) -le 10200 ]"
 check "still playing at 1.5x" playing_audio
@@ -252,7 +227,7 @@ a=$(field positionMs); sleep 6; b=$(field positionMs)
 check "pitch alone keeps the pace ($((b - a)) ms)" bash -c "[ $((b - a)) -ge 5200 ] && [ $((b - a)) -le 6800 ]"
 "$app" set pitch 1 >/dev/null
 "$app" set skipSilence true >/dev/null; sleep 3
-check "silence skipping runs through the rust stage" waitfor "silence skipping in chain" 15
+check "silence skipping runs through the engine's stage" waitfor "silence skipping in chain" 15
 check "still playing while skipping silence" playing_audio
 "$app" set skipSilence false >/dev/null; sleep 2
 
@@ -279,8 +254,8 @@ c=$(field positionMs)
 check "play resumes from the seek ($c)" bash -c "[ '${c:-0}' -ge 29000 ]"
 
 echo "-- errors"
-# Either engine's: ExoPlayer's own line, or the Rust player's error events (RustPlayer.kt).
-errs=$(adb logcat -d | grep -cE "ExoPlayerImplInternal: Playback error|nori.*rust player error: ")
+# The player's error events (RustPlayer.kt).
+errs=$(adb logcat -d | grep -cE "nori.*rust player error: ")
 check "no playback errors in logcat ($errs)" test "$errs" -eq 0
 echo "== $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

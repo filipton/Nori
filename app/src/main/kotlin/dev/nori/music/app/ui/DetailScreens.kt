@@ -135,7 +135,7 @@ private fun discsOf(d: AlbumDetail): List<Pair<dev.nori.music.ffi.library.DiscGr
 
 /** An artist's releases by kind, as the core grouped them when the artist was read (`pages::release_groups`). */
 private fun groupsOf(d: dev.nori.music.ffi.library.ArtistDetail): List<Pair<String, List<Album>>> =
-    d.groups.map { g -> g.heading to g.albums.map { d.albums[it.toInt()] } }
+    d.groups.map { g -> say.releaseShelf(g) to g.albums.map { d.albums[it.toInt()] } }
 
 
 /**
@@ -146,9 +146,10 @@ private fun groupsOf(d: dev.nori.music.ffi.library.ArtistDetail): List<Pair<Stri
 @Composable
 internal fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
     val missing = remember(songs, done) { songs.filterNot { it.id in done } }
-    // What it says and does is the core's (`menus::download_entry`).
-    val entry = remember(songs.size, missing.size) { dev.nori.music.ffi.library.downloadEntry(songs.size.toUInt(), missing.size.toUInt()) }
-    return entry.label to when (entry.act) {
+    // What it does is the core's (`menus::download_entry`); what it says, Say's.
+    val act = remember(songs.size, missing.size) { dev.nori.music.ffi.library.downloadEntry(songs.size.toUInt(), missing.size.toUInt()) }
+    val label = remember(act, missing.size) { say.downloadEntry(act, missing.size) }
+    return label to when (act) {
         dev.nori.music.ffi.library.DownloadAct.ALL -> { { actions.download(songs) } }
         dev.nori.music.ffi.library.DownloadAct.MISSING -> { { actions.download(missing) } }
         dev.nori.music.ffi.library.DownloadAct.REMOVE -> { { actions.undownload(songs) } }
@@ -158,7 +159,7 @@ internal fun downloadEntry(songs: List<Song>, done: Set<String>, actions: Action
 /** The offer on a provider's album or playlist page (the core's `library_offer`), under the hero. */
 @Composable
 private fun LibraryOffer(id: String, external: Boolean, actions: ActionsViewModel) {
-    val offer = remember(id, external) { dev.nori.music.ffi.library.libraryOffer(id, external) } ?: return
+    val offer = remember(id, external) { dev.nori.music.ffi.library.libraryOffer(id, external)?.let(say::libraryOffer) } ?: return
     TextButton({ actions.addToLibrary(id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) { Text(offer) }
 }
 
@@ -196,8 +197,8 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
         return
     }
     val discs = remember(detail) { detail?.let(::discsOf).orEmpty() }
-    // The album's own caption once it is read; until then what the row that opened it knew (nori-core's `fmt`).
-    val caption = detail?.caption ?: remember(album) { dev.nori.music.ffi.words.albumHintCaption(album.year, album.songCount, album.duration) }
+    // The album's own caption once it is read; until then what the row that opened it knew.
+    val caption = remember(detail, album) { detail?.let(say::albumCaption) ?: say.albumHintCaption(album.year.toInt(), album.songCount.toInt(), album.duration.toLong()) }
     val queue = detail?.queue ?: remember(album.id) { albumHintQueue(album) }
     HeroPage(
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
@@ -235,7 +236,7 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
                         LibraryOffer(album.id, album.isExternal, actions)
                         discs.forEach { (disc, tracks) ->
                             // Only an album of several discs heads them (the core leaves the one disc's empty).
-                            if (disc.heading.isNotEmpty()) SectionTitle(disc.heading)
+                            if (disc.headed) SectionTitle(remember(disc) { say.discHeading(disc) })
                             val (onRight, onLeft) = actions.swipes
                             tracks.forEachIndexed { i, s ->
                                 SongRow(
@@ -287,7 +288,7 @@ private fun AlbumBody(
         coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
         title = d.album.name,
         subtitle = d.album.artist,
-        caption = d.caption,
+        caption = remember(d) { say.albumCaption(d) },
         onSubtitle = d.album.artistId?.let { a ->
             { nav.artist(a, Artist(a, d.album.artist, d.album.coverArt, null, 0u, false, false)) }
         },
@@ -302,7 +303,7 @@ private fun AlbumBody(
     ) {
         item(key = "header") { LibraryOffer(d.album.id, d.album.isExternal, actions) }
         discs.forEach { (disc, tracks) ->
-            if (disc.heading.isNotEmpty()) item(key = "disc${disc.disc}") { SectionTitle(disc.heading) }
+            if (disc.headed) item(key = "disc${disc.disc}") { SectionTitle(remember(disc) { say.discHeading(disc) }) }
             songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d${disc.disc}-", context = d.songs, lines = disc.lines)
         }
     }
@@ -338,8 +339,8 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
         coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
         title = artist.name,
         caption = remember(ui?.detail, artist.albumCount) {
-            if (ui != null) dev.nori.music.ffi.words.wordsReleases(ui.detail.albums.size.toUInt())
-            else artist.albumCount.takeIf { it > 0u }?.let { dev.nori.music.ffi.words.wordsReleases(it) }.orEmpty()
+            if (ui != null) say.releases(ui.detail.albums.size)
+            else artist.albumCount.takeIf { it > 0u }?.let { say.releases(it.toInt()) }.orEmpty()
         },
         onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id) } },
         onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id, shuffle = true) } },
@@ -434,7 +435,7 @@ private fun ArtistBody(
     HeroPage(
         coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
         title = ui.detail.artist.name,
-        caption = remember(ui.detail) { dev.nori.music.ffi.words.wordsReleases(ui.detail.albums.size.toUInt()) },
+        caption = remember(ui.detail) { say.releases(ui.detail.albums.size) },
         onPlay = { actions.playArtist(ui.detail.artist.id) },
         onShuffle = { actions.playArtist(ui.detail.artist.id, shuffle = true) },
         queue = ui.detail.queue,
@@ -507,7 +508,7 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
         subtitle = playlist.comment?.ifEmpty { null },
-        caption = detail?.caption ?: remember(playlist) { dev.nori.music.ffi.words.albumHintCaption(0u, playlist.songCount, playlist.duration) },
+        caption = remember(detail, playlist) { detail?.let { say.listCaption(it.songs.size, it.seconds.toLong(), true) } ?: say.albumHintCaption(0, playlist.songCount.toInt(), playlist.duration.toLong()) },
         onPlay = detail?.let { d -> { actions.play(d.songs) } },
         onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
         awaitingPlay = detail == null && load !is Load.Failed,
@@ -591,7 +592,7 @@ private fun PlaylistBody(
         coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
         title = d.playlist.name,
         subtitle = d.playlist.comment?.ifEmpty { null },
-        caption = d.caption,
+        caption = remember(d) { say.listCaption(d.songs.size, d.seconds.toLong(), true) },
         onPlay = { actions.play(d.songs) },
         onShuffle = { actions.shuffle(d.songs) },
         queue = d.queue,
@@ -622,7 +623,7 @@ fun GenreScreen(name: String, actions: ActionsViewModel, vm: GenreViewModel = vi
     val playing = playingId()
     LoadBox(load) { list ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item(key = "header") { Header(name, remember(list.size) { dev.nori.music.ffi.words.wordsSongs(list.size.toUInt()) }, null); PlayButtons(list, actions) }
+            item(key = "header") { Header(name, remember(list.size) { say.songs(list.size) }, null); PlayButtons(list, actions) }
             songRows(list, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }
@@ -642,12 +643,12 @@ fun FolderScreen(id: String, actions: ActionsViewModel, vm: FolderViewModel = vi
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
             item(key = "header") {
                 Header(
-                    remember(d.name) { dev.nori.music.ffi.words.wordsFolderTitle(d.name) },
-                    remember(d) { dev.nori.music.ffi.words.wordsFolder(d.folders.size.toUInt(), d.songs.size.toUInt()) }, null,
+                    remember(d.name) { say.folderTitle(d.name) },
+                    remember(d) { say.folderCaption(d.folders.size, d.songs.size) }, null,
                 )
                 if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions)
             }
-            items(d.folders, key = { "f" + it.id }) { f -> Text(remember(f.name) { dev.nori.music.ffi.words.wordsFolderRow(f.name) }, Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
+            items(d.folders, key = { "f" + it.id }) { f -> Text(remember(f.name) { say.folderRow(f.name) }, Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
             songRows(d.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
         }
     }

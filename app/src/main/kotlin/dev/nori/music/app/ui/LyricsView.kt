@@ -163,7 +163,7 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
                 }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     val look = LocalLook.current
-                    LookText(noteText(dev.nori.music.ffi.words.Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
+                    LookText(noteText(Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
                 }
             }
         }
@@ -198,22 +198,9 @@ private class LyricsAnchor {
         val ref = seen.firstOrNull { it.index == active } ?: seen.firstOrNull() ?: return null
         val starts = LongArray(old.lines.size) { old.lines[it].startMs }
         val next = LongArray(lyrics.lines.size) { lyrics.lines[it].startMs }
-        return matchingLine(starts, ref.index, next, old.synced && lyrics.synced) to ref.offset
+        // Which new line stands for the old one is the core's (nori_look::lyrics::matching_line).
+        return dev.nori.music.look.LyricsClock.matchingLine(starts, ref.index, next, old.synced && lyrics.synced) to ref.offset
     }
-}
-
-/**
- * The line of the new lyrics ([next], each line's start) that stands for line [at] of the old ones
- * ([old]): the one starting nearest to it (the earlier of two as near), or the same number when either
- * is not timed. Services split a song's words into lines their own way, so the numbers need not agree.
- */
-internal fun matchingLine(old: LongArray, at: Int, next: LongArray, timed: Boolean): Int {
-    if (next.isEmpty()) return 0
-    val i = at.coerceIn(0, maxOf(old.size - 1, 0))
-    if (!timed || old.isEmpty() || old[i] < 0) return at.coerceIn(0, next.size - 1)
-    var best = 0
-    for (k in next.indices) if (kotlin.math.abs(next[k] - old[i]) < kotlin.math.abs(next[best] - old[i])) best = k
-    return best
 }
 
 /** A display frame as the core counts them for the sweep (a sixtieth of a second), and the leeway a frame's timing is given. */
@@ -508,7 +495,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
         // on the next tap, and stays open while the offset is not zero so the number can be read.
         var tuning by remember(lyrics) { mutableStateOf(false) }
         // Whose words these are and whether they are timed, in the core's words; None: no corner at all.
-        val credit = remember(found.source, lyrics.synced) { dev.nori.music.ffi.words.wordsLyricsCredit(found.source, lyrics.synced) }
+        val credit = remember(found.source, lyrics.synced) { say.lyricsCredit(found.source, lyrics.synced) }
         val open = tuning || nudgeMs != 0L
         if (credit != null) androidx.compose.material3.Surface(
             onClick = { if (lyrics.synced) tuning = !tuning },
@@ -532,7 +519,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     dim, Modifier.padding(horizontal = 8.dp), style = MaterialTheme.typography.labelSmall,
                 )
                 if (open) {
-                    if (nudgeMs != 0L) LookText(remember(nudgeMs) { dev.nori.music.ffi.words.nudgeSeconds(nudgeMs) }, bright, style = MaterialTheme.typography.labelSmall)
+                    if (nudgeMs != 0L) LookText(remember(nudgeMs) { say.nudge(nudgeMs) }, bright, style = MaterialTheme.typography.labelSmall)
                     TextButton({ nudgeMs = clock.nudge(-1) }) { LookText(say.later, accent, style = MaterialTheme.typography.labelLarge) }
                     TextButton({ nudgeMs = clock.nudge(1) }) { LookText(say.sooner, accent, style = MaterialTheme.typography.labelLarge) }
                     if (nudgeMs != 0L) TextButton({ nudgeMs = clock.nudge(0) }) { LookText(say.reset, accent, style = MaterialTheme.typography.labelLarge) }

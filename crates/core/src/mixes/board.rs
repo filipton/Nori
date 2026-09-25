@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use crate::{db, stars, Core, Song};
+use nori_library::pages::total_seconds;
 
 pub use nori_library::mixes::board::*;
 
@@ -94,15 +95,15 @@ impl Core {
         if id == FAVOURITES_MIX {
             return self.board(|b| match &b.favourites {
                 Some(songs) => MixLookup::Ready {
-                    sheet: MixSheet { id: id.clone(), title: "Favourites".into(), covers: cover_ids(songs), caption: caption(songs), songs: songs.clone(), refreshable: false, favourites: true },
+                    sheet: MixSheet { id: id.clone(), name: MixName::Favourites, covers: cover_ids(songs), seconds: total_seconds(songs), songs: songs.clone(), refreshable: false, favourites: true },
                 },
                 None => MixLookup::NotDrawn,
             });
         }
-        let Some(spec) = spec_of(&id) else { return MixLookup::Unknown { message: format!("There is no mix called {id}") } };
+        let Some(spec) = spec_of(&id) else { return MixLookup::Unknown };
         self.board(|b| match b.drawn.get(spec.id) {
             Some(d) => MixLookup::Ready {
-                sheet: MixSheet { id: spec.id.into(), title: spec.title.into(), songs: d.songs.clone(), covers: cover_ids(&d.songs), refreshable: spec.refreshable(), favourites: false, caption: caption(&d.songs) },
+                sheet: MixSheet { id: spec.id.into(), name: spec.name, songs: d.songs.clone(), covers: cover_ids(&d.songs), refreshable: spec.refreshable(), favourites: false, seconds: total_seconds(&d.songs) },
             },
             None => MixLookup::NotDrawn,
         })
@@ -143,7 +144,7 @@ pub(crate) mod tests {
     fn empty_index_asks_for_the_fallback_and_keeps_the_period() {
         let core = Core::new(String::new(), "t".into()).unwrap();
         assert_eq!(core.mix_draw("nope".into(), 100, false, None), MixDraw::Unknown);
-        assert!(matches!(core.mix_page("nope".into()), MixLookup::Unknown { message } if message == "There is no mix called nope"));
+        assert!(matches!(core.mix_page("nope".into()), MixLookup::Unknown));
         assert_eq!(core.mix_page("discover".into()), MixLookup::NotDrawn);
         assert_eq!(core.mix_draw("discover".into(), 100, false, None), MixDraw::NeedsFallback);
         let random = vec![song("r1", "t", "a", "b", "", 0), song("ext-r2", "t", "a", "b", "", 0), song("r1", "t", "a", "b", "", 0)];

@@ -288,6 +288,12 @@ pub fn sleep_after(songs: u32, end_of_track: bool) -> (bool, u32) {
     (end_of_track || songs == 1, if songs <= 1 { 0 } else { songs - 1 })
 }
 
+/// Whether the equalizer screen wants the shallow buffer ([`Chain::tuning`]): the screen in sight, a
+/// change of the sound made on it, and the equalizer on.
+pub fn tuning_wanted(in_sight: bool, touched: bool, eq_on: bool) -> bool {
+    in_sight && touched && eq_on
+}
+
 /// A song change with `left` changes to go: how many remain, and whether to pause at the end of this one.
 pub fn sleep_song_changed(left: u32) -> (u32, bool) {
     match left {

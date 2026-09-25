@@ -400,7 +400,7 @@ pub fn main(argv: Vec<String>) {
             // Any setting by its name, as the settings screen changes it: `set eq true`.
             "set" => {
                 let (name, value) = rest.split_once(' ').unwrap_or((rest, ""));
-                match nori_core::settings_schema::setting_set(name.to_string(), value.to_string()) {
+                match nori_core::settings_model::setting_set(name.to_string(), value.to_string()) {
                     Some(c) => {
                         cli.prefs = c.prefs;
                         if c.effect & (APPLY_AUDIO | SOUND) != 0 {

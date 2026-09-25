@@ -100,7 +100,7 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// An output's reading, under `key` ("engine", "track", "exoplayer"): playing, its count of what it
+    /// An output's reading, under `key` ("engine", "track"): playing, its count of what it
     /// presented must move while it holds music written and not presented.
     pub fn output(&mut self, key: &str, m: &Moving) -> Option<Break> {
         let i = match self.outputs.iter().position(|(k, _)| k == key) {
@@ -135,23 +135,23 @@ impl Watch {
     }
 
     /// The song heard changed to `id` (the player service's word).
-    pub fn heard(&mut self, now: i64, id: &str, grace_ms: i64) -> Option<Break> {
+    pub fn heard(&mut self, now: i64, id: &str) -> Option<Break> {
         if self.heard.as_ref().is_none_or(|(h, _)| h != id) {
             self.heard = Some((id.to_string(), now));
         }
-        self.compare(now, grace_ms)
+        self.compare(now)
     }
 
     /// The screen shows `id` now (none: nothing).
-    pub fn shown(&mut self, now: i64, id: Option<&str>, grace_ms: i64) -> Option<Break> {
+    pub fn shown(&mut self, now: i64, id: Option<&str>) -> Option<Break> {
         self.shown = id.map(str::to_string);
-        self.compare(now, grace_ms)
+        self.compare(now)
     }
 
     /// Whether the screen can be seen: the app in the foreground with the screen on. A difference is only
     /// counted while it can, and from the moment it came back, so the time it spent off is not the
     /// screen's lateness, and it has the same [`DIFFER_MS`] to catch up as after any change of song.
-    pub fn visible(&mut self, now: i64, on: bool, grace_ms: i64) -> Option<Break> {
+    pub fn visible(&mut self, now: i64, on: bool) -> Option<Break> {
         if !on {
             self.hidden = true;
             self.differ_since = None;
@@ -161,12 +161,13 @@ impl Watch {
             self.hidden = false;
             self.differ_since = None;
         }
-        self.compare(now, grace_ms)
+        self.compare(now)
     }
 
     /// Whether the screen and the ear agree, looked at now: a difference said once, when it has lasted
-    /// longer than [`DIFFER_MS`] (and `grace_ms` more, the length of a mix the screen follows the ear through).
-    pub fn compare(&mut self, now: i64, grace_ms: i64) -> Option<Break> {
+    /// longer than [`DIFFER_MS`]. The player says itself which song is heard, a mix's too, so the screen
+    /// follows the ear through one with no grace of its own.
+    pub fn compare(&mut self, now: i64) -> Option<Break> {
         let (Some((heard, _)), Some(shown)) = (&self.heard, &self.shown) else {
             self.differ_since = None;
             return None;
@@ -180,7 +181,7 @@ impl Watch {
             return None;
         }
         let since = *self.differ_since.get_or_insert(now);
-        if self.differ_said || now - since <= DIFFER_MS + grace_ms.max(0) {
+        if self.differ_said || now - since <= DIFFER_MS {
             return None;
         }
         self.differ_said = true;
@@ -365,56 +366,43 @@ pub fn track_seen(now_ms: i64, playing: bool, written: u64, presented: u64, rate
     said(wall_ms(), b);
 }
 
-/// An output the platform reads (ExoPlayer's AudioTrack, `track` telling one from the next), at a moment it
-/// was awake anyway.
+/// The player service arrived on song `id`.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_output(key: String, track: i64, now_ms: i64, playing: bool, offloaded: bool, written: u64, presented: u64, rate: u32) {
+pub fn perf_watch_heard(wall_ms: i64, id: String) {
     if !on() {
         return;
     }
-    // Each AudioTrack counts from nought: another one starts the watch afresh.
-    let m = Moving { now_ms, playing, offloaded, song: Some(track as usize), written, presented, rate };
-    let b = with(|w| w.output(&key, &m));
-    said(wall_ms(), b);
-}
-
-/// The player service arrived on song `id`; `grace_ms` is how long a mix lets the screen trail it.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_heard(wall_ms: i64, id: String, grace_ms: i64) {
-    if !on() {
-        return;
-    }
-    let b = with(|w| w.heard(wall_ms, &id, grace_ms));
+    let b = with(|w| w.heard(wall_ms, &id));
     said(wall_ms, b);
 }
 
 /// The screen's player shows song `id` now.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_shown(wall_ms: i64, id: Option<String>, grace_ms: i64) {
+pub fn perf_watch_shown(wall_ms: i64, id: Option<String>) {
     if !on() {
         return;
     }
-    let b = with(|w| w.shown(wall_ms, id.as_deref(), grace_ms));
+    let b = with(|w| w.shown(wall_ms, id.as_deref()));
     said(wall_ms, b);
 }
 
 /// The screen can be seen (the app in the foreground, the screen on), or no longer can.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_visible(wall_ms: i64, visible: bool, grace_ms: i64) {
+pub fn perf_watch_visible(wall_ms: i64, visible: bool) {
     if !on() {
         return;
     }
-    let b = with(|w| w.visible(wall_ms, visible, grace_ms));
+    let b = with(|w| w.visible(wall_ms, visible));
     said(wall_ms, b);
 }
 
 /// Anything else woke the platform's watcher: the screen and the ear compared at this moment too.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_look(wall_ms: i64, grace_ms: i64) {
+pub fn perf_watch_look(wall_ms: i64) {
     if !on() {
         return;
     }
-    let b = with(|w| w.compare(wall_ms, grace_ms));
+    let b = with(|w| w.compare(wall_ms));
     said(wall_ms, b);
 }
 
@@ -583,52 +571,49 @@ mod tests {
     #[test]
     fn the_screen_may_trail_the_ear_a_second_and_a_mix_longer() {
         let mut w = Watch::default();
-        assert_eq!(w.heard(0, "a", 0), None);
-        assert_eq!(w.shown(10, Some("a"), 0), None);
-        assert_eq!(w.heard(1000, "b", 0), None);
-        assert_eq!(w.compare(1900, 0), None, "0.9 s behind");
-        assert_eq!(w.shown(1950, Some("b"), 0), None);
-        assert_eq!(w.heard(5000, "c", 0), None);
-        let b = w.compare(6100, 0).expect("1.1 s behind");
+        assert_eq!(w.heard(0, "a"), None);
+        assert_eq!(w.shown(10, Some("a")), None);
+        assert_eq!(w.heard(1000, "b"), None);
+        assert_eq!(w.compare(1900), None, "0.9 s behind");
+        assert_eq!(w.shown(1950, Some("b")), None);
+        assert_eq!(w.heard(5000, "c"), None);
+        let b = w.compare(6100).expect("1.1 s behind");
         assert_eq!(b.kind, "shown-heard");
         assert_eq!(b.detail, "the screen showed b while c was heard, for 1100 ms");
-        assert_eq!(w.compare(9000, 0), None, "said once");
-        assert_eq!(w.shown(9100, Some("c"), 0), None);
-        assert_eq!(w.heard(20_000, "d", 0), None);
-        assert_eq!(w.compare(24_000, 6000), None, "inside a six second mix");
-        assert!(w.compare(27_100, 6000).is_some());
+        assert_eq!(w.compare(9000), None, "said once");
+        assert_eq!(w.shown(9100, Some("c")), None);
     }
 
     #[test]
     fn the_screen_is_not_late_while_nobody_can_see_it() {
         let mut w = Watch::default();
-        w.heard(0, "a", 0);
-        w.shown(10, Some("a"), 0);
-        assert_eq!(w.visible(20, false, 0), None, "the screen goes off");
-        w.heard(1000, "b", 0);
-        assert_eq!(w.compare(60_000, 0), None, "a minute off: nothing is drawn, nothing is late");
-        assert_eq!(w.visible(64_000, true, 0), None, "back on: the second to catch up starts now");
-        assert_eq!(w.compare(64_900, 0), None);
-        let b = w.compare(65_100, 0).expect("still the old song 1.1 s after coming back");
+        w.heard(0, "a");
+        w.shown(10, Some("a"));
+        assert_eq!(w.visible(20, false), None, "the screen goes off");
+        w.heard(1000, "b");
+        assert_eq!(w.compare(60_000), None, "a minute off: nothing is drawn, nothing is late");
+        assert_eq!(w.visible(64_000, true), None, "back on: the second to catch up starts now");
+        assert_eq!(w.compare(64_900), None);
+        let b = w.compare(65_100).expect("still the old song 1.1 s after coming back");
         assert_eq!(b.detail, "the screen showed a while b was heard, for 1100 ms");
         // Caught up in time: nothing said.
         let mut w = Watch::default();
-        w.heard(0, "a", 0);
-        w.shown(10, Some("a"), 0);
-        w.visible(20, false, 0);
-        w.heard(1000, "b", 0);
-        w.visible(64_000, true, 0);
-        assert_eq!(w.shown(64_300, Some("b"), 0), None);
-        assert_eq!(w.compare(70_000, 0), None);
+        w.heard(0, "a");
+        w.shown(10, Some("a"));
+        w.visible(20, false);
+        w.heard(1000, "b");
+        w.visible(64_000, true);
+        assert_eq!(w.shown(64_300, Some("b")), None);
+        assert_eq!(w.compare(70_000), None);
     }
 
     #[test]
     fn lyrics_belong_to_the_song_heard() {
         let mut w = Watch::default();
         assert_eq!(w.lyrics(0, "a"), None, "nothing heard yet");
-        w.heard(1000, "a", 0);
+        w.heard(1000, "a");
         assert_eq!(w.lyrics(1500, "a"), None);
-        w.heard(2000, "b", 0);
+        w.heard(2000, "b");
         assert_eq!(w.lyrics(2500, "a"), None, "a's lyrics arriving just as b started");
         let b = w.lyrics(4000, "a").unwrap();
         assert_eq!(b.kind, "lyrics");

@@ -6,26 +6,19 @@ import dev.nori.music.Nori
 class NoriApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        dev.nori.music.app.ui.Say.use(resources)
+        dev.nori.music.net.Failures.use(resources)
         // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
         val nori = Nori.get(this)
         // Then the AutoEQ list, if the core says it is due (one request on Wi-Fi, once a month at most).
-        Thread { numberStyle(); nori.warmUp(); forgetCoil(); kotlinx.coroutines.runBlocking { nori.keepAutoEqList() } }.start()
+        Thread { nori.warmUp(); forgetCoil(); kotlinx.coroutines.runBlocking { nori.keepAutoEqList() } }.start()
     }
 
-    /** A new locale changes how the core writes fractions ("12,4 MB"), so it is told again. */
+    /** A new locale changes the words, read again from the resources (fractions follow it by themselves: "12,4 MB"). */
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        numberStyle()
-    }
-
-    /**
-     * The core writes numbers the way `String.format` does in the default locale; this tells it which
-     * separators that locale uses. On the warm-up thread at start, so loading the core stays off the
-     * main thread.
-     */
-    private fun numberStyle() {
-        val symbols = java.text.DecimalFormatSymbols.getInstance()
-        dev.nori.music.ffi.words.fmtSetLocale(symbols.decimalSeparator.toString(), symbols.groupingSeparator.toString())
+        dev.nori.music.app.ui.Say.use(resources)
+        dev.nori.music.net.Failures.use(resources)
     }
 
     /**

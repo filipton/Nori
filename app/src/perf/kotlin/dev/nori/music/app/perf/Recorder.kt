@@ -28,7 +28,6 @@ import dev.nori.music.Nori
 import dev.nori.music.app.PerfHooks
 import dev.nori.music.ffi.perf.PerfCounters
 import dev.nori.music.ffi.perf.PerfDevice
-import dev.nori.music.ffi.perf.PerfFormat
 import dev.nori.music.ffi.perf.PerfFrames
 import dev.nori.music.ffi.perf.PerfLogs
 import dev.nori.music.ffi.perf.PerfNote
@@ -103,8 +102,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
     /** The page's log section as the core laid it out, read when it is unfolded, and whether it is. */
     val log = mutableStateOf("")
     val logOpen = mutableStateOf(false)
-    /** The page's fixed words, the core's. */
-    val words by lazy { dev.nori.music.ffi.words.wordsPerf() }
+    /** The page's fixed words. */
+    val words = PerfWords
 
     /** The self test behind the page's button; made when the page first shows it. */
     val selfTest by lazy { SelfTest(app, this) }
@@ -210,7 +209,7 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             val player = Nori.get(app).player
             scope.launch {
                 player.state.map { it.current?.id }.distinctUntilChanged().collect { id ->
-                    dev.nori.music.ffi.perf.perfWatchShown(System.currentTimeMillis(), id, grace())
+                    dev.nori.music.ffi.perf.perfWatchShown(System.currentTimeMillis(), id)
                 }
             }
             scope.launch {
@@ -238,8 +237,7 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         val t = System.currentTimeMillis()
         heardId = id
         handler.post {
-            dev.nori.music.ffi.perf.perfWatchHeard(t, id, grace())
-            exoOutput()
+            dev.nori.music.ffi.perf.perfWatchHeard(t, id)
             underruns(t)
             val nori = Nori.get(app)
             // A song the queue does not know comes back with its id only.
@@ -253,11 +251,6 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             )
             note(t, PerfNote.Song(song))
         }
-    }
-
-    override fun format(id: String, codec: String, container: String, rate: Int, channels: Int, bitrate: Int, delay: Int, padding: Int) {
-        val t = System.currentTimeMillis()
-        handler.post { note(t, PerfNote.Format(id, PerfFormat(codec, container, rate, channels, bitrate, delay, padding))) }
     }
 
     override fun engine(engine: String?) {
@@ -298,15 +291,6 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
     }
 
     /**
-     * How long the screen may trail the song the service is on beyond a second: through a mix on the
-     * ExoPlayer path the service moves to the next song while the ear, and the screen, stay on the last.
-     */
-    private fun grace(): Long {
-        val p = Nori.get(app).settings.value
-        return if (PlaybackService.engine == "exoplayer" && (p.crossfadeSec > 0 || p.autoMix)) (maxOf(p.crossfadeSec, p.autoMixMaxS) + 1) * 1000L else 0L
-    }
-
-    /**
      * A second after the settings changed: what the engine shows against them (the core's call, which
      * judges only while playing through an open output, and not just after the service started).
      */
@@ -317,27 +301,6 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain, nori.outputs.usb.value,
             playing, PlaybackService.track != null,
         )
-    }
-
-    /**
-     * ExoPlayer's output, read at a moment this thread was awake anyway: what it presented against what
-     * was handed to it. The Rust player's is watched where it is written.
-     */
-    private fun exoOutput() {
-        if (PlaybackService.engine != "exoplayer") return
-        val opened = PlaybackService.track ?: return
-        val t = opened.track
-        runCatching {
-            val frame = frameBytes(t.audioFormat, t.channelCount)
-            val offloaded = Build.VERSION.SDK_INT >= 29 && t.isOffloadedPlayback
-            // Without the frames written (offloaded, or a format not read here) nothing can be judged.
-            if (frame <= 0 || offloaded || t.state != android.media.AudioTrack.STATE_INITIALIZED) return@runCatching
-            val written = dev.nori.music.playback.TransitionSink.bytesWritten / frame
-            dev.nori.music.ffi.perf.perfWatchOutput(
-                "exoplayer", System.identityHashCode(t).toLong(), SystemClock.elapsedRealtime(), t.playState == android.media.AudioTrack.PLAYSTATE_PLAYING, false,
-                written.toULong(), (t.playbackHeadPosition.toLong() and 0xFFFF_FFFFL).toULong(), t.sampleRate.toUInt(),
-            )
-        }
     }
 
     private fun note(t: Long, note: PerfNote) = runCatching { dev.nori.music.ffi.perf.perfNote(t, note) }
@@ -363,10 +326,9 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
 
     /** Something happened: when it moved the app into another state, one stretch ends and the next begins. */
     private fun changed() {
-        exoOutput()
         // Only a screen that can be seen is held to the song heard (see the core's Watch::visible).
-        dev.nori.music.ffi.perf.perfWatchVisible(System.currentTimeMillis(), foreground && screenOn, grace())
-        dev.nori.music.ffi.perf.perfWatchLook(System.currentTimeMillis(), grace())
+        dev.nori.music.ffi.perf.perfWatchVisible(System.currentTimeMillis(), foreground && screenOn)
+        dev.nori.music.ffi.perf.perfWatchLook(System.currentTimeMillis())
         // The service may have started (or stopped) since, and with it the path that plays.
         settings = cfg()
         val key = key()
@@ -453,7 +415,7 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
     private fun bench(into: androidx.compose.runtime.MutableState<String>, body: () -> String) {
         into.value = words.running
         Thread({
-            val result = runCatching(body).getOrElse { dev.nori.music.ffi.words.wordsPerfFailed(it.toString()) }
+            val result = runCatching(body).getOrElse { PerfWords.failed(it.toString()) }
             main.post { into.value = result }
         }, "bench").start()
     }
@@ -476,14 +438,14 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         return runCatching {
             val device = t.routedDevice
             PerfOutput(
-                engine = opened.engine, rate = t.sampleRate, channels = t.channelCount, encoding = t.audioFormat,
+                engine = "rust", rate = t.sampleRate, channels = t.channelCount, encoding = t.audioFormat,
                 askedBytes = opened.askedBytes.toLong(), sizeFrames = t.bufferSizeInFrames.toLong(),
                 capacityFrames = t.bufferCapacityInFrames.toLong(), modeAsked = opened.askedMode, mode = t.performanceMode,
                 offloaded = Build.VERSION.SDK_INT >= 29 && t.isOffloadedPlayback,
                 deviceType = device?.type ?: 0, deviceName = device?.productName?.toString().orEmpty(),
                 underruns = t.underrunCount, playState = t.playState,
-                // Only the Rust player says why it plays on the CPU.
-                pcmWhy = PlaybackService.rustPlayer?.takeIf { opened.engine == "rust" }?.pcmWhy.orEmpty(),
+                // Why it plays on the CPU, in the player's words.
+                pcmWhy = PlaybackService.rustPlayer?.pcmWhy.orEmpty(),
             )
         }.getOrNull()
     }

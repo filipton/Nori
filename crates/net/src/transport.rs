@@ -1,8 +1,8 @@
 //! The one door to the network. The platform keeps its HTTP stack (on Android OkHttp: the connection pool
 //! shared with the player, TLS, proxies, the reverse-proxy headers) and implements [`Transport`], a single
 //! GET. Everything above the socket is decided here: which address to ask, what is retried, what is
-//! cached, what a failure means to a person. A second player on another platform implements one method
-//! and gets all of it.
+//! cached, what kind of failure it was (each client words it). A second player on another platform
+//! implements one method and gets all of it.
 
 use std::fmt;
 
@@ -10,7 +10,7 @@ use std::fmt;
 pub const USER_AGENT: &str = "nori-music/0.1 (+https://github.com/filipton/nori-music)";
 
 /// What the platform says was wrong when a request did not come back. The platform only sorts its own
-/// exceptions into these; the words shown for them are [`describe_error`]'s.
+/// exceptions into these; each client words them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum FailureKind {
@@ -82,7 +82,8 @@ pub struct TransportResponse {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Error))]
 pub enum TransportError {
-    /// `detail` is the platform's own message, kept so a screen shows what it always showed.
+    /// `detail` is the platform's own message, data for the log and for a client that has no better
+    /// words for the kind.
     Failed { kind: FailureKind, detail: Option<String> },
 }
 
@@ -134,13 +135,20 @@ pub trait Transport: Send + Sync {
     fn address_changed(&self);
 }
 
-/// Everything a request from the client can end in, as the platform will see it. Kotlin's exception carries
-/// no message (uniffi's JNI bindings give none), so its `toString` is the Display below.
+/// Everything a request from the client can end in, as a kind and its facts: each client words it (the
+/// Display below is for logs). Kotlin's exception carries no message (uniffi's JNI bindings give none),
+/// so its `toString` is that Display.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Error), uniffi::export(Display))]
 pub enum NetError {
+    /// The request did not come back: what kind of failure the platform saw, and its own message.
     Transport { kind: FailureKind, detail: Option<String> },
+    /// The server answered with an error `status` and no Subsonic answer in the body (a proxy's page,
+    /// nothing at all). Counted as the network's failure: kept for later and tried at the other address.
+    Http { status: u16 },
+    /// The Subsonic error: its code, and the server's own message.
     Api { code: i32, reason: String },
+    /// The address answered, but not with a Subsonic response; `reason` is for the log.
     Parse { reason: String },
     Db { reason: String },
 }
@@ -148,7 +156,7 @@ pub enum NetError {
 impl NetError {
     /// The network failed, not the request: the write is kept for later and the other address is worth a try.
     pub fn is_io(&self) -> bool {
-        matches!(self, NetError::Transport { kind, .. } if kind.is_io())
+        matches!(self, NetError::Http { .. }) || matches!(self, NetError::Transport { kind, .. } if kind.is_io())
     }
 
     pub fn io(detail: String) -> Self {
@@ -160,6 +168,7 @@ impl fmt::Display for NetError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NetError::Transport { detail, .. } => f.write_str(detail.as_deref().unwrap_or("")),
+            NetError::Http { status } => write!(f, "HTTP {status}"),
             NetError::Api { reason, .. } => f.write_str(reason),
             NetError::Parse { reason } => write!(f, "bad response: {reason}"),
             NetError::Db { reason } => write!(f, "database: {reason}"),
@@ -198,7 +207,7 @@ impl From<TransportError> for NetError {
 pub async fn get(transport: &dyn Transport, url: String, timeout_ms: u32) -> Result<Vec<u8>, NetError> {
     let r = transport.get(url, timeout_ms).await?;
     if !(200..300).contains(&r.status) && (r.body.is_empty() || !subsonic_body(&r.body)) {
-        return Err(NetError::io(format!("HTTP {}", r.status)));
+        return Err(NetError::Http { status: r.status });
     }
     Ok(r.body)
 }
@@ -207,45 +216,6 @@ pub async fn get(transport: &dyn Transport, url: String, timeout_ms: u32) -> Res
 fn subsonic_body(body: &[u8]) -> bool {
     let start = body.iter().position(|b| !b.is_ascii_whitespace()).map_or(&[][..], |i| &body[i..]);
     start.starts_with(b"{") || (start.starts_with(b"<") && body.windows(17).take(512).any(|w| w == b"subsonic-response"))
-}
-
-// ---- what a failure means to a person -------------------------------------------------------------------
-
-const METERED_TEXT: &str = "This server is set to Wi-Fi only";
-
-/// What went wrong, sorted by the platform. `Api` carries the Subsonic error.
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum Trouble {
-    Network { kind: FailureKind },
-    Api { code: i32, reason: String },
-    /// The address answered, but not with a Subsonic response.
-    Parse,
-    Other,
-}
-
-/// What went wrong, in words a person can act on. `fallback` is the platform's own message, used when
-/// there is nothing better to say.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn describe_error(trouble: Trouble, fallback: String) -> String {
-    match trouble {
-        Trouble::Network { kind: FailureKind::Metered } => METERED_TEXT.into(),
-        Trouble::Network { kind: FailureKind::UnknownHost } => "Server not found. Check the address.".into(),
-        Trouble::Network { kind: FailureKind::Connect } => "Nothing is answering at that address. Is the port right, and is the server running?".into(),
-        Trouble::Network { kind: FailureKind::Timeout } => "The server did not answer in time.".into(),
-        Trouble::Network { kind: FailureKind::Tls } => {
-            "The server's certificate was not accepted. If it is self-signed, turn on \"Accept self-signed certificate\"; if it needs a client certificate, import one.".into()
-        }
-        Trouble::Network { kind: FailureKind::Cleartext } => "Cleartext HTTP was refused; use https://".into(),
-        Trouble::Api { code, reason } => match code {
-            40 => "Wrong user name or password.".into(),
-            41 => "This server does not support token authentication.".into(),
-            50 => "This user is not allowed to do that.".into(),
-            _ => reason,
-        },
-        Trouble::Parse => "That address answered, but not like a Subsonic server. Check the URL (and any reverse-proxy path).".into(),
-        Trouble::Network { .. } | Trouble::Other => fallback,
-    }
 }
 
 // ---- how the platform's HTTP client is set up ----------------------------------------------------------
@@ -470,18 +440,5 @@ mod tests {
         assert_eq!(server_host("h:0".into()), None);
         assert_eq!(server_host("h:99999".into()), None);
         assert_eq!(server_host("h b".into()), None);
-    }
-
-    #[test]
-    fn errors_are_worded_for_people() {
-        let t = |k| describe_error(Trouble::Network { kind: k }, "raw".into());
-        assert_eq!(t(FailureKind::Metered), "This server is set to Wi-Fi only");
-        assert_eq!(t(FailureKind::UnknownHost), "Server not found. Check the address.");
-        assert_eq!(t(FailureKind::Io), "raw");
-        assert_eq!(t(FailureKind::NoRoute), "raw");
-        assert_eq!(describe_error(Trouble::Api { code: 40, reason: "x".into() }, "raw".into()), "Wrong user name or password.");
-        assert_eq!(describe_error(Trouble::Api { code: 70, reason: "gone".into() }, "raw".into()), "gone");
-        assert!(describe_error(Trouble::Parse, "raw".into()).starts_with("That address answered"));
-        assert_eq!(describe_error(Trouble::Other, "raw".into()), "raw");
     }
 }

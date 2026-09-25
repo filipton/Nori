@@ -102,9 +102,9 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                 val s = if (shelf.row == dev.nori.music.settings.HomeRow.PINNED) dev.nori.music.app.vm.Shelf.Playlists(shelf.row, ui.pinned) else shelf
                 if (s.isEmpty) return@forEach
                 when (s) {
-                    is dev.nori.music.app.vm.Shelf.Albums -> shelf(s.row.title, s.albums, vm, arrival, place++, rise)
-                    is dev.nori.music.app.vm.Shelf.Playlists -> playlistShelf(s.row.title, s.playlists, vm, arrival, place++, rise)
-                    is dev.nori.music.app.vm.Shelf.Songs -> songShelf(s.row.title, s.songs, vm, actions, arrival, place++, rise)
+                    is dev.nori.music.app.vm.Shelf.Albums -> shelf(say.homeRow(s.row), s.albums, vm, arrival, place++, rise)
+                    is dev.nori.music.app.vm.Shelf.Playlists -> playlistShelf(say.homeRow(s.row), s.playlists, vm, arrival, place++, rise)
+                    is dev.nori.music.app.vm.Shelf.Songs -> songShelf(say.homeRow(s.row), s.songs, vm, actions, arrival, place++, rise)
                 }
             }
         }
@@ -177,7 +177,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.playlistShelf(
             SectionTitle(title)
             LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(playlists, key = { it.id }, contentType = { "playlist" }) { p ->
-                    CoverCard(p.name, p.songsLine, vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
+                    CoverCard(p.name, remember(p.songCount) { say.songs(p.songCount.toInt()) }, vm.cover(p.coverArt, CoverSize.CARD), 150.dp, { nav.playlist(p.id, p) })
                 }
             }
         }
@@ -337,7 +337,7 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
                         .padding(horizontal = Space.gutter, vertical = 14.dp),
                     verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                 ) {
-                    Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+                    Text(say.homeRow(row), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
                     // Turning a row off leaves it in the list below rather than taking it away, so it is
                     // clear where it went and how to have it back.
                     NoriSwitch(true, { _ -> toggled(row, false) })
@@ -351,7 +351,7 @@ private fun RowOrder(settings: dev.nori.music.app.vm.SettingsViewModel, onDone: 
                         Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 14.dp),
                         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
                     ) {
-                        Text(row.title, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(say.homeRow(row), Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         // It comes back at the end of the page, where it can be seen, and can be carried
                         // up from there.
                         NoriSwitch(false, { _ -> toggled(row, true) })

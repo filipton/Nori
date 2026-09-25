@@ -6,7 +6,7 @@ import dev.nori.music.ffi.model.Lyrics
 import dev.nori.music.data.FoundLyrics
 import dev.nori.music.data.followSong
 import dev.nori.music.data.sameAs
-import dev.nori.music.ffi.words.LyricsOrigin
+import dev.nori.music.ffi.settings.LyricsOrigin
 import dev.nori.music.net.said
 import dev.nori.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi

@@ -1788,7 +1788,6 @@ dependencies = [
  "nori-queue",
  "nori-settings",
  "nori-transfers",
- "nori-words",
  "parking_lot",
  "uniffi",
  "uniffi-bindgen-kotlin-jni",
@@ -1812,6 +1811,7 @@ dependencies = [
 name = "nori-cli"
 version = "0.3.3"
 dependencies = [
+ "async-trait",
  "image",
  "libc",
  "nori-core",
@@ -1846,7 +1846,6 @@ dependencies = [
  "nori-queue",
  "nori-settings",
  "nori-transfers",
- "nori-words",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1933,7 +1932,6 @@ dependencies = [
  "nori-look",
  "nori-model",
  "nori-net",
- "nori-words",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1956,7 +1954,6 @@ dependencies = [
  "nori-model",
  "nori-net",
  "nori-settings",
- "nori-words",
  "parking_lot",
  "roxmltree",
  "serde",
@@ -1970,7 +1967,6 @@ name = "nori-model"
 version = "0.3.3"
 dependencies = [
  "nori-player",
- "nori-text",
  "rusqlite",
  "serde",
  "thiserror 2.0.20",
@@ -2014,7 +2010,6 @@ dependencies = [
  "nori-model",
  "nori-player",
  "nori-settings",
- "nori-text",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2026,7 +2021,6 @@ name = "nori-player"
 version = "0.3.3"
 dependencies = [
  "nori-player",
- "nori-text",
  "opus-rs",
  "parking_lot",
  "rubato",
@@ -2058,12 +2052,10 @@ version = "0.3.3"
 dependencies = [
  "nori-automix",
  "nori-db",
- "nori-library",
  "nori-look",
  "nori-model",
  "nori-player",
  "nori-testdir",
- "nori-words",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -2077,10 +2069,6 @@ name = "nori-testdir"
 version = "0.3.3"
 
 [[package]]
-name = "nori-text"
-version = "0.3.3"
-
-[[package]]
 name = "nori-transfers"
 version = "0.3.3"
 dependencies = [
@@ -2088,21 +2076,8 @@ dependencies = [
  "nori-model",
  "nori-net",
  "nori-settings",
- "nori-text",
- "nori-words",
  "parking_lot",
  "rusqlite",
- "serde_json",
- "uniffi",
-]
-
-[[package]]
-name = "nori-words"
-version = "0.3.3"
-dependencies = [
- "nori-model",
- "nori-player",
- "nori-text",
  "serde_json",
  "uniffi",
 ]

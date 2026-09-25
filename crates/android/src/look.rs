@@ -4,8 +4,8 @@
 //! up. The lyrics page is prepared once per song through uniffi (`nori_core::look`) and then asked every
 //! frame here with primitives in and one packed `long` out, allocating nothing on either side.
 
-use jni::objects::{JClass, JIntArray, JObject};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
+use jni::objects::{JClass, JIntArray, JLongArray, JObject};
+use jni::sys::{jboolean, jfloat, jint, jlong};
 use jni::JNIEnv;
 use nori_look::cover::derive;
 #[cfg(target_os = "android")]
@@ -21,7 +21,6 @@ pub(crate) static COVER: Class = Class {
     methods: &[
         native!(c"mix", c"([I[IF[I)V", mix),
         native!(c"seekTimes", c"(ZFJJJ)J", seek_times),
-        native!(c"duration", c"(JZ)Ljava/lang/String;", duration),
         native!(c"seekStep", c"(FFFFF)J", seek_step),
         native!(c"seekPaceNew", c"()J", seek_pace_new),
         native!(c"seekPaceFree", c"(J)V", seek_pace_free),
@@ -34,7 +33,6 @@ pub(crate) static COVER: Class = Class {
         native!(c"seekPaceFade", c"(J)F", seek_pace_fade),
         native!(c"transportGlyph", c"(ZZZ)I", transport_glyph),
         native!(c"heroButtons", c"(ZZZZZZ)I", hero_buttons),
-        native!(c"heroPlayLabel", c"(Z)Ljava/lang/String;", hero_play_label),
         native!(c"plain", c"([I[I)V", plain),
         native!(c"tones", c"(IZ[I)V", tones),
         native!(c"amoled", c"([I)V", amoled),
@@ -54,6 +52,7 @@ pub(crate) static LYRICS: Class = Class {
         native!(c"nudge", c"(JI)J", lyrics_nudge),
         native!(c"kept", c"(JJ)J", lyrics_kept),
         native!(c"strength", c"(ZII)F", lyrics_strength),
+        native!(c"matchingLine", c"([JI[JZ)I", lyrics_matching_line),
     ],
 };
 
@@ -252,18 +251,6 @@ extern "system" fn seek_times(dragging: jboolean, drag: jfloat, held_ms: jlong, 
     ((t.at_s.clamp(0, u32::MAX as i64)) << 32) | t.left_s.clamp(0, u32::MAX as i64)
 }
 
-/// A time under the seek bar ("3:07", or "-3:07" when `left`), asked once a second as the song plays:
-/// formatted on the stack and handed to Java as its one string, with no bridge objects around it.
-extern "system" fn duration(env: JNIEnv, _: JClass, seconds: jlong, left: jboolean) -> jstring {
-    let mut buf = [0u8; 32];
-    let n = nori_core::fmt::write_duration(seconds, left != 0, &mut buf).min(31);
-    buf[n] = 0;
-    let raw = env.get_raw();
-    // SAFETY: `raw` is this call's live JNIEnv, and `buf` is ASCII (digits, ':' and '-') ending in
-    // the NUL written above, which is valid modified UTF-8 for NewStringUTF.
-    unsafe { ((**raw).NewStringUTF.unwrap())(raw, buf.as_ptr().cast()) }
-}
-
 /// Which glyph the play button shows (`stage::transport_glyph`), as its place in `TransportGlyph`: 0 play,
 /// 1 pause, 2 spinner. Asked on every play and pause, so primitives only.
 extern "system" fn transport_glyph(playing: jboolean, buffering: jboolean, waited: jboolean) -> jint {
@@ -279,17 +266,6 @@ extern "system" fn transport_glyph(playing: jboolean, buffering: jboolean, waite
 /// and pause, so primitives only.
 extern "system" fn hero_buttons(here: jboolean, shuffle: jboolean, playing: jboolean, buffering: jboolean, can_play: jboolean, can_shuffle: jboolean) -> jint {
     nori_core::pages::hero_buttons(here != 0, shuffle != 0, playing != 0, buffering != 0, can_play != 0, can_shuffle != 0).pack()
-}
-
-/// What Play says (`pages::hero_play_label`): one Java string, no bridge objects.
-extern "system" fn hero_play_label(env: JNIEnv, _: JClass, pausing: jboolean) -> jstring {
-    let mut buf = [0u8; 8];
-    let label = nori_core::pages::hero_play_label(pausing != 0).as_bytes();
-    buf[..label.len()].copy_from_slice(label);
-    let raw = env.get_raw();
-    // SAFETY: `raw` is this call's live JNIEnv, and `buf` is ASCII ending in a NUL (the label is at most
-    // five bytes), which is valid modified UTF-8 for NewStringUTF.
-    unsafe { ((**raw).NewStringUTF.unwrap())(raw, buf.as_ptr().cast()) }
 }
 
 /// One step of the seek bar (`nori_look::motion::seek_step`), asked each frame it moves: primitives
@@ -374,6 +350,21 @@ extern "system" fn lyrics_kept(key: jlong, position_ms: jlong) -> jlong {
 /// line on the page whenever the line being sung changes, so primitives only.
 extern "system" fn lyrics_strength(synced: jboolean, line: jint, active: jint) -> jfloat {
     nori_look::lyrics::line_strength(synced != 0, line, active)
+}
+
+/// The line of the new lyrics that stands for line `at` of the old ones (`nori_look::lyrics::matching_line`),
+/// each given as its lines' starts. Asked once when finer lyrics replace the ones on screen: `@FastNative`,
+/// the arrays copied once.
+extern "system" fn lyrics_matching_line(env: JNIEnv, _: JClass, old: JLongArray, at: jint, next: JLongArray, timed: jboolean) -> jint {
+    let read = |a: &JLongArray| -> Vec<i64> {
+        let n = env.get_array_length(a).unwrap_or(0).max(0) as usize;
+        let mut v = vec![0i64; n];
+        if env.get_long_array_region(a, 0, &mut v).is_err() {
+            v.clear();
+        }
+        v
+    };
+    nori_look::lyrics::matching_line(&read(&old), at, &read(&next), timed != 0)
 }
 
 extern "system" fn lyrics_destroy(h: jlong) {

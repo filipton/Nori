@@ -74,22 +74,22 @@ pub enum ChoiceKind {
     Profile,
 }
 
-/// One output device in the equalizer's device list: `name` is what it calls itself, `kind` where it is
-/// plugged in, `sound` what it gets (a profile's name, "Flat", "Automatic", "Leave as is").
+/// One output device in the equalizer's device list: `output` is its key, `port` and `name` where it is
+/// plugged in and what it calls itself (none when it gave no name), and `choice` what it gets, with the
+/// profile's name for [`ChoiceKind::Profile`]. The client words the rest ("Automatic", "Leave as is").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRow {
     pub output: String,
-    pub name: String,
-    pub kind: Option<String>,
+    pub port: crate::outputs::OutputPort,
+    pub name: Option<String>,
     pub current: bool,
-    pub sound: String,
     pub choice: ChoiceKind,
     /// The profile bound to it, for `ChoiceKind::Profile`.
     pub profile: Option<String>,
 }
 
 /// Every output seen, the one playing now included, each with the sound it gets: the speaker first,
-/// then by name. `profiles` are (name, the outputs bound to it).
+/// then by the name its key gives it. `profiles` are (name, the outputs bound to it).
 pub fn rows(known: &[String], current: &str, profiles: &[(&str, &[String])], quiet: &[String]) -> Vec<DeviceRow> {
     let mut outputs: Vec<&str> = Vec::with_capacity(known.len() + 1);
     for o in known.iter().map(String::as_str).chain(std::iter::once(current)) {
@@ -97,7 +97,7 @@ pub fn rows(known: &[String], current: &str, profiles: &[(&str, &[String])], qui
             outputs.push(o);
         }
     }
-    let mut rows: Vec<DeviceRow> = outputs
+    let mut rows: Vec<(String, DeviceRow)> = outputs
         .into_iter()
         .map(|o| {
             let bound = profiles.iter().find(|(_, outs)| outs.iter().any(|x| x == o)).map(|(n, _)| *n);
@@ -107,49 +107,22 @@ pub fn rows(known: &[String], current: &str, profiles: &[(&str, &[String])], qui
                 None if quiet.iter().any(|q| q == o) => ChoiceKind::Quiet,
                 None => ChoiceKind::Automatic,
             };
-            let sound = match choice {
-                ChoiceKind::Automatic => "Automatic",
-                ChoiceKind::Quiet => "Leave as is",
-                ChoiceKind::Flat => "Flat",
-                ChoiceKind::Profile => bound.unwrap_or_default(),
-            };
-            let (kind, name) = match o.split_once(": ") {
-                Some((k, n)) => ((!k.is_empty()).then(|| k.to_string()), n),
-                None => (None, o),
-            };
-            DeviceRow {
+            let (port, name) = crate::outputs::parts(o);
+            // In the order the list has always had: by the name after "USB: " or "Bluetooth: ", else the key.
+            let order = o.split_once(": ").map_or(o, |(_, n)| n).to_lowercase();
+            let row = DeviceRow {
                 output: o.to_string(),
-                name: name.to_string(),
-                kind,
+                port,
+                name: name.map(str::to_string),
                 current: o == current,
-                sound: sound.to_string(),
                 choice,
-                profile: (choice == ChoiceKind::Profile).then(|| sound.to_string()),
-            }
+                profile: bound.filter(|_| choice == ChoiceKind::Profile).map(str::to_string),
+            };
+            (order, row)
         })
         .collect();
-    rows.sort_by_cached_key(|r| (r.output != crate::outputs::SPEAKER, r.name.to_lowercase()));
-    rows
-}
-
-/// A line for the snackbar about the device that just connected, with the one thing it offers to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NoticeText {
-    pub message: String,
-    pub action: String,
-}
-
-/// What to say about the device that just connected; only while it is still the one playing. `offer`:
-/// a curve `name` is offered; otherwise the curve `name` was applied without asking.
-pub fn notice(offer: bool, name: &str, output: &str, current: &str) -> Option<NoticeText> {
-    if output != current {
-        return None;
-    }
-    Some(if offer {
-        NoticeText { message: format!("{name} connected. Use its AutoEQ curve?"), action: "Apply".to_string() }
-    } else {
-        NoticeText { message: format!("Using AutoEQ for {name}"), action: "Undo".to_string() }
-    })
+    rows.sort_by(|a, b| (a.1.output != crate::outputs::SPEAKER, &a.0).cmp(&(b.1.output != crate::outputs::SPEAKER, &b.0)));
+    rows.into_iter().map(|(_, r)| r).collect()
 }
 
 #[cfg(test)]
@@ -159,40 +132,32 @@ mod tests {
 
     #[test]
     fn device_rows_say_what_each_device_gets() {
+        use crate::outputs::OutputPort;
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let known = s(&["USB: K3", SPEAKER, "Bluetooth: buds", "Wired headphones"]);
+        let known = s(&["USB: K3", SPEAKER, "Bluetooth: buds", "Wired headphones", "USB: DAC"]);
         let flat = s(&["Wired headphones"]);
         let warm = s(&["USB: K3", "Bluetooth: Other"]);
         let profiles: [(&str, &[String]); 2] = [(FLAT, &flat), ("Warm", &warm)];
         let rows = rows(&known, "Bluetooth: Other", &profiles, &s(&["Bluetooth: buds"]));
-        let got: Vec<(&str, &str, Option<&str>, bool, &str, ChoiceKind)> =
-            rows.iter().map(|r| (r.output.as_str(), r.name.as_str(), r.kind.as_deref(), r.current, r.sound.as_str(), r.choice)).collect();
+        let got: Vec<(&str, OutputPort, Option<&str>, bool, ChoiceKind, Option<&str>)> =
+            rows.iter().map(|r| (r.output.as_str(), r.port, r.name.as_deref(), r.current, r.choice, r.profile.as_deref())).collect();
         assert_eq!(
             got,
             [
-                (SPEAKER, SPEAKER, None, false, "Automatic", ChoiceKind::Automatic),
-                ("Bluetooth: buds", "buds", Some("Bluetooth"), false, "Leave as is", ChoiceKind::Quiet),
-                ("USB: K3", "K3", Some("USB"), false, "Warm", ChoiceKind::Profile),
-                ("Bluetooth: Other", "Other", Some("Bluetooth"), true, "Warm", ChoiceKind::Profile),
-                ("Wired headphones", "Wired headphones", None, false, "Flat", ChoiceKind::Flat),
+                (SPEAKER, OutputPort::Speaker, None, false, ChoiceKind::Automatic, None),
+                ("Bluetooth: buds", OutputPort::Bluetooth, Some("buds"), false, ChoiceKind::Quiet, None),
+                ("USB: DAC", OutputPort::Usb, None, false, ChoiceKind::Automatic, None),
+                ("USB: K3", OutputPort::Usb, Some("K3"), false, ChoiceKind::Profile, Some("Warm")),
+                ("Bluetooth: Other", OutputPort::Bluetooth, Some("Other"), true, ChoiceKind::Profile, Some("Warm")),
+                ("Wired headphones", OutputPort::Wired, None, false, ChoiceKind::Flat, None),
             ]
         );
-        assert_eq!(rows[2].profile.as_deref(), Some("Warm"));
-        assert_eq!(rows[4].profile, None);
     }
 
     #[test]
     fn the_current_device_is_listed_once() {
         let known = vec![SPEAKER.to_string()];
         assert_eq!(rows(&known, SPEAKER, &[], &[]).len(), 1);
-    }
-
-    #[test]
-    fn a_notice_is_only_about_the_device_playing_now() {
-        assert_eq!(notice(true, "Sony WH-1000XM5", "Bluetooth: X", "Bluetooth: X").unwrap().message, "Sony WH-1000XM5 connected. Use its AutoEQ curve?");
-        assert_eq!(notice(true, "A", "o", "o").unwrap().action, "Apply");
-        assert_eq!(notice(false, "A", "o", "o"), Some(NoticeText { message: "Using AutoEQ for A".into(), action: "Undo".into() }));
-        assert_eq!(notice(true, "A", "o", SPEAKER), None);
     }
 
     #[test]

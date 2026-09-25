@@ -32,8 +32,10 @@ object Bench {
             for (k in a.indices) o[k] = androidx.compose.ui.graphics.lerp(androidx.compose.ui.graphics.Color(a[k]), androidx.compose.ui.graphics.Color(b[k]), t).value.toInt()
             sink += o[3]
         }
-        run(out, "jni duration string", 50_000) { i -> sink += dev.nori.music.look.CoverLook.duration((i % 7000).toLong(), false).length }
-        run(out, "uniffi duration string", 20_000) { i -> sink += dev.nori.music.ffi.words.duration((i % 7000).toLong()).length }
+        // The seek bar's time label, formatted in Kotlin (it crossed over JNI, and over uniffi before that):
+        // a new string each time, and the per-second cache the seek bar reads.
+        run(out, "kotlin duration string", 50_000) { i -> sink += dev.nori.music.text.Fmt.clock((i % 7000).toLong(), false).length }
+        run(out, "kotlin duration cached", 50_000) { i -> sink += dev.nori.music.text.Fmt.duration((i % 7000).toLong()).length }
         return out.append("sink $sink").toString()
     }
 

@@ -12,8 +12,6 @@ import dev.nori.music.ffi.net.RequestPolicy
 import dev.nori.music.ffi.net.Transport
 import dev.nori.music.ffi.net.TransportException
 import dev.nori.music.ffi.net.TransportResponse
-import dev.nori.music.ffi.net.Trouble
-import dev.nori.music.ffi.net.describeError
 import dev.nori.music.ffi.net.netPolicy
 import dev.nori.music.ffi.net.netServer
 import dev.nori.music.ffi.net.requestPolicy
@@ -41,13 +39,13 @@ import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** The words come from the core; read once, when the first one is thrown. */
-private val meteredText by lazy { describeError(Trouble.Network(FailureKind.METERED), "") }
-
 private val JSON = "application/json".toMediaType()
 
-/** The server is only allowed on unmetered networks and this is not one. */
-class MeteredNetworkException : IOException(meteredText)
+/** The server is only allowed on unmetered networks and this is not one. Its message is for the log; [said] words it. */
+class MeteredNetworkException : IOException("metered network, server is Wi-Fi only")
+
+/** The server answered with an error status and nothing a Subsonic client can read. Its message is for the log; [said] words it. */
+class HttpStatusException(val status: Int) : IOException("HTTP $status")
 
 /**
  * One connection pool for everything: API calls, cover art and audio all ride
@@ -203,7 +201,7 @@ class Http(private val context: Context) {
      */
     suspend fun get(url: String, timeoutMs: Long = 0): ByteArray {
         val r = exchange(url, timeoutMs)
-        if (getFailed(r.status, r.body.isEmpty())) throw IOException(dev.nori.music.ffi.words.wordsHttpStatus(r.status))
+        if (getFailed(r.status, r.body.isEmpty())) throw HttpStatusException(r.status.toInt())
         return r.body
     }
 
@@ -260,6 +258,7 @@ fun NetException.lift(): Exception = when (this) {
         FailureKind.IO -> IOException(detail)
         FailureKind.OTHER -> IllegalStateException(detail)
     }
+    is NetException.Http -> HttpStatusException(status.toInt())
     is NetException.Api -> CoreException.Api(code, reason)
     is NetException.Parse -> CoreException.Parse(reason)
     is NetException.Db -> CoreException.Db(reason)
@@ -274,18 +273,10 @@ inline fun <T> lifted(block: () -> T): T = try {
 
 /**
  * What a failure says. The core's exceptions carry no message of their own (uniffi's JNI bindings give
- * them none); their `toString` is the core's wording.
+ * them none) and hand over a kind and its facts; they are worded here ([Failures]), as are the app's own
+ * network exceptions. Anything else says its own message.
  */
-val Throwable.said: String? get() = message ?: if (this is CoreException || this is NetException) toString() else null
+val Throwable.said: String? get() = Failures.said(this)
 
 /** What went wrong, in words a person can act on. */
-fun describeConnectionError(e: Throwable): String {
-    val trouble = when (e) {
-        is NetException -> return describeConnectionError(e.lift())
-        is CoreException.Api -> Trouble.Api(e.code, e.reason)
-        is CoreException.Parse -> Trouble.Parse
-        is CoreException -> Trouble.Other
-        else -> Trouble.Network(failureKind(e))
-    }
-    return describeError(trouble, e.said ?: e.javaClass.simpleName)
-}
+fun describeConnectionError(e: Throwable): String = Failures.describe(e)

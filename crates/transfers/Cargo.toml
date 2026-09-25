@@ -3,14 +3,14 @@ name = "nori-transfers"
 version.workspace = true
 edition.workspace = true
 
-# What is kept on the device: downloads as they run and what they say, and the stream cache's order.
+# What is kept on the device: downloads as they run and the facts about them, and the stream cache's order.
 [lib]
 name = "nori_transfers"
 
 [features]
 # The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
 # crate without them.
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-settings/ffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi", "nori-settings/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
@@ -19,8 +19,7 @@ rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 parking_lot = "0.12"
 nori-model = { path = "../model" }
 nori-db = { path = "../db" }
-nori-words = { path = "../words" }
 nori-net = { path = "../net" }
 # A download's size is estimated at the download quality the settings ask for.
 nori-settings = { path = "../settings" }
-nori-text = { path = "../text" }
+

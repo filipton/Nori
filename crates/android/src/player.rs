@@ -1,7 +1,6 @@
 //! The Rust playback path: nori-engine playing the core's queue (`CoreQueue`, `CoreApp`) into an
-//! AudioTrack (track.rs), selected by the "Playback engine" setting instead of ExoPlayer. Kotlin's
-//! `EnginePlayer` is a media3 player over these doors, so the session, the notification and the screens
-//! follow it as they follow ExoPlayer.
+//! AudioTrack (track.rs): the app's one player. Kotlin's `EnginePlayer` is a media3 player over these
+//! doors, so the media session, the notification and the screens follow it as they would any player.
 //!
 //! What only the platform has comes from Kotlin through a few calls into `RustBridge`, each made rarely:
 //! - the AudioTrack, opened by Kotlin (`openTrack`: the attributes, the DAC's preferred device and
@@ -9,9 +8,8 @@
 //! - a song's bytes (`open`, then `read` per 256 KB, each filled whole), at the URL and under the cache
 //!   key the core resolves (`nori_core::stream::resolve_now`, over the network state Kotlin tells the
 //!   core): through media3's data sources on the app's one OkHttp client, so the TLS settings, client
-//!   certificates and headers of the profile apply, and the downloads and the stream cache are the ones
-//!   the ExoPlayer path uses - a song downloaded or cached by either plays from the disk on both, and the
-//!   precacher fills them for both;
+//!   certificates and headers of the profile apply, and a song downloaded, cached or fetched ahead by the
+//!   precacher plays from the disk;
 //! - a wake for the events (`signal`): one call per batch of engine events, however many there are,
 //!   and Kotlin takes them from here on its own thread;
 //! - audio offload (Android 10 and later): whether the phone's audio chip decodes a song's compression
@@ -1150,7 +1148,7 @@ fn player(h: jlong) -> Option<Arc<Player>> {
 }
 
 /// Starts the engine over the core's queue and settings. `sdk` is Android's API level; `float` the high
-/// quality output setting, read once as the ExoPlayer path reads it; `memory_mb` the app's memory class,
+/// quality output setting, read once; `memory_mb` the app's memory class,
 /// which sizes how much of a song is kept loaded. 0 when the Java side could not be found.
 extern "system" fn create(mut env: JNIEnv, _: JClass, sdk: jint, float: jboolean, memory_mb: jint) -> jlong {
     if JAVA.get().is_none() {
@@ -1178,10 +1176,6 @@ extern "system" fn create(mut env: JNIEnv, _: JClass, sdk: jint, float: jboolean
     let chip = JAVA.get().is_some_and(|j| j.offload.is_some()) && sdk >= 29;
     let offloaded: Option<Box<dyn OffloadOutput>> = chip.then(|| Box::new(JavaOffload::new(offload.clone())) as Box<dyn OffloadOutput>);
     log(&format!("the engine starts: API {sdk}, {} output, {} MB of memory, offload {}", if float != 0 { "float" } else { "16-bit" }, config.memory_mb, if chip { "possible" } else { "not on this Android" }));
-    // The page's heard clock reads what ExoPlayer's transition engine last said, which nothing says here:
-    // an ExoPlayer let go of in the middle of a mix would otherwise keep the song it was mixing into on
-    // the page, over whatever this engine plays.
-    nori_core::heard::forget();
     let app = CoreApp::new().bridging();
     let engine = Engine::start_with(library, app, CoreQueue, Box::new(output), offloaded, config, move |e| tell.push(e));
     let h = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -1297,7 +1291,7 @@ extern "system" fn mixing(h: jlong) -> jboolean {
     player(h).is_some_and(|p| p.engine.status_with(|s| s.mixing)) as jboolean
 }
 
-/// Whether the sound chain is in the samples' path: what ExoPlayer's `Equalizer.active` says there.
+/// Whether the sound chain is in the samples' path.
 extern "system" fn chain_in(h: jlong) -> jboolean {
     player(h).is_some_and(|p| p.engine.status_with(|s| s.chain)) as jboolean
 }

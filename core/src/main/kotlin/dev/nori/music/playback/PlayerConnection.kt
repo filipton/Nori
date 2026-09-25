@@ -17,6 +17,7 @@ import com.google.common.util.concurrent.MoreExecutors
 import dalvik.annotation.optimization.CriticalNative
 import dalvik.annotation.optimization.FastNative
 import dev.nori.music.Nori
+import dev.nori.music.core.R
 import dev.nori.music.ffi.queue.Hand
 import dev.nori.music.ffi.queue.NextAction
 import dev.nori.music.ffi.model.RadioStation
@@ -153,8 +154,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     private val _mixing = MutableStateFlow(false)
     /**
      * A mix (AutoMix, a crossfade) is being heard right now, while the music plays. Pushed, not polled:
-     * whichever engine plays says when a mix starts and stops being heard (the ExoPlayer path's sink and
-     * nori-engine both nudge [publish], as for a change of song), so between mixes nothing runs for it.
+     * the player says when a mix starts and stops being heard (nori-engine nudges [publish], as for a
+     * change of song), so between mixes nothing runs for it.
      * Apart from [state], so that a mix starting recomposes only what says so.
      */
     val mixing: StateFlow<Boolean> = _mixing
@@ -173,9 +174,8 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             val c = runCatching { future.get() }.getOrNull() ?: return@addListener
             controller = c
             c.addListener(listener)
-            // The ear leaving the player's song, or catching up with it, is a song change to the
-            // UI, and the player itself fires no event for it. Fired on the playback thread.
-            TransitionSink.onHeardChanged = { main.post { controller?.let { publish(it, queueChanged = false) } } }
+            // A mix starting or ending is a change to the UI, and the player itself fires no event for it.
+            PlaybackService.onMixingChanged = { main.post { controller?.let { publish(it, queueChanged = false) } } }
             publish(c, queueChanged = true)
             pending.forEach { it(c) }
             pending.clear()
@@ -211,14 +211,19 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
         override fun onPlayerError(error: PlaybackException) {
             // The platform only sorts its error into the core's kinds (media3's audio output codes are the
-            // 5000s); what the player says about it is the core's (words.rs words_playback_error). It
-            // used to show the exception's own text, or a constant's name when the controller had none.
+            // 5000s), and says it in its own words. It used to show the exception's own text, or a
+            // constant's name when the controller had none.
             val kind = when {
                 error.errorCode in 5000 until 6000 -> dev.nori.music.ffi.model.PlaybackError.OUTPUT
                 error.isNetworkish() -> dev.nori.music.ffi.model.PlaybackError.NETWORK
                 else -> dev.nori.music.ffi.model.PlaybackError.OTHER
             }
-            _state.value = _state.value.copy(error = dev.nori.music.ffi.words.wordsPlaybackError(kind))
+            val said = when (kind) {
+                dev.nori.music.ffi.model.PlaybackError.OUTPUT -> R.string.playback_error_output
+                dev.nori.music.ffi.model.PlaybackError.NETWORK -> R.string.playback_error_network
+                else -> R.string.playback_error_other
+            }
+            _state.value = _state.value.copy(error = context.getString(said))
         }
     }
 
@@ -257,7 +262,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val heardIndex = (p as? MediaController)?.takeIf(::heard)?.let {
             dev.nori.music.ffi.queue.heardShownRow(this.heardIndex, queue.map { it.id }, item?.mediaId).takeIf { it >= 0 }
         }
-        _mixing.value = p.isPlaying && (PlaybackService.rustPlayer?.mixing ?: TransitionSink.mixing)
+        _mixing.value = p.isPlaying && PlaybackService.rustPlayer?.mixing == true
         _state.value = old.copy(
             connected = true, queue = queue, order = order, queued = queued,
             index = if (p.mediaItemCount == 0) -1 else heardIndex ?: p.currentMediaItemIndex,
@@ -288,7 +293,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         if (radioShown == null || announced != radioAnnounced || station != radioStation) {
             radioAnnounced = announced
             radioStation = station
-            radioShown = dev.nori.music.ffi.words.radioTitle(announced, station)
+            radioShown = dev.nori.music.ffi.radioTitle(announced, station)
         }
         return radioShown
     }
@@ -349,7 +354,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     }
 
     fun playRadio(station: RadioStation) = with { c ->
-        c.setMediaItem(station.toMediaItem())
+        c.setMediaItem(station.toMediaItem(context.getString(R.string.radio_artist)))
         c.prepare()
         c.play()
     }
@@ -540,6 +545,4 @@ internal object PlaylistJni {
     @JvmStatic @CriticalNative external fun shuffleShown(): Boolean
     /** The play order while shuffling, written into [out] when it is exactly that long; its length, -1 when not shuffling. */
     @JvmStatic @FastNative external fun order(out: IntArray): Int
-    /** Whether the player's list matches the core's: ids and play order as `List.hashCode()` over them. */
-    @JvmStatic @CriticalNative external fun same(count: Int, current: Int, shuffling: Boolean, idsHash: Int, orderHash: Int): Boolean
 }

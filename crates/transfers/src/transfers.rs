@@ -1,9 +1,9 @@
 //! Downloads as they run: how far each song is, how fast the bytes arrive, the batch the notification
-//! counts ("12 of 49"), what the notification and the downloads screen say, and how the batch went.
-//! The platform moves the bytes (media3 on Android) and reports to this; this decides and words
-//! everything. The per-chunk report is a slot number and three numbers - nothing is looked up by name
-//! or allocated while bytes flow - and the once-a-second notification is only rebuilt when its words
-//! or its bar actually change.
+//! counts ("12 of 49"), which of the notification's messages applies and how the batch went. The
+//! platform moves the bytes (media3 on Android), reports to this, and words what this says: the facts
+//! come out as numbers and kinds. The per-chunk report is a slot number and three numbers - nothing is
+//! looked up by name or allocated while bytes flow - and the once-a-second notification is only rebuilt
+//! when its facts actually change.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -144,11 +144,22 @@ impl Batch {
     }
 }
 
+/// What the running batch's notification is made from ([`notice`]).
 #[derive(Debug, Clone, PartialEq, Default)]
-struct Notice {
-    title: String,
-    text: String,
-    permille: i32,
+pub struct Notice {
+    pub kind: NoticeKind,
+    /// Which song of the batch is in flight, from 1, and how many the batch has.
+    pub position: i32,
+    pub total: i32,
+    /// The bar, in thousandths.
+    pub permille: i32,
+    /// Bytes a second, and seconds left (-1 unknown).
+    pub speed_bps: i64,
+    pub eta_s: i64,
+    /// The song in flight's title; empty when none is known.
+    pub current: String,
+    /// The album the batch is, when it has more than one song and all are from it; empty otherwise.
+    pub label: String,
 }
 
 /// Every download the platform has reported, the batch they make and what the notification says.
@@ -165,10 +176,6 @@ pub struct Tracker {
     remaining_bytes: i64,
     eta_s: i64,
     notice: Notice,
-    scratch_title: String,
-    scratch_text: String,
-    /// The downloads screen's lines are written here and handed over; see [`line`].
-    scratch_line: String,
 }
 
 static TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
@@ -498,12 +505,11 @@ pub fn sections<'a, T: Clone>(pending: &'a [T], done: &'a [T], marks: &HashMap<S
     [active, queued, failed, finished]
 }
 
-/// The notification's words and bar for `listed` downloads media3 knows of (`waiting`: no network yet).
-/// Returns 0 when nothing changed since the last call (keep the last notification), 1 when it did (read
-/// [`notice_words`] and [`notice_permille`]), 2 when the batch is over (the "complete" notification). Asked once a
-/// second: it works in buffers kept from call to call and allocates nothing unless the words change.
+/// The notification's facts and bar for `listed` downloads media3 knows of (`waiting`: no network yet).
+/// Returns 0 when nothing changed since the last call (keep the last notification), 1 when something did
+/// (read [`notice_facts`]; the platform words them), 2 when the batch is over (the "complete"
+/// notification). Asked once a second: it allocates nothing unless the song or the album changes.
 pub fn notice(listed: i32, waiting: bool, now: i64) -> i32 {
-    use std::fmt::Write;
     let mut guard = TRACKER.lock();
     let t = guard.get_or_insert_with(Tracker::default);
     let total = t.batch.total.max(t.batch.finished() + listed);
@@ -541,67 +547,61 @@ pub fn notice(listed: i32, waiting: bool, now: i64) -> i32 {
     t.remaining_bytes = remaining + (total - t.batch.finished() - listed).max(0) as i64 * avg;
     t.eta_s = if t.speed_bps > 0 && t.remaining_bytes > 0 { t.remaining_bytes / t.speed_bps } else { -1 };
     let current_title = current.and_then(|i| t.info.get(&t.slots[i].id)).map(|i| i.title.as_str()).filter(|s| !s.is_empty());
-    let (title, text) = (&mut t.scratch_title, &mut t.scratch_text);
-    title.clear();
-    text.clear();
-    if waiting {
-        title.push_str("Waiting for a network");
+    let kind = if waiting {
+        NoticeKind::Waiting
     } else if total == 1 {
-        match current_title {
-            Some(c) => {
-                let _ = write!(title, "Downloading “{c}”");
-            }
-            None => title.push_str("Downloading 1 song"),
-        }
+        if current_title.is_some() { NoticeKind::OneNamed } else { NoticeKind::One }
     } else {
-        let _ = write!(title, "Downloading: {position} of {total}");
-    }
-    let part = |text: &mut String, f: &dyn Fn(&mut String)| {
-        let start = text.len();
-        if start > 0 {
-            text.push_str(" · ");
-        }
-        let mark = text.len();
-        f(text);
-        if text.len() == mark {
-            text.truncate(start);
-        }
+        NoticeKind::Many
     };
-    if let Some(c) = current_title {
-        part(text, &|b| b.push_str(c));
-    }
-    if total != 1 {
-        if let Some(l) = t.batch.label() {
-            part(text, &|b| {
-                let _ = write!(b, "“{l}”");
-            });
-        }
-    }
-    let (speed_bps, eta_s) = (t.speed_bps, t.eta_s);
-    part(text, &|b| push_speed(b, speed_bps));
-    part(text, &|b| push_eta(b, eta_s));
-    if t.notice.title == t.scratch_title && t.notice.text == t.scratch_text && t.notice.permille == permille {
+    let label = if total != 1 { t.batch.label() } else { None };
+    let n = &t.notice;
+    if n.kind == kind
+        && n.position == position
+        && n.total == total
+        && n.permille == permille
+        && n.speed_bps == t.speed_bps
+        && n.eta_s == t.eta_s
+        && n.current == current_title.unwrap_or("")
+        && n.label == label.unwrap_or("")
+    {
         return 0;
     }
-    std::mem::swap(&mut t.notice.title, &mut t.scratch_title);
-    std::mem::swap(&mut t.notice.text, &mut t.scratch_text);
-    t.notice.permille = permille;
+    let (current, label) = (current_title.unwrap_or(""), label.unwrap_or(""));
+    let n = &mut t.notice;
+    // The strings are written into the ones kept, only when they changed.
+    if n.current != current {
+        n.current.clear();
+        n.current.push_str(current);
+    }
+    if n.label != label {
+        n.label.clear();
+        n.label.push_str(label);
+    }
+    (n.kind, n.position, n.total, n.permille, n.speed_bps, n.eta_s) = (kind, position, total, permille, t.speed_bps, t.eta_s);
     1
 }
 
-/// The notification's title and text as [`notice`] last worded them, as "title\ntext" (a title never
-/// holds a line break: the songs' and albums' are taken out), lent to `f`: one crossing for both.
-pub fn notice_words<R>(f: impl FnOnce(&str) -> R) -> R {
-    with(|t| {
-        let mut out = std::mem::take(&mut t.scratch_line);
-        out.clear();
-        out.push_str(&t.notice.title);
-        out.push('\n');
-        out.push_str(&t.notice.text);
-        let r = f(&out);
-        t.scratch_line = out;
-        r
-    })
+/// What the notification says while a batch runs, as [`notice`] last found it: which title applies and
+/// the facts the platform words it from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NoticeKind {
+    /// No network yet: "Waiting for a network".
+    #[default]
+    Waiting,
+    /// One song, whose title is known: "Downloading “Title”".
+    OneNamed,
+    /// One song, not named yet: "Downloading 1 song".
+    One,
+    /// More: "Downloading: 12 of 49".
+    Many,
+}
+
+/// The notification's facts as [`notice`] last found them, lent to `f`: the song in flight's title (empty
+/// when none) and the batch's album (empty unless the batch has more than one song, all from it), with
+/// the numbers. One crossing for all of it.
+pub fn notice_facts<R>(f: impl FnOnce(&Notice) -> R) -> R {
+    with(|t| f(&t.notice))
 }
 
 /// The notification's bar, in thousandths.
@@ -609,41 +609,64 @@ pub fn notice_permille() -> i32 {
     with(|t| t.notice.permille)
 }
 
-/// How the batch went, once it has: "title\ntext" (text may be empty), or empty when there is nothing to
-/// say. The caller keeps the notification when [`summary_failed`] says something failed.
-pub fn summary() -> String {
+/// How a finished batch went, for its notification's title: which one applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryTitle {
+    /// "`failed` songs couldn’t be downloaded".
+    Failed,
+    /// "“`label`” downloaded": more than one song, all from one album, none failed.
+    Album,
+    /// "`done` songs downloaded".
+    Downloaded,
+}
+
+/// The line under a finished batch's title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryText {
+    None,
+    /// Some failed, some did not: "`done` downloaded · tap to see what failed".
+    SomeFailed,
+    /// All failed: "Tap to try again".
+    TryAgain,
+}
+
+/// How a batch went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    pub title: SummaryTitle,
+    pub text: SummaryText,
+    pub done: i32,
+    pub failed: i32,
+    /// The album the batch was, for [`SummaryTitle::Album`]; empty otherwise.
+    pub label: String,
+}
+
+/// How the batch went, once it has; none when there is nothing to say. The caller keeps the notification
+/// when something failed.
+pub fn summary() -> Option<Summary> {
     with(|t| {
         let (done, failed) = (t.batch.done, t.batch.failed);
         if done == 0 && failed == 0 {
-            return String::new();
+            return None;
         }
+        let album = t.batch.label().filter(|_| done > 1);
         let title = if failed > 0 {
-            if failed == 1 {
-                "1 song couldn’t be downloaded".to_string()
-            } else {
-                format!("{failed} songs couldn’t be downloaded")
-            }
-        } else if let Some(l) = t.batch.label().filter(|_| done > 1) {
-            format!("“{l}” downloaded")
-        } else if done == 1 {
-            "1 song downloaded".to_string()
+            SummaryTitle::Failed
+        } else if album.is_some() {
+            SummaryTitle::Album
         } else {
-            format!("{done} songs downloaded")
+            SummaryTitle::Downloaded
         };
         let text = if failed > 0 && done > 0 {
-            format!("{done} downloaded · tap to see what failed")
+            SummaryText::SomeFailed
         } else if failed > 0 {
-            "Tap to try again".to_string()
+            SummaryText::TryAgain
         } else {
-            String::new()
+            SummaryText::None
         };
-        format!("{title}\n{text}")
+        let label = if title == SummaryTitle::Album { album.unwrap_or("").to_string() } else { String::new() };
+        Some(Summary { title, text, done, failed, label })
     })
-}
-
-/// How many songs of the batch failed.
-pub fn summary_failed() -> i32 {
-    with(|t| t.batch.failed)
 }
 
 // ---- uniffi: which songs are queued, and picking up an earlier process's queue -----------------------------
@@ -851,110 +874,37 @@ pub fn download_marks_changed() -> DownloadMarks {
     })
 }
 
-/// "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading", onto the
-/// end of `out`.
-fn push_summary(out: &mut String, active: i32, queued: i32, failed: i32, speed: i64, eta: i64) {
-    use std::fmt::Write;
-    let base = out.len();
-    let mut add = |f: &dyn Fn(&mut String)| {
-        let start = out.len();
-        if start > base {
-            out.push_str(" · ");
-        }
-        let mark = out.len();
-        f(out);
-        if out.len() == mark {
-            out.truncate(start);
-        }
-    };
-    if active > 0 {
-        add(&|o| {
-            let _ = write!(o, "{active} downloading");
-        });
-    }
-    if queued > 0 {
-        add(&|o| {
-            let _ = write!(o, "{queued} waiting");
-        });
-    }
-    if failed > 0 {
-        add(&|o| {
-            let _ = write!(o, "{failed} failed");
-        });
-    }
-    if active > 0 {
-        add(&|o| push_speed(o, speed));
-        add(&|o| push_eta(o, eta));
-    }
-    if out.len() == base {
-        out.push_str("Nothing downloading");
-    }
+/// Where a running song stands, for its row on the downloads screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowFacts {
+    /// Whole percent, -1 when the size is not known.
+    pub percent: i32,
+    /// Bytes a second (0 unknown) and seconds left (-1 unknown).
+    pub speed_bps: i64,
+    pub eta_s: i64,
 }
 
-/// Where a running song stands, onto the end of `out` (its artist): " · 45% · 2.1 MB/s · 1:20 left".
-fn push_row(out: &mut String, slots: &[Slot], id: &str) {
-    use std::fmt::Write;
-    {
-        let Some(s) = slots.iter().find(|s| s.live && s.id == id) else { return };
-        let f = fraction(s.length, s.bytes, s.estimate);
-        let total = if s.length > 0 { s.length } else { s.estimate };
-        let speed = s.rate as i64;
-        let eta = if speed > 0 && total > s.bytes { (total - s.bytes) / speed } else { -1 };
-        // Each figure only when there is one to give.
-        let add = |out: &mut String, f: &dyn Fn(&mut String)| {
-            let start = out.len();
-            out.push_str(" · ");
-            let mark = out.len();
-            f(out);
-            if out.len() == mark {
-                out.truncate(start);
-            }
-        };
-        if f >= 0.0 {
-            add(out, &|o| {
-                let _ = write!(o, "{}%", (f * 100.0).round() as i32);
-            });
-        }
-        add(out, &|o| push_speed(o, speed));
-        add(out, &|o| push_eta(o, eta));
-    }
+/// Where `id` stands if it is running; none when it is not.
+fn row_facts(slots: &[Slot], id: &str) -> Option<RowFacts> {
+    let s = slots.iter().find(|s| s.live && s.id == id)?;
+    let f = fraction(s.length, s.bytes, s.estimate);
+    let total = if s.length > 0 { s.length } else { s.estimate };
+    let speed = s.rate as i64;
+    let eta = if speed > 0 && total > s.bytes { (total - s.bytes) / speed } else { -1 };
+    Some(RowFacts { percent: if f >= 0.0 { (f * 100.0).round() as i32 } else { -1 }, speed_bps: speed, eta_s: eta })
 }
 
-/// Writes one of the downloads screen's lines into the tracker's own buffer and lends it to `f`: the only
-/// allocation is whatever the screen keeps of it.
-fn line<R>(write: impl FnOnce(&mut Tracker, &mut String), f: impl FnOnce(&str) -> R) -> R {
+// ---- the downloads screen's facts -----------------------------------------------------------------------------
+
+/// A song's row on the downloads screen: its artist (the downloads table's, read once per song; empty when
+/// unknown) and, while it runs, where it stands. Asked whenever its ring moves; the artist is lent to `f`.
+pub fn row<R>(id: &str, f: impl FnOnce(&str, Option<RowFacts>) -> R) -> R {
     let mut guard = TRACKER.lock();
     let t = guard.get_or_insert_with(Tracker::default);
-    let mut out = std::mem::take(&mut t.scratch_line);
-    out.clear();
-    write(t, &mut out);
-    let r = f(&out);
-    t.scratch_line = out;
-    r
+    let facts = row_facts(&t.slots, id);
+    let artist = t.info_now(id).map(|i| i.artist.as_str()).unwrap_or("");
+    f(artist, facts)
 }
-
-// ---- the downloads screen's words -----------------------------------------------------------------------------
-
-/// A running song's second line: its artist, then where it stands ("45% · 2.1 MB/s · 1:20 left"). Asked
-/// whenever its ring moves; lent to `f`. The artist is the downloads table's, read once per song.
-pub fn row<R>(id: &str, f: impl FnOnce(&str) -> R) -> R {
-    line(
-        |t, out| {
-            if let Some(i) = t.info_now(id) {
-                out.push_str(&i.artist);
-            }
-            push_row(out, &t.slots, id);
-        },
-        f,
-    )
-}
-
-/// The screen's summary line for its sections' sizes, with the batch's speed and time left; asked once a
-/// second while it is open; lent to `f`.
-pub fn summary_line<R>(active: i32, queued: i32, failed: i32, f: impl FnOnce(&str) -> R) -> R {
-    line(|t, out| push_summary(out, active, queued, failed, t.speed_bps, t.eta_s), f)
-}
-
 // ---- whether a song is downloaded -----------------------------------------------------------------------------
 
 /// The downloads table's ids of the core the app is using now; the core holds them, this only keeps them
@@ -975,58 +925,15 @@ pub fn held(id: &str) -> i32 {
 /// The download statistics for checks: bytes a second right now, and seconds left (-1 unknown).
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_speed_eta() -> Vec<i64> {
-    with(|t| vec![t.speed_bps, t.eta_s])
+    let (speed, eta) = speed_eta();
+    vec![speed, eta]
 }
 
-// ---- words ----------------------------------------------------------------------------------------------------
-
-/// "850 KB/s", "3.2 MB/s"; empty when nothing is measurable.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn format_speed(bps: i64) -> String {
-    let mut s = String::new();
-    push_speed(&mut s, bps);
-    s
+/// The batch's bytes a second right now, and seconds left (-1 unknown): the downloads screen's summary
+/// line asks once a second while it is open.
+pub fn speed_eta() -> (i64, i64) {
+    with(|t| (t.speed_bps, t.eta_s))
 }
-
-/// [`format_speed`] onto the end of `out`, in the phone's number style (`nori_text`).
-pub fn push_speed(out: &mut String, bps: i64) {
-    use std::fmt::Write;
-    let (v, places, unit) = match bps {
-        b if b <= 0 => return,
-        b if b < 1_000 => {
-            let _ = write!(out, "{b} B/s");
-            return;
-        }
-        b if b < 1_000_000 => (b as f64 / 1_000.0, 0, " KB/s"),
-        b if b < 10_000_000 => (b as f64 / 1_000_000.0, 1, " MB/s"),
-        b => (b as f64 / 1_000_000.0, 0, " MB/s"),
-    };
-    nori_text::push_fixed(out, v, places, false);
-    out.push_str(unit);
-}
-
-/// "45 s left", "12:34 left", "2:05:00 left"; empty when it cannot be said (negative).
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn format_eta(sec: i64) -> String {
-    let mut s = String::new();
-    push_eta(&mut s, sec);
-    s
-}
-
-/// [`format_eta`] onto the end of `out`.
-pub fn push_eta(out: &mut String, sec: i64) {
-    use std::fmt::Write;
-    let (h, m, s) = (sec / 3600, (sec % 3600) / 60, sec % 60);
-    let _ = match sec {
-        x if x < 0 => Ok(()),
-        x if x < 60 => write!(out, "{x} s left"),
-        _ if h > 0 => write!(out, "{h}:{m:02}:{s:02} left"),
-        _ => write!(out, "{m}:{s:02} left"),
-    };
-}
-
-/// "850 B", "38 MB", "2.1 GB": a size as the downloads screen says it, written as every number is.
-pub use nori_words::fmt::format_bytes;
 
 #[cfg(test)]
 mod tests {
@@ -1201,20 +1108,10 @@ mod tests {
     }
 
     #[test]
-    fn the_screen_lines() {
-        let mut s = String::new();
-        push_summary(&mut s, 2, 14, 1, 3_200_000, 754);
-        assert_eq!(s, "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left");
-        s.clear();
-        push_summary(&mut s, 0, 0, 0, 3_200_000, 754);
-        assert_eq!(s, "Nothing downloading");
+    fn a_rows_facts_are_given_only_while_it_runs() {
         let slot = Slot { id: "r".into(), estimate: 0, length: 1000, bytes: 450, started_at: 0, gate_value: 0.0, gate_at: 0, speed_bytes: 0, speed_at: 0, rate: 0.0, live: true };
-        let mut s = String::from("Artist");
-        push_row(&mut s, std::slice::from_ref(&slot), "r");
-        assert_eq!(s, "Artist · 45%");
-        let mut s = String::from("Artist");
-        push_row(&mut s, std::slice::from_ref(&slot), "other");
-        assert_eq!(s, "Artist");
+        assert_eq!(row_facts(std::slice::from_ref(&slot), "r"), Some(RowFacts { percent: 45, speed_bps: 0, eta_s: -1 }));
+        assert_eq!(row_facts(std::slice::from_ref(&slot), "other"), None);
     }
 
     #[test]
@@ -1222,19 +1119,12 @@ mod tests {
         with(|t| {
             t.info.insert("rw-1".into(), Info { artist: "Nils".into(), ..Info::default() });
         });
-        assert_eq!(row("rw-1", str::to_string), "Nils", "known, and not running: the artist alone");
-        assert_eq!(row("rw-unknown", str::to_string), "", "no core to read it from: nothing, and nothing kept");
+        assert_eq!(row("rw-1", |a, f| (a.to_string(), f)), ("Nils".into(), None), "known, and not running: the artist alone");
+        assert_eq!(row("rw-unknown", |a, f| (a.to_string(), f)), (String::new(), None), "no core to read it from: nothing, and nothing kept");
         with(|t| {
-            t.notice.title = "Downloading 3 songs".into();
-            t.notice.text = "Album".into();
+            t.notice.kind = NoticeKind::Many;
+            t.notice.label = "Album".into();
         });
-        assert_eq!(notice_words(str::to_string), "Downloading 3 songs\nAlbum");
-    }
-
-    #[test]
-    fn words() {
-        assert_eq!((format_speed(0), format_speed(850_000), format_speed(3_200_000)), (String::new(), "850 KB/s".into(), "3.2 MB/s".into()));
-        assert_eq!((format_eta(45), format_eta(754), format_eta(7500), format_eta(-1)), ("45 s left".into(), "12:34 left".into(), "2:05:00 left".into(), String::new()));
-        assert_eq!((format_bytes(850), format_bytes(38 * 1_048_576), format_bytes(2_254_857_830)), ("850 B".into(), "38 MB".into(), "2.1 GB".into()));
+        assert_eq!(notice_facts(|n| (n.kind, n.label.clone())), (NoticeKind::Many, "Album".into()));
     }
 }

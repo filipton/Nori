@@ -27,18 +27,13 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import dev.nori.music.ffi.words.Said
 import dev.nori.music.ffi.queue.ShufflePlan
 import dev.nori.music.ffi.queue.TapPlan
 import dev.nori.music.ffi.queue.TestRef
-import dev.nori.music.ffi.coverWants
 import dev.nori.music.ffi.queue.shufflePlan
 import dev.nori.music.ffi.queue.tapPlan
 import dev.nori.music.ffi.queue.testRef
-import dev.nori.music.ffi.words.words
-import dev.nori.music.ffi.words.wordsDownloading
-import dev.nori.music.ffi.words.wordsDownloadsRemoved
-import dev.nori.music.ffi.wordsFavourite
+import dev.nori.music.app.ui.say
 
 /** Everything that can be done to a song, album or playlist from any screen. One instance per activity. */
 class ActionsViewModel(app: Application) : NoriViewModel(app) {
@@ -53,7 +48,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     init { nori.downloads.resume() }
 
     private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
-        try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.said ?: words(Said.FAILED, "")) }
+        try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.said ?: say.saidFailed) }
     }
 
     // ---- selection mode: long-press a song anywhere, then act on the whole selection ----
@@ -161,9 +156,9 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
             }
             dev.nori.music.ffi.model.LyricLine(start, start + 3500, text, timedWords, null, false, "", emptyList(), 0u)
         }
-        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, false, lines(false), 0uL), dev.nori.music.ffi.words.LyricsOrigin.LRCLIB))
+        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, false, lines(false), 0uL), dev.nori.music.ffi.settings.LyricsOrigin.LRCLIB))
         kotlinx.coroutines.delay(slowMs)
-        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, true, lines(true), 0uL), dev.nori.music.ffi.words.LyricsOrigin.BETTER_LYRICS))
+        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, true, lines(true), 0uL), dev.nori.music.ffi.settings.LyricsOrigin.BETTER_LYRICS))
     }
 
     /** The last lyrics the test bridge asked for, so the state dump can report what arrived. */
@@ -202,18 +197,18 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
 
     fun instantMix(song: Song) = attempt(null) { nori.player.play(nori.library.instantMix(song)) }
 
-    fun excludeFromMixes(song: Song) = attempt(words(Said.EXCLUDED_FROM_MIXES, "")) { nori.library.excludeFromMixes(song.id, true) }
+    fun excludeFromMixes(song: Song) = attempt(say.excludedFromMixes) { nori.library.excludeFromMixes(song.id, true) }
 
     fun exportM3u(name: String, songs: List<Song>): String = nori.library.m3uExport(name, songs)
 
     /** Creates a server playlist from an M3U file; tracks that are not in the index are reported, not guessed. */
     fun importM3u(name: String, text: String) = attempt(null) {
-        val imported = withContext(Dispatchers.IO) { nori.core.m3uImport(name, text) }
+        val imported = withContext(Dispatchers.IO) { nori.core.m3uImport(text) }
         if (imported.songIds.isNotEmpty()) nori.library.createPlaylist(name, imported.songIds)
-        _messages.send(imported.message)
+        _messages.send(say.m3uImported(imported.songIds.size, imported.entries.toInt(), name))
     }
-    fun playNext(songs: List<Song>) { nori.player.playNext(songs); _messages.trySend(words(Said.PLAYING_NEXT, "")) }
-    fun enqueue(songs: List<Song>) { nori.player.enqueue(songs); _messages.trySend(words(Said.ADDED_TO_QUEUE, "")) }
+    fun playNext(songs: List<Song>) { nori.player.playNext(songs); _messages.trySend(say.playingNext) }
+    fun enqueue(songs: List<Song>) { nori.player.enqueue(songs); _messages.trySend(say.addedToQueue) }
 
     fun playAlbum(a: Album, shuffle: Boolean = false) = attempt(null) { nori.player.play(nori.library.albumSongs(a.id), shuffle = shuffle) }
     fun playPlaylist(p: Playlist) = attempt(null) { nori.player.play(nori.library.playlistSongs(p.id)) }
@@ -226,7 +221,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun resumeFromServer() = attempt(null) {
         // What to do with what the server kept is the core's (`resume_from_server`).
         when (val plan = nori.library.resumeFromServer()) {
-            is dev.nori.music.ffi.library.ResumePlan.Nothing -> _messages.send(plan.message)
+            is dev.nori.music.ffi.library.ResumePlan.Nothing -> _messages.send(say.noServerQueue)
             is dev.nori.music.ffi.library.ResumePlan.Play -> { nori.player.play(plan.songs, plan.index.toInt()); nori.player.seekTo(plan.positionMs.toLong()) }
         }
     }
@@ -235,7 +230,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
      * octo-fiesta downloads a provider item into the library when it is starred: a song on its own, an album
      * or playlist in full, on the server, without streaming it to the phone.
      */
-    fun addToLibrary(id: String, isAlbum: Boolean) = attempt(words(Said.SERVER_DOWNLOADING, "")) {
+    fun addToLibrary(id: String, isAlbum: Boolean) = attempt(say.serverDownloading) {
         nori.library.star(if (isAlbum) StarKind.ALBUM else StarKind.SONG, id, true)
     }
 
@@ -250,7 +245,7 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
      * says nothing then).
      */
     private fun favourite(on: Boolean, block: suspend () -> Unit) {
-        wordsFavourite(on)?.let { _messages.trySend(it) }
+        if (dev.nori.music.ffi.favouriteNotice()) _messages.trySend(say.favourite(on))
         attempt(null, block)
     }
 
@@ -262,27 +257,23 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun download(songs: List<Song>) {
         nori.downloads.download(songs)
         warmCovers(songs)
-        _messages.trySend(wordsDownloading(songs.size.toUInt()))
+        _messages.trySend(say.downloadingSongs(songs.size))
     }
 
     /**
-     * Fetches the artwork of songs being downloaded onto the disk, at the two sizes the app asks for.
-     * Covers are only kept once something has drawn them, so a song downloaded from a menu - without its
-     * cover ever being on screen - arrives on the device with no picture, and shows a blank plate for the
-     * rest of its life offline. Not decoded: nothing is drawing them now, and hundreds of them would push
-     * the covers on screen out of memory.
+     * Fetches the artwork of songs being downloaded onto the disk; which covers, at which addresses, is
+     * the core's (`Core::download_cover_urls`). Not decoded: nothing is drawing them now, and hundreds of
+     * them would push the covers on screen out of memory.
      */
     private fun warmCovers(songs: List<Song>) = viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
         val loader = dev.nori.music.data.CoverLoader.get(getApplication<Application>())
-        for (want in coverWants(songs.mapNotNull { it.coverArt }, 500u)) {
-            nori.library.coverUrl(want.id, want.size.toInt())?.let(loader::warm)
-        }
+        for (url in nori.core.downloadCoverUrls(songs.mapNotNull { it.coverArt })) loader.warm(url)
     }
 
     /** Gives the downloads back: the same menu entry that offered them should be able to take them away. */
     fun undownload(songs: List<Song>) {
         nori.downloads.remove(songs.map { it.id })
-        _messages.trySend(wordsDownloadsRemoved(songs.size.toUInt()))
+        _messages.trySend(say.downloadsRemoved(songs.size))
     }
     fun downloadAlbum(a: Album) = attempt(null) { download(nori.library.albumSongs(a.id)) }
     fun removeDownloads(ids: List<String>) = nori.downloads.remove(ids)
@@ -318,6 +309,6 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun cancelAllDownloads() = nori.downloads.cancelAll()
 
     suspend fun playlists(): List<Playlist> = runCatching { nori.library.playlists().first() }.getOrDefault(emptyList())
-    fun addToPlaylist(p: Playlist, songs: List<Song>) = attempt(words(Said.ADDED_TO_PLAYLIST, p.name)) { nori.library.addToPlaylist(p.id, songs.map { it.id }) }
-    fun addToNewPlaylist(name: String, songs: List<Song>) = attempt(words(Said.PLAYLIST_CREATED, name)) { nori.library.createPlaylist(name, songs.map { it.id }) }
+    fun addToPlaylist(p: Playlist, songs: List<Song>) = attempt(say.addedToPlaylist(p.name)) { nori.library.addToPlaylist(p.id, songs.map { it.id }) }
+    fun addToNewPlaylist(name: String, songs: List<Song>) = attempt(say.playlistCreated(name)) { nori.library.createPlaylist(name, songs.map { it.id }) }
 }

@@ -109,21 +109,21 @@ pub fn keep_app_value(key: &'static str, value: String) {
     });
 }
 
-/// [`settings_put`]'s answer: what the platform's player has to apply again. The sound chain and the
-/// transition planner's settings follow by themselves.
-/// Which parts of the output chain may run, speed and pitch (`dsp::audio_apply`).
+/// [`settings_put`]'s answer: what the platform's player has to apply again. The transition planner's
+/// settings follow by themselves.
+/// Which parts of the output chain may run, speed and pitch.
 pub const APPLY_AUDIO: u32 = 1;
 /// The ReplayGain volume.
 pub const APPLY_GAIN: u32 = 2;
 /// A plan already made for the song playing is asked for again.
 pub const REPLAN: u32 = 4;
-/// The sound chain's values moved (a band, the pre-amp, balance, crossfeed, the limiter). The core's own
-/// chain (`dsp::settings_changed`) follows them by itself; a player that keeps its own (nori-engine) is
-/// handed them. Only a change in which parts may run is [`APPLY_AUDIO`] as well.
+/// The sound chain's values moved (a band, the pre-amp, balance, crossfeed, the limiter): the player
+/// (nori-engine, which keeps its own chain) is handed them. Only a change in which parts may run is
+/// [`APPLY_AUDIO`] as well.
 pub const SOUND: u32 = 8;
-/// The fades on play, pause and switches, or high quality output. The platform's own player reads them
-/// where it uses them; one that keeps its own copy (nori-engine) is handed them, or it went on with the
-/// ones it started with until the app was started again.
+/// The fades on play, pause and switches, or high quality output: the player (nori-engine, which keeps
+/// its own copy) is handed them, or it went on with the ones it started with until the app was started
+/// again.
 pub const PLAYER: u32 = 16;
 
 /// What a change from `a` to `b` asks of the player.
@@ -291,7 +291,7 @@ impl SoundTool {
             SoundTool::AddBand => st::add_band(s),
             SoundTool::RemoveBand { index } => st::remove_band(s, index),
             SoundTool::ResetBands => st::eq_reset_bands(s),
-            SoundTool::Import { text } => st::import(s, &text, "that file had no filters in it")?,
+            SoundTool::Import { text } => st::import(s, &text)?,
         })
     }
 }
@@ -322,7 +322,6 @@ pub fn settings_sound_tool(tool: SoundTool) -> Result<Option<SoundChange>, Sound
 fn changed(prefs: &StoredPrefs) {
     nori_automix::planner::settings_changed(prefs.transition_prefs());
     nori_automix::beat_model::switched(prefs.auto_mix_better_beats);
-    crate::dsp::settings_changed(prefs);
 }
 
 /// The settings as they are kept now, for a Rust client that edits them and puts them back; none
@@ -445,7 +444,7 @@ mod tests {
         let n = tool.sound.eq_bands.len();
         let removed = settings_sound_tool(SoundTool::RemoveBand { index: n as u32 - 1 }).unwrap().unwrap();
         assert_eq!(removed.sound.eq_bands.len(), n - 1);
-        assert!(matches!(settings_sound_tool(SoundTool::Import { text: "nothing here".into() }), Err(SoundError::NoFilters(_))));
+        assert!(matches!(settings_sound_tool(SoundTool::Import { text: "nothing here".into() }), Err(SoundError::NoFilters)));
         assert_eq!(current().unwrap().eq_bands.len(), n - 1, "a failed import changes nothing");
         assert_eq!(settings_sound_tool(SoundTool::RemoveBand { index: 999 }).unwrap(), None, "no band there: nothing changed");
     }

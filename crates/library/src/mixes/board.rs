@@ -32,12 +32,25 @@ pub enum Kind {
     Top,
 }
 
-/// One "For you" mix: `id` is the route, `kind` is what the index draws, `title` is what the tile says.
+/// Which "For you" tile or page this is; the client names it ("Quick picks", "Your top songs").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[repr(u8)]
+pub enum MixName {
+    Favourites,
+    QuickPicks,
+    Discover,
+    DiscoverWeekly,
+    ListenAgain,
+    Top,
+}
+
+/// One "For you" mix: `id` is the route, `kind` is what the index draws, `name` is which tile it is.
 /// Discover Daily and Discover Weekly both call the same taste-based draw; only the seed period differs.
 pub struct Spec {
     pub id: &'static str,
     pub kind: Kind,
-    pub title: &'static str,
+    pub name: MixName,
     pub weekly: bool,
     /// The tile's own colour: what it wears before its covers arrive, and the band its name sits on.
     colour: u32,
@@ -52,11 +65,11 @@ impl Spec {
 
 /// The mixes "For you" offers, in the order it offers them.
 pub const MIXES: [Spec; 5] = [
-    Spec { id: "quick-picks", kind: Kind::QuickPicks, title: "Quick picks", weekly: false, colour: 0xFF8E_3BD6 },
-    Spec { id: "discover", kind: Kind::Discover, title: "Discover", weekly: false, colour: 0xFF1E_88E5 },
-    Spec { id: "discover-weekly", kind: Kind::Discover, title: "Discover Weekly", weekly: true, colour: 0xFF15_65C0 },
-    Spec { id: "listen-again", kind: Kind::ListenAgain, title: "Listen again", weekly: false, colour: 0xFF00_897B },
-    Spec { id: "top", kind: Kind::Top, title: "Your top songs", weekly: false, colour: 0xFFE0_662B },
+    Spec { id: "quick-picks", kind: Kind::QuickPicks, name: MixName::QuickPicks, weekly: false, colour: 0xFF8E_3BD6 },
+    Spec { id: "discover", kind: Kind::Discover, name: MixName::Discover, weekly: false, colour: 0xFF1E_88E5 },
+    Spec { id: "discover-weekly", kind: Kind::Discover, name: MixName::DiscoverWeekly, weekly: true, colour: 0xFF15_65C0 },
+    Spec { id: "listen-again", kind: Kind::ListenAgain, name: MixName::ListenAgain, weekly: false, colour: 0xFF00_897B },
+    Spec { id: "top", kind: Kind::Top, name: MixName::Top, weekly: false, colour: 0xFFE0_662B },
 ];
 
 /// The mix `id` names; none for an id this build does not know.
@@ -110,17 +123,17 @@ pub fn distinct(songs: impl IntoIterator<Item = Song>) -> Vec<Song> {
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixSpec {
     pub id: String,
-    pub title: String,
+    pub name: MixName,
     pub weekly: bool,
     pub refreshable: bool,
 }
 
-/// A "For you" tile: what it is called and up to four cover ids of what is in it.
+/// A "For you" tile: which it is and up to four cover ids of what is in it.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixTile {
     pub id: String,
-    pub title: String,
+    pub name: MixName,
     pub covers: Vec<String>,
     pub favourites: bool,
 }
@@ -130,27 +143,22 @@ pub struct MixTile {
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct MixSheet {
     pub id: String,
-    pub title: String,
+    pub name: MixName,
     pub songs: Vec<Song>,
     /// Up to four cover ids.
     pub covers: Vec<String>,
     /// False for favourites (they follow the hearts) and for top songs (there is only one draw of those).
     pub refreshable: bool,
     pub favourites: bool,
-    /// The line under the title, "12 songs · 48:10" ([`nori_words::fmt::list_caption`]); empty with no songs.
-    pub caption: String,
-}
-
-/// A mix page's line under its title; empty with no songs.
-pub fn caption(songs: &[Song]) -> String {
-    if songs.is_empty() { String::new() } else { nori_words::fmt::list_caption(songs, false) }
+    /// The songs' summed length in seconds, for the line under the title ("12 songs · 48:10").
+    pub seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum MixLookup {
-    /// No mix has this id; `message` says so in words.
-    Unknown { message: String },
+    /// No mix has this id (the client says so, with the id it asked for).
+    Unknown,
     /// Not drawn yet (or, for favourites, not handed over yet): the page keeps its loader.
     NotDrawn,
     Ready { sheet: MixSheet },
@@ -213,9 +221,9 @@ pub fn draw(c: &Connection, kind: Kind, seed: u64, now_ms: i64) -> Vec<Song> {
 /// is on (switched off, it draws nothing and offers only favourites). No covers yet.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_tiles(taste: bool) -> Vec<MixTile> {
-    let mut out = vec![MixTile { id: FAVOURITES_MIX.into(), title: "Favourites".into(), covers: vec![], favourites: true }];
+    let mut out = vec![MixTile { id: FAVOURITES_MIX.into(), name: MixName::Favourites, covers: vec![], favourites: true }];
     if taste {
-        out.extend(MIXES.iter().map(|s| MixTile { id: s.id.into(), title: s.title.into(), covers: vec![], favourites: false }));
+        out.extend(MIXES.iter().map(|s| MixTile { id: s.id.into(), name: s.name, covers: vec![], favourites: false }));
     }
     out
 }
@@ -223,7 +231,7 @@ pub fn mix_tiles(taste: bool) -> Vec<MixTile> {
 /// The mixes "For you" offers, in order.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn mix_catalogue() -> Vec<MixSpec> {
-    MIXES.iter().map(|s| MixSpec { id: s.id.into(), title: s.title.into(), weekly: s.weekly, refreshable: s.refreshable() }).collect()
+    MIXES.iter().map(|s| MixSpec { id: s.id.into(), name: s.name, weekly: s.weekly, refreshable: s.refreshable() }).collect()
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 //! playlist.rs. One call per user action or player event; the settings are read here, not handed in.
 
 use nori_player::queue::{self as q, ErrorRun};
-use nori_player::transport::{self as t, SwitchQueue};
+use nori_player::transport as t;
 use parking_lot::Mutex;
 
 // Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
@@ -88,8 +88,7 @@ pub fn queue_bridged() {
 }
 
 /// What the last song that would not play failed of, until music plays again: for a player that stops
-/// by itself after a run of them (nori-engine's `Event::Stopped`) to say why, as the ExoPlayer path's
-/// error says it. None when the stop was anything else (the sleep timer's end of a song).
+/// by itself after a run of them (nori-engine's `Event::Stopped`) to say why. None when the stop was anything else (the sleep timer's end of a song).
 static LAST_ERROR: Mutex<Option<PlaybackError>> = Mutex::new(None);
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -140,73 +139,6 @@ pub fn next_action(has_next: bool) -> NextAction {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn skip_plays(play_when_ready: bool) -> bool {
     t::skip_plays(play_when_ready)
-}
-
-/// A switch waiting out its dip (`nori_player::transport::SwitchQueue`): the platform keeps the action,
-/// this keeps whether it may still run.
-#[derive(Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
-pub struct SwitchState(Mutex<SwitchQueue>);
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-impl SwitchState {
-    #[cfg_attr(feature = "ffi", uniffi::constructor)]
-    pub fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::default())
-    }
-
-    /// A switch now waits, asked on `song` at queue index `index`.
-    pub fn wait(&self, song: Option<String>, index: i32) {
-        self.0.lock().wait(song.as_deref(), index);
-    }
-
-    /// The waiting switch is due: whether it runs (the player is still where it was asked).
-    pub fn take(&self, song: Option<String>, index: i32) -> bool {
-        self.0.lock().take(song.as_deref(), index)
-    }
-
-    pub fn drop_waiting(&self) {
-        self.0.lock().drop_waiting();
-    }
-}
-
-/// The output's rebuild bookkeeping for the equalizer screen and settings changes; see
-/// `nori_player::transport::Chain`. Each method says whether to rebuild the output now.
-#[derive(Default)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
-pub struct ChainState(Mutex<nori_player::transport::Chain>);
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-impl ChainState {
-    #[cfg_attr(feature = "ffi", uniffi::constructor)]
-    pub fn new() -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self::default())
-    }
-
-    pub fn tuning(&self, on: bool, eq: bool, idle: bool, playing: bool) -> bool {
-        self.0.lock().tuning(on, eq, idle, playing) == nori_player::transport::ChainAct::Rebuild
-    }
-
-    /// A rebuild deferred to the boundary; true when it was not already waiting.
-    pub fn defer(&self) -> bool {
-        self.0.lock().defer()
-    }
-
-    pub fn boundary(&self, repeat_one: bool) -> bool {
-        self.0.lock().boundary(repeat_one) == nori_player::transport::ChainAct::Rebuild
-    }
-
-    pub fn paused(&self) -> bool {
-        self.0.lock().paused() == nori_player::transport::ChainAct::Rebuild
-    }
-
-    pub fn is_tuning(&self) -> bool {
-        self.0.lock().tuning
-    }
-
-    pub fn bursting(&self, offloaded: bool) -> bool {
-        self.0.lock().bursting(offloaded)
-    }
 }
 
 // ---- the sleep timer ----
@@ -307,6 +239,111 @@ pub fn precache_list(ids: Vec<String>, downloading: impl Fn(&str) -> bool) -> Ve
     ids
 }
 
+// ---- what a moment asks of the service ----
+
+/// A moment the queue is kept at, or handed to the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum QueueMoment {
+    /// A new song arrived (not a repeat-one loop).
+    Song,
+    /// The queue's list was edited.
+    Edited,
+    /// Playback paused by the listener (not a stall): the moment another device may pick the queue up.
+    Paused,
+    /// The service or the program is closing.
+    Closing,
+}
+
+/// What to do with the queue at a [`QueueMoment`]: save it (`Core::playlist_save`) now (`save_after_ms`
+/// 0) or once this long has passed with nothing else changing it (the platform's timer, restarted by the
+/// next moment), and whether to hand it to the server too (`Client::playlist_push`, which itself does
+/// nothing unless the settings say so).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct QueueKeep {
+    pub save_after_ms: i64,
+    pub push: bool,
+}
+
+/// When the queue is kept, and when it is handed to the server: a song or an edit saves it a moment
+/// later (a burst of edits saves once), a pause saves it at once and hands it over (the listener may be
+/// about to pick it up elsewhere), closing saves it at once.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn queue_keep(moment: QueueMoment) -> QueueKeep {
+    match moment {
+        QueueMoment::Song | QueueMoment::Edited => QueueKeep { save_after_ms: t::SAVE_AFTER_MS, push: false },
+        QueueMoment::Paused => QueueKeep { save_after_ms: 0, push: true },
+        QueueMoment::Closing => QueueKeep { save_after_ms: 0, push: false },
+    }
+}
+
+/// What the offline bridge does as a song arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum BridgeStep {
+    /// Nothing: the bridge is switched off.
+    Off,
+    /// No bridge is playing: stop watching the network, if it was watched.
+    Idle,
+    /// A bridge plays and has songs of its own left before the parked one.
+    Bridging,
+    /// The parked song is next: the queue comes back if the network has, more downloads go in before it
+    /// if not (`Core::bridge_parked`).
+    Parked,
+}
+
+fn bridge_step(on: bool, bridging: bool, next_is_parked: bool) -> BridgeStep {
+    match (on, bridging, next_is_parked) {
+        (false, ..) => BridgeStep::Off,
+        (true, false, _) => BridgeStep::Idle,
+        (true, true, false) => BridgeStep::Bridging,
+        (true, true, true) => BridgeStep::Parked,
+    }
+}
+
+/// Everything a new song asks of the platform, in one answer. The steps with a state of their own are
+/// taken here (the refill's fetch counted as on the wire, the sleep timer's songs counted down), so this
+/// is asked once per song, and never on a repeat-one loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SongSteps {
+    /// Save the queue after this long ([`queue_keep`] of [`QueueMoment::Song`]).
+    pub save_after_ms: i64,
+    /// Fetch songs for the queue's end now (`Client::autofill`, then `autofill_arrived`).
+    pub fill: bool,
+    pub bridge: BridgeStep,
+    /// Fetch the songs coming up ahead (`Client::precache_targets`) after this long, once the song
+    /// playing has been fetched. A client on nori-engine with a store has the engine do it
+    /// (`CoreLibrary::ahead`, as the next song is fetched) and skips this.
+    pub precache_after_ms: i64,
+    /// The sleep timer's last song: pause at its end.
+    pub pause_at_end: bool,
+}
+
+/// A new song arrived (the ear is on it): what to do now.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn song_arrived() -> SongSteps {
+    let on = prefs(|p| p.bridge_offline);
+    let (bridging, parked) = crate::playlist::with(|p| (p.bridging(), p.next_is_parked()));
+    SongSteps {
+        save_after_ms: queue_keep(QueueMoment::Song).save_after_ms,
+        fill: crate::autofill::autofill_start(),
+        bridge: bridge_step(on, bridging, parked),
+        precache_after_ms: t::PRECACHE_AFTER_MS,
+        pause_at_end: sleep_song_changed(),
+    }
+}
+
+/// Whether the equalizer screen trades the deep buffer for the shallow one now (`set_tuning`): only
+/// while the screen is in sight (`in_sight`, the client's own call), after a change of the sound made on
+/// it (`touched`), with the equalizer on - with it off, nothing it changes is heard. A change counts as
+/// touching it when this is true of it with `touched` true.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn equalizer_tuning(in_sight: bool, touched: bool, eq_on: bool) -> bool {
+    t::tuning_wanted(in_sight, touched, eq_on)
+}
+
 // ---- the volume slider -------------------------------------------------------------------------------------
 
 /// The output's volume step for a slider at `fraction` (0..1) of an output with steps 0..=`max`: the
@@ -341,6 +378,16 @@ mod tests {
     }
 
     #[test]
+    fn the_precacher_leaves_downloads_and_providers_alone() {
+        let _g = hold(&[], 0);
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(precache_list(ids(&["1", "2", "ext-3", "4"]), |id| id == "2"), ["1", "4"]);
+        assert_eq!(precache_list(ids(&["1", "2"]), |_| false), ["1", "2"]);
+        assert!(precache_list(ids(&["4"]), |id| id == "4").is_empty());
+        assert!(precache_list(Vec::new(), |_| true).is_empty());
+    }
+
+    #[test]
     fn the_skip_a_failure_makes_does_not_break_the_run() {
         let _g = hold(&["sk1", "sk2", "sk3", "sk4", "sk5"], 0);
         queue_playing();
@@ -370,6 +417,8 @@ mod tests {
 
     #[test]
     fn the_sleep_timer_counts_songs_here() {
+        // The count is the process's, as the queue is: taken in turns with the song steps' test.
+        let _g = hold(&[], 0);
         assert!(!sleep_set(3, false));
         assert!(!sleep_song_changed());
         assert!(sleep_song_changed(), "the third song is the last");
@@ -378,6 +427,41 @@ mod tests {
         assert!(!sleep_song_changed(), "end of track: nothing counted");
         assert_eq!(sleep_shown(1, false, 0, 10), SleepShown { at_ms: 60_010, at_end_of_track: false });
         assert_eq!(playback_timings().seek_look_ms, 300);
+    }
+
+    #[test]
+    fn a_pause_saves_and_hands_the_queue_over_and_a_song_or_an_edit_saves_it_later() {
+        assert_eq!(queue_keep(QueueMoment::Paused), QueueKeep { save_after_ms: 0, push: true });
+        assert_eq!(queue_keep(QueueMoment::Closing), QueueKeep { save_after_ms: 0, push: false });
+        for m in [QueueMoment::Song, QueueMoment::Edited] {
+            assert_eq!(queue_keep(m), QueueKeep { save_after_ms: t::SAVE_AFTER_MS, push: false });
+        }
+    }
+
+    #[test]
+    fn the_bridge_step_follows_the_setting_and_the_parked_song() {
+        assert_eq!(bridge_step(false, true, true), BridgeStep::Off);
+        assert_eq!(bridge_step(true, false, true), BridgeStep::Idle);
+        assert_eq!(bridge_step(true, true, false), BridgeStep::Bridging);
+        assert_eq!(bridge_step(true, true, true), BridgeStep::Parked);
+    }
+
+    #[test]
+    fn a_song_arriving_counts_the_sleep_timer_down_and_saves_later() {
+        let _g = hold(&["sa1", "sa2"], 0);
+        assert!(!sleep_set(3, false));
+        let s = song_arrived();
+        assert_eq!((s.save_after_ms, s.precache_after_ms, s.bridge, s.pause_at_end), (t::SAVE_AFTER_MS, t::PRECACHE_AFTER_MS, BridgeStep::Off, false));
+        assert!(song_arrived().pause_at_end, "the third song is the sleep timer's last");
+        assert!(!song_arrived().pause_at_end);
+    }
+
+    #[test]
+    fn the_equalizer_tunes_only_in_sight_touched_and_on() {
+        assert!(equalizer_tuning(true, true, true));
+        assert!(!equalizer_tuning(true, true, false), "the equalizer off: nothing to hear at once");
+        assert!(!equalizer_tuning(false, true, true));
+        assert!(!equalizer_tuning(true, false, true), "opened to look is not a reason");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use crate::cache_policy::{Page, Read};
 use crate::client::{Client, NetResult, Starrable, Write};
 use crate::mixes::board::MixDraw;
 use crate::{PlayQueue, Song};
+use std::sync::Arc;
 
 pub use nori_library::library::*;
 
@@ -27,13 +28,26 @@ impl Client {
         refreshed(self.read_fetch(read, stored_digest).await, stored_digest.is_some())
     }
 
-    /// Sends a favourite whose mark is already up (`star_mark`). Offline, the write is kept for later and
-    /// this succeeds; a refusal puts the mark from before (`previous`) back, so the screen stops showing a
-    /// favourite the server never took, and the error comes back to say so.
-    pub async fn star_send(&self, kind: Starrable, id: String, on: bool, previous: Option<bool>) -> NetResult<()> {
+    /// A screen's read, whole: what is stored goes to `shown` at once, then the server is asked unless
+    /// that was fresh, and its answer goes to `shown` too when it differs. A failure is an error only when
+    /// nothing was stored (offline with something to show is not); a client that is offline on purpose
+    /// gives the client a transport that refuses. Returns when the read is over; dropping the call cancels
+    /// the request.
+    pub async fn read_cached(&self, read: Read, shown: Arc<dyn PageShown>) -> NetResult<()> {
+        self.read_each(read, |p| shown.show(p)).await
+    }
+
+    /// A heart pressed: the mark goes up at once, before the server is asked, so the heart fills under
+    /// the finger (`marked` is handed the marks as they are then), and the change is sent. Offline, the
+    /// write is kept for later and this succeeds; a refusal puts the mark from before back, so the screen
+    /// stops showing a favourite the server never took (`marked` is handed the marks again), and the
+    /// error comes back to say so.
+    pub async fn star(&self, kind: Starrable, id: String, on: bool, marked: Arc<dyn StarsShown>) -> NetResult<()> {
+        let m = crate::stars::star_mark(kind, id.clone(), on);
+        marked.marks(m.marks);
         let sent = self.write(Write::Star { kind, id: id.clone(), on }).await;
         if sent.is_err() {
-            crate::stars::star_restore(kind, id, previous);
+            marked.marks(crate::stars::star_restore(kind, id, m.previous));
         }
         sent
     }
@@ -111,7 +125,36 @@ impl Client {
     }
 }
 
+/// Where a screen's read ([`Client::read_cached`]) hands each answer as it comes: what was stored, then
+/// the server's when it differs.
+#[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
+pub trait PageShown: Send + Sync {
+    fn show(&self, page: Page);
+}
+
+/// Where [`Client::star`] hands this session's star marks each time they change.
+#[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
+pub trait StarsShown: Send + Sync {
+    fn marks(&self, marks: crate::stars::StarMarks);
+}
+
 impl Client {
+    /// [`Client::read_cached`] for a caller in Rust: each answer to `each`.
+    pub async fn read_each(&self, read: Read, mut each: impl FnMut(Page)) -> NetResult<()> {
+        let stored = self.read_stored(read.clone())?;
+        let digest = stored.digest;
+        if let Some(p) = stored.page {
+            each(p);
+        }
+        if stored.fresh {
+            return Ok(());
+        }
+        if let Some(p) = self.read_refresh(read, digest).await? {
+            each(p);
+        }
+        Ok(())
+    }
+
     async fn mix_fallback(&self, id: String, day: i64, again: bool) {
         let random = self.songs(Read::RandomSongs { size: MIX_FALLBACK_SONGS, genre: None }).await.unwrap_or_default();
         self.core.mix_draw(id, day, again, Some(random));
@@ -132,12 +175,55 @@ pub(crate) mod tests {
         assert!(matches!(refreshed(Ok(None), false), Ok(None)));
     }
 
+    #[derive(Default)]
+    struct Marks(parking_lot::Mutex<Vec<Option<bool>>>);
+
+    impl StarsShown for Marks {
+        fn marks(&self, m: crate::stars::StarMarks) {
+            self.0.lock().push(m.songs.get("lib-refused").copied());
+        }
+    }
+
     #[test]
     fn a_refused_favourite_takes_its_mark_back() {
         let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
-        let marked = crate::stars::star_mark(Starrable::Song, "lib-refused".into(), true);
+        fake.answer(crate::client::tests::OK);
+        let seen = Arc::new(Marks::default());
+        assert!(block(c.star(Starrable::Song, "lib-refused".into(), true, seen.clone())).is_ok());
         fake.answer(r#"{"subsonic-response":{"status":"failed","error":{"code":50,"message":"no"}}}"#);
-        assert!(block(c.star_send(Starrable::Song, "lib-refused".into(), true, marked.previous)).is_err());
-        assert_eq!(crate::stars::star_marks().songs.get("lib-refused"), None);
+        assert!(block(c.star(Starrable::Song, "lib-refused".into(), false, seen.clone())).is_err());
+        assert_eq!(*seen.0.lock(), [Some(true), Some(false), Some(true)], "up at once, then the mark from before back");
+        assert_eq!(crate::stars::star_marks().songs.get("lib-refused"), Some(&true));
+    }
+
+    const GENRES: &str = r#"{"subsonic-response":{"status":"ok","genres":{"genre":[{"value":"Rock","songCount":1,"albumCount":1}]}}}"#;
+    const GENRES2: &str = r#"{"subsonic-response":{"status":"ok","genres":{"genre":[{"value":"Jazz","songCount":1,"albumCount":1}]}}}"#;
+
+    fn each(c: &Client, read: Read) -> (NetResult<()>, usize) {
+        let mut n = 0;
+        let r = block(c.read_each(read, |_| n += 1));
+        (r, n)
+    }
+
+    #[test]
+    fn a_read_shows_what_is_stored_then_the_servers_answer_when_it_differs() {
+        let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
+        fake.fail(crate::transport::FailureKind::Connect);
+        let (r, n) = each(&c, Read::GenreList);
+        assert!(r.is_err() && n == 0, "nothing stored and no server: an error");
+        fake.answer(GENRES);
+        assert_eq!(each(&c, Read::GenreList).1, 1, "the server's answer");
+        assert_eq!(each(&c, Read::GenreList).1, 1, "stored and fresh: the server is not asked");
+        assert_eq!(fake.asked().len(), 2);
+        c.core.db.lock().execute("UPDATE cache SET ts = 0", []).unwrap();
+        fake.answer(GENRES);
+        assert_eq!(each(&c, Read::GenreList).1, 1, "stale, and the server says the same: shown once");
+        c.core.db.lock().execute("UPDATE cache SET ts = 0", []).unwrap();
+        fake.answer(GENRES2);
+        assert_eq!(each(&c, Read::GenreList).1, 2, "stale, and the server says otherwise: both");
+        c.core.db.lock().execute("UPDATE cache SET ts = 0", []).unwrap();
+        fake.fail(crate::transport::FailureKind::Connect);
+        let (r, n) = each(&c, Read::GenreList);
+        assert!(r.is_ok() && n == 1, "offline with something stored is not an error");
     }
 }

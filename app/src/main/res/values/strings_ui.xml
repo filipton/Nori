@@ -1,0 +1,497 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Every word the app's screens say. Numbers are written in Kotlin (dev.nori.music.text.Fmt); the words
+     around them are here, so the app can be translated. The core says none of these: it hands over data
+     and kinds (docs/clients.md). -->
+<resources>
+    <!-- The fixed words: titles, buttons, hints, and the names icons are read out by (ui/Say.kt). -->
+    <string name="home">Home</string>
+    <string name="search">Search</string>
+    <string name="library">Library</string>
+    <string name="settings">Settings</string>
+    <string name="back">Back</string>
+    <string name="more">More</string>
+    <string name="next">Next</string>
+    <string name="previous">Previous</string>
+    <string name="play">Play</string>
+    <string name="pause">Pause</string>
+    <string name="shuffle">Shuffle</string>
+    <string name="repeat">Repeat</string>
+    <string name="queue">Queue</string>
+    <string name="lyrics">Lyrics</string>
+    <string name="favourite">Favourite</string>
+    <string name="add_to_favourites">Add to favourites</string>
+    <string name="remove_from_favourites">Remove from favourites</string>
+    <string name="remove">Remove</string>
+    <string name="cancel">Cancel</string>
+    <string name="done">Done</string>
+    <string name="close">Close</string>
+    <string name="create">Create</string>
+    <string name="delete">Delete</string>
+    <string name="edit">Edit</string>
+    <string name="save">Save</string>
+    <string name="add">Add</string>
+    <string name="copy_it">Copy</string>
+    <string name="clear">Clear</string>
+    <string name="reset">Reset</string>
+    <string name="open">Open</string>
+    <string name="import_it">Import</string>
+    <string name="name">Name</string>
+    <string name="sort">Sort</string>
+    <string name="filter">Filter</string>
+    <string name="get">Get</string>
+    <string name="retry">Retry</string>
+    <string name="automatic">Automatic</string>
+    <string name="chosen">Chosen</string>
+    <string name="now_playing_bar">Now playing bar</string>
+    <string name="not_in_library_yet">Not in library yet</string>
+    <string name="nothing_matches">Nothing matches</string>
+    <string name="listen_now">Listen now</string>
+    <string name="shuffle_everything">Shuffle everything</string>
+    <string name="resume_from_server">Resume from server</string>
+    <string name="rearrange_rows">Rearrange rows</string>
+    <string name="for_you">For you</string>
+    <string name="rows">Rows</string>
+    <string name="hold_a_row_to_move_it">Hold a row to move it</string>
+    <string name="not_shown">Not shown</string>
+    <string name="search_hint">Songs, albums, artists</string>
+    <string name="recent_searches">Recent searches</string>
+    <string name="albums">Albums</string>
+    <string name="artists">Artists</string>
+    <string name="songs">Songs</string>
+    <string name="playlists">Playlists</string>
+    <string name="smart">Smart</string>
+    <string name="history">History</string>
+    <string name="favourites">Favourites</string>
+    <string name="genres">Genres</string>
+    <string name="decades">Decades</string>
+    <string name="folders">Folders</string>
+    <string name="radio">Radio</string>
+    <string name="downloads">Downloads</string>
+    <string name="filter_artists">Filter artists</string>
+    <string name="new_playlist">New playlist</string>
+    <string name="import_playlist_file">Import M3U…</string>
+    <string name="export_playlist_file">Export M3U</string>
+    <string name="favourite_songs">Favourite songs</string>
+    <string name="starred_favourites">★ Favourites</string>
+    <string name="new_station">New station</string>
+    <string name="stream_url">Stream URL</string>
+    <string name="download_queue">Download queue</string>
+    <string name="add_all_to_queue">Add all to queue</string>
+    <string name="download_all">Download all</string>
+    <string name="download_everything">Download everything</string>
+    <string name="add_to_queue">Add to queue</string>
+    <string name="open_in_browser">Open in browser?</string>
+    <string name="top_songs">Top songs</string>
+    <string name="similar_artists">Similar artists</string>
+    <string name="sleep_timer">Sleep timer</string>
+    <string name="add_to_playlist">Add to playlist</string>
+    <string name="details">Details</string>
+    <string name="playlist">Playlist</string>
+    <string name="clear_selection">Clear selection</string>
+    <string name="added_by_you">Added by you</string>
+    <string name="reorder">Reorder</string>
+    <string name="later">Later</string>
+    <string name="sooner">Sooner</string>
+    <string name="mixing">Mixing</string>
+    <string name="new_mix">New mix</string>
+    <string name="new_smart_playlist">New smart playlist</string>
+    <string name="ready_made">Ready made</string>
+    <string name="smart_playlist">Smart playlist</string>
+    <string name="match_all">Match all</string>
+    <string name="match_any">Match any</string>
+    <string name="remove_rule">Remove rule</string>
+    <string name="add_rule">Add rule</string>
+    <string name="sort_by">Sort by</string>
+    <string name="descending">Descending</string>
+    <string name="limit">Limit</string>
+    <string name="no_limit">none</string>
+    <string name="listening_stats">Listening stats</string>
+    <string name="clear_history">Clear history</string>
+    <string name="listening">Listening</string>
+    <string name="when_you_listen">When you listen</string>
+    <string name="top_artists">Top artists</string>
+    <string name="top_albums">Top albums</string>
+    <string name="top_genres">Top genres</string>
+    <string name="downloaded">Downloaded</string>
+    <string name="download_failed">Download failed</string>
+    <string name="stop_all">Stop all</string>
+    <string name="downloading">Downloading</string>
+    <string name="waiting">Waiting</string>
+    <string name="failed">Failed</string>
+    <string name="retry_all">Retry all</string>
+    <string name="finished">Finished</string>
+    <string name="stop_download">Stop download</string>
+    <string name="equalizer">Equalizer</string>
+    <string name="eq_hint">Tap a band\'s label to change its frequency, width or type.</string>
+    <string name="add_band">Add band</string>
+    <string name="paste_preset">Paste a preset</string>
+    <string name="presets">Presets</string>
+    <string name="auto_preamp_hint">Automatic pulls the level down by the largest boost so the curve cannot clip</string>
+    <string name="output">Output</string>
+    <string name="balance">Balance</string>
+    <string name="mono">Mono</string>
+    <string name="mono_detail">Both channels summed, for one-earbud listening</string>
+    <string name="limiter">Limiter</string>
+    <string name="limiter_detail">Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.</string>
+    <string name="profiles">Profiles</string>
+    <string name="save_these_settings">Save these settings</string>
+    <string name="save_as_profile">Save current settings as a profile</string>
+    <string name="crossfeed">Crossfeed</string>
+    <string name="import_preset">Import preset</string>
+    <string name="import_preset_hint">Paste an AutoEQ ParametricEQ.txt or GraphicEQ.txt, or an Equalizer APO config.</string>
+    <string name="import_preset_example">Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70</string>
+    <string name="no_filters_found">No filters found in that text</string>
+    <string name="frequency">Frequency</string>
+    <string name="remove_band">Remove band</string>
+    <string name="headphone_presets">Headphone presets</string>
+    <string name="autoeq_about">AutoEQ measures headphones and publishes a correction curve for each. The list is one 850 kB request to github.com, made by itself on Wi-Fi while Keep the AutoEQ list is on; after that, searching happens on this device.</string>
+    <string name="download_the_list">Download the list</string>
+    <string name="refresh_list">Refresh list</string>
+    <string name="autoeq_no_curve">AutoEQ has no curve for that one, so it\'s left out of the list from now on.</string>
+    <string name="autoeq_credit">Curves by the AutoEQ project (jaakkopasanen/AutoEq). Tapping one replaces the equalizer\'s bands.</string>
+    <string name="devices">Devices</string>
+    <string name="autoeq_auto">Apply AutoEQ automatically</string>
+    <string name="autoeq_auto_detail">Headphones with a known AutoEQ curve get it as soon as they connect, instead of being asked.</string>
+    <string name="devices_note">Devices keep their sound only while Settings, then Sound, then Remember sound per device is on.</string>
+    <string name="flat">Flat</string>
+    <string name="flat_detail">The equalizer off on this device</string>
+    <string name="leave_as_is">Leave as is</string>
+    <string name="leave_as_is_detail">Nothing switches and nothing is offered</string>
+    <string name="saved_profile">Saved profile</string>
+    <string name="autoeq_curves">AutoEQ curves</string>
+    <string name="autoeq_download_hint">Download the AutoEQ list once (850 kB from github.com) to pick a curve by headphone name, for example the IEMs you plug into this DAC.</string>
+    <string name="forget_device">Forget this device</string>
+    <string name="search_settings">Search settings</string>
+    <string name="performance">Performance</string>
+    <string name="performance_detail">Battery, CPU, wakeups and frames, as recorded</string>
+    <string name="server">Server</string>
+    <string name="server_hint">Navidrome, octo-fiesta or any Subsonic server</string>
+    <string name="server_url">Server URL</string>
+    <string name="user">User</string>
+    <string name="password">Password</string>
+    <string name="connecting">Connecting…</string>
+    <string name="connect">Connect</string>
+    <string name="hide_advanced">Hide advanced</string>
+    <string name="advanced">Advanced</string>
+    <string name="name_optional">Name (optional)</string>
+    <string name="second_address">Second address (e.g. public URL)</string>
+    <string name="second_address_hint">Used when the first one does not answer, for example away from home</string>
+    <string name="api_key">API key instead of password (OpenSubsonic)</string>
+    <string name="extra_headers">Extra HTTP headers</string>
+    <string name="extra_headers_hint">One per line, Name: value. For reverse proxies, basic auth, Cloudflare Access.</string>
+    <string name="legacy_auth">Legacy authentication</string>
+    <string name="legacy_auth_hint">For old servers without token auth. Detected automatically when the server says so.</string>
+    <string name="self_signed">Accept self-signed certificate</string>
+    <string name="self_signed_hint">Only for your own server. Certificates you installed in Android are accepted without this.</string>
+    <string name="wifi_only">Wi-Fi only</string>
+    <string name="wifi_only_hint">Never contact this server over mobile data</string>
+    <string name="client_cert_password">Client certificate password</string>
+    <string name="import_client_cert">Import client certificate (.p12)</string>
+    <string name="replace_client_cert">Replace client certificate</string>
+    <string name="under_the_hood">Under the hood</string>
+    <string name="playback">Playback</string>
+    <string name="library_and_search">Library and search</string>
+    <string name="automix">AutoMix</string>
+    <string name="interface_title">Interface</string>
+    <string name="open_source">Open source</string>
+    <string name="free_software">Nori is free software</string>
+    <string name="licence_line">MIT licence \u0020· \u0020Copyright (c) 2026 filipton</string>
+    <string name="licences">Licences</string>
+    <string name="licences_detail">The libraries, fonts and data this app is made of, and their terms</string>
+    <string name="rust_core">Rust core</string>
+    <string name="fonts_and_data">Fonts and data</string>
+    <string name="no_licence_text">No licence text to reproduce.</string>
+    <string name="licence_unreadable">The licence text could not be read.</string>
+
+    <!-- Confirmations after an action. -->
+    <string name="said_playing_next">Playing next</string>
+    <string name="said_added_to_queue">Added to queue</string>
+    <string name="said_excluded_from_mixes">Excluded from mixes</string>
+    <string name="said_added_to_playlist">Added to %1$s</string>
+    <string name="said_playlist_created">Created %1$s</string>
+    <string name="said_no_server_queue">No queue saved on the server</string>
+    <string name="said_server_downloading">The server is downloading it into your library</string>
+    <string name="said_failed">Failed</string>
+    <string name="said_favourite_added">Added to favourites</string>
+    <string name="said_favourite_removed">Removed from favourites</string>
+    <plurals name="said_downloading">
+        <item quantity="one">Downloading %d song</item>
+        <item quantity="other">Downloading %d songs</item>
+    </plurals>
+    <plurals name="said_downloads_removed">
+        <item quantity="one">Removed %d download</item>
+        <item quantity="other">Removed %d downloads</item>
+    </plurals>
+    <string name="said_playing_through">Playing through %1$s</string>
+    <string name="m3u_none_found">None of the %1$d entries are on this device yet. Update the offline search first.</string>
+    <string name="m3u_imported">Imported %1$d of %2$d tracks into %3$s</string>
+    <string name="autoeq_applied">Applied %1$s. The equalizer screen now holds that curve.</string>
+
+    <!-- Counts. -->
+    <plurals name="songs">
+        <item quantity="one">%d song</item>
+        <item quantity="other">%d songs</item>
+    </plurals>
+    <!-- The album and playlist pages have always said "1 songs". -->
+    <string name="songs_always_plural">%d songs</string>
+    <plurals name="albums">
+        <item quantity="one">%d album</item>
+        <item quantity="other">%d albums</item>
+    </plurals>
+    <plurals name="releases">
+        <item quantity="one">%d release</item>
+        <item quantity="other">%d releases</item>
+    </plurals>
+    <plurals name="folders">
+        <item quantity="one">%d folder</item>
+        <item quantity="other">%d folders</item>
+    </plurals>
+    <string name="selected_count">%1$d selected</string>
+    <string name="download_queue_to_go">%1$d to go</string>
+    <string name="decade_name">%1$ds</string>
+    <string name="folder_untitled">Folder</string>
+    <string name="caption_explicit">explicit</string>
+    <string name="disc_heading">Disc %1$d</string>
+    <string name="disc_heading_titled">Disc %1$d · %2$s</string>
+    <string name="library_offer_album">Add the whole album to the library (%1$s)</string>
+    <string name="library_offer_playlist">Add the whole playlist to the library (%1$s)</string>
+    <string name="library_offer_provider">provider</string>
+
+    <!-- The player. -->
+    <string name="nothing_playing">Nothing playing</string>
+    <string name="bridging">Playing downloads until you’re online</string>
+    <string name="up_next">Playing next</string>
+    <string name="sleep_end_of_track">Sleep · end of track</string>
+    <string name="sleep_minutes">Sleep · %1$d min</string>
+    <string name="widget_idle">Nori</string>
+
+    <!-- Lyrics. -->
+    <string name="lyrics_your_server">your server</string>
+    <string name="lyrics_timing">Timing</string>
+    <string name="lyrics_not_timed">not timed</string>
+    <string name="lyrics_nudge">%1$s s</string>
+
+    <!-- Downloads. -->
+    <string name="stop_all_title">Stop all downloads?</string>
+    <plurals name="stop_all_text">
+        <item quantity="one">%d song that has not finished downloading leaves the queue. Songs already downloaded stay.</item>
+        <item quantity="other">%d songs that have not finished downloading leave the queue. Songs already downloaded stay.</item>
+    </plurals>
+
+    <!-- The empty-list, failure and help lines. -->
+    <string name="note_no_index">No songs on this device yet. Settings, then Library and lists, then Update.</string>
+    <string name="note_no_playlists">No playlists yet</string>
+    <string name="note_no_stations">No stations yet</string>
+    <string name="note_nothing_downloaded">Nothing downloaded yet</string>
+    <string name="note_no_downloads">No downloads</string>
+    <string name="note_no_downloads_help">Songs you download show here while they arrive, and for a while after.</string>
+    <string name="note_download_failed">Couldn\'t download</string>
+    <string name="note_no_favourite_songs">No favourite songs yet. Tap the heart on a song and it will be here.</string>
+    <string name="note_nothing_to_mix">Nothing to mix yet. Play some music, or sync the library in Settings.</string>
+    <string name="note_smart_help">Matched against the synced library: sync it in Settings so every song can be found.</string>
+    <string name="note_no_history">Nothing played yet, or listening history is off in Settings, under Library and lists.</string>
+    <string name="note_nothing_found">Nothing found</string>
+    <string name="note_no_lyrics">No lyrics</string>
+    <string name="note_could_not_load">Could not load</string>
+    <string name="note_could_not_evaluate">Could not evaluate</string>
+    <string name="delete_named">Delete %1$s</string>
+
+    <!-- The equalizer's figures. -->
+    <string name="eq_preamp">Pre-amp %1$s dB</string>
+    <string name="eq_preamp_automatic">Pre-amp %1$s dB (automatic)</string>
+    <string name="eq_balance_centre">centre</string>
+    <string name="eq_balance_left">L %1$s%%</string>
+    <string name="eq_balance_right">R %1$s%%</string>
+    <string name="eq_ceiling">Ceiling %1$s dB</string>
+    <string name="eq_reduction">−%1$s dB</string>
+    <string name="eq_not_clipping">not clipping</string>
+    <string name="eq_crossfeed_on">%1$s dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.</string>
+    <string name="eq_off">Off</string>
+    <string name="eq_hz_title">%1$s Hz</string>
+    <string name="eq_slope">Slope %1$s</string>
+    <string name="eq_q">Q %1$s</string>
+    <string name="eq_band_left">%1$s L</string>
+    <string name="eq_band_right">%1$s R</string>
+
+    <!-- A song's details. -->
+    <string name="info_title">Title</string>
+    <string name="info_artist">Artist</string>
+    <string name="info_album">Album</string>
+    <string name="info_track">Track</string>
+    <string name="info_year">Year</string>
+    <string name="info_genre">Genre</string>
+    <string name="info_duration">Duration</string>
+    <string name="info_format">Format</string>
+    <string name="info_quality">Quality</string>
+    <string name="info_size">Size</string>
+    <string name="info_replay_gain">ReplayGain</string>
+    <string name="info_bpm">BPM</string>
+    <string name="info_plays">Plays (server)</string>
+    <string name="info_last_played">Last played</string>
+    <string name="info_added">Added</string>
+    <string name="info_path">Path</string>
+    <string name="info_musicbrainz">MusicBrainz</string>
+    <string name="info_comment">Comment</string>
+    <string name="info_id">Id</string>
+    <string name="info_disc_number">disc %1$d</string>
+    <string name="info_track_number">track %1$d</string>
+    <string name="info_track_gain">track %1$s dB</string>
+    <string name="info_album_gain">album %1$s dB</string>
+    <string name="info_peak">peak %1$s</string>
+
+    <!-- Listening stats. -->
+    <string name="stats_week">Week</string>
+    <string name="stats_month">Month</string>
+    <string name="stats_year">Year</string>
+    <string name="stats_all_time">All time</string>
+    <string name="stats_headline">plays · %1$s listened</string>
+    <string name="stats_habit">Most around %1$d:00</string>
+    <string name="stats_habit_day">Most around %1$d:00, mostly on %2$s</string>
+    <string-array name="stats_weekdays">
+        <item>Mondays</item>
+        <item>Tuesdays</item>
+        <item>Wednesdays</item>
+        <item>Thursdays</item>
+        <item>Fridays</item>
+        <item>Saturdays</item>
+        <item>Sundays</item>
+    </string-array>
+    <string name="stat_songs">songs</string>
+    <string name="stat_artists">artists</string>
+    <string name="stat_albums">albums</string>
+    <string name="stat_skips">skips</string>
+    <string name="stat_active_days">active days</string>
+    <string name="stat_day_streak">day streak</string>
+
+    <!-- About: what this build is made of. -->
+    <string name="about_title">Nori %1$s</string>
+    <string name="about_build">%1$s %2$s \u0020· \u0020%3$s \u0020· \u0020Android %4$s (API %5$d)</string>
+    <string name="about_debug">debug</string>
+    <string name="about_release">release</string>
+    <string name="about_no_commit">no commit</string>
+    <string name="about_unknown_abi">unknown ABI</string>
+    <string name="about_playback">Media3 ExoPlayer%1$s \u0020· \u0020OkHttp%2$s \u0020· \u0020equalizer, crossfeed and limiter in the Rust core</string>
+    <string name="about_library">SQLite with full-text search through rusqlite%1$s \u0020· \u0020Rust core reached through uniffi%2$s</string>
+    <string name="about_automix">Beat and key analysis on this device with RustFFT%1$s \u0020· \u0020tempo changes by Signalsmith Stretch%2$s</string>
+    <string name="about_ui">Jetpack Compose and Material 3 (BOM%1$s) \u0020· \u0020covers fetched, kept and decoded by the Rust core</string>
+    <string name="about_report">%1$s (%2$s)\nPlayback: %3$s\nLibrary: %4$s\nAutoMix: %5$s\nInterface: %6$s</string>
+
+    <!-- The song menu's lines, by the action the core offers (menus::song_menu). -->
+    <string name="menu_play_next">Play next</string>
+    <string name="menu_add_to_playlist">Add to playlist…</string>
+    <string name="menu_remove_download">Remove download</string>
+    <string name="menu_download">Download</string>
+    <string name="menu_go_to_album">Go to album</string>
+    <string name="menu_go_to_artist">Go to artist</string>
+    <string name="menu_go_to_named">Go to %1$s</string>
+    <string name="menu_add_to_library">Add to library (%1$s)</string>
+    <string name="menu_provider">provider</string>
+    <string name="menu_sleep_timer">Sleep timer…</string>
+    <string name="menu_start_radio">Start radio from this song</string>
+    <string name="menu_instant_mix">Instant mix</string>
+    <string name="menu_exclude_from_mixes">Exclude from mixes</string>
+    <string name="menu_share_link">Share link</string>
+    <!-- The sleep timer's choices (menus::sleep_choices). -->
+    <string name="sleep_choice_off">Off</string>
+    <string name="sleep_choice_minutes">%1$d minutes</string>
+    <string name="sleep_choice_end_of_track">End of track</string>
+    <string name="sleep_choice_after_songs">After %1$d songs</string>
+    <!-- A page's download entry (menus::download_entry). -->
+    <string name="entry_remove_downloads">Remove downloads</string>
+    <string name="entry_download_other">Download the other %1$d</string>
+    <!-- The "For you" mixes (mixes::board). -->
+    <string name="mix_quick_picks">Quick picks</string>
+    <string name="mix_discover">Discover</string>
+    <string name="mix_discover_weekly">Discover Weekly</string>
+    <string name="mix_listen_again">Listen again</string>
+    <string name="mix_top">Your top songs</string>
+    <string name="mix_unknown">There is no mix called %1$s</string>
+    <!-- The ready-made smart playlists (smart.rs). -->
+    <string name="smart_most_played">Most played</string>
+    <string name="smart_recently_played">Recently played</string>
+    <string name="smart_recently_added">Recently added</string>
+    <string name="smart_never_played">Never played</string>
+    <string name="smart_top_rated">Top rated</string>
+    <string name="smart_forgotten_favourites">Forgotten favourites</string>
+    <string name="smart_long_tracks">Long tracks</string>
+    <!-- An artist's shelves by kind of release (pages::release_groups); a type the app does not know is named by its tag. -->
+    <string name="shelf_eps">EPs</string>
+    <string name="shelf_singles">Singles</string>
+    <string name="shelf_live">Live</string>
+    <string name="shelf_compilations">Compilations</string>
+    <string name="shelf_soundtracks">Soundtracks</string>
+    <string name="shelf_remixes">Remixes</string>
+    <string name="shelf_other">Others</string>
+    <string name="shelf_tagged">%1$ss</string>
+    <!-- The album grid's and the songs list's orders. -->
+    <string name="sort_az">A–Z</string>
+    <string name="sort_artist">Artist</string>
+    <string name="sort_added">Added</string>
+    <string name="sort_played">Played</string>
+    <string name="sort_most_played">Most played</string>
+    <string name="sort_year">Year</string>
+    <string name="sort_random">Random</string>
+    <string name="sort_title">Title</string>
+    <string name="sort_album">Album</string>
+    <string name="sort_longest">Longest</string>
+    <!-- Search. -->
+    <string name="scope_everything">Everything</string>
+    <string name="scope_in_library">In library</string>
+    <string name="search_fallback">Server search failed: %1$s — showing offline results</string>
+    <!-- The home page's shelves. -->
+    <string name="home_row_pinned">Favourite playlists</string>
+    <string name="home_row_recent">Recently played</string>
+    <string name="home_row_newest">Recently added</string>
+    <string name="home_row_frequent">Most played albums</string>
+    <string name="home_row_top_songs">Most played songs</string>
+    <string name="home_row_random">Random</string>
+    <string name="home_row_starred">Favourite albums</string>
+    <!-- The equalizer: band kinds and channels, the built-in curves, why it does nothing, a profile's use. -->
+    <string name="band_peak">Peak</string>
+    <string name="band_low_shelf">Low shelf</string>
+    <string name="band_high_shelf">High shelf</string>
+    <string name="band_low_pass">Low pass</string>
+    <string name="band_high_pass">High pass</string>
+    <string name="band_band_pass">Band pass</string>
+    <string name="band_notch">Notch</string>
+    <string name="band_all_pass">All pass</string>
+    <string name="band_low_shelf_slope">Low shelf (slope)</string>
+    <string name="band_high_shelf_slope">High shelf (slope)</string>
+    <string name="channel_both">Both</string>
+    <string name="channel_left">Left</string>
+    <string name="channel_right">Right</string>
+    <string name="preset_bass_boost">Bass boost</string>
+    <string name="preset_bass_cut">Bass cut</string>
+    <string name="preset_treble_boost">Treble boost</string>
+    <string name="preset_treble_cut">Treble cut</string>
+    <string name="preset_vocal_boost">Vocal boost</string>
+    <string name="preset_loudness">Loudness</string>
+    <string name="preset_small_speakers">Small speakers</string>
+    <string name="eq_bypass_bit_perfect">Bit-perfect USB output is active, so nothing here touches the audio.</string>
+    <string name="eq_bypass_hi_res">High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound.</string>
+    <string name="profile_choose_to_load">Choose to load</string>
+    <string name="profile_used_for">Used for %1$s</string>
+    <!-- Output devices: where each is plugged in, and the names the app gives the ones without their own. -->
+    <string name="output_speaker">Phone speaker</string>
+    <string name="output_wired">Wired headphones</string>
+    <string name="output_usb">USB</string>
+    <string name="output_bluetooth">Bluetooth</string>
+    <string name="output_usb_nameless">DAC</string>
+    <string name="output_bluetooth_nameless">device</string>
+    <string name="output_other">Other output</string>
+    <string name="output_named">%1$s: %2$s</string>
+    <string name="output_description">Output: %1$s</string>
+    <string name="device_playing_now">Playing now</string>
+    <string name="device_playing_now_after">" · Playing now"</string>
+    <string name="device_sheet_intro">What music played through %1$s sounds like. It switches by itself whenever the device connects.</string>
+    <string name="device_this">this</string>
+    <string name="device_this_kind">this %1$s device</string>
+    <string name="device_auto_uses">Uses a matching AutoEQ curve when one is known</string>
+    <string name="device_auto_offers">Offers a matching AutoEQ curve when one is known</string>
+    <string name="device_notice_offer">%1$s connected. Use its AutoEQ curve?</string>
+    <string name="device_notice_apply">Apply</string>
+    <string name="device_notice_applied">Using AutoEQ for %1$s</string>
+    <string name="device_notice_undo">Undo</string>
+    <string name="autoeq_count">%1$d headphones</string>
+    <string name="autoeq_search_count">Search %1$d headphones</string>
+</resources>

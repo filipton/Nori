@@ -121,13 +121,13 @@ pub fn test_ref(text: String) -> TestRef {
     }
 }
 
-/// An M3U file matched against the index: the songs for the new playlist, in the file's order, and the
-/// message to show once it exists (or, with no songs, instead of creating it).
+/// An M3U file matched against the index: the songs for the new playlist, in the file's order, and how
+/// many entries the file had (the client says how many were found, or, with none, that none were).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct M3uImport {
     pub song_ids: Vec<String>,
-    pub message: String,
+    pub entries: u32,
 }
 
 #[cfg(test)]

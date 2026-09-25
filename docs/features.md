@@ -124,7 +124,7 @@ owner's DAC), 11 backup, automation API, shortcuts, widgets, Auto nodes, logs, W
 | Crossfade with real overlap | x | fade-out only | | yes | |
 | Crossfade: separate in/out length, curves, "mix only", off for albums in order | x | | | part | part: off inside albums |
 | A scrub into the mix stays on the song to hear the ending, and the mix still fires | | | | yes | |
-| AutoMix "Better beat detection": a neural beat tracker (Beat This!, MIT) reads each song's first and last half minute | | | | yes | done in the core: off by default, 5 MB model downloaded once, runs in the measurer on the song playing and the next; only in a build with `neural-beats`, which the app's builds leave out (docs/research/analysis.md) |
+| AutoMix "Better beat detection": a neural beat tracker (Beat This!, MIT) reads each song's first and last half minute | | | | yes | done in the core: off by default, runs in the measurer on the song playing and the next; only in a build with `neural-beats`: the debug and perf builds, with the 5 MB model inside the APK (a release build leaves it out unless asked; another client downloads the model) (docs/research/analysis.md) |
 | Smart fades (waveform-analysed fade points) | x | | | | ask (cost: decode-ahead analysis per track) |
 | Fade on play / pause / seek / skip | x | x | | yes | done |
 | Speed | x | x | x | yes | |

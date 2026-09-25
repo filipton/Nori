@@ -60,19 +60,18 @@ pub enum SearchScope {
     Providers,
 }
 
-/// The scope chips and their words, in their order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SearchScopeChip {
-    pub scope: SearchScope,
-    pub label: String,
+/// The scope chips, in their order; the client names each.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn search_scopes() -> Vec<SearchScope> {
+    vec![SearchScope::Everything, SearchScope::Library, SearchScope::Providers]
 }
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn search_scopes() -> Vec<SearchScopeChip> {
-    [(SearchScope::Everything, "Everything"), (SearchScope::Library, "In library"), (SearchScope::Providers, "Not in library yet")]
-        .map(|(scope, label)| SearchScopeChip { scope, label: label.into() })
-        .to_vec()
+/// The server could not be asked and the offline answer stays on screen: the client says so, with
+/// `reason`, what it said the failure was when it reported it (`SearchSession::failed`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SearchFallback {
+    pub reason: Option<String>,
 }
 
 impl SearchSplit {
@@ -100,8 +99,8 @@ pub struct SearchView {
     pub from_server: bool,
     /// The server is being asked.
     pub searching: bool,
-    /// The server could not be asked, in words; the offline answer stays on screen.
-    pub error: Option<String>,
+    /// The server could not be asked; the offline answer stays on screen.
+    pub error: Option<SearchFallback>,
     pub scope: SearchScope,
     /// The scope chips are offered: there are provider items, or a scope other than everything is on.
     pub scopes_offered: bool,
@@ -116,7 +115,7 @@ pub struct Session {
     pub split: Option<SearchSplit>,
     pub from_server: bool,
     pub searching: bool,
-    pub error: Option<String>,
+    pub error: Option<SearchFallback>,
     pub scope: SearchScope,
 }
 

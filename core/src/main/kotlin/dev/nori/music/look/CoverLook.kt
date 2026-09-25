@@ -109,9 +109,6 @@ object CoverLook {
      */
     @JvmStatic @CriticalNative external fun seekTimes(dragging: Boolean, drag: Float, heldMs: Long, positionMs: Long, durationMs: Long): Long
 
-    /** A time under the seek bar, "3:07", or "-3:07" when [left] (`nori-core fmt::duration`): one Java string, no bridge objects. */
-    @JvmStatic @FastNative external fun duration(seconds: Long, left: Boolean): String
-
     @JvmStatic @CriticalNative external fun seekStep(bar: Float, target: Float, dtS: Float, widthPx: Float, speed: Float): Long
 
     // The seek bar's pace (nori_look::motion::SeekPace), through [SeekPace]: a handle and primitives.
@@ -134,9 +131,6 @@ object CoverLook {
      * press (0 start, 1 toggle, 2 shuffle off). Primitives only: it is asked on every play and pause.
      */
     @JvmStatic @CriticalNative external fun heroButtons(here: Boolean, shuffle: Boolean, playing: Boolean, buffering: Boolean, canPlay: Boolean, canShuffle: Boolean): Int
-
-    /** What Play says, "Pause" or "Play" (`nori-core pages::hero_play_label`). */
-    @JvmStatic @FastNative external fun heroPlayLabel(pausing: Boolean): String
 
     @JvmStatic @FastNative private external fun plain(roles: IntArray, out: IntArray)
     @JvmStatic @FastNative private external fun tones(seed: Int, dark: Boolean, out: IntArray)

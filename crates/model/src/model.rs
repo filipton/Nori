@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 // Defined in the player crate, where the audio code that uses them lives; described here again so
 // uniffi can hand them to Kotlin unchanged.
-pub use nori_player::types::{AutoMixSettings, EqBand, EqKind, FadeCurve, NamedPreset, TrackAnalysis, TransitionKind, TransitionPlan};
+pub use nori_player::types::{AutoMixSettings, EqBand, EqKind, FadeCurve, NamedPreset, PresetKind, TrackAnalysis, TransitionKind, TransitionPlan};
 
 /// `starred` is a timestamp on the wire and a bool once stored.
 fn flag<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
@@ -208,7 +208,7 @@ dressed!(Album);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-#[serde(remote = "Self", default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct Artist {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -221,23 +221,11 @@ pub struct Artist {
     pub starred: bool,
     /// Set by octo-fiesta for provider items that are not in the library yet.
     pub is_external: bool,
-    /// Under the name in the artists list, "12 albums" ([`crate::lines::albums`]), made when read.
-    #[serde(skip)]
-    #[cfg_attr(feature = "ffi", uniffi(default))]
-    pub albums_line: String,
 }
-
-impl Artist {
-    fn dress(&mut self) {
-        self.albums_line = crate::lines::albums(self.album_count);
-    }
-}
-
-dressed!(Artist);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-#[serde(remote = "Self", default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct Playlist {
     #[serde(deserialize_with = "id")]
     pub id: String,
@@ -249,24 +237,7 @@ pub struct Playlist {
     pub duration: u32,
     #[serde(deserialize_with = "opt_id")]
     pub cover_art: Option<String>,
-    /// Its line in the library, "12 songs · 48:10" ([`crate::lines::playlist_line`]), made when read.
-    #[serde(skip)]
-    #[cfg_attr(feature = "ffi", uniffi(default))]
-    pub line: String,
-    /// Under its card on the home page: "12 songs".
-    #[serde(skip)]
-    #[cfg_attr(feature = "ffi", uniffi(default))]
-    pub songs_line: String,
 }
-
-impl Playlist {
-    fn dress(&mut self) {
-        self.line = crate::lines::playlist_line(self.song_count, self.duration);
-        self.songs_line = crate::lines::songs(self.song_count);
-    }
-}
-
-dressed!(Playlist);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -422,11 +393,24 @@ pub struct EqPreset {
     pub bands: Vec<EqBand>,
 }
 
+#[cfg(feature = "ffi")]
+#[uniffi::remote(Enum)]
+pub enum PresetKind {
+    Flat,
+    BassBoost,
+    BassCut,
+    TrebleBoost,
+    TrebleCut,
+    VocalBoost,
+    Loudness,
+    SmallSpeakers,
+}
+
 /// One of the built-in curves from `dsp::eq_presets`.
 #[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
 pub struct NamedPreset {
-    pub name: String,
+    pub kind: PresetKind,
     pub preamp_db: f32,
     pub bands: Vec<EqBand>,
 }
@@ -526,13 +510,30 @@ pub struct ListeningStats {
     pub first_play: Option<HistoryEntry>,
 }
 
+/// Which ready-made smart playlist a built-in definition is; the client names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[repr(u8)]
+pub enum SmartBuiltin {
+    MostPlayed,
+    RecentlyPlayed,
+    RecentlyAdded,
+    NeverPlayed,
+    TopRated,
+    ForgottenFavourites,
+    LongTracks,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartPlaylist {
     pub id: String,
+    /// The name the user gave it; empty for a ready-made one, which the client names by [`builtin`](Self::builtin).
     pub name: String,
     /// The definition; schema in `smart.rs`.
     pub json: String,
+    /// Set on the ready-made definitions (`smart_defaults`), never on a stored one.
+    pub builtin: Option<SmartBuiltin>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -937,7 +938,7 @@ pub enum Rebuild {
     AtBoundary,
 }
 
-pub use nori_player::dac::{DacChoice, DacMode};
+pub use nori_player::dac::{DacBlock, DacChoice, DacMode};
 
 #[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
@@ -951,7 +952,16 @@ pub struct DacMode {
 #[uniffi::remote(Record)]
 pub struct DacChoice {
     pub use_index: i32,
-    pub blocked_by: Option<String>,
+    pub blocked_by: Option<DacBlock>,
+}
+
+#[cfg(feature = "ffi")]
+#[uniffi::remote(Enum)]
+pub enum DacBlock {
+    NoModeAtRate { rate: u32 },
+    NeedsExclusive { rate: u32, depths: u8 },
+    PlatformTooOld,
+    Refused,
 }
 
 /// What failed when a song would not play (`nori_player::queue`): the queue's rules count it, and the

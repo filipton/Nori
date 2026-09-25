@@ -169,7 +169,7 @@ pub async fn fetch_curve(transport: &dyn nori_net::transport::Transport, e: &Aut
             continue;
         }
         if !(200..300).contains(&r.status) {
-            return Err(nori_net::transport::NetError::io(format!("HTTP {}", r.status)));
+            return Err(nori_net::transport::NetError::Http { status: r.status });
         }
         let t = text(&r.body);
         if usable(&t) {

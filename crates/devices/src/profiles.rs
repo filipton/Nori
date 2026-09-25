@@ -10,7 +10,8 @@ use nori_player::device::{self, keep_loose, FLAT};
 use nori_player::outputs::SPEAKER;
 
 // Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
-pub use nori_player::device::{ChoiceKind, DeviceRow, NoticeText};
+pub use nori_player::device::{ChoiceKind, DeviceRow};
+pub use nori_player::outputs::OutputPort;
 
 use nori_settings::settings::{sound_json, SoundSettings, StoredPrefs};
 use nori_model::AutoEqEntry;
@@ -32,22 +33,24 @@ pub enum ChoiceKind {
 }
 
 #[cfg(feature = "ffi")]
-#[uniffi::remote(Record)]
-pub struct DeviceRow {
-    pub output: String,
-    pub name: String,
-    pub kind: Option<String>,
-    pub current: bool,
-    pub sound: String,
-    pub choice: ChoiceKind,
-    pub profile: Option<String>,
+#[uniffi::remote(Enum)]
+pub enum OutputPort {
+    Speaker,
+    Wired,
+    Usb,
+    Bluetooth,
+    Other,
 }
 
 #[cfg(feature = "ffi")]
 #[uniffi::remote(Record)]
-pub struct NoticeText {
-    pub message: String,
-    pub action: String,
+pub struct DeviceRow {
+    pub output: String,
+    pub port: OutputPort,
+    pub name: Option<String>,
+    pub current: bool,
+    pub choice: ChoiceKind,
+    pub profile: Option<String>,
 }
 
 /// What happens to the sound kept from before a device took over (see `nori_player::device::keep_loose`).
@@ -139,12 +142,6 @@ pub fn device_rows(known: Vec<String>, current: String, profiles: Vec<SoundProfi
     device::rows(&known, &current, &bound, &quiet)
 }
 
-/// The snackbar line about the device that just connected; see `nori_player::device::notice`.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_notice(offer: bool, name: String, output: String, current: String) -> Option<NoticeText> {
-    device::notice(offer, &name, &output, &current)
-}
-
 /// What the test bridge asks a device to get.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
@@ -191,86 +188,32 @@ pub fn autoeq_too_short(query: &str) -> bool {
     query.trim().encode_utf16().count() < 2
 }
 
-/// One AutoEQ curve with the lines under it: `caption` in the browser (who measured it, the form and
-/// the target, whichever are known), `short` in a device's sheet (who measured it and the form).
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AutoEqHit {
-    pub entry: AutoEqEntry,
-    pub caption: String,
-    pub short: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct AutoEqFound {
     pub too_short: bool,
-    pub hits: Vec<AutoEqHit>,
+    pub hits: Vec<AutoEqEntry>,
 }
 
-fn hit(entry: AutoEqEntry) -> AutoEqHit {
-    let caption = [&entry.source, &entry.form, &entry.target].iter().filter(|s| !s.is_empty()).map(|s| s.as_str()).collect::<Vec<_>>().join(" · ");
-    let short = format!("{} · {}", entry.source, entry.form);
-    AutoEqHit { entry, caption, short }
-}
-
-/// The curves with their lines.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn autoeq_hits(entries: Vec<AutoEqEntry>) -> Vec<AutoEqHit> {
-    entries.into_iter().map(hit).collect()
-}
-
-/// The size of the downloaded AutoEQ list: "8123 headphones", and the search field's "Search 8123 headphones".
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AutoEqCount {
-    pub count: String,
-    pub search: String,
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn autoeq_count_words(count: u32) -> AutoEqCount {
-    AutoEqCount { count: format!("{count} headphones"), search: format!("Search {count} headphones") }
-}
-
-/// What a device's sheet says and offers.
+/// What a device's sheet offers; the client words it (its introduction by where the device is plugged
+/// in, the line under "Automatic" by whether a curve is applied or offered).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct DeviceSheet {
-    /// The words under its name.
-    pub intro: String,
-    /// The line under "Automatic": whether a known curve is used or offered.
-    pub automatic: String,
     /// The saved profiles it can be given; "Flat" is its own row, so it is not among them.
     pub profiles: Vec<String>,
     /// Neither the one playing now nor the phone's speaker, which are always there.
     pub can_forget: bool,
 }
 
-pub fn sheet(output: &str, kind: Option<&str>, current: bool, auto_eq_auto: bool, profiles: &[String]) -> DeviceSheet {
-    let this = match kind {
-        None => "this".to_string(),
-        Some(k) => format!("this {k} device"),
-    };
-    DeviceSheet {
-        intro: format!("What music played through {this} sounds like. It switches by itself whenever the device connects."),
-        automatic: (if auto_eq_auto { "Uses a matching AutoEQ curve when one is known" } else { "Offers a matching AutoEQ curve when one is known" }).into(),
-        profiles: profiles.iter().filter(|p| *p != FLAT).cloned().collect(),
-        can_forget: !current && output != SPEAKER,
-    }
+pub fn sheet(output: &str, current: bool, profiles: &[String]) -> DeviceSheet {
+    DeviceSheet { profiles: profiles.iter().filter(|p| *p != FLAT).cloned().collect(), can_forget: !current && output != SPEAKER }
 }
 
-/// The sheet of the device `output` (plugged in as `kind`, the one playing now or not), given the
-/// saved profiles' names.
+/// The sheet of the device `output` (the one playing now or not), given the saved profiles' names.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_sheet(output: String, kind: Option<String>, current: bool, auto_eq_auto: bool, profiles: Vec<String>) -> DeviceSheet {
-    sheet(&output, kind.as_deref(), current, auto_eq_auto, &profiles)
-}
-
-/// The mark on the device playing now, after its kind when it has one: " · Playing now", "Playing now".
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn device_playing_now(after_kind: bool) -> String {
-    (if after_kind { " · Playing now" } else { "Playing now" }).into()
+pub fn device_sheet(output: String, current: bool, profiles: Vec<String>) -> DeviceSheet {
+    sheet(&output, current, &profiles)
 }
 
 #[cfg(test)]

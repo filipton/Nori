@@ -66,7 +66,7 @@ Under each stretch, on the page and in the report, two lines say why it cost wha
 | Line | What it is |
 |---|---|
 | threads by wakeups | the six threads that woke most over the stretch (`/proc/self/task/*/stat` and `status`): each one's name, wakeups per second and CPU time. A thread that started during the stretch is marked "(new)". The Rust player's threads carry their own names (`nori-engine`, `nori-track`, `nori-load`, `nori-open`, `nori-covers`, `nori-analysis`); Java's are the platform's (`binder:…`, `RenderThread`, `main` is the app's package name) |
-| output | the AudioTrack the player last opened, as the platform describes it when the stretch ended, against what was asked of it: the engine, rate, channels and encoding, the buffer in ms (given, of what was asked, and the most it could grow to), the performance mode asked for and given (the Rust player asks for power saving, the platform's deep-buffer output; media3 asks for none), whether it is offloaded to the audio chip, where it is routed, its underruns since it was made, and whether it was playing |
+| output | the AudioTrack the player last opened, as the platform describes it when the stretch ended, against what was asked of it: the engine, rate, channels and encoding, the buffer in ms (given, of what was asked, and the most it could grow to), the performance mode asked for and given (the player asks for power saving, the platform's deep-buffer output), whether it is offloaded to the audio chip, where it is routed, its underruns since it was made, and whether it was playing |
 
 Under those, the stretch's **timeline**: what happened during it, one timestamped line each, folded on
 the page ("12 events") and printed in full in the report. At most 150 per stretch; past that the oldest
@@ -74,7 +74,7 @@ go, and the stretch says how many.
 
 | Event | What it says |
 |---|---|
-| song | the song the ear arrived on: the file as the server has it (suffix, rate, bit depth, bit rate) and where its bytes come from (the download, the stream cache at which quality, or the network); with ExoPlayer, what the decoder was handed as well (codec, container, rate, bit rate, encoder delay and padding) |
+| song | the song the ear arrived on: the file as the server has it (suffix, rate, bit depth, bit rate) and where its bytes come from (the download, the stream cache at which quality, or the network) |
 | settings | which settings changed, from what to what (the servers and keys only as "changed"); a slider dragged is one event |
 | engine | the player service started with an engine, or ended |
 | output | an AudioTrack opened or reopened, as the output line says it (format, buffer, mode, offload, route), or let go |
@@ -135,7 +135,7 @@ for the other clients. What holds it, read from the code, and what was done:
 | The moving cover's ExoPlayer: media3's default `DefaultLoadControl`, 50 s ahead, looping, up to 1080 px HLS in the Java heap | tens of MB with the player open (50 s at 5-10 Mbit/s is 30-60 MB) | both | `motion_load_control`: 4-8 s, at most 4 MB. The loop comes from the disk cache, so this costs no network |
 | Decoded covers (`CoverLoader`, hardware Bitmaps, counted under Graphics) | up to 15 % of the memory class: 29 MB on the emulator (192 MB), 38 MB on a 256 MB phone | both | a quarter stays while no screen is in sight (`cover_rules().hidden_share`). Covers still on the page are held by their views anyway |
 | Page colours (`CoverPalette`): 128 entries, each with a 128 px ARGB wash | up to 8 MB (native heap) | both | an LRU capped at 2 MB, about 30 washes |
-| The music's buffer (`load_control`): a quarter of the memory class, at most 48 MB, the whole song in one burst | the song ahead (ExoPlayer drops what it has played); on the Rust engine the whole song, played part included | both | kept: one network wake per song is the battery design. The Rust loader could drop what it has played (it needs chunked storage, since `Vec::drain` keeps the allocation), but a seek back then needs the network |
+| The music's buffer (`load_control`): a quarter of the memory class, at most 48 MB, the whole song in one burst | the whole song, played part included | both | kept: one network wake per song is the battery design. The Rust loader could drop what it has played (it needs chunked storage, since `Vec::drain` keeps the allocation), but a seek back then needs the network |
 | The Rust engine's ring: 12 s of f32 | 4.2 MB at 44.1 kHz stereo, 9.2 MB at 96 kHz | Rust | kept: storing i16 for a 16-bit device would halve it, but the fades run on the samples as they are pulled |
 | The AudioTrack: 11.5 s | 2 MB i16, 4 MB float (shared memory) | Rust | kept (the burst design) |
 | SQLite: two connections at the default 2 MB page cache, no mmap | at most 4 MB, filled only by reads | both | kept |
@@ -146,7 +146,7 @@ for the other clients. What holds it, read from the code, and what was done:
 `tools/meminfo.sh <label>` prints one line of `dumpsys meminfo` (total PSS, Java heap, native heap, code,
 stack, graphics, other), plus the PSS of libnorimusic.so and the thread count. Use it for the
 before/after table in each state (cold start, library, a scrolled album grid, player open, lyrics, screen
-off) on both engines (`tools/app.sh engine rust`). That table is still to be measured.
+off). That table is still to be measured.
 
 ## What the open player costs
 

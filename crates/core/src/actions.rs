@@ -5,7 +5,7 @@
 use crate::autofill::seed_now;
 use crate::cache_policy::{Page, Read};
 use crate::client::{Client, NetResult};
-use crate::{m3u, words, Album, Core, Result, Song};
+use crate::{m3u, Album, Core, Result, Song};
 
 pub use nori_queue::actions::*;
 
@@ -67,10 +67,10 @@ impl Client {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
     /// Tracks that are not in the index are reported, not guessed.
-    pub fn m3u_import(&self, name: String, text: String) -> Result<M3uImport> {
+    pub fn m3u_import(&self, text: String) -> Result<M3uImport> {
         let matched = self.m3u_match(m3u::m3u_parse(text))?;
         let song_ids: Vec<String> = matched.iter().flatten().map(|s| s.id.clone()).collect();
-        Ok(M3uImport { message: words::m3u_imported(song_ids.len(), matched.len(), &name), song_ids })
+        Ok(M3uImport { entries: matched.len() as u32, song_ids })
     }
 }
 
@@ -128,11 +128,10 @@ pub(crate) mod tests {
         let core = Core::new(String::new(), "t".into()).unwrap();
         db::index(&mut core.db.lock(), &[], &[], &[song("1", "Dogs", "Pink Floyd", "Animals", "", 1977)]).unwrap();
         let text = "#EXTM3U\n#EXTINF:200,Pink Floyd - Dogs\na.flac\n#EXTINF:100,Nobody - Nothing\nb.flac\n";
-        let r = core.m3u_import("Road".into(), text.into()).unwrap();
-        assert_eq!(r.song_ids, ["1"]);
-        assert_eq!(r.message, "Imported 1 of 2 tracks into Road");
-        let none = core.m3u_import("Road".into(), "#EXTM3U\n#EXTINF:1,X - Y\nc.mp3\n".into()).unwrap();
+        let r = core.m3u_import(text.into()).unwrap();
+        assert_eq!((r.song_ids.as_slice(), r.entries), (["1".to_string()].as_slice(), 2));
+        let none = core.m3u_import("#EXTM3U\n#EXTINF:1,X - Y\nc.mp3\n".into()).unwrap();
         assert!(none.song_ids.is_empty());
-        assert!(none.message.starts_with("None of the 1 entries"));
+        assert_eq!(none.entries, 1);
     }
 }

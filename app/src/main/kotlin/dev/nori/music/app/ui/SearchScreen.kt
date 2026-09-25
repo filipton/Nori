@@ -40,7 +40,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
     val downloads by actions.downloads.collectAsState()
     val nav = LocalNav.current
     val menu = LocalSongMenu.current
-    val scopes = remember { dev.nori.music.ffi.library.searchScopes() }
+    val scopes = remember { dev.nori.music.ffi.library.searchScopes().map { it to say.searchScope(it) } }
     Column {
         LargeTitle(say.search)
         SearchField(
@@ -52,7 +52,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
         ui.error?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
 
         if (ui.scopesOffered) LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(scopes) { c -> Chip(c.label, ui.scope == c.scope) { vm.setScope(c.scope) } }
+            items(scopes) { (scope, label) -> Chip(label, ui.scope == scope) { vm.setScope(scope) } }
         }
         val r = ui.shown
         if (r == null) {
@@ -95,7 +95,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                     swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
                 )
             }
-            if (ui.nothingFound) item { EmptyNote(dev.nori.music.ffi.words.Note.NOTHING_FOUND) }
+            if (ui.nothingFound) item { EmptyNote(Note.NOTHING_FOUND) }
         }
     }
 }

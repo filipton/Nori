@@ -173,20 +173,6 @@ pub fn seek_times(dragging: bool, drag: f32, held_ms: i64, position_ms: i64, dur
     SeekTimes { at_s: shown / 1000, left_s: (duration_ms - shown).max(0) / 1000 }
 }
 
-/// What the middle of the seek bar's times says: an error, or the sleep timer (`sleep_left_ms` None when
-/// none is set by time), or nothing - it holds its place so the two times either side never move. It
-/// said "Mixing" through every crossfade once, which is a word about the plumbing rather than the music.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn seek_middle(error: Option<String>, sleep_end_of_track: bool, sleep_left_ms: Option<i64>) -> String {
-    if let Some(e) = error {
-        return e;
-    }
-    if sleep_end_of_track || sleep_left_ms.is_some() {
-        return crate::words::words_sleep(sleep_end_of_track, sleep_left_ms.unwrap_or(0));
-    }
-    String::new()
-}
-
 // ---- the queue panel ---------------------------------------------------------------------------------------
 
 /// The queue as the panel lists it.
@@ -233,10 +219,6 @@ mod tests {
         assert_eq!(seek_times(false, 0.5, 9_000, 1_000, 200_000), SeekTimes { at_s: 9, left_s: 191 });
         assert_eq!(seek_times(false, 0.5, -1, 61_500, 200_000), SeekTimes { at_s: 61, left_s: 138 });
         assert_eq!(seek_times(false, 0.0, -1, 5_000, 0), SeekTimes { at_s: 5, left_s: 0 });
-        assert_eq!(seek_middle(Some("Offline".into()), true, Some(1)), "Offline");
-        assert_eq!(seek_middle(None, true, None), "Sleep · end of track");
-        assert_eq!(seek_middle(None, false, Some(60_000)), "Sleep · 1 min");
-        assert_eq!(seek_middle(None, false, None), "");
     }
 
     #[test]

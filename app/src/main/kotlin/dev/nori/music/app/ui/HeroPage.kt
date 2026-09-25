@@ -105,11 +105,10 @@ fun HeroPage(
         CoverLook.heroButtons(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null)
     }
     val pausing = bits and 4 != 0
-    val playLabel = remember(pausing) { CoverLook.heroPlayLabel(pausing) }
-    val buttons = remember(bits, playLabel) {
+    val buttons = remember(bits) {
         dev.nori.music.ffi.library.HeroButtons(
             shuffleLit = bits and 1 != 0, shuffleEnabled = bits and 2 != 0, shufflePress = heroPress(bits shr 4),
-            playLabel = playLabel, pausing = pausing, playEnabled = bits and 8 != 0, playPress = heroPress(bits shr 6),
+            pausing = pausing, playEnabled = bits and 8 != 0, playPress = heroPress(bits shr 6),
         )
     }
 
@@ -210,7 +209,7 @@ fun HeroPage(
                                 onClick = { press(buttons.shufflePress, onShuffle) },
                             )
                             PillButton(
-                                buttons.playLabel, if (buttons.pausing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                if (buttons.pausing) say.pause else say.play, if (buttons.pausing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                                 { press(buttons.playPress, onPlay) }, Modifier.weight(1f),
                                 prominent = true, enabled = buttons.playEnabled,
                             )

@@ -40,8 +40,8 @@ pub fn lyrics_none() -> nori_model::Lyrics {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum ResumePlan {
-    /// Nothing was saved: say so.
-    Nothing { message: String },
+    /// Nothing was saved: the client says so.
+    Nothing,
     /// Play `songs` from `index`, then seek to `position_ms`.
     Play { songs: Vec<Song>, index: u32, position_ms: u64 },
 }
@@ -49,7 +49,7 @@ pub enum ResumePlan {
 /// What the server's queue `q` plays when it is picked back up.
 pub fn resume_plan(q: PlayQueue) -> ResumePlan {
     if q.songs.is_empty() {
-        ResumePlan::Nothing { message: nori_words::words::words(nori_words::words::Said::NoServerQueue, String::new()) }
+        ResumePlan::Nothing
     } else {
         ResumePlan::Play { songs: q.songs, index: q.index, position_ms: q.position_ms }
     }
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn nothing_saved_on_the_server_says_so() {
-        assert_eq!(resume_plan(PlayQueue { songs: vec![], index: 3, position_ms: 9 }), ResumePlan::Nothing { message: "No queue saved on the server".into() });
+        assert_eq!(resume_plan(PlayQueue { songs: vec![], index: 3, position_ms: 9 }), ResumePlan::Nothing);
         let s = Song { id: "a".into(), ..Default::default() };
         assert_eq!(resume_plan(PlayQueue { songs: vec![s.clone()], index: 0, position_ms: 1200 }), ResumePlan::Play { songs: vec![s], index: 0, position_ms: 1200 });
     }

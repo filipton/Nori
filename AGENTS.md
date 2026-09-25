@@ -20,8 +20,8 @@ crates/player/  Rust, platform-free: how music is played and heard. Decoding com
                 what mixes where (transitions.rs), the audio policy, ReplayGain and fades (policy.rs), USB
                 DACs (dac.rs), outputs (outputs.rs) and which sound an output device gets (device.rs,
                 sound.rs). No I/O, no uniffi, no JNI. pipeline.rs is the player around the transition
-                engine with the platform left out (the queue walked song by song, one reading at a time,
-                media3's AudioSink with the processors in it over a device buffer); sim.rs (behind
+                engine with the platform left out (the queue walked song by song, one reading at a time, a
+                sink shaped like media3's AudioSink with the processors in it over a device buffer); sim.rs (behind
                 `synth`) runs it on a simulated AudioTrack and a virtual clock, and tests/pipeline asserts
                 on what the ear would get.
 crates/look/    Rust, platform-free: how a page looks and moves. The colours a page takes from its cover
@@ -30,8 +30,6 @@ crates/look/    Rust, platform-free: how a page looks and moves. The colours a p
                 (dress.rs, over Compose's own colour maths in compose.rs), the gradients that dissolve a
                 picture into its page (sleeve.rs), the seek bar's pacing (motion.rs) and lyric timing, sweep
                 and redraw pacing (lyrics.rs). Pixels and times in, colours and numbers out; no I/O, no uniffi, no JNI.
-crates/text/    Rust, platform-free: numbers written the way the platform's locale writes them (the
-                decimal separator is handed in once), with Java's rounding.
 crates/testdir/ Rust, tests only (a dev-dependency, package nori-testdir): `TempDir`, a directory of a test's
                 own under the temp directory, uniquely named and removed when the guard drops, a panicking
                 test's too. Every test that writes files takes one; none calls `std::env::temp_dir()` itself.
@@ -44,7 +42,8 @@ crates/core/    Rust, platform-free: the top of the app's state, an rlib a deskt
                 core (history.rs, playlist.rs, transfers.rs, ...) - the reads and their response cache
                 (cache_policy.rs), the covers worth fetching ahead (covers.rs), an album's moving cover
                 found in Apple Music's catalogue (motion.rs), the stage's constants
-                (stage.rs) and the few words that read the app's state (words.rs). It re-exports every
+                (stage.rs) and the few facts for the screens that read the app's state (shown.rs: the
+                media session's buttons, whether a heart press is confirmed). It re-exports every
                 domain crate under the paths clients use (`nori_core::playlist`, `::settings_store`,
                 `::transfers`, `::Song`, ...). Depends on every crate below. Kotlin asks and draws; the
                 core decides, and reacts to its own state (a settings change reaches the planner and the
@@ -53,16 +52,13 @@ crates/core/    Rust, platform-free: the top of the app's state, an rlib a deskt
                 domain crate built on its own, has no uniffi in it. Plain Rust types in and out, no JNI.
 crates/model/   Rust, platform-free: the shapes every part of the core shares (package nori-model): the
                 library's records as the server sends them, the index stores them and Kotlin gets them
-                (model.rs, with the player's own records described again for uniffi), the few words a record
-                carries about itself (lines.rs), the core's error (`CoreError`) and its log (alog.rs).
-                Depends on nori-player and nori-text.
+                (model.rs, with the player's own records described again for uniffi), what a record carries
+                about itself beyond the server's fields, unworded (lines.rs: a provider's name, the explicit
+                mark), the core's error (`CoreError`) and its log (alog.rs). Depends on nori-player.
 crates/db/      Rust, platform-free: the app's one SQLite/FTS5 database (package nori-db): its schema, opened
                 for one server's rows (`sid()`), the library index and its search, the database of the core
                 in use for the parts that run without one handed to them (`active`), and the one thread
                 that writes in the background (background.rs). Depends on nori-model.
-crates/words/   Rust, platform-free: every word the app says and every number it writes (package
-                nori-words): confirmations, labels and sentences (words.rs), times, decibels, sizes and
-                captions (fmt.rs). Depends on nori-model, nori-player and nori-text.
 crates/net/     Rust, platform-free: the Subsonic API below the client (package nori-net): request signing
                 and addresses (api.rs), the `Transport` a platform implements and what a failure means
                 (transport.rs), the profile, the writes and what they make stale (requests.rs), and the
@@ -72,7 +68,7 @@ crates/library/ Rust, platform-free: the music library as the app shows it (pack
                 mixes/board.rs), smart playlists (smart.rs, smart/draft.rs), M3U (m3u.rs), browsing and
                 search (browse.rs, search.rs), this session's stars (stars.rs), how each page is laid out
                 (pages.rs, rows.rs), the song menus (menus.rs), the car's browse tree (car.rs) and the
-                repository's small decisions (library.rs). Depends on nori-model, nori-db, nori-words,
+                repository's small decisions (library.rs). Depends on nori-model, nori-db,
                 nori-net and nori-look.
 crates/automix/ Rust, platform-free: AutoMix over the app's database (package nori-automix): the analysis
                 store and the streaming analyser (store.rs), the transition planner the audio path asks
@@ -80,12 +76,14 @@ crates/automix/ Rust, platform-free: AutoMix over the app's database (package no
                 optional beat model's file is (beat_model.rs).
                 Depends on nori-model, nori-db and nori-player.
 crates/settings/ Rust, platform-free: the settings (package nori-settings): codec, defaults and rules
-                (settings.rs), the live copy kept in the app's database (settings_store.rs), every settings
-                page as data (settings_schema.rs), the lyrics services and which of them are asked
-                (lyrics_sources.rs), and what follows them by itself - the sound chain
-                (dsp.rs) and which streams the core's decoder takes (decoder.rs). Depends on nori-model,
-                nori-db, nori-words, nori-library (the settings search), nori-automix (a change reaches the
-                planner), nori-player and nori-look.
+                (settings.rs), the live copy kept in the app's database (settings_store.rs), the model a
+                client builds its settings screen on (settings_model.rs: every setting's name, kind,
+                options as values and default, the values now, and what the rules make of them), the
+                lyrics services and which of them are asked (lyrics_sources.rs), the credits (credits.rs),
+                and the sound settings' answers the player asks for (dsp.rs). No settings screen: pages,
+                rows and words are each client's.
+                Depends on nori-model, nori-db, nori-automix (a change reaches the planner),
+                nori-player and nori-look.
 crates/lyrics/  Rust, platform-free: lyrics (package nori-lyrics): the server's and the lyrics services' in
                 one shape with every word timed, backing vocals and duet sides (lyrics.rs); every format
                 the services answer in (formats.rs: lyricsfile, TTML, YRC, KRC, QRC and the cache's own;
@@ -94,7 +92,7 @@ crates/lyrics/  Rust, platform-free: lyrics (package nori-lyrics): the server's 
                 at an answer's ends stripped (credits.rs); each answer scored against the song and the
                 other answers (trust.rs); the services asked in waves, the best chosen, bounded and remembered in the response
                 cache with its score (race.rs); and the lyrics page's
-                clock (look.rs). Depends on nori-model, nori-net, nori-words, nori-settings and nori-look.
+                clock (look.rs). Depends on nori-model, nori-net, nori-settings and nori-look.
 crates/devices/ Rust, platform-free: the output side (package nori-devices): the platform's output devices
                 as the player's and the ones known (outputs.rs), which sound each device gets (profiles.rs)
                 and the AutoEQ index (autoeq.rs). Depends on nori-model, nori-db, nori-net, nori-settings
@@ -108,10 +106,12 @@ crates/queue/   Rust, platform-free: the queue the app plays (package nori-queue
                 nori-settings and nori-player.
 crates/transfers/ Rust, platform-free: what is kept on the device (package nori-transfers): downloads as
                 they run, what they say and which songs are downloaded (transfers.rs), and the stream
-                cache's order (stream_cache.rs). Depends on nori-model, nori-db, nori-words, nori-net,
-                nori-settings and nori-text.
+                cache's order (stream_cache.rs). Its notification's and screen's words are the client's: it
+                gives which message applies (`NoticeKind`, `SummaryTitle`), counts, speed and time left.
+                Depends on nori-model, nori-db, nori-net and nori-settings.
 crates/perf/    Rust, platform-free: the perf recorder's bookkeeping (package nori-perf, perf_log.rs).
-                Depends on nori-model, nori-library, nori-settings, nori-devices, nori-player and nori-text.
+                Its report is tooling, in English, and rounds its own figures. Depends on nori-model,
+                nori-library, nori-settings, nori-devices and nori-player.
 crates/engine/  Rust, platform-free: the whole player for a platform without one (package nori-engine):
                 songs loaded in bursts per `load_control` through a client's ByteSource, teed into the
                 stream cache (source.rs), demuxed with symphonia's format readers, opened off the engine's
@@ -127,7 +127,8 @@ crates/engine/  Rust, platform-free: the whole player for a platform without one
                 plays the core's queue with its planner, settings, stream addresses and error run, and
                 runs downloads and AutoMix's measuring ahead from the core's bookkeeping; with the
                 `neural-beats` feature the measurer also runs Beat This! (tract) over the ends of the songs
-                coming up, a feature the app's builds leave out (`-PrustFeatures=neural-beats`).
+                coming up, a feature the debug and perf builds carry with the model as an APK asset
+                and a release build leaves out unless asked (`-PrustFeatures=neural-beats`).
                 tests/engine.rs checks it against sim.rs sample for sample; tests/core.rs over the core,
                 tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
@@ -161,12 +162,12 @@ crates/android/ Rust, Android only: the library the app loads (package nori-andr
                 with uniffi-bindgen-kotlin-jni from the exports of the core and of every crate of it,
                 which this crate depends on directly with their `ffi` feature on (the Kotlin comes from
                 crates/uniffi-bindgen: nori-core's in package dev.nori.music.ffi, each other crate's in a
-                package of its own below it - dev.nori.music.ffi.model, .db, .words, .net, .library,
+                package of its own below it - dev.nori.music.ffi.model, .db, .net, .library,
                 .automix, .settings, .lyrics, .devices, .queue, .transfers, .perf, as its uniffi.toml says -
                 and the runtime in package uniffi); a new crate of the core goes into build.rs's list,
                 this crate's dependencies and nori-core's `ffi` feature. JNI_OnLoad hands it
-                the JavaVM and the app's class loader. The doors are one module per group (decoder.rs, dsp.rs,
-                stages.rs, engine.rs, store.rs, heard.rs, seek.rs, look.rs - Bitmaps written in
+                the JavaVM and the app's class loader. The doors are one module per group (dsp.rs,
+                heard.rs, seek.rs, measure.rs, mediacodec.rs, look.rs - Bitmaps written in
                 place - covers.rs - the cover loader, decoding into Bitmaps and calling Kotlin back -
                 playlist.rs, settings.rs, transfers.rs, stream_cache.rs, player.rs). Doors
                 only convert; anything they decide belongs in the core. track.rs is nori-engine's output on
@@ -185,11 +186,9 @@ crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.
                 app's class loader, and a thread the runtime attached to the JVM is detached when it ends
                 (Android aborts otherwise). Take upstream's again when the revision moves, and keep both.
 core/           Android library, no UI: net/, data/ (Library = the repository; CoverLoader, the covers'
-                Bitmaps), playback/ (media3 service, DAC, scrobbling; RustAudio.kt puts the core's
-                decoder ahead of MediaCodec, TransitionSink only forwards to the engine, Stages.kt only forwards
-                speed/pitch and silence skipping; RustPlayer.kt is nori-engine as a
-                media3 player, the default path for a new install; the "Playback engine" setting, read at
-                service start, still chooses ExoPlayer instead),
+                Bitmaps), playback/ (the media3 session service, DAC, scrobbling; RustPlayer.kt is
+                nori-engine as a media3 player, the app's one player - ExoPlayer plays only the moving
+                covers' muted video, MotionPlayer.kt),
                 downloads/, settings/, Nori.kt (object graph)
 app/            the UI only: vm/ (ViewModels: the screens' state, asked of the core and held for Compose)
                 and ui/ (Compose, draws state)
@@ -228,9 +227,27 @@ Not in the core, but each client's own:
 - screen structure: settings pages, sections, rows, their order and which are shown, search over them;
 - layout, drawing, gestures and animation.
 
-A new setting is added to the model in nori-settings and to each client's screen. Being moved out
-(2026-09-25): the settings schema (`settings_schema.rs`), and nori-words / nori-text, whose text
-belongs in the clients; until done, add nothing new to them.
+A new setting is added to the model in nori-settings and to each client's screen: its field, load and
+save and `set_by_name` (settings.rs), its line in `SPECS` and `value_of` (settings_model.rs, whose test
+checks every option is taken and reads back), and what a change of it asks of the player
+(settings_store.rs `effects`); then its row on Android (app/vm `SettingsPages.kt`, its words in
+`res/values/strings.xml`, and a search entry in `INDEX` if people will look for it) and in the terminal
+client if it makes sense there (crates/cli `settings_view.rs`).
+
+Where the text lives (nori-words was removed 2026-09-25):
+- The core hands over data and kinds: counts, seconds, which message applies (an enum: `ResumePlan`,
+  `NoticeKind`, `SummaryTitle`, `BandMark`, `LyricsOrigin`, `PlaybackError`), the facts a line is made
+  of. It says no sentence to a screen: a menu is a list of actions, a mix, a shelf, a sort, a preset or
+  a car folder is a kind, a failure is an error enum with its facts (`NetError::Http { status }`,
+  `FailureKind`, `DacBlock`, `SoundError::NoFilters`). The few English strings left in Rust and why
+  are in docs/clients.md ("What is still English in the core"); add nothing to it.
+- Android: every word is a string resource (app/: `strings.xml` for settings, `strings_ui.xml` for the
+  other screens; core/: `strings.xml` for the notifications, the media session and the player's errors),
+  plurals as `<plurals>`. `app/ui/Say.kt` reads them (`say.back`, `say.songs(n)`); `core/text/Fmt.kt`
+  writes the numbers (times, sizes, speeds, decibels, frequencies) with `String.format` in the default
+  locale, which rounds and separates as the core's copy of Java did (`FmtTest` runs the old vectors).
+- The terminal client words its own screens in `crates/cli/src/text.rs`, in plain English.
+- Logs, the perf report and the self test are tooling: English, kept where they are.
 
 Prefer fewer boundary crossings: the client should not call into Rust just to get a string or a
 label.
@@ -319,11 +336,11 @@ there: a screenshot proves a screen renders, not that the feature works.
   an offloaded track routed there plays nothing while reporting itself fine. `Outputs.usb` stands
   offload down whenever anything USB is attached, and a sink that refuses the stream gives it up for
   the life of the service. That silence is what a USB DAC looked like before.
-- Anything that touches samples disables audio offload, so the default path has no audio processors
-  and ReplayGain is player volume. Sample-domain features must keep working under bursts (deep
-  buffer); only the equalizer screen (`CMD_TUNING`) may trade it for latency. The sink chain is
-  renderer -> `TransitionSink` (the Rust engine, feeding in bursts) -> `DefaultAudioSink` (with the
-  Rust `SoundChain`: equalizer, silence skipping, speed and pitch).
+- Anything that touches samples disables audio offload (nori_player::policy). Sample-domain features
+  must keep working under bursts (deep buffer); only the equalizer screen (`CMD_TUNING`) may trade it
+  for latency, and the engine makes its track shallow in place for it. The chain is nori-engine's:
+  decode -> each song's ReplayGain on its samples -> the transition engine -> equalizer, silence
+  skipping, speed and pitch -> the AudioTrack, fed in bursts (crates/android/src/track.rs).
 - The UI thread never waits for the core: `Nori` builds `core`, `http` and `sources` lazily and the
   application warms them on a background thread. Keep FFI and OkHttp out of constructors and composition.
 - FFI calls are coarse: one response or one page per call. Per-buffer work uses raw JNI on direct

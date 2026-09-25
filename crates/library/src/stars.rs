@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(out.songs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["1", "3"]);
         assert_eq!(out.albums.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["2"]);
         assert_eq!(out.artists.len(), 2);
-        assert_eq!(out.songs_line, "2 songs", "counted after the overlay");
+        assert_eq!(out.library_songs, 2, "counted after the overlay");
         assert_eq!(albums(vec![a("1"), a("2")], &mut Marks::new(&marks(&[("albumId:2", false)]))).len(), 1);
         assert_eq!(albums(vec![a("1")], &mut Marks::new(&HashMap::new())).len(), 1);
     }

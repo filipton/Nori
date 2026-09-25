@@ -64,14 +64,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.settings.SettingRow
-import dev.nori.music.ffi.settings.SettingsSection
+import dev.nori.music.app.R
+import dev.nori.music.app.vm.SettingRow
+import dev.nori.music.app.vm.SettingsSection
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.res.stringResource
 import dev.nori.music.settings.ServerProfile
 
 /**
  * Search lands on a row, not on a page: the group page is told which row to reveal, the row reports
- * where it is, and the page scrolls there and lets the highlight fade out. A row's key comes with it
- * from the core (`settings_schema::setting_key`), the same key the search result carries.
+ * where it is, and the page scrolls there and lets the highlight fade out. A row's key is its title
+ * slugged (`settingKey`), the same key the search result carries.
  */
 class SettingSpotlight(val key: String?, val onPlaced: (Int) -> Unit)
 
@@ -144,7 +147,7 @@ private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     ) { Column(content = content) }
 }
 
-/** Each group's icon; the groups themselves, their order and their words are the core's (`settings_schema`). */
+/** Each group's icon; the groups themselves, their order and their words are SettingsPages.kt's. */
 private fun groupIcon(id: String): ImageVector = when (id) {
     "servers" -> Icons.Outlined.Dns
     "playing" -> Icons.Outlined.PlayCircle
@@ -189,12 +192,15 @@ private fun ActionRowSetting(row: SettingRow.Action, onClick: () -> Unit) {
 fun SettingsScreen(vm: SettingsViewModel) {
     val nav = LocalNav.current
     var query by remember { mutableStateOf("") }
-    // Titles first, then anything whose explanation mentions it: searching "oled" finds AMOLED black
-    // (the core's `settings_search`), asked once per change of the query.
-    val hits = remember(query) { if (query.isBlank()) emptyList() else vm.searchSettings(query) }
+    val res = LocalContext.current.resources
+    val config = LocalConfiguration.current
+    // Titles first, then anything whose explanation mentions it: searching "oled" finds AMOLED black,
+    // asked once per change of the query (or of the language).
+    val hits = remember(query, config) { if (query.isBlank()) emptyList() else vm.searchSettings(query, res) }
+    val groups = remember(config) { vm.settingsGroups(res) }
     Column {
         LargeTitle(say.settings)
-        SearchField(query, { query = it }, say.searchSettings, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
+        SearchField(query, { query = it }, stringResource(R.string.settings_search), Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
         if (query.isNotBlank()) {
             // A result is the setting itself: tapping opens its page and puts the finger on the row.
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
@@ -211,12 +217,12 @@ fun SettingsScreen(vm: SettingsViewModel) {
                         Hairline(startIndent = Space.gutter)
                     }
                 }
-                if (hits.isEmpty()) item { EmptyNote(remember(query) { dev.nori.music.ffi.words.wordsNothingMatches(query) }) }
+                if (hits.isEmpty()) item { EmptyNote(stringResource(R.string.settings_nothing_matches, query)) }
             }
             return@Column
         }
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            items(vm.settingsGroups, key = { it.id }) { g ->
+            items(groups, key = { it.id }) { g ->
                 Column(Modifier.clickable { nav.settingsGroup(g.id) }) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(groupIcon(g.id), null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
@@ -258,8 +264,10 @@ fun SettingsGroupScreen(vm: SettingsViewModel, id: String, highlight: String = "
     LaunchedEffect(id, p.autoMix) { if (id == "playing" && p.autoMix) vm.refreshAnalysed() }
     LaunchedEffect(id) { if (id == "data") vm.refreshStorage() }
     LaunchedEffect(id, p.activeServerId) { if (id == "servers") vm.loadMusicFolders() }
-    // One call for the whole page, again only when the settings or its facts change.
-    val page = remember(id, p, facts) { vm.settingsPage(id, facts) } ?: return
+    val res = LocalContext.current.resources
+    val config = LocalConfiguration.current
+    // Built once for the whole page, again only when the settings, its facts or the language change.
+    val page = remember(id, p, facts, config) { vm.settingsPage(id, p, facts, res) } ?: return
     val scroll = rememberScrollState()
     var target by remember { mutableIntStateOf(-1) }
     LaunchedEffect(target) { if (target >= 0) scroll.animateScrollTo((scroll.value + target - 400).coerceAtLeast(0)) }
@@ -300,14 +308,14 @@ private fun TextSettingDialog(row: SettingRow.Text, onDismiss: () -> Unit, onSav
     )
 }
 
-/** One section of a page as the core laid it out; this only draws the rows and hands back what was picked. */
+/** One section of a page as SettingsPages.kt laid it out; this only draws the rows and hands back what was picked. */
 @Composable
 private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection) {
     val nav = LocalNav.current
     val context = LocalContext.current
     val p by vm.prefs.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ServerProfile?>(null) }
-    var asking by remember { mutableStateOf<Pair<String, dev.nori.music.ffi.settings.ActionAsk>?>(null) }
+    var asking by remember { mutableStateOf<Pair<String, dev.nori.music.app.vm.ActionAsk>?>(null) }
     editing?.let { e -> androidx.compose.ui.window.Dialog({ editing = null }, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) { LoginScreen(vm, e) { editing = null } } }
     val act: (String) -> Unit = { action ->
         when (action) {
@@ -320,11 +328,11 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
             }
             "downloads" -> nav.downloads()
             "add-server" -> editing = vm.newProfile()
-            // A page of its own inside this one (the lyrics sources), as the core names it.
+            // A page of its own inside this one (the lyrics sources), as the row names it.
             else -> when {
                 action.startsWith("page:") -> nav.settingsGroup(action.removePrefix("page:"))
-                // Whether it asks first, and what it says, are the core's (`settings_action_asks`).
-                else -> dev.nori.music.ffi.settings.settingsActionAsks(action, vm.settingsFacts.value)?.let { asking = action to it } ?: vm.act(action)
+                // Whether it asks first, and what it says (`settingsActionAsks`).
+                else -> vm.actionAsks(action, context.resources)?.let { asking = action to it } ?: vm.act(action)
             }
         }
     }
@@ -383,7 +391,7 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
                 }
                 is SettingRow.Slider -> {
                     Text(row.label, Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp), style = MaterialTheme.typography.bodySmall)
-                    // A slider the core names a level for is edited in place on every step, like the equalizer's.
+                    // A slider with a level is edited in place on every step, like the equalizer's.
                     NoriSlider(row.value, row.min..row.max, { v -> row.level?.let { vm.setLevel(it, v) } ?: vm.set(row.name, v.toString()) }, Modifier.padding(horizontal = 16.dp), centred = row.centred)
                 }
                 is SettingRow.Palette -> Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -2,7 +2,12 @@
 //! mapped onto the player's, and the doors the Kotlin glue calls when a device is attached or removed
 //! and when the output format changes. Event rate only, never per buffer.
 
-use nori_player::dac::{self, DacMode};
+use nori_model::DacMode;
+#[cfg(feature = "ffi")]
+#[allow(unused_imports)]
+use nori_model::DacBlock;
+use nori_player::dac;
+use crate::profiles::OutputPort;
 use nori_player::outputs::{self, OutputKind};
 use nori_settings::settings_store;
 
@@ -32,13 +37,12 @@ pub enum DacStep {
 #[uniffi::remote(Record)]
 pub struct DacDecision {
     pub step: DacStep,
-    pub device: String,
+    pub device: Option<String>,
     pub supported: bool,
-    pub modes: Vec<String>,
-    pub playing: Option<String>,
+    pub modes: Vec<DacMode>,
+    pub playing: Option<DacMode>,
     pub bits: u32,
-    pub blocked_by: Option<String>,
-    pub refused: String,
+    pub blocked_by: Option<DacBlock>,
 }
 
 /// `AudioDeviceInfo.TYPE_*`.
@@ -64,29 +68,29 @@ pub enum OutputGlyph {
     Cast,
 }
 
-/// The output button as it stands.
+/// The output button as it stands, and where the sound is going for the client to say to a screen reader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct OutputLook {
     pub glyph: OutputGlyph,
     /// The sound is going somewhere other than the phone's speaker: the glyph takes the accent.
     pub elsewhere: bool,
-    /// What the button says to a screen reader.
-    pub description: String,
+    pub port: OutputPort,
+    /// The name the device gives itself; none when it gave none.
+    pub name: Option<String>,
 }
 
-/// The output button for `output`, one of the names outputs are remembered by ("USB: …",
+/// The output button for `output`, one of the keys outputs are remembered by ("USB: …",
 /// "Bluetooth: …", "Wired headphones", the speaker, or a device's own name).
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn output_look(output: String) -> OutputLook {
-    let glyph = if output.starts_with("USB") || output.starts_with("Wired") {
-        OutputGlyph::Headphones
-    } else if output.starts_with("Bluetooth") {
-        OutputGlyph::Bluetooth
-    } else {
-        OutputGlyph::Cast
+    let (port, name) = outputs::parts(&output);
+    let glyph = match port {
+        OutputPort::Usb | OutputPort::Wired => OutputGlyph::Headphones,
+        OutputPort::Bluetooth => OutputGlyph::Bluetooth,
+        _ => OutputGlyph::Cast,
     };
-    OutputLook { glyph, elsewhere: output != outputs::SPEAKER, description: format!("Output: {output}") }
+    OutputLook { glyph, elsewhere: output != outputs::SPEAKER, port, name: name.map(str::to_string) }
 }
 
 /// `AudioFormat.ENCODING_*` in bits per sample; float counts as 32.
@@ -171,12 +175,6 @@ pub fn dac_decide(
     dac::decide(enabled, platform_ok, &name, &modes(&rates, &encodings), mode(playing_rate, playing_encoding), applied.as_deref(), was_bit_perfect)
 }
 
-/// What the AudioTrack was opened with, for the user to check.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn dac_track_line(rate: u32, encoding: i32, offloaded: bool) -> String {
-    dac::track_line(rate, bits(encoding), offloaded)
-}
-
 /// A DAC that is not there, as the test bridge describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
@@ -227,7 +225,8 @@ mod tests {
         assert_eq!(l("Bluetooth: buds"), (OutputGlyph::Bluetooth, true));
         assert_eq!(l(outputs::SPEAKER), (OutputGlyph::Cast, false));
         assert_eq!(l("HDMI"), (OutputGlyph::Cast, true));
-        assert_eq!(output_look("Bluetooth: buds".into()).description, "Output: Bluetooth: buds");
+        let buds = output_look("Bluetooth: buds".into());
+        assert_eq!((buds.port, buds.name.as_deref()), (OutputPort::Bluetooth, Some("buds")));
     }
 
     #[test]
@@ -242,8 +241,6 @@ mod tests {
 
     #[test]
     fn encodings_are_bits() {
-        assert_eq!(dac_track_line(44_100, 2, false), "44.1 kHz / 16 bit");
-        assert_eq!(dac_track_line(96_000, 4, true), "96.0 kHz / 32 bit, offloaded to the audio chip");
         let d = dac_decide(true, true, "K3".into(), vec![44_100, 96_000], vec![2, 4], 96_000, 4, None, None, false);
         assert_eq!(d.step, DacStep::Prefer { index: 1 });
         let d = dac_decide(true, true, "K3".into(), vec![96_000], vec![22], 96_000, 4, None, None, false);

@@ -18,7 +18,7 @@ default = ["ffi"]
 # The optional neural beat tracker (nori-player's `neural-beats`) and the download of its model. nori-engine's
 # feature of the same name turns it on; without it nothing of tract is built.
 neural-beats = ["nori-player/neural-beats", "dep:sha2"]
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-words/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi", "nori-lyrics/ffi", "nori-devices/ffi", "nori-queue/ffi", "nori-transfers/ffi", "nori-perf/ffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi", "nori-library/ffi", "nori-automix/ffi", "nori-settings/ffi", "nori-lyrics/ffi", "nori-devices/ffi", "nori-queue/ffi", "nori-transfers/ffi", "nori-perf/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
@@ -33,7 +33,6 @@ nori-player = { path = "../player" }
 nori-look = { path = "../look" }
 nori-model = { path = "../model" }
 nori-db = { path = "../db" }
-nori-words = { path = "../words" }
 nori-net = { path = "../net" }
 nori-library = { path = "../library" }
 nori-automix = { path = "../automix" }

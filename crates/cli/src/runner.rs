@@ -169,6 +169,7 @@ pub fn run(o: Options) -> Result<(), String> {
     app.volume = own::number(own::VOLUME, 1.0);
     app.protocol = picker.as_ref().map_or("off", |p| protocol_name(p.protocol_type()));
     app.settings.own.data = o.data.display().to_string();
+    app.settings.own.device = own::text(own::DEVICE).unwrap_or_default();
     let art = picker.clone().map(Art::new);
     let mut r = Runner { http: Http::new(), tx, session: None, art, picker, tickets: Vec::new(), heard: None, repaint: false, focused: true, unseen_cover: false, said: Said::default(), o };
     match prefs.servers.iter().find(|s| s.id == prefs.active_server_id).cloned() {
@@ -279,7 +280,7 @@ impl Runner {
     fn take(&mut self, app: &mut App, m: Msg) {
         crate::term::debug!("took {}", m.brief());
         match &m {
-            Msg::Engine(e @ (Event::Song { .. } | Event::State(_) | Event::Looped { .. })) => {
+            Msg::Engine(e @ (Event::Song { .. } | Event::State(_) | Event::Looped { .. } | Event::Bridge)) => {
                 match e {
                     Event::State(st) => self.said.state = Some(*st),
                     Event::Song { id, .. } | Event::Looped { id, .. } => self.said.song = Some(id.clone()),
@@ -424,6 +425,14 @@ impl Runner {
                 app.settings.invalidate();
                 return;
             }
+            Cmd::Device(name) => {
+                own::keep(own::DEVICE, name.clone());
+                app.settings.own.device = name.clone();
+                app.settings.invalidate();
+                let said = if name.is_empty() { "the system default".to_string() } else { name };
+                app.say(&format!("Output device: {said}, from the next start"), false);
+                return;
+            }
             Cmd::Images(on) => {
                 own::keep(own::IMAGES, on.to_string());
                 app.images = on;
@@ -562,7 +571,7 @@ impl Runner {
                     }
                 }
             }
-            Cmd::Quit | Cmd::Mouse(_) | Cmd::Images(_) | Cmd::Login(_) | Cmd::SwitchServer(_) => {}
+            Cmd::Quit | Cmd::Mouse(_) | Cmd::Images(_) | Cmd::Device(_) | Cmd::Login(_) | Cmd::SwitchServer(_) => {}
         }
     }
 

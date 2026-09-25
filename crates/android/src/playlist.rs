@@ -14,7 +14,6 @@ pub(crate) static CLASS: Class = Class {
         native!(c"rev", c"()J", rev),
         native!(c"shuffleShown", c"()Z", shuffle_shown),
         native!(c"order", c"([I)I", order),
-        native!(c"same", c"(IIZII)Z", same),
     ],
 };
 
@@ -42,10 +41,6 @@ extern "system" fn order(env: JNIEnv, _: JClass, out: JIntArray) -> jint {
         }
         o.len() as jint
     })
-}
-
-extern "system" fn same(count: jint, current: jint, shuffling: jboolean, ids_hash: jint, order_hash: jint) -> jboolean {
-    playlist::playlist_same(count.max(0) as usize, current, shuffling != 0, ids_hash, order_hash) as jboolean
 }
 
 /// What the list looks like now, cheaply, so an unchanged queue is not copied over again.

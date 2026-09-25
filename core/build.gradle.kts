@@ -12,6 +12,7 @@ import org.gradle.api.tasks.PathSensitive
 import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 import org.gradle.process.ExecOperations
+import java.security.MessageDigest
 import javax.inject.Inject
 
 plugins {
@@ -24,10 +25,14 @@ plugins {
 val shipping = gradle.startParameter.taskNames.any { t -> listOf("release", "perf", "bundle").any { t.contains(it, ignoreCase = true) } }
 val rustTargets = (project.findProperty("rustTargets") as String? ?: if (shipping) "arm64-v8a" else "x86_64").split(",")
 val rustProfile = project.findProperty("rustProfile") as String? ?: "release"
-// Cargo features of the core, none by default. `-PrustFeatures=neural-beats` builds in tract for "Better beat
-// detection" (docs/research/analysis.md): the arm64 library grows by about 14.5 MB, which every install would
-// carry for a switch that is off by default, so the app's builds leave it out and the setting is not shown.
-val rustFeatures = project.findProperty("rustFeatures") as String? ?: ""
+// Cargo features of the core. `neural-beats` builds in tract for "Better beat detection" (docs/research/analysis.md),
+// and the model itself is shipped as an asset (below), so the switch works offline; it stays off by default. The
+// debug and perf builds have it; a release build leaves it out unless asked (-PrustFeatures=neural-beats): it
+// makes the arm64 APK 20.6 MB bigger (the library 9.8 to 25.3 MB, and the 5.1 MB model). `-PrustFeatures=`
+// (empty) leaves it out of any build: no tract in the library, no model in the APK, and no setting shown.
+val releasing = gradle.startParameter.taskNames.any { t -> listOf("release", "bundle").any { t.contains(it, ignoreCase = true) } }
+val rustFeatures = project.findProperty("rustFeatures") as String? ?: if (releasing) "" else "neural-beats"
+val beatModel = rustFeatures.split(",").map { it.trim() }.contains("neural-beats")
 val cargoRoot = rootProject.projectDir
 val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")
     ?: file("${System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk").listFiles()
@@ -80,6 +85,40 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
     }
 }
 
+// The beat model the app ships (tools/beat-this/export.py makes it): copied in as an asset, which the app stores
+// uncompressed (app/build.gradle.kts), so the core reads it in place from the APK. Checked against the SHA-256 and
+// size pinned in crates/automix/src/beat_model.rs, so the file and the core cannot drift apart.
+abstract class BeatModelAssetTask : DefaultTask() {
+    @get:InputFile @get:PathSensitive(PathSensitivity.RELATIVE) abstract val model: RegularFileProperty
+    @get:InputFile @get:PathSensitive(PathSensitivity.RELATIVE) abstract val pins: RegularFileProperty
+    @get:OutputDirectory abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun run() {
+        val src = model.get().asFile
+        val rs = pins.get().asFile.readText()
+        fun pin(name: String) = Regex("""pub const $name: [^=]+= "?([0-9a-f_]+)"?;""").find(rs)?.groupValues?.get(1)?.replace("_", "")
+            ?: error("$name not found in ${pins.get().asFile}")
+        val bytes = src.readBytes()
+        val sha = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+        check(sha == pin("SHA256") && bytes.size.toString() == pin("BYTES")) {
+            "${src.name} is not the model pinned in beat_model.rs (SHA-256 $sha, ${bytes.size} bytes)"
+        }
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        src.copyTo(File(out, src.name))
+    }
+}
+
+val beatModelAsset = tasks.register<BeatModelAssetTask>("beatModelAsset") {
+    group = "rust"
+    description = "The beat model, checked against its pin, as an asset"
+    model.set(File(cargoRoot, "tools/beat-this/beat-this-small0-v1.onnx"))
+    pins.set(File(cargoRoot, "crates/automix/src/beat_model.rs"))
+    outputDir.set(layout.buildDirectory.dir("generated/beatModel"))
+}
+
 abstract class UniffiBindgenTask @Inject constructor(private val exec: ExecOperations) : DefaultTask() {
     @get:InputDirectory @get:PathSensitive(PathSensitivity.RELATIVE) abstract val crates: DirectoryProperty
     @get:Internal abstract val workDir: DirectoryProperty
@@ -122,6 +161,7 @@ androidComponents {
     onVariants { variant ->
         variant.sources.java?.addGeneratedSourceDirectory(uniffiBindgen, UniffiBindgenTask::outputDir)
         variant.sources.jniLibs?.addGeneratedSourceDirectory(cargoNdkBuild, CargoNdkTask::outputDir)
+        if (beatModel) variant.sources.assets?.addGeneratedSourceDirectory(beatModelAsset, BeatModelAssetTask::outputDir)
     }
 }
 

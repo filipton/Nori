@@ -23,6 +23,8 @@ nori-mpris = { path = "../mpris" }
 nori-covers = { path = "../covers" }
 nori-look = { path = "../look" }
 parking_lot = "0.12"
+# The transport an offline session hands the core (already in the tree through nori-http).
+async-trait = "0.1"
 # The screen: ratatui over crossterm (its re-export, so the two always agree on a version). MIT.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 # Covers in the terminal: kitty graphics, sixel, iTerm2 or half blocks, whichever the terminal answers to.

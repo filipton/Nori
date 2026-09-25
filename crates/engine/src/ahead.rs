@@ -1,5 +1,5 @@
-//! Songs fetched whole into the stream cache ahead of their turn, as Android's precacher fetches them
-//! for the ExoPlayer path: which ones and how many is the core's (`Client::precache_targets`: the
+//! Songs fetched whole into the stream cache ahead of their turn, as Android's precacher (Precacher.kt)
+//! fetches them for this engine there: which ones and how many is the core's (`Client::precache_targets`: the
 //! user's count for the network the device is on, none on a metered one by default, never a provider's
 //! song or one the downloads have), asked as a song starts ([`crate::Library::ahead`]), a moment the
 //! network is awake for the song after it anyway. When their turn comes they play from the disk and the

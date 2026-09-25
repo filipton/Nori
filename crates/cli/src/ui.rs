@@ -67,7 +67,7 @@ fn spread<'a>(left: Vec<Span<'a>>, right: Span<'a>, w: usize) -> Line<'a> {
 }
 
 pub fn clock(ms: i64) -> String {
-    nori_core::fmt::duration(ms.max(0) / 1000)
+    crate::text::duration(ms.max(0) / 1000)
 }
 
 /// Readable text on `bg`.
@@ -440,11 +440,11 @@ fn library(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn artist_line<'a>(a: &'a nori_core::Artist, w: usize, t: &Theme) -> Line<'a> {
-    spread(vec![Span::raw(a.name.as_str())], Span::styled(a.albums_line.as_str(), Style::default().fg(t.dim)), w)
+    spread(vec![Span::raw(a.name.as_str())], Span::styled(crate::text::albums(a.album_count), Style::default().fg(t.dim)), w)
 }
 
 fn playlist_line<'a>(p: &'a nori_core::Playlist, w: usize, t: &Theme) -> Line<'a> {
-    spread(vec![Span::raw(p.name.as_str())], Span::styled(p.line.as_str(), Style::default().fg(t.dim)), w)
+    spread(vec![Span::raw(p.name.as_str())], Span::styled(crate::text::playlist_line(p), Style::default().fg(t.dim)), w)
 }
 
 fn plain_song_row<'a>(s: &'a Song, w: usize, t: &Theme) -> Line<'a> {
@@ -462,7 +462,7 @@ fn search(f: &mut Frame, area: Rect, app: &mut App) {
     app.hits.push((field, Hit::SearchField));
     let view = s.view.as_ref();
     let line = match view {
-        Some(v) if v.error.is_some() => Span::styled(v.error.clone().unwrap_or_default(), Style::default().fg(Color::LightRed)),
+        Some(v) if v.error.is_some() => Span::styled(crate::text::search_fallback(v.error.as_ref().and_then(|e| e.reason.as_deref())), Style::default().fg(Color::LightRed)),
         Some(v) if v.searching => Span::styled("Asking the server…", Style::default().fg(t.dim)),
         Some(v) if v.nothing_found => Span::styled("Nothing found", Style::default().fg(t.dim)),
         Some(v) if !v.query.is_empty() => Span::styled(if v.from_server { "From the server" } else { "From the offline index · the server is asked when you pause" }, Style::default().fg(t.dim)),
@@ -489,7 +489,7 @@ fn search(f: &mut Frame, area: Rect, app: &mut App) {
         f.render_widget(block, area);
         let len = s.len(p);
         match p {
-            0 => list(f, inner, &mut s.sels[0], len, ListRef::Search(0), hits, &t, focused, &|i, w| spread(vec![Span::raw(r.artists[i].name.as_str())], Span::styled(r.artists[i].albums_line.as_str(), Style::default().fg(t.dim)), w)),
+            0 => list(f, inner, &mut s.sels[0], len, ListRef::Search(0), hits, &t, focused, &|i, w| spread(vec![Span::raw(r.artists[i].name.as_str())], Span::styled(crate::text::albums(r.artists[i].album_count), Style::default().fg(t.dim)), w)),
             1 => list(f, inner, &mut s.sels[1], len, ListRef::Search(1), hits, &t, focused, &|i, w| album_line(&r.albums[i], w, &t)),
             _ => list(f, inner, &mut s.sels[2], len, ListRef::Search(2), hits, &t, focused, &|i, w| song_row(&r.songs[i], w, &t, None)),
         }
@@ -558,9 +558,9 @@ fn page(f: &mut Frame, area: Rect, app: &mut App, art: Option<&mut Art>) {
     let header_h = if images { 10u16.min(area.height / 2) } else { 4 };
     let [head, body] = Layout::vertical([Constraint::Length(header_h), Constraint::Min(1)]).areas(area);
     let (title, sub, caption, art_key): (String, String, String, Option<String>) = match p {
-        Page::Album { detail: Load::Ready(d), .. } => (d.album.name.clone(), d.album.artist.clone(), d.caption.clone(), d.album.cover_art.clone()),
-        Page::Artist { detail: Load::Ready(d), .. } => (d.artist.name.clone(), d.artist.albums_line.clone(), String::new(), None),
-        Page::Playlist { detail: Load::Ready(d), .. } => (d.playlist.name.clone(), d.playlist.owner.clone().unwrap_or_default(), d.caption.clone(), None),
+        Page::Album { detail: Load::Ready(d), .. } => (d.album.name.clone(), d.album.artist.clone(), crate::text::album_caption(d), d.album.cover_art.clone()),
+        Page::Artist { detail: Load::Ready(d), .. } => (d.artist.name.clone(), crate::text::albums(d.artist.album_count), String::new(), None),
+        Page::Playlist { detail: Load::Ready(d), .. } => (d.playlist.name.clone(), d.playlist.owner.clone().unwrap_or_default(), crate::text::playlist_caption(d), None),
         Page::Album { detail: Load::Failed(e), .. } | Page::Artist { detail: Load::Failed(e), .. } | Page::Playlist { detail: Load::Failed(e), .. } => {
             return failed(f, area, &t, e);
         }
@@ -631,7 +631,7 @@ fn queue(f: &mut Frame, area: Rect, app: &mut App) {
         2 => modes.push_str(" · repeat all"),
         _ => {}
     }
-    let head_text = format!("{}{modes}", nori_core::fmt::songs_caption(q.len, secs, true));
+    let head_text = format!("{}{modes}", crate::text::songs_caption(q.len, secs));
     f.render_widget(Paragraph::new(Span::styled(head_text, Style::default().fg(t.dim))), head);
     let App { queue, queue_sel, hits, .. } = app;
     let q = queue.as_ref().expect("checked");
@@ -672,7 +672,7 @@ fn playing(f: &mut Frame, area: Rect, app: &mut App, art: Option<&mut Art>) {
     if song.year > 0 {
         facts.push(song.year.to_string());
     }
-    if let Some(q) = nori_core::fmt::quality_of(&song) {
+    if let Some(q) = crate::text::quality(&song) {
         facts.push(q);
     }
     lines.push(Line::from(Span::styled(fit(&facts.join(" · "), w).into_owned(), Style::default().fg(t.dim))));
@@ -747,11 +747,11 @@ fn lyrics(f: &mut Frame, area: Rect, app: &mut App) {
         };
         return empty(f, area, &t, text);
     };
-    if l.lyrics.lines.is_empty() {
+    if l.pick.lyrics.lines.is_empty() {
         return empty(f, area, &t, "No lyrics for this song");
     }
     let frame = l.clock.shown();
-    let synced = l.lyrics.synced;
+    let synced = l.pick.lyrics.synced;
     let sweep = app.prefs.lyrics_sweep && l.clock.timing().sweeps();
     let translate = app.prefs.lyrics_translation;
     let active = frame.active;
@@ -760,7 +760,7 @@ fn lyrics(f: &mut Frame, area: Rect, app: &mut App) {
     let body = if credit.is_some() { Rect { height: area.height.saturating_sub(1), ..area } } else { area };
     // Each lyric line and what it draws under it: the backing vocals, a translation.
     let extra = |i: usize| -> u16 {
-        let line = &l.lyrics.lines[i];
+        let line = &l.pick.lyrics.lines[i];
         (!line.backing.is_empty()) as u16 + (translate && line.translation.as_ref().is_some_and(|x| !x.is_empty())) as u16
     };
     // The line in focus sits a third of the way down, as Android's does.
@@ -774,7 +774,7 @@ fn lyrics(f: &mut Frame, area: Rect, app: &mut App) {
     let mut rows = Vec::new();
     let w = body.width as usize;
     let mut at = y;
-    for (n, line) in l.lyrics.lines.iter().enumerate().skip(i.max(0) as usize) {
+    for (n, line) in l.pick.lyrics.lines.iter().enumerate().skip(i.max(0) as usize) {
         if at >= (body.y + body.height) as i32 {
             break;
         }
@@ -859,8 +859,12 @@ fn equalizer(f: &mut Frame, area: Rect, app: &mut App) {
     let bypass = nori_core::settings::eq_bypass(p.hi_res, p.bit_perfect);
     let graph_h = (area.height / 2).clamp(6, 14);
     let [note, graph, rows_area] = Layout::vertical([Constraint::Length(1), Constraint::Length(graph_h), Constraint::Min(3)]).areas(area);
-    let head = bypass.unwrap_or_else(|| if p.eq_enabled { "Equalizer on · changes are heard at once while this screen is open".into() } else { "Equalizer off · enter on the first row switches it on".into() });
-    status_line(f, note, &head, Style::default().fg(t.dim));
+    let head: &str = match bypass {
+        Some(why) => crate::text::eq_bypass(why),
+        None if p.eq_enabled => "Equalizer on · changes are heard at once while this screen is open",
+        None => "Equalizer off · enter on the first row switches it on",
+    };
+    status_line(f, note, head, Style::default().fg(t.dim));
     let rows = crate::settings_view::eq_rows(p);
     let selected_band = match rows.get(app.eq_sel.at) {
         Some(EqRow::Band(i)) => Some(*i),
@@ -921,7 +925,7 @@ fn eq_bars(f: &mut Frame, area: Rect, p: &nori_core::settings::StoredPrefs, sele
             let style = if y == mid { Style::default().fg(if Some(i) == selected { t.accent } else { t.dim }) } else { Style::default().fg(colour) };
             f.render_widget(Paragraph::new(Span::styled(sym.repeat((col - 1) as usize), style)), Rect { x, y: area.y + y, width: col - 1, height: 1 });
         }
-        let label = nori_core::fmt::eq_hz(b.freq);
+        let label = crate::text::hz(b.freq);
         f.render_widget(Paragraph::new(Span::styled(fit(&label, col as usize - 1).into_owned(), Style::default().fg(colour))), Rect { x, y: area.y + h, width: col - 1, height: 1 });
     }
 }
@@ -929,12 +933,13 @@ fn eq_bars(f: &mut Frame, area: Rect, p: &nori_core::settings::StoredPrefs, sele
 fn settings(f: &mut Frame, area: Rect, app: &mut App) {
     let t = app.theme;
     let prefs = app.prefs.clone();
-    app.settings.own = settings_view::Own { mouse: app.mouse, images: app.images, volume: app.volume, protocol: app.protocol.to_string(), data: app.settings.own.data.clone() };
+    let own = &app.settings.own;
+    app.settings.own = settings_view::Own { mouse: app.mouse, images: app.images, volume: app.volume, protocol: app.protocol.to_string(), data: own.data.clone(), device: own.device.clone() };
     let [left, right] = Layout::horizontal([Constraint::Length(30.min(area.width / 3)), Constraint::Min(10)]).areas(area);
     let App { settings: v, hits, .. } = app;
-    let groups: Vec<(String, String)> = v.groups().iter().map(|g| (g.title.clone(), g.summary.clone())).collect();
+    let groups: Vec<(&str, &str)> = v.groups().iter().map(|g| (g.title, g.summary)).collect();
     let pane = v.pane;
-    list(f, left, &mut v.group, groups.len(), ListRef::Groups, hits, &t, pane == 0, &|i, w| Line::from(Span::raw(fit(&groups[i].0, w).into_owned())));
+    list(f, left, &mut v.group, groups.len(), ListRef::Groups, hits, &t, pane == 0, &|i, w| Line::from(Span::raw(fit(groups[i].0, w).into_owned())));
     let page = v.page(&prefs).clone();
     let lines = SettingsView::lines(&page);
     let len = lines.len();
@@ -948,7 +953,7 @@ fn settings(f: &mut Frame, area: Rect, app: &mut App) {
     list(f, inner, &mut v.row, len, ListRef::Rows, hits, &t, pane == 1, &|i, w| setting_line(&lines[i], w, &t));
 }
 
-/// One line of a settings page, drawn from the row the schema made.
+/// One line of a settings page, drawn from its row.
 fn setting_line<'a>(line: &SLine<'a>, w: usize, t: &Theme) -> Line<'static> {
     let row = match line {
         SLine::Title(title) => return Line::from(Span::styled(title.to_string(), Style::default().fg(t.accent).add_modifier(Modifier::BOLD))),
@@ -957,7 +962,7 @@ fn setting_line<'a>(line: &SLine<'a>, w: usize, t: &Theme) -> Line<'static> {
     let (title, detail) = settings_view::row_words(row);
     let live = settings_view::row_enabled(row);
     let text_style = if live { Style::default().fg(t.text) } else { Style::default().fg(t.dim) };
-    if let nori_core::settings_schema::SettingRow::Palette { colours, chosen, .. } = row {
+    if let settings_view::Row::Palette { colours, chosen, .. } = row {
         let mut spans = vec![Span::styled("  Accent colour  ", text_style)];
         for c in colours {
             let colour = crate::art::argb(*c as u32);
@@ -983,7 +988,7 @@ fn setting_line<'a>(line: &SLine<'a>, w: usize, t: &Theme) -> Line<'static> {
         return spread(vec![Span::styled(format!("  {title}"), text_style)], Span::styled(bar, Style::default().fg(t.accent)), w);
     }
     if title.is_empty() {
-        // A note: the schema's own words between the rows.
+        // A note: a line of explanation between the rows.
         return Line::from(Span::styled(fit(&format!("  {detail}"), w).into_owned(), Style::default().fg(t.dim).add_modifier(Modifier::ITALIC)));
     }
     let value = settings_view::row_value(row);

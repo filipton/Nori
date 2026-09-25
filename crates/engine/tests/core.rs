@@ -340,7 +340,7 @@ fn listens_with_a_real_model(core: &Core, dir: &std::path::Path, measurer: &Arc<
         return;
     };
     std::fs::create_dir_all(dir.join("models")).unwrap();
-    std::fs::copy(model, dir.join("models").join(nori_core::automix::beat_model::FILE_NAME)).unwrap();
+    std::fs::copy(&model, dir.join("models").join(nori_core::automix::beat_model::FILE_NAME)).unwrap();
     nori_core::automix::beat_model::set_home(&dir.join("nori.db").to_string_lossy());
     measurer.ask(Vec::new());
     measurer.ask(nori_core::rules::queue_measure());
@@ -350,4 +350,18 @@ fn listens_with_a_real_model(core: &Core, dir: &std::path::Path, measurer: &Arc<
         assert!(a.intro_grid_source >= GRID_CHECKED && a.outro_grid_source >= GRID_CHECKED, "{id}: both ends read");
     }
     assert!(core.analysis_neural_missing(vec!["m-3".into(), "m-4".into()]).unwrap().is_empty());
+
+    // Shipped inside the app's package, as the Android app does: read in place, checked, loaded, and nothing
+    // fetched; a stretch that is not the pinned model is refused.
+    use nori_core::automix::beat_model::{self, Source};
+    let bytes = std::fs::read(&model).unwrap();
+    let package = dir.join("base.apk");
+    std::fs::write(&package, [&b"zip entries"[..], &bytes, &b"central directory"[..]].concat()).unwrap();
+    let shipped = Source { path: package, offset: 11, len: bytes.len() as u64 };
+    beat_model::set_bundled(Some(shipped.clone()));
+    assert_eq!(nori_core::beat_download::ensure(), Some(shipped.clone()));
+    let read = nori_core::beat_download::read(&shipped).unwrap();
+    assert!(nori_player::automix::neural::BeatThis::from_bytes(&read).is_ok());
+    assert!(nori_core::beat_download::read(&Source { offset: 10, ..shipped }).is_err());
+    beat_model::set_bundled(None);
 }

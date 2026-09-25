@@ -1,11 +1,33 @@
-//! The lyrics services the settings can switch on and rank: what each is called and good at, the finest
+//! The lyrics services the settings can switch on and rank: what each is stored as, the finest
 //! timing it can answer with, whether it needs a key, and whether it is on out of the box. How each is
 //! asked and read is nori-lyrics'; which to ask, in what order, is the settings' (`StoredPrefs`'s
 //! `lyrics_order`, `lyrics_on`, and [`lyrics_lookup`]).
 
-use nori_words::words::LyricsOrigin;
-
 use crate::settings::StoredPrefs;
+
+/// Where lyrics came from, for the credit line under them: the server, or the lyrics service that
+/// answered ([`LyricsService`], one for one). The client names each ("your server", "LRCLIB").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum LyricsOrigin {
+    Server,
+    Binilyrics,
+    BetterLyrics,
+    Paxsenix,
+    LyricsPlus,
+    Portato,
+    PaxsenixMusixmatch,
+    Simpmusic,
+    Unison,
+    Netease,
+    Kugou,
+    Lrclib,
+    PaxsenixSpotify,
+    YoutubeCaptions,
+    Megalobiz,
+    YoutubeMusic,
+    Genius,
+}
 
 /// A key some lyrics services need, entered in Settings, Lyrics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +111,7 @@ impl LyricsService {
         LyricsService::ALL.into_iter().find(|s| s.name().eq_ignore_ascii_case(name.trim()))
     }
 
-    /// Its row's title in Settings.
+    /// What it is called in the core's own log lines. A client names it in its own words.
     pub fn title(self) -> &'static str {
         match self {
             LyricsService::Binilyrics => "BiniLyrics",
@@ -108,28 +130,6 @@ impl LyricsService {
             LyricsService::Megalobiz => "Megalobiz",
             LyricsService::YoutubeMusic => "YouTube Music",
             LyricsService::Genius => "Genius",
-        }
-    }
-
-    /// What it is good at, in plain words: the line under its title.
-    pub fn about(self) -> &'static str {
-        match self {
-            LyricsService::Binilyrics => "Apple Music's lyrics, syllable by syllable, from a volunteer's copy. Unofficial.",
-            LyricsService::BetterLyrics => "Apple Music's lyrics, syllable by syllable. Finds more with a key. Unofficial.",
-            LyricsService::Paxsenix => "Apple Music's lyrics, syllable by syllable, looked up another way. Unofficial.",
-            LyricsService::LyricsPlus => "Apple Music's lyrics and others', syllable by syllable, from volunteers. Unofficial.",
-            LyricsService::Portato => "QQ Music's lyrics, word by word. Strong on Chinese music. Unofficial.",
-            LyricsService::PaxsenixMusixmatch => "Musixmatch's lyrics, often word by word. Needs a PaxSenix key.",
-            LyricsService::Simpmusic => "Lyrics timed by listeners, often word by word, matched to the song on YouTube.",
-            LyricsService::Unison => "Open, written and timed by listeners. Many songs word by word.",
-            LyricsService::Netease => "The Chinese streaming service's own lyrics, often word by word. Unofficial.",
-            LyricsService::Kugou => "Strong on Chinese, Japanese and Korean music, often word by word. Unofficial.",
-            LyricsService::Lrclib => "Open and run by volunteers. Timed line by line, some songs word by word.",
-            LyricsService::PaxsenixSpotify => "Spotify's lyrics, timed line by line. Needs a PaxSenix key.",
-            LyricsService::YoutubeCaptions => "The captions of the song on YouTube, timed line by line. Unofficial.",
-            LyricsService::Megalobiz => "Lyrics timed line by line by its users, read off its pages.",
-            LyricsService::YoutubeMusic => "The words YouTube Music shows for the song. Not timed. Unofficial.",
-            LyricsService::Genius => "The biggest catalogue of words, not timed. Asked only when nobody has timed lyrics.",
         }
     }
 
@@ -321,7 +321,7 @@ mod tests {
         for s in LyricsService::ALL {
             assert_eq!(LyricsService::named(s.name()), Some(s));
             assert_eq!(LyricsService::named(&s.name().to_lowercase()), Some(s));
-            assert!(!s.title().is_empty() && s.about().ends_with('.'));
+            assert!(!s.title().is_empty());
         }
         assert_eq!(LyricsService::named("MUSIXMATCH"), None, "a test build's service is not read");
     }

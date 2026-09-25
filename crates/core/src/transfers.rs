@@ -1,11 +1,10 @@
 //! Downloads as the core's calls: the queue of songs to download and what finished, kept in the core's
-//! database. How downloads run, what they say and how the batch went are nori-transfers'.
+//! database. How downloads run, the facts they are worded from and how the batch went are nori-transfers'.
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use crate::Core;
-pub use nori_words::fmt::format_bytes;
 
 pub use nori_transfers::transfers::*;
 
@@ -234,7 +233,9 @@ pub(crate) mod tests {
         let v1 = core.download_counts();
         assert_eq!((v1.done, v1.pending, state("h-a"), state("h-b")), (1, 2, 2, 0));
         assert!(v1.version > v0.version);
-        assert_eq!(core.download_counts(), v1, "asked again, the same answer");
+        // The version is the process's, moved by any test's downloads running beside this one: the counts only.
+        let again = core.download_counts();
+        assert_eq!((again.done, again.pending), (v1.done, v1.pending), "asked again, the same answer");
         assert_eq!(core.downloads(true).unwrap().len(), 1);
 
         let mut gone = core.download_cancel_all().unwrap();

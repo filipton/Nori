@@ -8,8 +8,8 @@ import dev.nori.music.ffi.library.StatsPage
 import dev.nori.music.ffi.library.SmartEdit
 import dev.nori.music.ffi.model.SmartPlaylist
 import dev.nori.music.ffi.library.smartEditPrepare
-import dev.nori.music.ffi.words.Note
-import dev.nori.music.ffi.words.wordsNote
+import dev.nori.music.app.ui.Note
+import dev.nori.music.app.ui.say
 import dev.nori.music.net.said
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,14 +35,14 @@ class SmartViewModel(app: Application) : NoriViewModel(app) {
 
     fun open(json: String) = viewModelScope.launch {
         _songs.value = Load.Loading
-        _songs.value = runCatching { Load.Ready(nori.library.smartPage(json)) }.getOrElse { Load.Failed(it.said ?: wordsNote(Note.COULD_NOT_EVALUATE)) }
+        _songs.value = runCatching { Load.Ready(nori.library.smartPage(json)) }.getOrElse { Load.Failed(it.said ?: say.note(Note.COULD_NOT_EVALUATE)) }
     }
 
     /** Null when saved; otherwise what is wrong with the definition. */
     fun save(draft: SmartEdit, onSaved: (String) -> Unit): String? {
         val ready = smartEditPrepare(draft)
         ready.error?.let { return it }
-        viewModelScope.launch { val id = nori.library.smartSave(ready.id, ready.name, ready.json); refresh(); onSaved(id) }
+        viewModelScope.launch { val id = nori.library.smartSave(ready.id, ready.name.ifEmpty { say.smartPlaylist }, ready.json); refresh(); onSaved(id) }
         return null
     }
 

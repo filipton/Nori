@@ -13,16 +13,14 @@
 
 use std::ffi::{c_void, CStr};
 
-use jni::objects::{JByteBuffer, JString};
+use jni::objects::JString;
 use jni::sys::{jint, jstring, JNINativeMethod, JNI_ERR, JNI_OK, JNI_VERSION_1_6};
 use jni::JNIEnv;
 
 include!(concat!(env!("OUT_DIR"), "/uniffi_bindgen_kotlin_jni.uniffi.rs"));
 
 mod covers;
-mod decoder;
 mod dsp;
-mod engine;
 mod heard;
 mod look;
 mod measure;
@@ -31,8 +29,6 @@ mod player;
 mod playlist;
 mod seek;
 mod settings;
-mod stages;
-mod store;
 mod stream_cache;
 mod track;
 mod transfers;
@@ -62,11 +58,9 @@ macro_rules! native {
 }
 pub(crate) use native;
 
-static CLASSES: [&Class; 19] = [
+static CLASSES: [&Class; 15] = [
     &covers::CLASS,
-    &decoder::CLASS,
     &dsp::CLASS,
-    &engine::CLASS,
     &heard::HEARD,
     &heard::PLAYHEAD,
     &look::COVER,
@@ -75,10 +69,8 @@ static CLASSES: [&Class; 19] = [
     &player::CLASS,
     &playlist::CLASS,
     &seek::CLASS,
-    &settings::EQ_WORDS,
+    &settings::EQ_BANDS,
     &settings::SOUND_EDIT,
-    &stages::CLASS,
-    &store::CLASS,
     &stream_cache::CLASS,
     &transfers::DOWNLOADS,
     &transfers::LINES,
@@ -157,28 +149,6 @@ fn register(env: &mut JNIEnv, class: &Class) {
         }
         (jni.DeleteLocalRef.unwrap())(raw, found);
     }
-}
-
-/// A direct buffer's memory: `len` bytes at `pos`, checked against its capacity. None when the buffer
-/// is not direct, or the range does not lie inside it.
-pub(crate) fn region<'a>(env: &JNIEnv, buf: &JByteBuffer, pos: jint, len: jint) -> Option<&'a mut [u8]> {
-    let p = region_ptr(env, buf, pos, len)?;
-    // SAFETY: `p` starts `len` bytes inside the buffer's memory (`region_ptr`), which Java keeps in place
-    // while the buffer is reachable - and the caller holds it for the whole call.
-    Some(unsafe { std::slice::from_raw_parts_mut(p, len as usize) })
-}
-
-/// Where [`region`]'s bytes start, without making a slice of them: for a door that takes two buffers
-/// which might be one.
-pub(crate) fn region_ptr(env: &JNIEnv, buf: &JByteBuffer, pos: jint, len: jint) -> Option<*mut u8> {
-    let addr = env.get_direct_buffer_address(buf).ok()?;
-    let cap = env.get_direct_buffer_capacity(buf).ok()?;
-    let (pos, len) = (usize::try_from(pos).ok()?, usize::try_from(len).ok()?);
-    if addr.is_null() || pos.checked_add(len)? > cap {
-        return None;
-    }
-    // SAFETY: `pos` is within the buffer's `cap` bytes, checked above.
-    Some(unsafe { addr.add(pos) })
 }
 
 /// `s` as a Java string, or null if the JVM could not make one (it has then thrown).

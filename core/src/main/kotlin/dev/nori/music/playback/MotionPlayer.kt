@@ -22,8 +22,8 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * The moving cover's own player: muted, looping, video only, and nothing to do with the music. It asks
  * for no audio focus, has no media session and no wake lock, opens no audio track (the audio track type
- * is switched off, so no audio renderer is ever enabled), and is its own ExoPlayer, so it cannot touch
- * the one in PlaybackService.
+ * is switched off, so no audio renderer is ever enabled), and is its own ExoPlayer, apart from the
+ * music's player in PlaybackService. It is the one thing media3's ExoPlayer still plays in the app.
  *
  * The ExoPlayer is built by the first [play] and let go of by [release]; the screen releases it when
  * the player is put away, when the app is left or the screen goes off, and when the switch goes off.

@@ -70,14 +70,15 @@ impl SearchSession {
         Ok(self.server(query, v))
     }
 
-    /// The server could not answer `query`: said, and the offline answer stays.
+    /// The server could not answer `query`, for `reason` (the client's own words for the failure): the
+    /// offline answer stays, and the view says it fell back.
     pub fn failed(&self, query: String, reason: Option<String>) -> Option<SearchView> {
         let mut s = self.0.lock();
         if s.query() != query {
             return None;
         }
         s.searching = false;
-        s.error = Some(format!("Server search failed: {} — showing offline results", reason.as_deref().unwrap_or("null")));
+        s.error = Some(SearchFallback { reason });
         Some(s.view())
     }
 
@@ -137,7 +138,7 @@ pub(crate) mod tests {
         assert_eq!(s.scope(SearchScope::Library).shown.unwrap().songs.len(), 2);
         assert!(s.server("cats".into(), result()).is_none());
         let failed = s.failed("dogs".into(), Some("timeout".into())).unwrap();
-        assert_eq!(failed.error.as_deref(), Some("Server search failed: timeout — showing offline results"));
+        assert_eq!(failed.error, Some(SearchFallback { reason: Some("timeout".into()) }));
         let v = s.typed("  ".into());
         assert!(v.shown.is_none() && !v.searching && v.error.is_none());
         assert!(s.scope(SearchScope::Everything).scopes_offered == false);
@@ -146,7 +147,7 @@ pub(crate) mod tests {
         let v = s.server("x".into(), SearchResult::default()).unwrap();
         assert!(v.nothing_found);
         assert_eq!(s.scope(SearchScope::Library).shown.unwrap().songs.len(), 0, "no provider items: the library is everything");
-        assert_eq!(search_scopes()[2].label, "Not in library yet");
+        assert_eq!(search_scopes()[2], SearchScope::Providers);
     }
 
     #[test]

@@ -25,4 +25,3 @@ nori-settings = { path = "../settings" }
 # The audio output's line names the output device's kind.
 nori-devices = { path = "../devices" }
 nori-player = { path = "../player" }
-nori-text = { path = "../text" }

@@ -153,7 +153,7 @@ impl Audio {
         Audio::Pcm { rate, channels, cycle: Arc::new(bytes(cycle)), frames }
     }
 
-    /// An MP3 file, decoded the way RustAudio decodes one without a LAME header: the decoder drops
+    /// An MP3 file, decoded the way the core's decoder decodes one without a LAME header: the decoder drops
     /// its own delay, so the first sample out is the first sample of the song.
     pub fn mp3(file: &[u8]) -> Audio {
         let packets: Vec<Vec<u8>> = mp3_frames(file).into_iter().map(<[u8]>::to_vec).collect();
@@ -713,7 +713,7 @@ impl pipeline::App for App {
         self.shuffling = shuffling;
     }
 
-    /// Measures the songs coming up that have not been measured, whole, as AutoMixPrefetch does.
+    /// Measures the songs coming up that have not been measured, whole, as the engine's measurer does.
     fn measure_ahead<S: Songs>(&mut self, songs: &mut S, ids: &[String]) {
         let missing: Vec<&String> = ids.iter().filter(|id| !self.analyses.contains_key(*id)).collect();
         self.log.push(format!("measuring ahead: {} of {} unmeasured, 0 not on the device yet", missing.len(), ids.len()));

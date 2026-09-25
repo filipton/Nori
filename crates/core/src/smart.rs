@@ -14,7 +14,7 @@ impl Core {
     pub fn smart_list(&self) -> Result<Vec<SmartPlaylist>> {
         let c = self.db.lock();
         let mut st = c.prepare_cached("SELECT id, name, json FROM smart_playlists WHERE server=sid() ORDER BY updated_ms DESC, id")?;
-        let rows = st.query_map([], |r| Ok(SmartPlaylist { id: r.get(0)?, name: r.get(1)?, json: r.get(2)? }))?;
+        let rows = st.query_map([], |r| Ok(SmartPlaylist { id: r.get(0)?, name: r.get(1)?, json: r.get(2)?, builtin: None }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -45,10 +45,10 @@ impl Core {
         Ok(run(&self.db.lock(), &def, &downloaded, offset as usize, limit as usize, false, db::now_ms())?.0)
     }
 
-    /// The playlist's page: its first `limit` songs and the caption over them, "12 songs · 48:10".
+    /// The playlist's page: its first `limit` songs and their summed length, for the caption over them.
     pub fn smart_page(&self, json: String, limit: u32) -> Result<SmartPage> {
         let songs = self.smart_evaluate(json, 0, limit)?;
-        Ok(SmartPage { caption: crate::fmt::list_caption(&songs, true), songs })
+        Ok(SmartPage { seconds: crate::pages::total_seconds(&songs), songs })
     }
 
     /// How many songs the playlist has, its own caps applied.
@@ -305,7 +305,7 @@ pub(crate) mod tests {
         assert_eq!(core.smart_save(a.clone(), "Jazz!".into(), def.clone()).unwrap(), a);
         let l = core.smart_list().unwrap();
         assert_eq!(l.len(), 2);
-        assert!(l.contains(&SmartPlaylist { id: a.clone(), name: "Jazz!".into(), json: def }));
+        assert!(l.contains(&SmartPlaylist { id: a.clone(), name: "Jazz!".into(), json: def, builtin: None }));
         assert!(l.iter().any(|p| p.name == "Ünïcödé ✓"));
         core.smart_delete(a).unwrap();
         core.smart_delete("missing".into()).unwrap();

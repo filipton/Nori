@@ -15,12 +15,14 @@ each side) with both outputs as logits. Then two changes for the phone, each che
   in fp32 (logits move by about 0.01; no frame changes side of zero on the check below). Dynamic int8 does not load
   in tract, and BitChord's int8 small export misbehaves; see docs/research/analysis.md.
 
-    python3 -m venv /tmp/bt && /tmp/bt/bin/pip install torch==2.8.0 onnx==1.19.0 onnxruntime numpy einops \
-        rotary-embedding-torch
+    python3.13 -m venv /tmp/bt && /tmp/bt/bin/pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+    /tmp/bt/bin/pip install onnx==1.19.0 onnxruntime numpy einops==0.8.0 rotary-embedding-torch==0.6.4
     git clone https://github.com/CPJKU/beat_this /tmp/beat_this && git -C /tmp/beat_this checkout b95c8ab0c58c
     /tmp/bt/bin/python tools/beat-this/export.py --beat-this /tmp/beat_this --out beat-this-small0-v1.onnx
 
-The checkpoint is fetched from the authors' server and checked against its SHA-256 (or given with --checkpoint).
+rotary-embedding-torch is the version beat_this's requirements.txt names: 0.9.1 traces a different graph (a file
+1.2 MB bigger). torch 2.8.0 has no wheel for Python 3.14. The checkpoint is fetched from the authors' server and
+checked against its SHA-256 (or given with --checkpoint).
 The fp16 export (before the attention is fused) is compared with the PyTorch model on a fixed test input. It prints
 the file's size and SHA-256: the numbers that go in crates/automix/src/beat_model.rs with the file published as a
 release asset. The fused file is then checked where it runs, in tract:
@@ -204,8 +206,13 @@ def main():
         model, hparams = load_model(args.beat_this, ckpt)
         print("small0:", hparams, sum(p.numel() for p in model.parameters()), "parameters")
         fp32, fp16 = Path(tmp) / "small0-fp32.onnx", Path(tmp) / "small0-fp16.onnx"
+        # Exported before the model has run: a run first leaves the rotary embedding's cache filled, and the file
+        # then carries it as constants (180 kB more, the same logits).
         export(model, fp32)
         to_fp16_weights(fp32, fp16)
+        # The reference from a model loaded again: tracing leaves the traced sizes in that cache, and the traced
+        # model itself then answers differently (logits off by 5); the ONNX file is right.
+        model, _ = load_model(args.beat_this, ckpt)
         x = test_input()
         with torch.no_grad():
             out = model(torch.from_numpy(x))

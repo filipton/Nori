@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.res.Resources
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
@@ -25,12 +26,14 @@ import androidx.media3.exoplayer.offline.DownloaderFactory
 import androidx.media3.exoplayer.scheduler.Scheduler
 import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.Nori
+import dev.nori.music.core.R
 import dev.nori.music.ffi.Core
 import dev.nori.music.ffi.transfers.DownloadKnown
 import dev.nori.music.ffi.transfers.DownloadQueued
 import dev.nori.music.ffi.model.Song
 import dev.nori.music.playback.MediaSources
 import dev.nori.music.settings.Settings
+import dev.nori.music.text.Fmt
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.util.concurrent.ConcurrentHashMap
@@ -355,15 +358,16 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * nothing else redraws it. The batch's aggregate speed is published for the downloads screen.
      */
     internal fun progressNotification(context: Context, downloads: List<Download>, notMetRequirements: Int): Notification {
-        // The words and the bar are the core's; asked once a second, it says whether they changed, and
-        // an unchanged notification is handed back as it was rather than built again.
+        // The facts and the bar are the core's, the words these; asked once a second, it says whether the
+        // facts changed, and a notification whose words and bar did not is handed back as it was rather
+        // than built again.
         when (DownloadsJni.notice(downloads.size, notMetRequirements, SystemClock.elapsedRealtime())) {
             0 -> lastProgress?.let { return it }
             2 -> return complete ?: NotificationCompat.Builder(context, CHANNEL)
                 // Nothing left: the service is on its way out, and the batch's own summary (its own id,
                 // so stopping the service does not take it) says how it went. No bar here.
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentTitle(noticeWords.complete)
+                .setContentTitle(context.getString(R.string.notice_complete))
                 .setContentIntent(openDownloads(context))
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
@@ -371,15 +375,19 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
                 .setShowWhen(false)
                 .build().also { complete = it }
         }
-        val words = DownloadsJni.noticeWords()
-        val cut = words.indexOf('\n')
+        val names = DownloadsJni.noticeFacts(noticeFacts) ?: "\n"
+        val cut = names.indexOf('\n')
+        val (title, text) = noticeWords(context.resources, names.substring(0, cut), names.substring(cut + 1), noticeFacts)
+        val permille = noticeFacts[3].toInt()
+        lastProgress?.let { if (title == lastTitle && text == lastText && permille == lastPermille) return it }
+        lastTitle = title; lastText = text; lastPermille = permille
         return NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(words.substring(0, cut))
-            .setContentText(words.substring(cut + 1).ifEmpty { null })
-            .setProgress(1000, DownloadsJni.noticePermille(), false)
+            .setContentTitle(title)
+            .setContentText(text.ifEmpty { null })
+            .setProgress(1000, permille, false)
             .setContentIntent(openDownloads(context))
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, noticeWords.cancel, cancelIntent(context))
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, context.getString(R.string.notice_cancel), cancelIntent(context))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
@@ -389,9 +397,39 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     private var lastProgress: Notification? = null
-    /** The notification's fixed words, the core's (`words_download_notice`). */
-    private val noticeWords by lazy { dev.nori.music.ffi.words.wordsDownloadNotice() }
+    private var lastTitle = ""
+    private var lastText = ""
+    private var lastPermille = -1
+    /** The notification's facts, `[kind, position, total, permille, speed_bps, eta_s]`. */
+    private val noticeFacts = LongArray(6)
     private var complete: Notification? = null
+
+    /**
+     * The notification's title and text from the core's facts: which title applies ([facts] `[0]`: 0
+     * waiting for a network, 1 one song named [current], 2 one song, 3 "12 of 49"), then the song in
+     * flight, the batch's album, how fast and how long, each only when there is one.
+     */
+    private fun noticeWords(res: Resources, current: String, album: String, facts: LongArray): Pair<String, String> {
+        val title = when (facts[0].toInt()) {
+            0 -> res.getString(R.string.notice_waiting)
+            1 -> res.getString(R.string.notice_downloading_named, current)
+            2 -> res.getString(R.string.notice_downloading_one)
+            else -> res.getString(R.string.notice_downloading_of, facts[1].toInt(), facts[2].toInt())
+        }
+        val text = StringBuilder()
+        fun part(f: (StringBuilder) -> Unit) {
+            val start = text.length
+            if (start > 0) text.append(" · ")
+            val mark = text.length
+            f(text)
+            if (text.length == mark) text.setLength(start)
+        }
+        if (current.isNotEmpty()) part { it.append(current) }
+        if (album.isNotEmpty()) part { it.append(res.getString(R.string.notice_album, album)) }
+        part { Fmt.appendSpeed(it, facts[4]) }
+        part { appendEta(res, it, facts[5]) }
+        return title to text.toString()
+    }
 
     /**
      * How the batch went, once it has. Its own notification id: the service takes the progress one with
@@ -399,19 +437,31 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
      * by itself. Something failed: it stays, and a tap shows which.
      */
     private fun summarise() {
-        val summary = DownloadsJni.summary()
-        if (summary.isEmpty()) return
+        val facts = IntArray(4)
+        val album = DownloadsJni.summary(facts) ?: return
         val nm = context.getSystemService(NotificationManager::class.java) ?: return
-        val failed = DownloadsJni.summaryFailed() > 0
+        val res = context.resources
+        val (done, failedCount) = facts[2] to facts[3]
+        val failed = failedCount > 0
+        val title = when (facts[0]) {
+            0 -> res.getQuantityString(R.plurals.summary_failed, failedCount, failedCount)
+            1 -> res.getString(R.string.summary_album, album)
+            else -> res.getQuantityString(R.plurals.summary_downloaded, done, done)
+        }
+        val text = when (facts[1]) {
+            1 -> res.getString(R.string.summary_some_failed, done)
+            2 -> res.getString(R.string.summary_try_again)
+            else -> null
+        }
         val b = NotificationCompat.Builder(context, CHANNEL)
             .setSmallIcon(if (failed) android.R.drawable.stat_notify_error else android.R.drawable.stat_sys_download_done)
-            .setContentTitle(summary.substringBefore('\n'))
-            .setContentText(summary.substringAfter('\n').ifEmpty { null })
+            .setContentTitle(title)
+            .setContentText(text)
             .setContentIntent(openDownloads(context))
             .setAutoCancel(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
-        if (!failed) b.setTimeoutAfter(noticeWords.resultTimeoutMs)
+        if (!failed) b.setTimeoutAfter(RESULT_TIMEOUT_MS)
         runCatching { nm.notify(DOWNLOAD_RESULT_NOTIFICATION, b.build()) }
     }
 
@@ -445,6 +495,8 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
 
     companion object {
         internal const val TAG = "noridl"
+        /** How long a batch's result stays when nothing failed; one that failed stays until tapped. */
+        private const val RESULT_TIMEOUT_MS = 8_000L
     }
 }
 
@@ -471,26 +523,90 @@ internal object DownloadsJni {
     @JvmStatic @CriticalNative external fun note(slot: Int, length: Long, bytes: Long, now: Long): Float
     /** 0 unchanged, 1 changed, 2 the batch is over. */
     @JvmStatic @CriticalNative external fun notice(listed: Int, waiting: Int, now: Long): Int
-    /** The notification's title and text, "title\ntext": one crossing for both. */
-    @JvmStatic @FastNative external fun noticeWords(): String
-    @JvmStatic @CriticalNative external fun noticePermille(): Int
-    /** "title\ntext", or empty when there is nothing to say. */
-    @JvmStatic @FastNative external fun summary(): String
-    @JvmStatic @CriticalNative external fun summaryFailed(): Int
+    /**
+     * The notification's facts, `[kind, position, total, permille, speed_bps, eta_s]` into [out], and the
+     * song in flight's title and the batch's album as "title\nalbum": one crossing for all of it.
+     */
+    @JvmStatic @FastNative external fun noticeFacts(out: LongArray): String?
+    /**
+     * How the batch went, `[title, text, done, failed]` into [out] (title 0 failed, 1 an album, 2
+     * downloaded; text 0 none, 1 some failed, 2 try again), and the album; null when there is nothing to say.
+     */
+    @JvmStatic @FastNative external fun summary(out: IntArray): String?
 }
 
 /**
- * The downloads screen's lines, in the core's words (crates/transfers/src/transfers.rs). A running row's line
- * is asked whenever its ring moves and the summary once a second, so they come over JNI, written in a
- * buffer the core keeps.
+ * The downloads screen's lines, worded here from the core's facts (crates/transfers/src/transfers.rs). A
+ * running row's line is asked whenever its ring moves and the summary once a second: one JNI call each,
+ * numbers into an array kept for it, the words from string resources. Main thread only.
  */
 object DownloadLines {
+    private val facts = LongArray(4)
+    private val out = StringBuilder(64)
+
+    /** A song's second line: its artist, then, while it runs, "45% · 2.1 MB/s · 1:20 left". */
+    fun row(res: Resources, id: String): String {
+        val artist = DownloadFacts.row(id, facts) ?: return ""
+        if (facts[0] == 0L) return artist
+        out.setLength(0)
+        out.append(artist)
+        if (facts[1] >= 0) out.append(" · ").append(facts[1]).append('%')
+        dotted { Fmt.appendSpeed(it, facts[2]) }
+        dotted { appendEta(res, it, facts[3]) }
+        return out.toString()
+    }
+
+    /** "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading". */
+    fun summary(res: Resources, active: Int, queued: Int, failed: Int): String {
+        out.setLength(0)
+        if (active > 0) out.append(res.getString(R.string.downloads_active, active))
+        if (queued > 0) part { it.append(res.getString(R.string.downloads_waiting, queued)) }
+        if (failed > 0) part { it.append(res.getString(R.string.downloads_failed, failed)) }
+        if (active > 0) {
+            DownloadFacts.speedEta(facts)
+            part { Fmt.appendSpeed(it, facts[0]) }
+            part { appendEta(res, it, facts[1]) }
+        }
+        if (out.isEmpty()) return res.getString(R.string.downloads_nothing)
+        return out.toString()
+    }
+
+    /** Adds `" · "` and what [f] writes, or nothing when it writes nothing. */
+    private inline fun dotted(f: (StringBuilder) -> Unit) {
+        val start = out.length
+        out.append(" · ")
+        val mark = out.length
+        f(out)
+        if (out.length == mark) out.setLength(start)
+    }
+
+    /** Adds `" · "` and what [f] writes, or nothing when it writes nothing (the first part has no dot). */
+    private inline fun part(f: (StringBuilder) -> Unit) {
+        val start = out.length
+        if (start > 0) out.append(" · ")
+        val mark = out.length
+        f(out)
+        if (out.length == mark) out.setLength(start)
+    }
+}
+
+/** "45 s left", "12:34 left", "2:05:00 left" onto [out]; nothing when it cannot be said (negative). */
+internal fun appendEta(res: Resources, out: StringBuilder, sec: Long) {
+    when {
+        sec < 0 -> Unit
+        sec < 60 -> out.append(res.getString(R.string.eta_seconds, sec.toInt()))
+        else -> out.append(res.getString(R.string.eta_clock, StringBuilder(10).also { Fmt.appendClock(it, sec, false) }))
+    }
+}
+
+/** The core's facts for the downloads screen (crates/android/src/transfers.rs). */
+internal object DownloadFacts {
     init { System.loadLibrary("norimusic") }
 
-    /** A running song's second line: its artist, then "45% · 2.1 MB/s · 1:20 left". */
-    @JvmStatic @FastNative external fun row(id: String): String
-    /** "2 downloading · 14 waiting · 1 failed · 3.2 MB/s · 12:34 left", or "Nothing downloading". */
-    @JvmStatic @FastNative external fun summary(active: Int, queued: Int, failed: Int): String
+    /** A song's artist (null when the id is null), and `[running, percent, speed_bps, eta_s]` into [out]. */
+    @JvmStatic @FastNative external fun row(id: String, out: LongArray): String?
+    /** The batch's `[speed_bps, eta_s]` into [out]. */
+    @JvmStatic @FastNative external fun speedEta(out: LongArray)
 }
 
 /** Asks the app to open on its downloads screen. The activity answers it; the core only names it. */

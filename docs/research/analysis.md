@@ -20,9 +20,10 @@ given; **[inferred]** = my reasoning or estimate, not confirmed.
   state-of-the-art beat tracker whose code *and* weights are MIT; madmom's models are CC BY-NC-SA and Demucs's
   weights are for scientific use only. On GTZAN it scores 88.8 % beat F1 and 79.4 % downbeat F1 (the full model
   89.1 % and 78.3 %), where classical trackers of the kind Nori uses score 55-66 %. **[verified]** The switch is
-  off by default; on, it downloads a 5.1 MB model once and runs it through tract (pure Rust, no second native
-  runtime) over the first and last 30 s of the song playing and the next one, in nori-engine's measurer. It is only
-  in a build with the `neural-beats` cargo feature, which the app's builds leave out (section 5). Its grid replaces the classical one at an end when it is confident and its bar is settled
+  off by default; on, it runs a 5.1 MB model through tract (pure Rust, no second native runtime) over the first and
+  last 30 s of the song playing and the next one, in nori-engine's measurer. The Android debug and perf builds
+  carry the feature and ship the model inside the APK; a release build leaves it out unless asked, and another
+  client downloads the model (section 5). Its grid replaces the classical one at an end when it is confident and its bar is settled
   (section 7). On the synthetic set the mix windows that are right and trusted go from 24 to 27 of 32 and none is
   trusted and wrong. **[measured]**
 - **The small model, not the full one, and not quantised to int8.** Over the same windows its beats agree with the
@@ -32,10 +33,13 @@ given; **[inferred]** = my reasoning or estimate, not confirmed.
   every frame-by-frame score matrix of a 30 s window, for 32 frequency rows at once: 700 MB at the peak. With each
   attention fused into one `Attention` node, which tract runs as flash attention, the same logits (within 1e-5)
   need about 100 MB. **[measured]**
-- **It is not free.** tract makes the arm64 core library 14.5 MB bigger (4.0 to 18.4 MB; 5.2 MB more compressed),
-  which a build with the feature makes every install pay whether the switch is on or not, and each new song costs
-  two windows of one core: 9 s here, perhaps 30-40 s on a mid-range phone's big core **[measured/inferred]**. Worth
-  it only as an opt-in, and only in a build meant for it.
+- **It is not free.** tract makes the arm64 core library 15.5 MB bigger (9.8 to 25.3 MB; 6.2 MB more compressed),
+  and with the model the perf APK grows by 20.6 MB (14.0 to 34.6 MB), which a build with the feature makes every
+  install pay whether the switch is on or not. Each new song costs two windows of one core: 6.7 s on a Ryzen 5
+  3600, perhaps 25-35 s on a mid-range phone's big core, and about 150 MB while it runs **[measured/inferred]**.
+  Worth it only as an opt-in, and only in a build meant for it.
+- **Not shown to be better on real records yet.** On ten songs of one real album (Radiohead's *Kid A*, scored
+  against the full model's beats) the grid the app adopts moves no mix window from wrong to right (section 7.1).
 - **Do not trust someone else's int8 export.** The quantised "small" Beat This! file BitChord ships gives beats only
   for the first seconds of some windows; the full model quantised by us does not do this. The shipped file was
   checked against the full model (above). **[measured]**
@@ -296,10 +300,14 @@ for every ABI, and the model sees the same PCM the analyser sees. It is 2 to 3 t
 **[measured]**; on ARM, where tract has hand-written NEON kernels, it may differ **[inferred]**. If device timing
 says tract is too slow, onnxruntime through `ort` is the fallback.
 
-**The size is the price.** Built in, every install carries the 14.5 MB, and Android stores native libraries
-uncompressed in the APK, so the arm64 APK grows by about that much. That is why the app's builds leave the feature
-out (`core/build.gradle.kts`, `-PrustFeatures=neural-beats` puts it in) and the setting is only shown by a build
-that has it: without it nothing of tract is compiled or linked. In a build with it, nothing else is paid while the
+**The size is the price.** Built in, every install carries the library's 15.5 MB, and Android stores native
+libraries uncompressed in the APK, so the arm64 APK grows by that much, and by the 5.1 MB model (stored, not
+deflated, so it is read in place) where the model ships with the app. Measured on the NDK build of September 2026
+(`./gradlew :app:assemblePerf -PrustTargets=arm64-v8a`, sizes read from the APK): `libnorimusic.so` 9,835,128 bytes
+without the feature and 25,324,664 with it (4.7 and 10.9 MB gzipped), the APK 14,048,503 and 34,607,884 bytes.
+**[measured]** So the debug and perf builds have the feature and the model, for testing, and a release build
+leaves both out unless asked (`core/build.gradle.kts`: `-PrustFeatures=neural-beats` puts them in, an empty
+`-PrustFeatures=` takes them out of any build). The setting is only shown by a build that has it: without it nothing of tract is compiled or linked. In a build with it, nothing else is paid while the
 switch is off: the code is mapped, not run, and the model is never loaded; the dynamic linker does relocate 0.5 MB
 more of read-only data when the library opens. Keeping tract in a second library loaded only when the switch is on
 would not shrink the APK, which is where the cost is; NNEF would save a quarter of it, once tract can write the
@@ -358,12 +366,16 @@ What was built follows these rules:
      tried again at the next song when it failed. nori-automix (`beat_model.rs`): where the file is, deleted when
      the switch goes off, and the words under the setting. nori-settings: the two switches and their rows, shown
      only in a build with the model. No Kotlin besides the two fields its copy of the settings carries.
-   - The app's builds leave `neural-beats` out: tract costs every install about 14.5 MB of library for a switch
-     that is off by default, and the model is not published yet. `./gradlew -PrustFeatures=neural-beats` builds it
-     in, and `cargo build -p nori-cli --features neural-beats` for the desktop.
-   - The model file is built by `tools/beat-this/export.py` from the MIT checkpoint and code (7.1); it is published
-     as the release asset `beat-this-small0-v1` of this repository, SHA-256
-     `4c1008bb81b1ec0f4b707bbf870fa3a69d76f016b9a08779ce9c5f564caa1845`, 5,069,715 bytes.
+   - The Android debug and perf builds have `neural-beats` and ship the model as an asset
+     (`tools/beat-this/beat-this-small0-v1.onnx`, copied in by `core/build.gradle.kts` after checking it against
+     the pin in `beat_model.rs`, stored uncompressed): Kotlin tells the core where its bytes are in the APK
+     (`beat_model_bundled`: the APK's path, the offset, the length) and the measurer reads them from there,
+     checks the SHA-256 and hands them to tract; nothing is downloaded or extracted. A release build leaves the
+     feature out unless asked (section 5). `cargo build -p nori-cli --features neural-beats` for the desktop,
+     which downloads the model instead.
+   - The model file is built by `tools/beat-this/export.py` from the MIT checkpoint and code (7.1): SHA-256
+     `847b51aaef519a60a47c815fa58440782de73bff7000210396673b0353e2cc8c`, 5,069,707 bytes. It is not hosted
+     anywhere yet; `beat_model::URL` is the one place that says where a client that does not ship it fetches it.
    - Measured: on the synthetic set, mix windows right and trusted 24 to 27 of 32, trusted with the bar on the
      wrong beat 2 to 0, refused 6 to 5, trusted and wrong still none. On the five real clips the windows come out as before (1 right,
      1 trusted and wrong at the end of *Vibe Ace* where the reference itself turns irregular, 8 refused). Expected
@@ -408,14 +420,50 @@ builds (±10 %). **[measured]**
   windows and 0.789 / 0.742 on the real ones, and the Nutcracker's outro was trusted with its bar on the wrong
   beat; 762 and 1012 frames fell less (0.812 / 0.692 and 0.855 / 0.758 on real windows). The fused file keeps the
   whole window in one pass with the same logits (within 1e-5) for 30 % more time.
-- **Where the file comes from.** The authors' checkpoint server (cloud.cp.jku.at) could not be reached from where
-  this was done. The file was therefore built from the small0 weights as two independent public exports carry them
-  (made with PyTorch 2.4.1 and 2.14.0, both stating the checkpoint's SHA-256; their 2,099,736 weights are bit for
-  bit the same), with the steps of `tools/beat-this/export.py` that need no PyTorch: the final sigmoids taken off,
-  the weights stored as fp16, the attention fused. `tools/beat-this/export.py` does the whole thing from the
-  published checkpoint; running it and scoring its output against the pinned file with `neural_eval`
-  (`NORI_BEAT_THIS_REF=` the new file) should show agreement 1.000 before the pinned file is trusted for good, and
-  its output can be published instead (its SHA-256 then goes into `crates/automix/src/beat_model.rs`).
+- **Where the file comes from (September 2026).** `tools/beat-this/export.py`, run as its header says: the code of
+  CPJKU/beat_this at b95c8ab0c58c (`LICENSE`: MIT, Copyright (c) 2024 Institute of Computational Perception, JKU
+  Linz; the README: "The code and the published model weights are released under the MIT license", with a note
+  that some of the training data is not, which does not bind the weights), the `small0` checkpoint fetched from
+  the authors' server (cloud.cp.jku.at), SHA-256 `6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b`
+  as the script pins it, 2,099,960 parameters; PyTorch 2.8.0 (CPU), onnx 1.19.0, rotary-embedding-torch 0.6.4 and
+  einops 0.8.0 on Python 3.13. The fp16 export is within 0.0012 of PyTorch's logits on the test input, no frame on
+  the other side of zero, and 12 attentions are fused. The output, `beat-this-small0-v1.onnx`, is 5,069,707 bytes,
+  SHA-256 `847b51aaef519a60a47c815fa58440782de73bff7000210396673b0353e2cc8c`, the same bytes on a second run. It
+  is 8 bytes short of the file pinned before (5,069,715 bytes, built from two public exports of the same weights
+  without PyTorch), which was never published and is not kept, so the two could not be compared. Two things in
+  the script had to change: rotary-embedding-torch is pinned to the version beat_this's `requirements.txt` names
+  (0.9.1 traces another graph, 1.2 MB bigger), and the PyTorch reference is taken from a freshly loaded model
+  (tracing leaves its sizes in the rotary embedding's cache, and the traced model then answers with logits off by
+  up to 7, which made the check fail although the file is right). The measurer test (`NORI_BEAT_THIS=<file> cargo
+  test --release -p nori-engine --features neural-beats --test core`) passes with it, from a file and from inside
+  a package as the APK holds it. **[measured]**
+- **Checked again with the exported file (September 2026, a Ryzen 5 3600, one thread).** The full model's
+  reference is final0 exported the same way (fp32, attention fused). The synthetic set has 18 songs now (36 mix
+  windows); the real songs are the ten of Radiohead's *Kid A* (FLAC), with the full model's own beats and
+  downbeats (PyTorch, no DBN, over the whole song) as the reference, so they measure agreement with the big model
+  more than truth, on an album that is hard for any tracker (*Treefingers* has no beat, *Motion Picture
+  Soundtrack* barely one). `analysis_eval` for the classical rows, `neural_eval` for the others, with `NORI_REAL`.
+  **[measured]**
+
+| Mix windows: bar-locked / wrong bar / wrong / refused (grid F, downbeat F) | Synthetic, 36 windows | *Kid A*, 16 windows |
+|---|---|---|
+| Classical | 28 / 2 / 0 / 6 (0.895, 0.892) | 6 / 2 / 3 / 5 (0.730, 0.477) |
+| Beat This! small, as shipped (adopted where sure) | 31 / 0 / 0 / 5 (0.931, 0.924) | 6 / 2 / 3 / 5 (0.709, 0.456) |
+| Beat This! small wherever it has a grid | 31 / 0 / 0 / 5 (0.972, 0.969) | 7 / 3 / 2 / 4 (0.785, 0.555) |
+| Agreement of small with full, beats F / downbeats F | 0.953 / 0.943 | 0.662 / 0.673 (20 windows) |
+
+  On the synthetic songs the model does what it did before: three more windows right, the two with the bar on the
+  wrong beat fixed, nothing trusted and wrong. On *Kid A* the gate that decides when its grid replaces the
+  classical one lets almost nothing through: one window changes (*Optimistic*'s intro, still bar-locked, F 1.00 to
+  0.67), and the counts stay those of the classical tracker. Its grid everywhere would be better on F (beats 0.73 to
+  0.79, downbeats 0.48 to 0.56) and turn one trusted-and-wrong window into a right one, but put one more bar on the
+  wrong beat. The small model agrees with the full one far less on these records than on the synthetic songs. So on
+  this album it is not better as shipped; whether it is on music with a steady beat has to be measured on a
+  labelled set (GTZAN, Ballroom, or the user's own library with hand-tapped beats).
+- **Time and memory per song (September 2026, Ryzen 5 3600, release, one thread).** `neural_song_cost`: loading
+  and optimising the model from its bytes 0.20-0.27 s, each 30 s window 3.2 s, the whole song 6.6-6.7 s (three songs
+  of *Kid A*); the process's peak RSS grows by about 150 MB over it (72 to 220 MB, the song's own PCM included in
+  the first number). `neural_eval` over its 56 windows: 3.27 s a window. **[measured]**
 3. **Vocals**: verify UMX-HQ's weights licence; if it is MIT, the same path (fp32 ONNX, tract, two windows) gives a
    vocals-to-mix ratio for the gate. Measure it against labelled songs first.
 4. **Not recommended**: madmom's models, Essentia, UMX-L, Demucs (licences); NNAPI (deprecated); separating whole
@@ -423,16 +471,17 @@ builds (±10 %). **[measured]**
 
 ## 8. What remains unverified
 
-- Accuracy on real music at scale. Five short CC clips with a model's beats as the reference is a sanity check, not
-  a measurement, and the synthetic songs are cleaner than records.
+- Accuracy on real music at scale. Five short CC clips and one album with a model's beats as the reference are a
+  sanity check, not a measurement, and the synthetic songs are cleaner than records.
 - Anything on a phone: the classical analysis after this branch (+6 % on the desktop), tract's and onnxruntime's
   speed on ARM, the model's time and energy per song, its memory under Android. The arm64 size was measured on a
   Linux arm64 build of the same code, not an NDK one (no Android NDK here).
-- "Better beat detection" end to end on a device: the model is not published, so nothing has downloaded it, and
-  the app's builds leave the feature out. The measurer's path is tested on the desktop without the model
-  (`crates/engine/tests/core.rs`) and with one when `NORI_BEAT_THIS` names it.
-- The shipped model file's provenance, until `tools/beat-this/export.py` has been run against the published
-  checkpoint (7.1); and UMX-HQ's licence.
+- "Better beat detection" on a phone: the debug and perf builds ship the model, but its time, energy and memory
+  have not been measured on a phone. The measurer's path is tested on the desktop without the model
+  (`crates/engine/tests/core.rs`) and with one when `NORI_BEAT_THIS` names it, including reading it from inside
+  a package.
+- Whether the model beats the classical tracker on real music with a steady beat (7.1: on *Kid A* it does not, as
+  shipped); and UMX-HQ's licence.
 - The key profiles were chosen on synthetic chords. Of the real clips only the *Sugar Plum Fairy* had a key worth
   checking against (E minor, if the arrangement keeps Tchaikovsky's); it reads B minor, a fifth away, before and
   after. The Brahms is "in F sharp minor" by its file name, but string-orchestra arrangements are not always in the

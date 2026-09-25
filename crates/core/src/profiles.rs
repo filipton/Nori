@@ -151,10 +151,10 @@ impl Core {
     }
 
     /// The AutoEQ browser's search as the screens show it: whether the query is too short to search,
-    /// and the hits with the lines under them.
+    /// and the hits (the client words the lines under them).
     pub fn autoeq_browse(&self, query: String) -> AutoEqFound {
         let too_short = autoeq_too_short(&query);
-        AutoEqFound { too_short, hits: autoeq_hits(self.autoeq_find(query)) }
+        AutoEqFound { too_short, hits: self.autoeq_find(query) }
     }
 }
 
@@ -183,7 +183,7 @@ impl Core {
     }
 
     fn adopt_as(&self, output: &str, name: &str, preset: &str, live: bool, now: &Now) -> Result<Step, SoundError> {
-        let sound = settings::import(now.sound.clone(), preset, "that preset had no filters in it")?;
+        let sound = settings::import(now.sound.clone(), preset)?;
         let created = self.save_bound(name, &sound, output)?;
         let (apply, loose) = if live { loaded(sound, &now.sound, now.per_output, self.loose().is_some()) } else { (None, LooseChange::Keep) };
         if live {
@@ -357,7 +357,7 @@ pub(crate) mod tests {
         let p = c.profiles().unwrap().into_iter().find(|p| p.name == "Sony").unwrap();
         assert_eq!(p.outputs, ["Bluetooth: X", "USB: Y"]);
         let err = c.adopt_as("x", "Empty", "nothing", true, &now(sound())).unwrap_err();
-        assert_eq!(err.to_string(), "that preset had no filters in it");
+        assert!(matches!(err, SoundError::NoFilters));
     }
 
     #[test]
@@ -421,26 +421,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_device_sheet_and_the_curves_are_worded() {
+    fn the_device_sheet_and_the_curve_search() {
         let names = vec![FLAT.to_string(), "Warm".to_string()];
-        let s = sheet("USB: K3", Some("USB"), false, false, &names);
-        assert_eq!(s.intro, "What music played through this USB device sounds like. It switches by itself whenever the device connects.");
-        assert_eq!(s.automatic, "Offers a matching AutoEQ curve when one is known");
+        let s = sheet("USB: K3", false, &names);
         assert_eq!(s.profiles, ["Warm"]);
         assert!(s.can_forget);
-        let s = sheet("x", None, true, true, &[]);
-        assert_eq!(s.intro, "What music played through this sounds like. It switches by itself whenever the device connects.");
-        assert_eq!(s.automatic, "Uses a matching AutoEQ curve when one is known");
-        assert!(!s.can_forget, "not the one playing");
-        assert!(!sheet(SPEAKER, None, false, false, &[]).can_forget, "not the speaker");
-        assert_eq!((device_playing_now(true), device_playing_now(false)), (" · Playing now".into(), "Playing now".into()));
-        let e = |target: &str| AutoEqEntry { name: "HD 600".into(), source: "oratory1990".into(), form: "over-ear".into(), target: target.into(), path: "p".into() };
-        let h = autoeq_hits(vec![e("Harman"), e("")]);
-        assert_eq!(h[0].caption, "oratory1990 · over-ear · Harman");
-        assert_eq!(h[1].caption, "oratory1990 · over-ear");
-        assert_eq!(h[0].short, "oratory1990 · over-ear");
+        assert!(!sheet("x", true, &[]).can_forget, "not the one playing");
+        assert!(!sheet(SPEAKER, false, &[]).can_forget, "not the speaker");
         assert!(autoeq_too_short("a") && autoeq_too_short("") && !autoeq_too_short("hd"));
-        assert_eq!(autoeq_count_words(8123), AutoEqCount { count: "8123 headphones".into(), search: "Search 8123 headphones".into() });
         let c = core();
         assert!(c.autoeq_browse("h".into()).too_short);
         assert!(!c.autoeq_browse("hd".into()).too_short);

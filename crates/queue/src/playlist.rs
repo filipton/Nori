@@ -12,7 +12,6 @@ pub use nori_player::playlist::Hand;
 pub use nori_player::queue::Onto;
 
 use crate::queue;
-use nori_model::alog;
 use nori_model::Song;
 
 static LIST: Mutex<Playlist> = Mutex::new(Playlist::new());
@@ -220,49 +219,6 @@ pub fn playlist_skips(index: usize) -> bool {
     });
     let explicit = id.is_some_and(|id| queue::queue_flags(id) & queue::EXPLICIT != 0);
     nori_player::queue::arrival(true, skip_explicit, explicit, has_next, false) == Onto::Skip
-}
-
-/// Java's `String.hashCode`, over the UTF-16 the platform keeps the id in.
-fn java_hash(s: &str) -> i32 {
-    s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
-}
-
-/// Java's `List.hashCode` over element hashes.
-fn list_hash(hashes: impl Iterator<Item = i32>) -> i32 {
-    hashes.fold(1i32, |h, e| h.wrapping_mul(31).wrapping_add(e))
-}
-
-/// Whether the player's list looks like this one: `count` songs, on `current`, shuffling or not, its ids
-/// hashing to `ids_hash` and (while shuffling) its play order to `order_hash`, both as Java's
-/// `List.hashCode` over them. Every edit is checked this way, so the ids and the order do not cross each
-/// time; only a list that differs is sent whole, to [`playlist_follow`].
-pub fn playlist_same(count: usize, current: i32, shuffling: bool, ids_hash: i32, order_hash: i32) -> bool {
-    with(|p| {
-        p.len() == count
-            && p.current() == usize::try_from(current).ok()
-            && p.shuffling() == shuffling
-            && list_hash(p.ids().iter().map(|id| java_hash(id))) == ids_hash
-            && (!shuffling || p.shuffle_order().is_some_and(|o| list_hash(o.iter().map(|&i| i as i32)) == order_hash))
-    })
-}
-
-/// The player's list after it changed, checked against this one. Every change is meant to be made here
-/// first; one that was not (a path that edits the player directly) is taken as it is, and said in the
-/// log so that path can be found. True when it had to be taken.
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn playlist_follow(ids: Vec<String>, current: i32, shuffling: bool, order: Vec<u32>) -> bool {
-    let mut p = LIST.lock();
-    let order: Vec<usize> = order.into_iter().map(|i| i as usize).collect();
-    let same = p.ids() == ids.as_slice()
-        && p.current() == usize::try_from(current).ok()
-        && p.shuffling() == shuffling
-        && (!shuffling || p.shuffle_order() == Some(order.as_slice()));
-    if same {
-        return false;
-    }
-    alog::info(&format!("queue: the player's list differs ({} vs {} songs), following it", ids.len(), p.len()));
-    p.adopt(ids, usize::try_from(current).ok(), shuffling.then_some(order));
-    true
 }
 
 /// How many songs still follow the current one in play order, repeat left out.
@@ -475,31 +431,6 @@ pub(crate) mod tests {
         playlist_repeat(2);
         assert!(playlist_window());
         assert_eq!(WINDOW.lock().0, ids(&["w2", "w3", "w1", "w2", "w3", "w1", "w2", "w3", "w1"]));
-    }
-
-    #[test]
-    fn the_players_list_is_checked_by_its_hashes() {
-        let _g = hold(&["h1", "hé2"], 0);
-        // What Kotlin computes: List<String>.hashCode() over the ids, List<Int>.hashCode() over the order.
-        let ids_hash = 31 * (31 + java_hash("h1")) + java_hash("hé2");
-        assert_eq!(java_hash("h1"), 31 * 'h' as i32 + '1' as i32);
-        assert!(playlist_same(2, 0, false, ids_hash, 0));
-        assert!(!playlist_same(2, 1, false, ids_hash, 0), "on another song");
-        assert!(!playlist_same(2, 0, false, ids_hash ^ 1, 0), "other songs");
-        assert!(!playlist_same(3, 0, false, ids_hash, 0));
-        playlist_shuffle(true);
-        let order = with(|p| p.shuffle_order().unwrap().to_vec());
-        let order_hash = list_hash(order.iter().map(|&i| i as i32));
-        assert!(playlist_same(2, 0, true, ids_hash, order_hash));
-        assert!(!playlist_same(2, 0, true, ids_hash, order_hash ^ 1), "another play order");
-    }
-
-    #[test]
-    fn a_change_made_behind_the_queues_back_is_followed() {
-        let _g = hold(&["f1", "f2"], 0);
-        assert!(!playlist_follow(ids(&["f1", "f2"]), 0, false, vec![0, 1]));
-        assert!(playlist_follow(ids(&["f1", "f2", "f3"]), 1, false, vec![0, 1, 2]));
-        assert_eq!((playlist_after(), playlist_upcoming(5)), (1, ids(&["f2", "f3"])));
     }
 
     #[test]

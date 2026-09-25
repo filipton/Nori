@@ -1,10 +1,10 @@
 //! What a song's menu offers and in what order, what the sleep timer offers, and what a page's
-//! download entry says: the screens draw these lists as they come, one icon per action, and do what the
-//! action names. Made once each time a menu opens.
+//! download entry does: the screens draw these lists as they come, one icon and their own words per
+//! action, and do what the action names. Made once each time a menu opens.
 
 use nori_model::Song;
 
-/// Something the song menu can do. The UI draws one icon per kind and does what it says.
+/// Something the song menu can do. The client draws one icon per kind, words it and does what it says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum SongAction {
@@ -17,10 +17,13 @@ pub enum SongAction {
     StopDownload,
     Download,
     GoToAlbum { id: String },
-    /// `name` is the artist's, for the page to show before it has loaded.
-    GoToArtist { id: String, name: String },
-    /// A provider's song: octo-fiesta fetches it into the library when it is starred.
-    AddToLibrary,
+    /// `name` is the artist's, for the page to show before it has loaded. `named` is set on a song by
+    /// several artists, where each gets a line of its own and the line names it ("Go to A" rather than
+    /// "Go to artist").
+    GoToArtist { id: String, name: String, named: bool },
+    /// A provider's song: octo-fiesta fetches it into the library when it is starred. `provider` is the
+    /// service it comes from ("Deezer"), when its id says.
+    AddToLibrary { provider: Option<String> },
     SleepTimer,
     StartRadio,
     InstantMix,
@@ -34,7 +37,6 @@ pub enum SongAction {
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongMenuItem {
     pub action: SongAction,
-    pub label: String,
     /// Under "More": what one reaches for perhaps once a month.
     pub more: bool,
 }
@@ -58,49 +60,48 @@ pub enum SongDownload {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_menu(song: Song, starred: bool, download: SongDownload, player: bool) -> Vec<SongMenuItem> {
     let mut out = Vec::with_capacity(16);
-    let mut add = |action: SongAction, label: String, more: bool| out.push(SongMenuItem { action, label, more });
-    add(SongAction::Favourite { on: !starred }, (if starred { "Remove from favourites" } else { "Add to favourites" }).into(), false);
-    add(SongAction::PlayNext, "Play next".into(), false);
-    add(SongAction::AddToQueue, "Add to queue".into(), false);
-    add(SongAction::AddToPlaylist, "Add to playlist…".into(), false);
+    let mut add = |action: SongAction, more: bool| out.push(SongMenuItem { action, more });
+    add(SongAction::Favourite { on: !starred }, false);
+    add(SongAction::PlayNext, false);
+    add(SongAction::AddToQueue, false);
+    add(SongAction::AddToPlaylist, false);
     match download {
-        SongDownload::Done => add(SongAction::RemoveDownload, "Remove download".into(), false),
-        SongDownload::Pending => add(SongAction::StopDownload, "Stop download".into(), false),
-        SongDownload::None => add(SongAction::Download, "Download".into(), false),
+        SongDownload::Done => add(SongAction::RemoveDownload, false),
+        SongDownload::Pending => add(SongAction::StopDownload, false),
+        SongDownload::None => add(SongAction::Download, false),
     }
     if let Some(id) = &song.album_id {
-        add(SongAction::GoToAlbum { id: id.clone() }, "Go to album".into(), false);
+        add(SongAction::GoToAlbum { id: id.clone() }, false);
     }
     // A song by several artists names each one it can go to; one by a single artist says "artist".
     if song.artists.len() > 1 {
         for a in song.artists.iter().filter(|a| !a.id.is_empty()) {
-            add(SongAction::GoToArtist { id: a.id.clone(), name: a.name.clone() }, format!("Go to {}", a.name), false);
+            add(SongAction::GoToArtist { id: a.id.clone(), name: a.name.clone(), named: true }, false);
         }
     } else if let Some(id) = &song.artist_id {
-        add(SongAction::GoToArtist { id: id.clone(), name: song.artist.clone() }, "Go to artist".into(), false);
+        add(SongAction::GoToArtist { id: id.clone(), name: song.artist.clone(), named: false }, false);
     }
     if song.is_external {
-        let provider = nori_words::fmt::provider_of(&song.id).unwrap_or_else(|| "provider".into());
-        add(SongAction::AddToLibrary, format!("Add to library ({provider})"), false);
+        add(SongAction::AddToLibrary { provider: nori_model::lines::provider_of(&song.id) }, false);
     }
     if player {
-        add(SongAction::SleepTimer, "Sleep timer…".into(), false);
+        add(SongAction::SleepTimer, false);
     }
-    add(SongAction::StartRadio, "Start radio from this song".into(), true);
+    add(SongAction::StartRadio, true);
     if !song.is_external {
-        add(SongAction::InstantMix, "Instant mix".into(), true);
-        add(SongAction::ExcludeFromMixes, "Exclude from mixes".into(), true);
-        add(SongAction::Share, "Share link".into(), true);
+        add(SongAction::InstantMix, true);
+        add(SongAction::ExcludeFromMixes, true);
+        add(SongAction::Share, true);
     }
-    add(SongAction::Details, "Details".into(), true);
+    add(SongAction::Details, true);
     out
 }
 
-/// One choice of the sleep timer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One choice of the sleep timer; the client words it from its numbers ("30 minutes", "End of track",
+/// "After 3 songs"; "Off" is all zeros).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SleepChoice {
-    pub label: String,
     /// Minutes from now; 0 for the choices that are not a time.
     pub minutes: u32,
     pub end_of_track: bool,
@@ -111,18 +112,18 @@ pub struct SleepChoice {
 /// The sleep timer's choices, "Off" first while one is running (it is a choice of all zeros).
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sleep_choices(running: bool) -> Vec<SleepChoice> {
-    let c = |label: String, minutes, end_of_track, songs| SleepChoice { label, minutes, end_of_track, songs };
+    let c = |minutes, end_of_track, songs| SleepChoice { minutes, end_of_track, songs };
     let mut out = Vec::with_capacity(10);
     if running {
-        out.push(c("Off".into(), 0, false, 0));
+        out.push(c(0, false, 0));
     }
-    out.extend([15, 30, 45, 60].map(|m| c(format!("{m} minutes"), m, false, 0)));
-    out.push(c("End of track".into(), 0, true, 0));
-    out.extend([2, 3, 5, 10].map(|n| c(format!("After {n} songs"), 0, false, n)));
+    out.extend([15, 30, 45, 60].map(|m| c(m, false, 0)));
+    out.push(c(0, true, 0));
+    out.extend([2, 3, 5, 10].map(|n| c(0, false, n)));
     out
 }
 
-/// What a sideways swipe on a song row does.
+/// What a sideways swipe on a song row does, and what the client says under the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum RowSwipeAct {
@@ -133,26 +134,17 @@ pub enum RowSwipeAct {
     Download,
 }
 
-/// What a swipe uncovers under a row, and what letting go does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct RowSwipe {
-    pub act: RowSwipeAct,
-    pub label: String,
-}
-
 /// The swipe set in the settings as stored (0 nothing, 1 add to queue, 2 play next, 3 favourite,
 /// 4 download), on a song whose heart is `starred`; None when that side does nothing.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn row_swipe(setting: u32, starred: bool) -> Option<RowSwipe> {
-    let (act, label) = match setting {
-        1 => (RowSwipeAct::Queue, "Add to queue"),
-        2 => (RowSwipeAct::PlayNext, "Play next"),
-        3 => (RowSwipeAct::Favourite { on: !starred }, if starred { "Remove" } else { "Favourite" }),
-        4 => (RowSwipeAct::Download, "Download"),
-        _ => return None,
-    };
-    Some(RowSwipe { act, label: label.into() })
+pub fn row_swipe(setting: u32, starred: bool) -> Option<RowSwipeAct> {
+    match setting {
+        1 => Some(RowSwipeAct::Queue),
+        2 => Some(RowSwipeAct::PlayNext),
+        3 => Some(RowSwipeAct::Favourite { on: !starred }),
+        4 => Some(RowSwipeAct::Download),
+        _ => None,
+    }
 }
 
 /// The mark a song row shows for its download.
@@ -180,7 +172,8 @@ pub fn download_glyph(phase: i32, downloaded: bool, pending: bool) -> DownloadGl
     }
 }
 
-/// What a page's download entry does.
+/// What a page's download entry does; the client words it ("Download", "Remove downloads", "Download
+/// the other 3" with the count of songs missing it already has).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum DownloadAct {
@@ -192,23 +185,15 @@ pub enum DownloadAct {
     Remove,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct DownloadEntry {
-    pub label: String,
-    pub act: DownloadAct,
-}
-
 /// A page's download entry, for `songs` songs of which `missing` are not downloaded: "Download" is the
 /// wrong word once they are all here, and so is offering all of them when only a few are missing.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn download_entry(songs: u32, missing: u32) -> DownloadEntry {
-    let e = |label: String, act| DownloadEntry { label, act };
+pub fn download_entry(songs: u32, missing: u32) -> DownloadAct {
     match (songs, missing) {
-        (0, _) => e("Download".into(), DownloadAct::All),
-        (_, 0) => e("Remove downloads".into(), DownloadAct::Remove),
-        (s, m) if s == m => e("Download".into(), DownloadAct::All),
-        (_, m) => e(format!("Download the other {m}"), DownloadAct::Missing),
+        (0, _) => DownloadAct::All,
+        (_, 0) => DownloadAct::Remove,
+        (s, m) if s == m => DownloadAct::All,
+        _ => DownloadAct::Missing,
     }
 }
 
@@ -225,24 +210,23 @@ mod tests {
     use super::*;
     use nori_model::model::ArtistRef;
 
-    fn labels(m: &[SongMenuItem]) -> Vec<(&str, bool)> {
-        m.iter().map(|i| (i.label.as_str(), i.more)).collect()
+    fn actions(m: &[SongMenuItem]) -> Vec<(SongAction, bool)> {
+        m.iter().map(|i| (i.action.clone(), i.more)).collect()
     }
 
     #[test]
     fn a_library_song_offers_everything() {
         let s = Song { id: "1".into(), album_id: Some("al".into()), artist_id: Some("ar".into()), artist: "Björk".into(), ..Default::default() };
         let m = song_menu(s, false, SongDownload::None, false);
+        use SongAction::*;
         assert_eq!(
-            labels(&m),
+            actions(&m),
             [
-                ("Add to favourites", false), ("Play next", false), ("Add to queue", false), ("Add to playlist…", false), ("Download", false),
-                ("Go to album", false), ("Go to artist", false),
-                ("Start radio from this song", true), ("Instant mix", true), ("Exclude from mixes", true), ("Share link", true), ("Details", true),
+                (Favourite { on: true }, false), (PlayNext, false), (AddToQueue, false), (AddToPlaylist, false), (Download, false),
+                (GoToAlbum { id: "al".into() }, false), (GoToArtist { id: "ar".into(), name: "Björk".into(), named: false }, false),
+                (StartRadio, true), (InstantMix, true), (ExcludeFromMixes, true), (Share, true), (Details, true),
             ]
         );
-        assert_eq!(m[0].action, SongAction::Favourite { on: true });
-        assert_eq!(m[6].action, SongAction::GoToArtist { id: "ar".into(), name: "Björk".into() });
     }
 
     #[test]
@@ -254,12 +238,14 @@ mod tests {
             ..Default::default()
         };
         let m = song_menu(s, true, SongDownload::Pending, true);
+        use SongAction::*;
         assert_eq!(
-            labels(&m),
+            actions(&m),
             [
-                ("Remove from favourites", false), ("Play next", false), ("Add to queue", false), ("Add to playlist…", false), ("Stop download", false),
-                ("Go to A", false), ("Go to B", false), ("Add to library (Deezer)", false), ("Sleep timer…", false),
-                ("Start radio from this song", true), ("Details", true),
+                (Favourite { on: false }, false), (PlayNext, false), (AddToQueue, false), (AddToPlaylist, false), (StopDownload, false),
+                (GoToArtist { id: "a".into(), name: "A".into(), named: true }, false), (GoToArtist { id: "b".into(), name: "B".into(), named: true }, false),
+                (AddToLibrary { provider: Some("Deezer".into()) }, false), (SleepTimer, false),
+                (StartRadio, true), (Details, true),
             ]
         );
         let done = song_menu(Song::default(), false, SongDownload::Done, false);
@@ -269,20 +255,19 @@ mod tests {
     #[test]
     fn sleep_offers_off_only_while_running() {
         let idle = sleep_choices(false);
-        assert_eq!(idle.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["15 minutes", "30 minutes", "45 minutes", "60 minutes", "End of track", "After 2 songs", "After 3 songs", "After 5 songs", "After 10 songs"]);
-        assert_eq!((idle[4].end_of_track, idle[5].songs, idle[1].minutes), (true, 2, 30));
-        let running = sleep_choices(true);
-        assert_eq!(running[0], SleepChoice { label: "Off".into(), minutes: 0, end_of_track: false, songs: 0 });
+        let c = |minutes, end_of_track, songs| SleepChoice { minutes, end_of_track, songs };
+        assert_eq!(idle, [c(15, false, 0), c(30, false, 0), c(45, false, 0), c(60, false, 0), c(0, true, 0), c(0, false, 2), c(0, false, 3), c(0, false, 5), c(0, false, 10)]);
+        assert_eq!(sleep_choices(true)[0], c(0, false, 0));
     }
 
     #[test]
     fn a_row_swipe_says_what_letting_go_does() {
         assert_eq!(row_swipe(0, false), None);
-        assert_eq!(row_swipe(1, false), Some(RowSwipe { act: RowSwipeAct::Queue, label: "Add to queue".into() }));
-        assert_eq!(row_swipe(2, true).unwrap().label, "Play next");
-        assert_eq!(row_swipe(3, true), Some(RowSwipe { act: RowSwipeAct::Favourite { on: false }, label: "Remove".into() }));
-        assert_eq!(row_swipe(3, false), Some(RowSwipe { act: RowSwipeAct::Favourite { on: true }, label: "Favourite".into() }));
-        assert_eq!(row_swipe(4, false).unwrap().act, RowSwipeAct::Download);
+        assert_eq!(row_swipe(1, false), Some(RowSwipeAct::Queue));
+        assert_eq!(row_swipe(2, true), Some(RowSwipeAct::PlayNext));
+        assert_eq!(row_swipe(3, true), Some(RowSwipeAct::Favourite { on: false }));
+        assert_eq!(row_swipe(3, false), Some(RowSwipeAct::Favourite { on: true }));
+        assert_eq!(row_swipe(4, false), Some(RowSwipeAct::Download));
     }
 
     #[test]
@@ -297,9 +282,9 @@ mod tests {
 
     #[test]
     fn the_download_entry_says_what_is_left() {
-        assert_eq!(download_entry(0, 0), DownloadEntry { label: "Download".into(), act: DownloadAct::All });
-        assert_eq!(download_entry(10, 0), DownloadEntry { label: "Remove downloads".into(), act: DownloadAct::Remove });
-        assert_eq!(download_entry(10, 10), DownloadEntry { label: "Download".into(), act: DownloadAct::All });
-        assert_eq!(download_entry(10, 3), DownloadEntry { label: "Download the other 3".into(), act: DownloadAct::Missing });
+        assert_eq!(download_entry(0, 0), DownloadAct::All);
+        assert_eq!(download_entry(10, 0), DownloadAct::Remove);
+        assert_eq!(download_entry(10, 10), DownloadAct::All);
+        assert_eq!(download_entry(10, 3), DownloadAct::Missing);
     }
 }

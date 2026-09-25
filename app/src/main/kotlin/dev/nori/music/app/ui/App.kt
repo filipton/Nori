@@ -234,12 +234,12 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"parkedId":"${dev.nori.music.ffi.queue.playlistBridgeState().parked.orEmpty()}","songId":"${dev.nori.music.ffi.queue.playlistBridgeState().current.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
                     """"dspActive":${dev.nori.music.playback.Equalizer.inChain},"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
                     """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
-                    // Whichever player plays: the Rust one answers from its own engine and output.
+                    // The player answers from its own engine and output.
                     dev.nori.music.playback.PlaybackService.rustPlayer.let { r ->
-                        """"engine":"${if (r != null) "rust" else "exo"}","mixing":${r?.mixing ?: dev.nori.music.playback.TransitionSink.mixing},"offloaded":${r?.offloaded ?: false},"""
+                        """"engine":"rust","mixing":${r?.mixing ?: false},"offloaded":${r?.offloaded ?: false},"""
                     } +
                     """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.transfers.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.transfers.downloadSpeedEta()[1]},""" +
-                    """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: dev.nori.music.playback.TransitionSink.bytesWritten},""" +
+                    """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: 0},""" +
                     // Moving covers: how many video players exist (nought whenever the switch is off) and
                     // the video the open player found for this album, if any.
                     """"motionPlayers":${dev.nori.music.playback.MotionPlayer.live},"motionVideo":"${player2.motionVideo.value.orEmpty()}",""" +
@@ -247,7 +247,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
                     dev.nori.music.Nori.get(context).dac.state.value.let { d ->
                         """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
-                            """"dacBlocked":"${d.blockedBy.orEmpty()}","dacTrack":"${d.track.orEmpty()}","""
+                            """"dacBlocked":"${d.blockedBy?.let { dev.nori.music.app.vm.dacBlockWords(context.resources, it) }.orEmpty()}","dacTrack":"${d.track?.let { dev.nori.music.app.vm.dacTrackWords(context.resources, it) }.orEmpty()}","""
                     } +
                     (actions.lastLyrics ?: (player2.lyrics.value.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
                         """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +

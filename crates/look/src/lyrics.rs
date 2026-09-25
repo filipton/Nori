@@ -87,6 +87,26 @@ pub const PAST_LINE: f32 = NEXT_LINE * 0.55;
 /// strength, so a finished line dims from where it was without a step.
 pub const UNSUNG: f32 = 0.55;
 
+/// The line of new lyrics (`next`, each line's start in ms) that stands for line `at` of the old ones
+/// (`old`), when finer lyrics replace the ones on screen: the one starting nearest to it (the earlier of
+/// two as near), or the same number when either is not `timed` (or the old line has no time). Services
+/// split a song's words into lines their own way, so the numbers need not agree. 0 when `next` is empty.
+pub fn matching_line(old: &[i64], at: i32, next: &[i64], timed: bool) -> i32 {
+    if next.is_empty() {
+        return 0;
+    }
+    let same = at.clamp(0, next.len() as i32 - 1);
+    let i = at.clamp(0, (old.len() as i32 - 1).max(0)) as usize;
+    let Some(&from) = old.get(i).filter(|&&t| timed && t >= 0) else { return same };
+    let mut best = 0;
+    for (k, &t) in next.iter().enumerate() {
+        if (t - from).abs() < (next[best] - from).abs() {
+            best = k;
+        }
+    }
+    best as i32
+}
+
 /// How lit line `line` is with `active` the line being sung (-1 before the first). Untimed words are all
 /// fully lit: nothing says which one is being sung.
 pub fn line_strength(synced: bool, line: i32, active: i32) -> f32 {
@@ -548,6 +568,23 @@ impl Step {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finer_lyrics_carry_the_line_on_screen_over_by_its_time() {
+        let lines = [0, 4_000, 8_000, 12_000, 16_000];
+        // Split differently: the line starting nearest to the old one's start.
+        let finer = [0, 2_000, 4_100, 6_000, 7_900, 10_000, 12_050];
+        assert_eq!(matching_line(&lines, 1, &finer, true), 2);
+        assert_eq!(matching_line(&lines, 2, &finer, true), 4);
+        assert_eq!(matching_line(&lines, 4, &finer, true), 6);
+        assert_eq!(matching_line(&[0, 3_000], 1, &[0, 2_000, 4_000], true), 1, "the earlier of two as near");
+        // Untimed words keep the same number, inside the new list.
+        assert_eq!(matching_line(&lines, 3, &finer, false), 3);
+        assert_eq!(matching_line(&lines, 4, &[-1, -1], false), 1);
+        assert_eq!(matching_line(&[-1, -1], 1, &finer, true), 1, "an old line with no time");
+        assert_eq!(matching_line(&[], 9, &finer, true), 6);
+        assert_eq!(matching_line(&lines, 4, &[], true), 0);
+    }
 
     #[test]
     fn lines_are_lit_by_where_the_singing_is() {

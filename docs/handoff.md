@@ -78,13 +78,16 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   (`automix::beats::Ends`, mono at about 22 kHz, 3.4 MB each), and reads each end once; the grid replaces the
   classical one at an end when it is sure (`automix/beats.rs`). The model is loaded when a look needs it and let
   go when the measuring thread ends. Synthetic mix windows right and trusted 24 to 27 of 32, none wrong (the
-  branch's measurement; see the research). The app's builds leave the feature out (`-PrustFeatures=neural-beats`
-  puts it in): tract makes the arm64 library about 14.5 MB bigger, and the row is not shown without it. Open:
-  the model file has to be published before the switch can do anything (the release asset `beat-this-small0-v1`
-  of this repository, whose SHA-256 is in `beat_model.rs`; `tools/beat-this/export.py` makes it from the authors'
-  checkpoint, research 7.1); the branch's charging backlog (`BeatBacklog`, a JobScheduler job over downloaded
-  songs) was not carried over, so only songs about to play are read; and nothing was timed on a phone: expect
-  about 35 s of one big core per new song. Research and numbers: `docs/research/analysis.md`, sections 5 to 7.
+  branch's measurement; see the research). The debug and perf builds carry the feature and ship the model in
+  the APK (`tools/beat-this/beat-this-small0-v1.onnx`, stored uncompressed and read in place: Kotlin passes the
+  APK's path, offset and length to `beat_model_bundled`, and nothing is downloaded); a release build leaves both
+  out unless `-PrustFeatures=neural-beats`: they make the arm64 APK 20.6 MB bigger (library 9.8 to 25.3 MB, model
+  5.1 MB), and the row is not shown without them. The model was exported from the authors' checkpoint (research
+  7.1: 5,069,707 bytes, SHA-256 in `beat_model.rs`); it is not hosted anywhere, so a client that does not ship it
+  (the desktop) cannot download it until `beat_model::URL` points at a real copy. On *Kid A* it changes no mix
+  window as shipped (research 7.1). Open: the branch's charging backlog (`BeatBacklog`, a JobScheduler job over downloaded
+  songs) was not carried over, so only songs about to play are read; and nothing was timed on a phone: 6.7 s of one
+  desktop core per new song, expect 25-35 s of a phone's big core. Research and numbers: `docs/research/analysis.md`, sections 5 to 7.
 - **AutoMix enters the next song on its drop, leaves before a dead ending, and keeps two singers apart.** The
   analysis finds where the incoming song's arrangement arrives (the drop), a closing breakdown and the silence
   before a hidden track; the planner searches for the window where the drop lands on a downbeat (and phrase line)

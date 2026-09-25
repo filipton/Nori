@@ -41,7 +41,7 @@ fun AutoEqScreen(vm: SettingsViewModel) {
         }
         if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
         ui.error?.let { Text(it, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.error) }
-        ui.applied?.let { Text(androidx.compose.runtime.remember(it) { dev.nori.music.ffi.words.wordsAutoeqApplied(it) }, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary) }
+        ui.applied?.let { Text(androidx.compose.runtime.remember(it) { say.autoeqApplied(it) }, Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary) }
 
         if (ui.count == 0) {
             Text(

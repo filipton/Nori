@@ -1,8 +1,9 @@
 //! Transitions between tracks inside one output stream: plain crossfades and AutoMix (beat-matched,
 //! with a bass swap, a filter sweep on the way out and a tempo stretch on the way in). The planner
 //! decides each transition; this decides where the audio goes. It sits between a decoder that hands
-//! it one track's PCM after another and the real output below it ([`Downstream`]), which on Android
-//! is media3's AudioSink and on a desktop whatever plays the samples.
+//! it one track's PCM after another and the real output below it ([`Downstream`]): the pipeline's sink
+//! (`pipeline::Sink`) over whatever plays the samples - an AudioTrack on Android, a sound card's ring
+//! on a desktop.
 //!
 //! Until the outgoing track reaches the planned start, audio passes straight through. From there it
 //! is held (at most the length of the transition; anything past that the plan chose to skip is
@@ -24,8 +25,8 @@
 //! ([`Heard`]): through a transition the player's own clock is ahead of the sound, and a seek bar or
 //! a title must follow the sound.
 //!
-//! This is a port of the Android `TransitionSink`, function for function; the comments carry over
-//! because every rule in here was learnt from a fault heard on a phone.
+//! This began as a port of Android's old `TransitionSink` (a media3 AudioSink), function for function;
+//! the comments carry over because every rule in here was learnt from a fault heard on a phone.
 
 use std::collections::VecDeque;
 
@@ -81,13 +82,14 @@ pub struct StreamFormat {
 
 /// The real output below. Every call is made from the thread that calls the engine.
 pub trait Downstream {
-    /// A platform token for a format (on Android, the AudioSinkConfig), handed back to [`Downstream::configure`].
+    /// A platform token for a format, handed back to [`Downstream::configure`].
     type Config: Clone;
     /// Opens the output for `config`, whose samples are `format` (`None`: not samples, e.g. offload).
     fn configure(&mut self, config: &Self::Config, format: Option<Format>);
     /// Offers `data[from..]` at `pts_us`; returns whether all of it was taken and how many bytes were.
-    /// The whole buffer and a read position, as a ByteBuffer has them: a platform whose output insists
-    /// on being offered the same buffer again after taking part of it (media3 does) can recognise it.
+    /// The whole buffer and a read position, as a ByteBuffer has them: an output that insists on being
+    /// offered the same buffer again after taking part of it (`pipeline::Sink` does, as media3's did) can
+    /// recognise it. What the engine hands down is always its own memory, so it can.
     fn handle_buffer(&mut self, data: &[u8], from: usize, pts_us: i64) -> (bool, usize);
     fn handle_discontinuity(&mut self);
     /// µs, or [`POSITION_NOT_SET`].
@@ -200,11 +202,6 @@ pub struct TransitionEngine<C: Clone> {
     /// A mix began (the plan and how late) before its incoming stream was announced, in media3's order:
     /// the domain the incoming side is stretched and skipped in is set once its format is known.
     awaiting_incoming: Option<(Plan, i64)>,
-    /// The decoder's buffer went straight down and the output took only part of it. The platform offers
-    /// the rest again, and it must go down the same way: an output like media3's insists on being given
-    /// the same buffer until it has all of it, and anything else throws. So a plan that arrived in
-    /// between waits for the next buffer (and begins that little bit late, which a late hold handles).
-    input_owed: bool,
     offset_us: i64,
 
     phase: Phase,
@@ -289,15 +286,10 @@ pub struct TransitionEngine<C: Clone> {
     pub lock_rate: bool,
 
     /// The volume the buffers arriving now are heard at (their song's ReplayGain); see
-    /// [`TransitionEngine::set_gain`].
+    /// [`TransitionEngine::set_gain`]. The host may change it while its song plays, so every buffer goes
+    /// down as a copy of the engine's own, never as the platform's memory: what the output took only part
+    /// of can still be brought to the new level ([`TransitionEngine::rescale`]).
     gain: f32,
-    /// The host sets volumes, and may change one while its song plays: every buffer then goes down as a
-    /// copy of the engine's own, never as the platform's memory, so what the output took only part of
-    /// can still be brought to the new level ([`TransitionEngine::rescale`]). A host that never sets
-    /// one (media3's own path, where the volume is not the engine's) keeps the zero-copy pass.
-    levels: bool,
-    /// A volume told while `input_owed`, taken up with the next buffer.
-    pending_gain: Option<f32>,
 
     queue: VecDeque<Chunk>,
     pool: Vec<Vec<u8>>,
@@ -321,7 +313,6 @@ impl<C: Clone> TransitionEngine<C> {
             fresh: false,
             awaiting_stream: false,
             awaiting_incoming: None,
-            input_owed: false,
             offset_us: 0,
             phase: Phase::Pass,
             plan: None,
@@ -371,8 +362,6 @@ impl<C: Clone> TransitionEngine<C> {
             mix_source_id: None,
             lock_rate: true,
             gain: 1.0,
-            levels: false,
-            pending_gain: None,
             queue: VecDeque::new(),
             pool: Vec::new(),
             heard: Heard { until_us: i64::MAX, audible_us: i64::MAX, next_rate: 1.0, ..Default::default() },
@@ -543,12 +532,6 @@ impl<C: Clone> TransitionEngine<C> {
         self.resampler.is_some()
     }
 
-    /// Whether the buffers arriving now are made over into one of the engine's own (converted, or at a
-    /// volume the host sets) rather than handed down as the platform gave them.
-    fn copying(&self) -> bool {
-        self.converting() || self.levels
-    }
-
     /// The staged format of `id` (its buffers flow now): arm it, or drop the converter when it is
     /// already at the pinned format. Anything staged for another id waits its turn.
     fn arm_staged_for<H: Host>(&mut self, host: &mut H, id: Option<String>) {
@@ -599,28 +582,17 @@ impl<C: Clone> TransitionEngine<C> {
     /// right while two songs sound at once: wherever it changed, the whole mix jumped by the difference.
     /// The analyser still hears the song as it is. At 1 nothing is scaled.
     ///
-    /// The next buffer is at this volume from its first sample. Once a host sets volumes, every buffer
-    /// goes down as a copy of the engine's own (see `levels`), so no rest of one the output took only
-    /// part of is ever owed from the platform's memory at the old volume; what was taken in already is
-    /// [`TransitionEngine::rescale`]'s.
+    /// The next buffer is at this volume from its first sample. Every buffer goes down as a copy of the
+    /// engine's own, so no rest of one the output took only part of is ever owed from the platform's
+    /// memory at the old volume; what was taken in already is [`TransitionEngine::rescale`]'s.
     pub fn set_gain(&mut self, gain: f32) {
-        let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
-        if self.input_owed && gain != self.gain {
-            // The first volume told while the platform's own buffer is only partly taken (media3 offers
-            // the rest again, and it must go down as it is): the rest is heard as it came, once.
-            self.pending_gain = Some(gain);
-            self.levels = true;
-            return;
-        }
-        self.gain = gain;
-        self.pending_gain = None;
-        self.levels = true;
+        self.gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
     }
 
     /// The song on the stream at `stream_offset_us` is to be heard `ratio` times as loud (the ReplayGain
     /// settings changed): what the engine took in of it and the output below has not taken yet is scaled
     /// where it lies - the rest of a chunk the output took only part of (the same memory is offered
-    /// again, as media3 insists, now at the new level), the chunks queued behind it and a held ending. A
+    /// again, now at the new level), the chunks queued behind it and a held ending. A
     /// mix of two songs is left as it was made. With the output's own rescale of what it holds, the
     /// change is heard from the output's read head on, and the samples on either side of every join are
     /// at one level. Nothing is allocated.
@@ -664,14 +636,6 @@ impl<C: Clone> TransitionEngine<C> {
             return (false, 0);
         }
         let native = self.conv_in.unwrap_or(out);
-        // The rest of the platform's buffer the output took only part of goes down as the first part
-        // did; a volume told meanwhile starts with the next one.
-        if self.input_owed {
-            return self.pass(down, host, buffer, buffer.len(), pts_us, false);
-        }
-        if let Some(g) = self.pending_gain.take() {
-            self.gain = g;
-        }
         let scaled = (self.gain != 1.0).then(|| {
             let mut b = self.copy_of(buffer);
             crate::pcm::scale(&mut b, native.encoding, self.gain);
@@ -691,11 +655,9 @@ impl<C: Clone> TransitionEngine<C> {
         let buffer = input;
         match self.phase {
             Phase::Pass => {
-                // Converted audio lives in a buffer the next call reuses: anything kept is copied.
-                // The stretcher works in the native domain, so it always sees the native buffer.
-                if self.copying() || self.stretch.is_some() {
-                    self.feed_analysis(host, raw, native);
-                }
+                // The analyser hears the song as it came, before any conversion or volume. The
+                // stretcher works in the native domain, so it always sees the native buffer.
+                self.feed_analysis(host, raw, native);
                 if self.stretch.is_some() {
                     self.stretch_out(host, buffer, pts_us);
                     self.drain(down);
@@ -763,15 +725,12 @@ impl<C: Clone> TransitionEngine<C> {
         // Past the planned region there is nothing to hold any more.
         let skip_transition = p.is_some_and(|(_, duration_us)| start_frame < -duration_us * out.rate as i64 / 1_000_000);
         if start_frame >= frames || skip_transition {
-            return Some(self.pass(down, host, buf, whole, pts_us, self.copying()));
+            return Some(self.pass(down, buf, whole, pts_us));
         }
         // Cloned only here, once per transition: every other buffer reads the plan in place.
         let p = self.plan.clone().expect("a plan exists past this point");
         let late = start_frame < 0;
         let before = start_frame.max(0) as usize * fb;
-        if !self.copying() {
-            self.feed_analysis(host, buf, out);
-        }
         if before > 0 {
             let head = self.copy_of(&buf[..before]);
             self.enqueue(head, pts_us, self.offset_us);
@@ -798,33 +757,22 @@ impl<C: Clone> TransitionEngine<C> {
             // fetching. The dry guard would let go within milliseconds, so do not hold at all.
             host.log(&format!("transition: no runway ({} ms), letting the ending play", runway / 1000));
             self.abandon_transition(host);
-            return Some(self.pass(down, host, &buf[before..], whole, pts_us, true));
+            return Some(self.pass(down, &buf[before..], whole, pts_us));
         }
         self.hold(&buf[before..], out);
         None
     }
 
-    /// Straight through. The output below refuses buffers on purpose (battery-friendly feeding) and the
-    /// platform then offers the same audio again, so the analyser is only given what was taken.
-    /// Converted audio (`copy`) always goes through the queue as a copy. `whole` is the length of the
-    /// caller's buffer, reported as taken when this goes through the queue.
-    fn pass<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, buffer: &[u8], whole: usize, pts_us: i64, copy: bool) -> (bool, usize) {
-        let out = self.out.expect("pass runs on PCM");
-        // A resync waiting (the track back on its own timestamps after a stretch) goes down with the
-        // buffer it belongs to, which only the queue knows how to do.
-        if !self.queue.is_empty() || copy || self.resync_next {
-            if !copy {
-                self.feed_analysis(host, buffer, out);
-            }
-            let c = self.copy_of(buffer);
-            self.enqueue(c, pts_us, self.offset_us);
-            self.drain(down);
-            return (true, whole);
-        }
-        let (taken, used) = down.handle_buffer(buffer, 0, pts_us);
-        self.input_owed = !taken;
-        self.feed_analysis(host, &buffer[..used], out);
-        (taken, used)
+    /// Straight through, as a copy of the engine's own on the queue: the output below refuses buffers on
+    /// purpose (battery-friendly feeding) and takes the rest of a chunk later, and the song's volume may
+    /// change meanwhile ([`TransitionEngine::rescale`]). A resync waiting (the track back on its own
+    /// timestamps after a stretch) goes down with the buffer it belongs to. `whole` is the length of the
+    /// caller's buffer, reported as taken.
+    fn pass<D: Downstream<Config = C>>(&mut self, down: &mut D, buffer: &[u8], whole: usize, pts_us: i64) -> (bool, usize) {
+        let c = self.copy_of(buffer);
+        self.enqueue(c, pts_us, self.offset_us);
+        self.drain(down);
+        (true, whole)
     }
 
     /// The plan for the song playing, asked for when it is not known yet; its start and length, µs.
@@ -1580,13 +1528,11 @@ impl<C: Clone> TransitionEngine<C> {
     pub fn flush<H: Host>(&mut self, host: &mut H) {
         self.clear(host);
         self.fresh = true;
-        self.input_owed = false;
     }
 
     /// Stopped: the latch goes with the output below, and the next playback pins again.
     pub fn reset<H: Host>(&mut self, host: &mut H) {
         self.clear(host);
-        self.input_owed = false;
         self.drop_converter();
         self.staged.clear();
         self.mix_source_id = None;
@@ -1618,7 +1564,7 @@ mod tests {
         position: i64,
         /// Take at most this many bytes of the next offer (then everything again), as a full track does.
         take_only: Option<usize>,
-        /// The buffer a partial take left pending: like media3, the next offer must be that same buffer.
+        /// The buffer a partial take left pending: like `pipeline::Sink`, the next offer must be that same buffer.
         owed: Option<(usize, usize)>,
     }
 
@@ -1628,10 +1574,10 @@ mod tests {
             self.configured.push(*config);
         }
         fn handle_buffer(&mut self, data: &[u8], from: usize, pts_us: i64) -> (bool, usize) {
-            // Where the unread bytes start, and how many: what media3 sees as "the same buffer, moved on".
+            // Where the unread bytes start, and how many: "the same buffer, moved on".
             let key = (data.as_ptr() as usize + from, data.len() - from);
             if let Some(owed) = self.owed {
-                assert_eq!(owed, key, "offered another buffer while one was only partly taken (media3 throws here)");
+                assert_eq!(owed, key, "offered another buffer while one was only partly taken (pipeline::Sink panics here)");
             }
             let n = self.take_only.take().unwrap_or(usize::MAX).min(data.len() - from);
             self.taken.push((data[from..from + n].to_vec(), pts_us));
@@ -1797,43 +1743,9 @@ mod tests {
         assert_eq!(e.heard().next_id.as_deref(), Some("b"));
     }
 
-    #[test]
-    fn a_buffer_the_output_took_only_part_of_goes_back_to_it_whole() {
-        // A buffer went straight through and the output, filling up, took only part of it. Then the plan
-        // arrived (a replan after a seek or a queue change), with its start inside the rest of that
-        // buffer. The rest must still go down as that same buffer - media3 throws otherwise, the player
-        // resets and the held ending is lost - and the transition starts from the next buffer instead.
-        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
-        d.position = POSITION_NOT_SET;
-        e.configure(&mut d, &mut h, stream("a", FMT), 1);
-        let a = tone(1000, 3.0);
-        let owed_at = 4096 * 10;
-        let mut at = 0;
-        while at < a.len() {
-            let n = 4096.min(a.len() - at);
-            if at == owed_at {
-                d.take_only = Some(1024);
-            }
-            let slice = &a[at..at + n];
-            let mut from = 0;
-            loop {
-                let (all, used) = e.handle_buffer(&mut d, &mut h, &slice[from..], FMT.us(at));
-                from += used;
-                if all {
-                    break;
-                }
-                // Between the two offers the plan appears, starting inside what is left of this buffer.
-                h.plans.insert("a".into(), fade("b", FMT.us(owed_at + 2048)));
-                e.replan();
-            }
-            at += n;
-        }
-        assert!(h.log.iter().any(|l| l.starts_with("transition: late hold")), "the transition still happens, just late: {:?}", h.log);
-    }
-
-    /// Feeds `data` in 4096-byte buffers the way media3 does: a buffer not taken whole is offered again
-    /// (what is left of it), and `between` runs between offers. `at_buffer` arms a partial take of 1024
-    /// bytes by the output below on that buffer.
+    /// Feeds `data` in 4096-byte buffers: a buffer not taken whole is offered again (what is left of it),
+    /// and `between` runs between offers. `at_buffer` arms a partial take of 1024 bytes by the output
+    /// below on that buffer, and `between` runs after it too.
     fn offer(e: &mut TransitionEngine<u32>, d: &mut Down, h: &mut Host_, data: &[u8], at_buffer: usize, mut between: impl FnMut(&mut TransitionEngine<u32>)) {
         for (i, slice) in data.chunks(4096).enumerate() {
             if i == at_buffer {
@@ -1856,7 +1768,7 @@ mod tests {
 
     #[test]
     fn a_volume_changed_while_the_output_holds_part_of_a_buffer_reaches_the_rest_of_it() {
-        // At a song's ReplayGain the output below, filling up, takes only part of a buffer: media3 must be
+        // At a song's ReplayGain the output below, filling up, takes only part of a buffer, and must be
         // offered the rest as the same buffer. Then the settings change. The rest goes down as that same
         // memory - the output checks - but at the new level: nothing after the change is heard at the old one.
         let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
@@ -1874,25 +1786,6 @@ mod tests {
         assert_eq!(s.len(), tone(1000, 1.0).len() / 2, "every sample, once");
         assert!(s[..cut].iter().all(|&v| v == 500), "what was taken before the change at the old level");
         assert!(s[cut..].iter().all(|&v| v == 250), "and everything after it at the new one, the rest of that buffer too");
-    }
-
-    #[test]
-    fn a_first_volume_told_while_the_platform_s_buffer_is_owed_waits_for_the_next_buffer() {
-        // Nothing has set a volume (media3's own path): buffers go straight down as the platform's memory,
-        // and one is taken only in part. A volume told now cannot reach the rest of it - the output insists on
-        // that very buffer - so the rest goes down as it came, and the volume starts with the next buffer.
-        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
-        e.configure(&mut d, &mut h, stream("a", FMT), 1);
-        let mut told = false;
-        offer(&mut e, &mut d, &mut h, &tone(1000, 1.0), 10, |e| {
-            if !std::mem::replace(&mut told, true) {
-                e.set_gain(0.5);
-            }
-        });
-        let s = d.samples();
-        let next = 11 * 4096 / 2;
-        assert!(s[..next].iter().all(|&v| v == 1000), "the buffer owed goes down whole as it came");
-        assert!(s[next..].iter().all(|&v| v == 500), "the volume from the next buffer on");
     }
 
     #[test]

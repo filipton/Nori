@@ -95,17 +95,4 @@ class FrameFadesTest {
         assertEquals(0f, f.current!!.level)
         assertEquals(0f, f.current!!.rise)
     }
-
-    @Test fun `finer lyrics carry the line on screen over by its time`() {
-        val lines = longArrayOf(0, 4_000, 8_000, 12_000, 16_000)
-        // Split differently: the line starting nearest to the old one's start.
-        val finer = longArrayOf(0, 2_000, 4_100, 6_000, 7_900, 10_000, 12_050)
-        assertEquals(2, matchingLine(lines, 1, finer, timed = true))
-        assertEquals(4, matchingLine(lines, 2, finer, timed = true))
-        assertEquals(6, matchingLine(lines, 4, finer, timed = true))
-        // Untimed words keep the same number, inside the new list.
-        assertEquals(3, matchingLine(lines, 3, finer, timed = false))
-        assertEquals(1, matchingLine(lines, 4, longArrayOf(-1, -1), timed = false))
-        assertEquals(0, matchingLine(lines, 4, longArrayOf(), timed = true))
-    }
 }

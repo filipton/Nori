@@ -264,10 +264,10 @@ fun androidx.compose.ui.draw.CacheDrawScope.sleeveWash(
 val stage: dev.nori.music.ffi.Stage by lazy { dev.nori.music.ffi.stage() }
 
 /**
- * Every fixed word the screens say, as nori-core words it (`words::words_ui`), so another front end says
- * the same. Read once, the first time a page draws; a word with a number or a name in it is a call of its own.
+ * Every word the screens say, from the app's string resources ([Say]): the fixed ones read once per
+ * locale, the ones with a number or a name in them made when asked.
  */
-val say: dev.nori.music.ffi.words.UiWords by lazy { dev.nori.music.ffi.words.wordsUi() }
+val say: Say get() = Say.current
 
 /**
  * How much of the sleeve's height goes soft at the bottom: the same share the colour of those rows is
@@ -839,7 +839,7 @@ fun NoriSwitch(checked: Boolean, onCheckedChange: ((Boolean) -> Unit)?, modifier
 }
 
 /** A decibel figure with its sign, one decimal, never "-0.0" (nori-core's `fmt::signed_db`). */
-fun signedDb(db: Float): String = dev.nori.music.settings.EqWords.signedDb(db)
+fun signedDb(db: Float): String = dev.nori.music.text.Fmt.signedDb(db)
 
 
 /**

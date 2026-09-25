@@ -298,7 +298,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                         )
                         val error = if (real) state.error else null
                         Text(
-                            remember(error, s?.artist) { dev.nori.music.ffi.words.wordsBarLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            remember(error, s?.artist) { say.barLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
                             color = if (real && state.error != null) scheme.error else look.color(CoverLook.CHROME_CONTENT_65),
                         )

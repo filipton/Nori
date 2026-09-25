@@ -14,6 +14,7 @@ mod runner;
 mod script;
 mod settings_view;
 mod term;
+mod text;
 mod ui;
 #[cfg(test)]
 mod tests;

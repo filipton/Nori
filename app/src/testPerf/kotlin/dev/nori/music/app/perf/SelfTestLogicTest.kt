@@ -17,13 +17,13 @@ class SelfTestLogicTest {
 
     // ---- the plan ----
 
-    @Test fun the_suite_sets_up_first_puts_everything_back_last_and_tests_both_players() {
+    @Test fun the_suite_sets_up_first_puts_everything_back_last_and_tests_the_player() {
         val p = plan(Options())
         assertEquals("prepare", p.first().id)
         assertEquals("restore", p.last().id)
-        assertEquals(listOf(EXO, RUST), p.filter { it.id == "engine" }.map { it.section })
-        // Offload is the Rust player's alone, after its controls; every step may take a while, never for ever.
-        assertEquals(listOf(RUST, RUST), p.filter { it.id.startsWith("offload") }.map { it.section })
+        assertEquals(listOf("start"), p.filter { it.section == PLAYER }.take(1).map { it.id })
+        // Offload after the controls; every step may take a while, never for ever.
+        assertEquals(listOf(PLAYER, PLAYER), p.filter { it.id.startsWith("offload") }.map { it.section })
         assertTrue(p.indexOfFirst { it.id == "offload" } > p.indexOfLast { it.id == "rapid" })
         assertTrue(p.all { it.timeoutMs in 1_000..120_000 })
         assertFalse("downloads are asked for", p.any { it.id == "downloads" })
@@ -198,15 +198,15 @@ class SelfTestLogicTest {
     // ---- putting things back ----
 
     private val user = Knobs(
-        engine = 0, eq = true, crossfeedDb = -3f, balance = 0f, mono = false, limiter = true, speed = 1f, pitch = 1f,
+        eq = true, crossfeedDb = -3f, balance = 0f, mono = false, limiter = true, speed = 1f, pitch = 1f,
         skipSilence = false, offload = true, crossfadeSec = 4, autoMix = true, replayGain = 3, scrobble = true,
         autoFill = true, skipExplicit = false, previousAlwaysSkips = true, fadeMs = 200,
     )
 
     @Test fun the_test_starts_from_a_plain_path_and_puts_every_setting_back() {
-        val t = testKnobs(user, engine = 1)
+        val t = testKnobs(user)
         assertEquals(
-            listOf("playbackEngine", "eqEnabled", "crossfeedDb", "limiter", "offload", "crossfadeSec", "autoMix", "scrobble", "autoFill", "previousAlwaysSkips", "fadeMs"),
+            listOf("eqEnabled", "crossfeedDb", "limiter", "offload", "crossfadeSec", "autoMix", "scrobble", "autoFill", "previousAlwaysSkips", "fadeMs"),
             knobsDiffer(user, t),
         )
         assertEquals(3, t.replayGain)
@@ -215,7 +215,7 @@ class SelfTestLogicTest {
 
     @Test fun the_queue_goes_back_as_the_app_starts_it_and_plays_only_if_it_played() {
         val before = Snapshot(user, listOf("a", "b", "c"), 1, 42_000, playing = false, shuffle = false, repeat = 0, serviceRunning = true)
-        val now = before.copy(knobs = testKnobs(user, 1), ids = listOf("x", "y"), index = 0, positionMs = 3_000, playing = true, repeat = 0)
+        val now = before.copy(knobs = testKnobs(user), ids = listOf("x", "y"), index = 0, positionMs = 3_000, playing = true, repeat = 0)
         assertEquals(listOf(RestoreStep.STOP_PLAYER, RestoreStep.SETTINGS, RestoreStep.START_PLAYER, RestoreStep.QUEUE), restoreSteps(before, now))
         val playing = before.copy(playing = true, shuffle = true, repeat = 1)
         assertEquals(
@@ -226,7 +226,7 @@ class SelfTestLogicTest {
         assertEquals(emptyList<String>(), restoreProblems(before, before.copy(positionMs = 44_000)))
         assertEquals(
             listOf(
-                "settings not as they were: playbackEngine, eqEnabled, crossfeedDb, limiter, offload, crossfadeSec, autoMix, scrobble, autoFill, previousAlwaysSkips, fadeMs",
+                "settings not as they were: eqEnabled, crossfeedDb, limiter, offload, crossfadeSec, autoMix, scrobble, autoFill, previousAlwaysSkips, fadeMs",
                 "the queue is not the same: 3 songs before, 2 after",
                 "on queue place 0, not 1",
                 "at 3.0 s, not 42.0 s",
@@ -240,20 +240,20 @@ class SelfTestLogicTest {
 
     @Test fun the_report_says_pass_or_fail_first_and_every_check_after() {
         val outcomes = listOf(
-            Outcome(EXO, "Seek", Verdict.PASS, "at 30.1 s", tookMs = 1_200),
-            Outcome(RUST, "Offload", Verdict.FAIL, "20.0 s", listOf("the chip presented nothing for 19.0 s: silence", "21:05:12 offload: the play head read 0")),
-            Outcome(RUST, "Offload EQ", Verdict.SKIP, "not available on this device"),
+            Outcome(PLAYER, "Seek", Verdict.PASS, "at 30.1 s", tookMs = 1_200),
+            Outcome(PLAYER, "Offload", Verdict.FAIL, "20.0 s", listOf("the chip presented nothing for 19.0 s: silence", "21:05:12 offload: the play head read 0")),
+            Outcome(PLAYER, "Offload EQ", Verdict.SKIP, "not available on this device"),
         )
         val text = reportText(outcomes, "2026-09-25 21:05", 252_000, listOf("21:05:13 invariant: offload-starved: ..."))
         assertEquals(
             """
             Self test, 2026-09-25 21:05, took 4 min 12 s: 1 FAILED (1 passed, 1 failed, 1 skipped)
-            Failed: Rust: Offload
-            PASS  ExoPlayer: Seek - at 30.1 s [1 s]
-            FAIL  Rust: Offload - 20.0 s
+            Failed: Player: Offload
+            PASS  Player: Seek - at 30.1 s [1 s]
+            FAIL  Player: Offload - 20.0 s
                     the chip presented nothing for 19.0 s: silence
                     21:05:12 offload: the play head read 0
-            SKIP  Rust: Offload EQ - not available on this device
+            SKIP  Player: Offload EQ - not available on this device
             Invariant breaks during the test:
                     21:05:13 invariant: offload-starved: ...
 

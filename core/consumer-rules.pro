@@ -4,10 +4,6 @@
 -keep,includedescriptorclasses class uniffi.** { *; }
 -keep class dev.nori.music.ffi.** { *; }
 
-# The transition engine reaches these by name from native code (crates/android/src/engine.rs):
-# the sink's down* callbacks and hostHeardChanged.
--keep class dev.nori.music.playback.TransitionSink { *; }
-
 # The Rust player reaches these by name from native code (crates/android/src/player.rs): the bridge's
 # static methods, and a song body's buffer, length, read and close.
 -keep class dev.nori.music.playback.RustBridge { *; }

@@ -28,11 +28,11 @@ internal object MeasureBridge {
 
 /**
  * Measures tracks before they are played, so a transition has both halves' tempo, beats and cue points
- * the first time those two songs meet. The streaming tap in [TransitionSink] only finishes a track as
- * it ends, which is one boundary too late: the mix out of a song the phone has never heard had nothing
- * to plan from and fell back to a plain fade.
+ * the first time those two songs meet. The player's streaming analysis only finishes a track as it
+ * ends, which is one boundary too late: the mix out of a song the phone has never heard had nothing to
+ * plan from and fell back to a plain fade.
  *
- * The measuring is the core's, for both players: nori-engine's measurer (crates/android/src/measure.rs)
+ * The measuring is the core's: nori-engine's measurer (crates/android/src/measure.rs)
  * decodes each song once, whole, on a thread of the lowest priority, reading its files straight. This
  * only says where a song's bytes are in media3's caches, and when one has become whole: the caches'
  * own callbacks say so as the precacher or the player writes the last of it, so the song after the one

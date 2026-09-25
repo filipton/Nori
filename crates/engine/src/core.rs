@@ -231,7 +231,7 @@ impl Order for CoreOrder {
 /// copy plays from the disk before the network is asked, what streams is kept in the cache, and the
 /// songs after the next one are fetched into it ahead of their turn as the core says
 /// (`Client::precache_targets`: how many for this network, never a provider's song or a download), as
-/// Android's precacher fetches them for the ExoPlayer path.
+/// Android's precacher (Precacher.kt) fetches them there.
 pub struct CoreLibrary {
     pub client: Arc<Client>,
     pub bytes: Arc<dyn ByteSource>,
@@ -904,9 +904,10 @@ struct BeatModel(nori_player::automix::neural::BeatThis);
 #[cfg(feature = "neural-beats")]
 impl BeatModel {
     fn load() -> Option<BeatModel> {
-        let path = nori_core::beat_download::ensure()?;
+        let source = nori_core::beat_download::ensure()?;
         let t0 = std::time::Instant::now();
-        match nori_player::automix::neural::BeatThis::load(&path) {
+        let loaded = nori_core::beat_download::read(&source).and_then(|bytes| nori_player::automix::neural::BeatThis::from_bytes(&bytes).map_err(|e| e.to_string()));
+        match loaded {
             Ok(m) => {
                 nori_core::alog::info(&format!("beat model loaded in {} ms", t0.elapsed().as_millis()));
                 Some(BeatModel(m))

@@ -7,7 +7,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.TransferListener
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheEvictor
@@ -168,23 +167,6 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
         .setCacheWriteDataSinkFactory(null)
         .setUpstreamDataSourceFactory(streamCached)
 
-    val factory = DataSource.Factory { Switch(cached.createDataSource(), network.createDataSource()) }
-
-    /**
-     * nori://song/<id> becomes a real URL and a cache key, at the moment the bytes are needed: the quality
-     * follows the network the phone is on right then.
-     */
-    fun resolve(dataSpec: DataSpec): DataSpec {
-        applyStreamLimit()
-        val id = dataSpec.uri.lastPathSegment!!
-        // Which copy and at what quality (a download is the permanent copy; a stream follows the network the
-        // phone is on and the second address's cap) is the core's, over its own settings. The network is
-        // asked only for a stream: one binder call per track.
-        val kept = isDownloaded(id)
-        val target = client.resolve(id, kept, !kept && http.metered)
-        return dataSpec.buildUpon().setUri(Uri.parse(target.url)).setKey(target.key).build()
-    }
-
     /** The songs to fetch ahead now, each with its address and key (`Client::precache_targets`). */
     fun precacheTargets(): List<dev.nori.music.ffi.net.Fetch> = client.precacheTargets(http.metered)
 
@@ -274,26 +256,5 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
             val length = ContentMetadata.getContentLength(cache.getContentMetadata(key))
             return length > 0 && cache.getCachedLength(key, 0, length) >= length - TAIL
         }
-    }
-
-    /**
-     * Songs are resolved when they are opened, not when they are queued, so the
-     * quality follows the network the phone is on at that moment. Anything
-     * else (internet radio) goes straight to the network, uncached.
-     */
-    private inner class Switch(private val songs: DataSource, private val plain: DataSource) : DataSource {
-        private var active: DataSource? = null
-
-        override fun open(dataSpec: DataSpec): Long {
-            if (dataSpec.uri.scheme != SONG_SCHEME) return plain.also { active = it }.open(dataSpec)
-            val resolved = resolve(dataSpec)
-            return songs.also { active = it }.open(resolved)
-        }
-
-        override fun read(buffer: ByteArray, offset: Int, length: Int) = active!!.read(buffer, offset, length)
-        override fun addTransferListener(l: TransferListener) { songs.addTransferListener(l); plain.addTransferListener(l) }
-        override fun getUri() = active?.uri
-        override fun getResponseHeaders() = active?.responseHeaders ?: emptyMap()
-        override fun close() { active?.close(); active = null }
     }
 }

@@ -12,6 +12,7 @@ use nori_core::settings::{EqLevel, SavedServer, SoundBand, StoredPrefs};
 use nori_core::settings_store::SoundTool;
 use nori_core::{Album, AlbumDetail, Artist, ArtistDetail, Playlist, PlaylistDetail, Song};
 use nori_engine::{Event, State};
+use nori_core::rules::equalizer_tuning;
 use nori_look::cover::CoverColours;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -81,6 +82,8 @@ pub enum Cmd {
     Action(String),
     Mouse(bool),
     Images(bool),
+    /// The output device for the next start, by name; empty for the system's own.
+    Device(String),
     Tuning(bool),
     SearchTyped(String),
     SearchServer(String),
@@ -116,6 +119,7 @@ impl Cmd {
             Cmd::Tuning(on) => format!("tuning {on}"),
             Cmd::Mouse(on) => format!("mouse {on}"),
             Cmd::Images(on) => format!("images {on}"),
+            Cmd::Device(d) => format!("device {d}"),
             Cmd::Quit => "quit".into(),
             _ => "an edit".into(),
         }
@@ -467,8 +471,10 @@ pub struct App {
     pub dirty: bool,
     pub quit: bool,
     /// The engine was asked for the equalizer's shallow buffer ([`App::sound_edited`]): asked back when
-    /// the equalizer screen closes.
+    /// the equalizer screen closes or the equalizer is switched off.
     pub tuning: bool,
+    /// The sound was changed on the equalizer screen since it was opened.
+    pub touched: bool,
     /// A drag on the seek bar: where it is, as a share of the song.
     pub scrub: Option<f32>,
     pub seek_rect: Rect,
@@ -519,6 +525,7 @@ impl App {
             dirty: true,
             quit: false,
             tuning: false,
+            touched: false,
             scrub: None,
             seek_rect: Rect::default(),
             last_click: None,
@@ -533,6 +540,8 @@ impl App {
     /// The settings as the core keeps them now, and whatever follows from them on screen.
     pub fn prefs_changed(&mut self, prefs: StoredPrefs) {
         self.prefs = prefs;
+        // The equalizer switched off gives the shallow buffer back.
+        self.tune();
         self.retheme();
         self.settings.invalidate();
         self.dirty = true;
@@ -548,10 +557,11 @@ impl App {
     // ---- going places ----
 
     pub fn go(&mut self, screen: Screen) {
-        if self.screen == Screen::Equalizer && screen != Screen::Equalizer && std::mem::take(&mut self.tuning) {
-            self.cmds.push(Cmd::Tuning(false));
+        if screen != Screen::Equalizer {
+            self.touched = false;
         }
         self.screen = screen;
+        self.tune();
         self.dirty = true;
         match screen {
             Screen::Home if !self.home.asked => {
@@ -696,12 +706,11 @@ impl App {
                     }
                 }
             }
-            Msg::Lyrics { song, lyrics, origin } => {
+            Msg::Lyrics { song, pick } => {
                 if self.lyrics_for.as_deref() == Some(&song) {
-                    let better = self.lyrics.as_ref().is_none_or(|l| l.replaced_by(&lyrics));
-                    if better {
+                    if self.lyrics.as_ref().is_none_or(|l| l.replaced_by(&pick)) {
                         let pos = self.now.position(Instant::now());
-                        self.lyrics = Some(SongLyrics::new(lyrics, origin, pos));
+                        self.lyrics = Some(SongLyrics::new(pick, pos));
                         self.lyrics_wake = Some(Instant::now());
                     }
                 }
@@ -1092,6 +1101,7 @@ impl App {
                     self.cmds.push(Cmd::Sound(SoundToolCmd::Preset(i)));
                 }
             }
+            "!device" => self.cmds.push(Cmd::Device(value.to_string())),
             _ => self.cmds.push(Cmd::Setting(name.to_string(), value.to_string())),
         }
     }
@@ -1172,7 +1182,7 @@ impl App {
                     };
                     let ms = l.clock.nudge(dir);
                     self.lyrics_wake = Some(now);
-                    self.say(if ms == 0 { "Lyrics on their own timing".to_string() } else { format!("Lyrics {}", nori_core::fmt::nudge_seconds(ms)) }, false);
+                    self.say(if ms == 0 { "Lyrics on their own timing".to_string() } else { format!("Lyrics {}", crate::text::nudge(ms)) }, false);
                 }
             }
             Action::Decrease | Action::Increase => {
@@ -1588,7 +1598,7 @@ impl App {
 
     fn lyrics_action(&mut self, a: Action) {
         let Some(l) = &self.lyrics else { return };
-        let len = l.lyrics.lines.len();
+        let len = l.pick.lyrics.lines.len();
         let active = l.clock.shown().active.max(0) as usize;
         let at = self.lyrics_sel.unwrap_or(active);
         match a {
@@ -1597,7 +1607,7 @@ impl App {
             Action::Top => self.lyrics_sel = Some(0),
             Action::Bottom => self.lyrics_sel = Some(len.saturating_sub(1)),
             Action::Open => {
-                if l.lyrics.synced {
+                if l.pick.lyrics.synced {
                     let to = l.clock.tap(at);
                     self.lyrics_sel = None;
                     self.now.position_ms = to;
@@ -1637,12 +1647,27 @@ impl App {
         self.settings.invalidate();
     }
 
-    /// A change of the sound was kept (a band, a level, a preset). On the equalizer screen, the first
-    /// one asks the engine for its shallow buffer (true), so the ones after it are heard at once and
-    /// without a dip. Opening the screen alone asks nothing: the output stays as it was until something
-    /// is really changed.
+    /// A change of the sound was kept (a band, a level, a preset). On the equalizer screen with the
+    /// equalizer on, the first one asks the engine for its shallow buffer (true), so the ones after it
+    /// are heard at once and without a dip. Opening the screen alone asks nothing: the output stays as it
+    /// was until something is really changed. When is the core's (`rules::equalizer_tuning`).
     pub fn sound_edited(&mut self) -> bool {
-        self.screen == Screen::Equalizer && !std::mem::replace(&mut self.tuning, true)
+        self.touched |= equalizer_tuning(self.screen == Screen::Equalizer, true, self.prefs.eq_enabled);
+        self.tune()
+    }
+
+    /// Asks the engine for the shallow buffer, or gives it back, when what the core wants changed: the
+    /// equalizer screen left, or the equalizer switched off. True when it was asked for now.
+    fn tune(&mut self) -> bool {
+        let want = equalizer_tuning(self.screen == Screen::Equalizer, self.touched, self.prefs.eq_enabled);
+        if want == self.tuning {
+            return false;
+        }
+        self.tuning = want;
+        if !want {
+            self.cmds.push(Cmd::Tuning(false));
+        }
+        want
     }
 
     fn eq_step(&mut self, up: bool) {
@@ -1658,7 +1683,7 @@ impl App {
         let rows = crate::settings_view::eq_rows(&self.prefs);
         match rows.get(self.eq_sel.at) {
             Some(crate::settings_view::EqRow::Presets) => {
-                let options = nori_core::dsp::eq_presets().iter().enumerate().map(|(i, p)| (p.name.clone(), i.to_string())).collect();
+                let options = nori_core::dsp::eq_presets().iter().enumerate().map(|(i, p)| (crate::text::preset(p.kind).to_string(), i.to_string())).collect();
                 self.overlay = Some(Overlay::Picker { title: "Presets".into(), options, sel: Sel::default(), name: "!preset".into() });
             }
             Some(row) => {
@@ -1741,7 +1766,7 @@ impl App {
                 }
             }
             ListRef::Lyrics => {
-                let len = self.lyrics.as_ref().map_or(0, |l| l.lyrics.lines.len());
+                let len = self.lyrics.as_ref().map_or(0, |l| l.pick.lyrics.lines.len());
                 let at = self.lyrics_sel.unwrap_or_else(|| self.lyrics.as_ref().map_or(0, |l| l.clock.shown().active.max(0) as usize));
                 self.lyrics_sel = Some((at as isize + d).clamp(0, len.saturating_sub(1) as isize) as usize);
             }

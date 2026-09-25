@@ -26,10 +26,25 @@ pub struct EqBand {
     pub q: f32,
 }
 
+/// Which built-in curve a preset is; the client names it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PresetKind {
+    #[default]
+    Flat,
+    BassBoost,
+    BassCut,
+    TrebleBoost,
+    TrebleCut,
+    VocalBoost,
+    Loudness,
+    SmallSpeakers,
+}
+
 /// One of the built-in curves from `dsp::eq_presets`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NamedPreset {
-    pub name: String,
+    pub kind: PresetKind,
     pub preamp_db: f32,
     pub bands: Vec<EqBand>,
 }

@@ -302,8 +302,8 @@ pub fn smart_edit_read(playlist: SmartPlaylist) -> Option<SmartEdit> {
     read(&playlist)
 }
 
-/// A built-in definition ("default-...") is saved as a new playlist of the user's own, and a playlist
-/// with no name is called "Smart playlist".
+/// A built-in definition ("default-...") is saved as a new playlist of the user's own. A name left
+/// blank comes back empty: the client gives it its own word for a smart playlist.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn smart_edit_prepare(edit: SmartEdit) -> SmartPrepared {
     let json = to_json(&edit);
@@ -313,7 +313,7 @@ pub fn smart_edit_prepare(edit: SmartEdit) -> SmartPrepared {
         other => other.to_string(),
     });
     let id = if edit.id.starts_with("default-") { String::new() } else { edit.id };
-    let name = if edit.name.trim().is_empty() { "Smart playlist".to_string() } else { edit.name };
+    let name = if edit.name.trim().is_empty() { String::new() } else { edit.name };
     SmartPrepared { id, name, json, error }
 }
 
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn reads_back_what_it_wrote() {
         let e = SmartEdit { id: "sp-1".into(), name: "Old".into(), ..edit(vec![rule("genre", "is", "Jazz"), rule("year", "between", "1970 1979"), rule("starred", "isFalse", "")]) };
-        let p = SmartPlaylist { id: e.id.clone(), name: e.name.clone(), json: smart_edit_json(e.clone()) };
+        let p = SmartPlaylist { id: e.id.clone(), name: e.name.clone(), json: smart_edit_json(e.clone()), builtin: None };
         assert_eq!(smart_edit_read(p), Some(e));
         let nested = SmartPlaylist { json: r#"{"match":{"rules":[{"all":false,"rules":[]}]}}"#.into(), ..Default::default() };
         assert_eq!(smart_edit_read(nested), None);
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn prepare_applies_the_save_rules_and_checks() {
         let p = smart_edit_prepare(SmartEdit { id: "default-most-played".into(), name: " ".into(), ..edit(vec![rule("year", "greater", "1990")]) });
-        assert_eq!((p.id.as_str(), p.name.as_str(), p.error), ("", "Smart playlist", None));
+        assert_eq!((p.id.as_str(), p.name.as_str(), p.error), ("", "", None));
         let p = smart_edit_prepare(SmartEdit { id: "sp-2".into(), name: "Mine".into(), ..edit(vec![rule("year", "greater", "soon")]) });
         assert_eq!((p.id.as_str(), p.name.as_str()), ("sp-2", "Mine"));
         assert!(p.error.unwrap().starts_with("reason=smart playlist: match.rules[0]"));

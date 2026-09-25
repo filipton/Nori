@@ -20,7 +20,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use nori_model::{Lyrics, Song};
 use nori_net::transport::Transport;
 use nori_settings::lyrics_sources::{LyricsLookup, LyricsService};
-use nori_words::words::LyricsOrigin;
+use nori_settings::lyrics_sources::LyricsOrigin;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +72,29 @@ pub struct LyricsPick {
 #[cfg_attr(feature = "ffi", uniffi::export(with_foreign))]
 pub trait LyricsShown: Send + Sync {
     fn show(&self, pick: LyricsPick);
+}
+
+/// Whether `a` and `b` show the same thing: the same words with the same timing from the same place,
+/// whatever key their timing was kept under ([`crate::look::keep`] gives each reading a key of its own,
+/// so the same lyrics read again - the lookup run again for a song come back to - come under another).
+pub fn same_lyrics(a: &LyricsPick, b: &LyricsPick) -> bool {
+    let (x, y) = (&a.lyrics, &b.lyrics);
+    a.origin == b.origin && x.synced == y.synced && x.word_timed == y.word_timed && x.lines == y.lines
+}
+
+/// [`same_lyrics`] for a platform holding the answers itself (Android's lyrics state, kept per song).
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn lyrics_same(a: LyricsPick, b: LyricsPick) -> bool {
+    same_lyrics(&a, &b)
+}
+
+/// Whether `next` goes on screen in place of what is `shown` (None: nothing yet). Which answer is
+/// better is decided before an answer is handed out at all: the race hands over only an answer that
+/// beats the one it showed ([`Race::to_show`], by the scores of trust.rs), and `Client::lyrics_for` the
+/// server's answer only when it changed. What is left to the screen is not to show the same lyrics
+/// again as if they were new: they would fade out and in and start their clock from the top.
+pub fn lyrics_replaces(shown: Option<&LyricsPick>, next: &LyricsPick) -> bool {
+    shown.is_none_or(|s| !same_lyrics(s, next))
 }
 
 /// Where answers are remembered: the core's response cache in the app's database.
@@ -520,6 +543,28 @@ mod tests {
     use crate::services::tests::{block, song, Web};
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
+
+    // ---- what the screen takes ---------------------------------------------------------------------------
+
+    fn pick(text: &str, key: u64, origin: LyricsOrigin) -> LyricsPick {
+        let line = nori_model::LyricLine { start_ms: 1000, end_ms: 2000, text: text.into(), ..Default::default() };
+        LyricsPick { lyrics: Lyrics { synced: true, word_timed: false, lines: vec![line], key }, origin }
+    }
+
+    #[test]
+    fn the_same_words_read_again_under_another_key_are_not_new() {
+        let shown = pick("hold on", 7, LyricsOrigin::Lrclib);
+        assert!(same_lyrics(&shown, &pick("hold on", 12, LyricsOrigin::Lrclib)), "the lookup run again keeps them under a new key");
+        assert!(!same_lyrics(&shown, &pick("let go", 7, LyricsOrigin::Lrclib)), "other words");
+        assert!(!same_lyrics(&shown, &pick("hold on", 7, LyricsOrigin::Unison)), "another source's");
+        let mut untimed = pick("hold on", 7, LyricsOrigin::Lrclib);
+        untimed.lyrics.synced = false;
+        assert!(!same_lyrics(&shown, &untimed), "other timing");
+        assert!(lyrics_replaces(None, &shown), "anything over nothing");
+        assert!(!lyrics_replaces(Some(&shown), &pick("hold on", 12, LyricsOrigin::Lrclib)));
+        assert!(lyrics_replaces(Some(&shown), &pick("hold on", 7, LyricsOrigin::Binilyrics)));
+        assert!(lyrics_same(shown.clone(), shown));
+    }
 
     // ---- the race, answer by answer ----------------------------------------------------------------------
 

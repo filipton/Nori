@@ -2,8 +2,7 @@ package dev.nori.music.playback
 
 /**
  * The perf build's self test plays quietly: [level] is a player volume under every output's own (the
- * engine's fades and ReplayGain, ExoPlayer's volume), never the phone's, so other apps and the volume
- * keys are left alone. 1 everywhere else, where nothing ever changes it: one field read when an output's
+ * engine's fades and ReplayGain), never the phone's, so other apps and the volume keys are left alone. 1 everywhere else, where nothing ever changes it: one field read when an output's
  * volume is set.
  */
 object Quiet {
@@ -11,8 +10,8 @@ object Quiet {
         private set
 
     /**
-     * The outputs play at [level] of their own volume from now on: the Rust player's through the core
-     * (`nori_perf::invariants::quiet`), ExoPlayer's through [TransitionSink]; the track open now at once.
+     * The outputs play at [level] of their own volume from now on, through the core
+     * (`nori_perf::invariants::quiet`); the track open now at once.
      */
     fun set(level: Float) {
         this.level = level.coerceIn(0f, 1f)

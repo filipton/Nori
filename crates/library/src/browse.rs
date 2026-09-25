@@ -172,29 +172,19 @@ impl AlbumSort {
     }
 }
 
-/// One entry of the album grid's sort menu.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct AlbumSortOption {
-    pub sort: AlbumSort,
-    pub label: String,
-}
-
-/// The album grid's sort menu, in its order.
+/// The album grid's sort menu, in its order; the client names each.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn album_sorts() -> Vec<AlbumSortOption> {
-    [
-        (AlbumSort::ByName, "A–Z"),
-        (AlbumSort::ByArtist, "Artist"),
-        (AlbumSort::Newest, "Added"),
-        (AlbumSort::Recent, "Played"),
-        (AlbumSort::Frequent, "Most played"),
-        (AlbumSort::Starred, "Favourites"),
-        (AlbumSort::ByYear, "Year"),
-        (AlbumSort::Random, "Random"),
+pub fn album_sorts() -> Vec<AlbumSort> {
+    vec![
+        AlbumSort::ByName,
+        AlbumSort::ByArtist,
+        AlbumSort::Newest,
+        AlbumSort::Recent,
+        AlbumSort::Frequent,
+        AlbumSort::Starred,
+        AlbumSort::ByYear,
+        AlbumSort::Random,
     ]
-    .map(|(sort, label)| AlbumSortOption { sort, label: label.into() })
-    .to_vec()
 }
 
 /// The `type` the server is asked for.
@@ -240,10 +230,30 @@ pub fn song_sort_kept(name: String) -> ListPref {
 
 // ---- the library ----------------------------------------------------------------
 
+/// One of the library's sections; the client names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[repr(u8)]
+pub enum LibrarySection {
+    Albums,
+    Favourites,
+    Artists,
+    Songs,
+    Playlists,
+    Smart,
+    History,
+    Genres,
+    Decades,
+    Folders,
+    Radio,
+    Downloads,
+}
+
 /// The library's sections, in the order their pills run.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn library_sections() -> Vec<String> {
-    ["Albums", "Favourites", "Artists", "Songs", "Playlists", "Smart", "History", "Genres", "Decades", "Folders", "Radio", "Downloads"].map(String::from).to_vec()
+pub fn library_sections() -> Vec<LibrarySection> {
+    use LibrarySection::*;
+    vec![Albums, Favourites, Artists, Songs, Playlists, Smart, History, Genres, Decades, Folders, Radio, Downloads]
 }
 
 /// A decade's years, first and last, from its first year.
@@ -296,31 +306,30 @@ pub fn browse_paging() -> Paging {
     Paging { albums: ALBUM_PAGE, songs: SONG_PAGE, history: HISTORY_PAGE }
 }
 
-/// One way to order the "all songs" list: `name` is what the app stores and passes back, `key` the song
-/// field it sorts on.
+/// One way to order the "all songs" list: `name` is what the app stores and passes back (and names the
+/// order by), `key` the song field it sorts on.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SongSortOption {
     pub name: String,
     pub key: String,
-    pub label: String,
     pub descending: bool,
 }
 
 /// Newest, longest and most played read from the top, the rest from A.
-pub const SONG_SORTS: [(&str, &str, &str, bool); 7] = [
-    ("TITLE", "title", "Title", false),
-    ("ARTIST", "artist", "Artist", false),
-    ("ALBUM", "album", "Album", false),
-    ("YEAR", "year", "Year", true),
-    ("ADDED", "created", "Added", true),
-    ("PLAYS", "playCount", "Most played", true),
-    ("LONGEST", "duration", "Longest", true),
+pub const SONG_SORTS: [(&str, &str, bool); 7] = [
+    ("TITLE", "title", false),
+    ("ARTIST", "artist", false),
+    ("ALBUM", "album", false),
+    ("YEAR", "year", true),
+    ("ADDED", "created", true),
+    ("PLAYS", "playCount", true),
+    ("LONGEST", "duration", true),
 ];
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn song_sorts() -> Vec<SongSortOption> {
-    SONG_SORTS.iter().map(|(name, key, label, descending)| SongSortOption { name: (*name).into(), key: (*key).into(), label: (*label).into(), descending: *descending }).collect()
+    SONG_SORTS.iter().map(|(name, key, descending)| SongSortOption { name: (*name).into(), key: (*key).into(), descending: *descending }).collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -338,21 +347,48 @@ pub struct HistoryPage {
     pub exhausted: bool,
 }
 
-/// The listening page: the stats, and what it says about them.
+/// The listening page: the stats, and what it reads out of them. The client words it ("Most around
+/// 21:00, mostly on Fridays").
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StatsPage {
     pub stats: ListeningStats,
-    pub words: nori_words::fmt::StatsWords,
-    pub tiles: Vec<nori_words::fmt::StatTileWords>,
+    /// The hour most was played in, 0 to 23 (the first of equal ones); none, and no chart, when nothing
+    /// was played.
+    pub busiest_hour: Option<u32>,
+    /// The day of the week most was played on, 0 Monday to 6 Sunday; only with a busiest hour.
+    pub busiest_weekday: Option<u32>,
+    /// Each hour's bar as a fraction of the busiest hour's.
+    pub hours: Vec<f32>,
 }
 
-/// A decade that has songs in the index: its first year, its name ("1990s") and how many songs.
+/// The first index holding the largest value, as Kotlin's `maxByOrNull` picks it.
+fn busiest(v: &[u32]) -> Option<usize> {
+    v.iter()
+        .enumerate()
+        .fold(None, |best: Option<(usize, u32)>, (i, &x)| match best {
+            Some((_, b)) if b >= x => best,
+            _ => Some((i, x)),
+        })
+        .map(|(i, _)| i)
+}
+
+impl StatsPage {
+    /// The page for `stats`.
+    pub fn new(stats: ListeningStats) -> Self {
+        let busiest_hour = busiest(&stats.plays_per_hour).filter(|&h| stats.plays_per_hour[h] > 0);
+        let busiest_weekday = busiest_hour.and(busiest(&stats.plays_per_weekday)).filter(|&d| d < 7);
+        let peak = stats.plays_per_hour.iter().copied().max().unwrap_or(0).max(1) as f32;
+        let hours = stats.plays_per_hour.iter().map(|&p| p as f32 / peak).collect();
+        StatsPage { busiest_hour: busiest_hour.map(|h| h as u32), busiest_weekday: busiest_weekday.map(|d| d as u32), hours, stats }
+    }
+}
+
+/// A decade that has songs in the index: its first year and how many songs.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Decade {
     pub start: u32,
-    pub name: String,
     pub song_count: u32,
 }
 
@@ -360,6 +396,28 @@ pub struct Decade {
 mod tests {
     use super::*;
     
+
+    #[test]
+    fn the_listening_page_reads_its_numbers() {
+        use nori_model::TopEntry;
+        let mut hours = vec![0u32; 24];
+        hours[9] = 5;
+        hours[21] = 10;
+        hours[22] = 10;
+        let stats = ListeningStats {
+            plays_per_hour: hours,
+            plays_per_weekday: vec![1, 0, 0, 0, 4, 4, 0],
+            top_artists: vec![TopEntry { listened_ms: 187_900, ..Default::default() }],
+            ..Default::default()
+        };
+        let p = StatsPage::new(stats);
+        // The first of equal peaks, as `maxByOrNull` picks.
+        assert_eq!((p.busiest_hour, p.busiest_weekday), (Some(21), Some(4)));
+        assert_eq!((p.hours[9], p.hours[21], p.hours[0]), (0.5, 1.0, 0.0));
+        // Nothing played: no chart and nothing to say about it, and no dividing by nothing.
+        let none = StatsPage::new(ListeningStats { plays_per_hour: vec![0; 24], plays_per_weekday: vec![0; 7], ..Default::default() });
+        assert_eq!((none.busiest_hour, none.busiest_weekday, none.hours[3]), (None, None, 0.0));
+    }
 
     #[test]
     fn shelves_follow_the_rows() {
@@ -390,9 +448,9 @@ mod tests {
     #[test]
     fn album_orders_are_kept_by_their_server_names() {
         use std::collections::HashMap;
-        let labels: Vec<(AlbumSort, String)> = album_sorts().into_iter().map(|o| (o.sort, o.label)).collect();
-        assert_eq!(labels[0], (AlbumSort::ByName, "A–Z".to_string()));
-        assert_eq!(labels.len(), 8);
+        let sorts = album_sorts();
+        assert_eq!(sorts[0], AlbumSort::ByName);
+        assert_eq!(sorts.len(), 8);
         assert_eq!(album_sort_api(AlbumSort::ByArtist), "alphabeticalByArtist");
         assert_eq!(album_sort_saved(HashMap::new()), AlbumSort::ByName);
         let kept = album_sort_kept(AlbumSort::Frequent);
@@ -408,7 +466,7 @@ mod tests {
 
     #[test]
     fn library_rules() {
-        assert_eq!(library_sections()[0], "Albums");
+        assert_eq!(library_sections()[0], LibrarySection::Albums);
         assert_eq!(library_sections().len(), 12);
         assert_eq!(decade_years(1990), YearSpan { from: 1990, to: 1999 });
         assert!(radio_can_add("FIP".into(), "https://x".into()));

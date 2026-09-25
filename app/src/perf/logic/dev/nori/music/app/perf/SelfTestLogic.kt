@@ -330,37 +330,34 @@ private fun spread(list: List<Candidate>): List<Candidate> {
 /** A check the suite makes, with how long it may take before it is a failure. */
 data class Step(val id: String, val section: String, val name: String, val timeoutMs: Long)
 
-/** What the plan depends on: the players tested and what this phone and the user's choices allow. */
-data class Options(val engines: List<String> = listOf(EXO, RUST), val downloads: Boolean = false)
+/** What the plan depends on: what this phone and the user's choices allow. */
+data class Options(val downloads: Boolean = false)
 
-const val EXO = "ExoPlayer"
-const val RUST = "Rust"
+/** The section the player's checks are reported under. */
+const val PLAYER = "Player"
 
 /**
- * The suite, in order: each player's playback and controls and the settings applied live on it, the Rust
- * player's offload, then lyrics, covers and (asked for) downloads; setting up first and putting
- * everything back last, always.
+ * The suite, in order: the player's playback and controls, the settings applied live on it and its
+ * offload, then lyrics, covers and (asked for) downloads; setting up first and putting everything back
+ * last, always.
  */
 fun plan(o: Options): List<Step> {
     val out = mutableListOf(Step("prepare", "Setup", "Songs and settings for the test", 30_000))
-    for (e in o.engines) {
-        out += Step("engine", e, "Switch to the $e player", 20_000)
-        out += Step("play", e, "Playback moves for 10 s", 25_000)
-        out += Step("pause", e, "Pause and resume", 15_000)
-        out += Step("seek", e, "Seek", 12_000)
-        out += Step("nextprev", e, "Next and previous", 20_000)
-        out += Step("rapid", e, "3 quick nexts move 3 songs", 20_000)
-        out += Step("endskip", e, "Skip just before a song ends", 20_000)
-        out += Step("auto", e, "A song ends into the next by itself", 25_000)
-        out += Step("eq", e, "Equalizer on and off while playing", 20_000)
-        out += Step("automix", e, "AutoMix switched on mid-song mixes the next boundary", 75_000)
-        out += Step("crossfade", e, "Crossfade length changed near a song's end", 40_000)
-        out += Step("replaygain", e, "ReplayGain mode changed while playing", 15_000)
-        if (e == RUST) {
-            out += Step("offload", e, "Offload: entered, 20 s without silence across a skip and a seek", 60_000)
-            out += Step("offloadeq", e, "Offload: equalizer on leaves it, off takes it back", 40_000)
-        }
-    }
+    val e = PLAYER
+    out += Step("start", e, "The test's songs start playing", 20_000)
+    out += Step("play", e, "Playback moves for 10 s", 25_000)
+    out += Step("pause", e, "Pause and resume", 15_000)
+    out += Step("seek", e, "Seek", 12_000)
+    out += Step("nextprev", e, "Next and previous", 20_000)
+    out += Step("rapid", e, "3 quick nexts move 3 songs", 20_000)
+    out += Step("endskip", e, "Skip just before a song ends", 20_000)
+    out += Step("auto", e, "A song ends into the next by itself", 25_000)
+    out += Step("eq", e, "Equalizer on and off while playing", 20_000)
+    out += Step("automix", e, "AutoMix switched on mid-song mixes the next boundary", 75_000)
+    out += Step("crossfade", e, "Crossfade length changed near a song's end", 40_000)
+    out += Step("replaygain", e, "ReplayGain mode changed while playing", 15_000)
+    out += Step("offload", e, "Offload: entered, 20 s without silence across a skip and a seek", 60_000)
+    out += Step("offloadeq", e, "Offload: equalizer on leaves it, off takes it back", 40_000)
     out += Step("lyrics", "Lyrics", "Lyrics of 3 songs: the right ones, stable, not fetched again", 90_000)
     out += Step("covers", "Covers", "Covers decode and give colours", 30_000)
     if (o.downloads) out += Step("downloads", "Downloads", "A downloaded song opens", 15_000)
@@ -377,15 +374,15 @@ fun plan(o: Options): List<Step> {
  * plays nor adds songs nor skips any by itself.
  */
 data class Knobs(
-    val engine: Int, val eq: Boolean, val crossfeedDb: Float, val balance: Float, val mono: Boolean, val limiter: Boolean,
+    val eq: Boolean, val crossfeedDb: Float, val balance: Float, val mono: Boolean, val limiter: Boolean,
     val speed: Float, val pitch: Float, val skipSilence: Boolean, val offload: Boolean, val crossfadeSec: Int, val autoMix: Boolean,
     val replayGain: Int, val scrobble: Boolean, val autoFill: Boolean, val skipExplicit: Boolean, val previousAlwaysSkips: Boolean,
     val fadeMs: Int,
 )
 
-/** What the test starts from: the plain CPU path, nothing mixing, nothing reported, nothing added, [engine] playing. */
-fun testKnobs(user: Knobs, engine: Int): Knobs = user.copy(
-    engine = engine, eq = false, crossfeedDb = 0f, balance = 0f, mono = false, limiter = false, speed = 1f, pitch = 1f,
+/** What the test starts from: the plain CPU path, nothing mixing, nothing reported, nothing added. */
+fun testKnobs(user: Knobs): Knobs = user.copy(
+    eq = false, crossfeedDb = 0f, balance = 0f, mono = false, limiter = false, speed = 1f, pitch = 1f,
     skipSilence = false, offload = false, crossfadeSec = 0, autoMix = false, scrobble = false, autoFill = false,
     skipExplicit = false, previousAlwaysSkips = false, fadeMs = 0,
 )
@@ -394,7 +391,7 @@ fun testKnobs(user: Knobs, engine: Int): Knobs = user.copy(
 fun knobsDiffer(a: Knobs, b: Knobs): List<String> {
     val out = mutableListOf<String>()
     fun d(name: String, x: Any, y: Any) { if (x != y) out += name }
-    d("playbackEngine", a.engine, b.engine); d("eqEnabled", a.eq, b.eq); d("crossfeedDb", a.crossfeedDb, b.crossfeedDb)
+    d("eqEnabled", a.eq, b.eq); d("crossfeedDb", a.crossfeedDb, b.crossfeedDb)
     d("balance", a.balance, b.balance); d("mono", a.mono, b.mono); d("limiter", a.limiter, b.limiter); d("speed", a.speed, b.speed)
     d("pitch", a.pitch, b.pitch); d("skipSilence", a.skipSilence, b.skipSilence); d("offload", a.offload, b.offload)
     d("crossfadeSec", a.crossfadeSec, b.crossfadeSec); d("autoMix", a.autoMix, b.autoMix); d("replayGain", a.replayGain, b.replayGain)
@@ -403,7 +400,7 @@ fun knobsDiffer(a: Knobs, b: Knobs): List<String> {
     return out
 }
 
-/** Where the user was: the queue (ids), the song and the place in it, playing or not, shuffle and repeat, the player. */
+/** Where the user was: the queue (ids), the song and the place in it, playing or not, shuffle and repeat, the player service. */
 data class Snapshot(
     val knobs: Knobs, val ids: List<String>, val index: Int, val positionMs: Long, val playing: Boolean,
     val shuffle: Boolean, val repeat: Int, val serviceRunning: Boolean,
@@ -415,7 +412,7 @@ enum class RestoreStep { STOP_PLAYER, SETTINGS, START_PLAYER, QUEUE, SHUFFLE, RE
 fun restoreSteps(s: Snapshot, now: Snapshot): List<RestoreStep> {
     val out = mutableListOf(RestoreStep.STOP_PLAYER, RestoreStep.SETTINGS)
     // The player is stopped for the queue to be put back as a start of the app puts it back (unprepared,
-    // at its place: nothing fetched), and with it the engine is the user's again.
+    // at its place: nothing fetched).
     if (s.serviceRunning || s.ids.isNotEmpty()) out += RestoreStep.START_PLAYER
     if (s.ids.isNotEmpty()) out += RestoreStep.QUEUE
     if (s.shuffle != now.shuffle || s.shuffle) out += RestoreStep.SHUFFLE

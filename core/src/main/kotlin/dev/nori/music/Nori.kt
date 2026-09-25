@@ -47,6 +47,21 @@ class Nori private constructor(private val context: Context) {
     private val lazySources = lazy { MediaSources(context, ::client, http, settings) }
 
     /**
+     * The beat model for "Better beat detection" ships in the APK, stored uncompressed (core/build.gradle.kts): the
+     * core is told where its bytes are and reads them in place when the switch is on, with nothing downloaded or
+     * extracted. Declared before [downloads], whose thread opens the core while this object is still
+     * being built. A build without the model has no such asset, and the core then downloads it (its own pin).
+     */
+    private val shipBeatModel: Unit by lazy {
+        val fd = try {
+            context.assets.openFd(dev.nori.music.ffi.automix.beatModelFileName())
+        } catch (_: java.io.IOException) {
+            return@lazy
+        }
+        fd.use { dev.nori.music.ffi.automix.beatModelBundled(context.applicationInfo.sourceDir, it.startOffset.toULong(), it.length.toULong()) }
+    }
+
+    /**
      * The core's one door to the network; built with [http]. The core's cover loader fetches through it
      * too ([dev.nori.music.data.CoverLoader]), so covers ride the API's connection.
      */
@@ -95,8 +110,10 @@ class Nori private constructor(private val context: Context) {
     /** True while requests go to the profile's second address; stream quality is capped then. */
     val onSecondAddress: Boolean get() = opened?.client?.onSecondAddress() ?: false
 
-    private fun open(id: String, profile: ServerProfile?): Core =
-        Core(File(context.filesDir, dev.nori.music.ffi.db.dbFileName()).path, id).also { c -> profile?.let { c.configure(it.config()) } }
+    private fun open(id: String, profile: ServerProfile?): Core {
+        shipBeatModel
+        return Core(File(context.filesDir, dev.nori.music.ffi.db.dbFileName()).path, id).also { c -> profile?.let { c.configure(it.config()) } }
+    }
 
     private fun ServerProfile.config() = ServerConfig(url, user, password, apiKey.ifEmpty { null }, legacyAuth)
     private fun ServerProfile.net() = NetProfile(url, altUrl, musicFolderId, altMaxBitRate.coerceAtLeast(0).toUInt())

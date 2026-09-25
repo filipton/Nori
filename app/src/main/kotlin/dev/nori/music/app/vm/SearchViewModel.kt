@@ -31,7 +31,7 @@ data class SearchUi(
     val history: List<String> = emptyList(),
 ) {
     internal fun with(v: SearchView) = copy(
-        query = v.text, shown = v.shown, searching = v.searching, error = v.error, scope = v.scope,
+        query = v.text, shown = v.shown, searching = v.searching, error = v.error?.let { dev.nori.music.app.ui.say.searchFallback(it.reason) }, scope = v.scope,
         scopesOffered = v.scopesOffered, nothingFound = v.nothingFound,
     )
 }

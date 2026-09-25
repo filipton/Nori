@@ -798,20 +798,20 @@ fn default_definitions() -> Vec<SmartPlaylist> {
     let one = |field: &str, op: &str, value: Value| json!({ "all": true, "rules": [{ "field": field, "op": op, "value": value }] });
     let sorted = |field: &str, descending: bool| json!({ "field": field, "descending": descending });
     let defs = [
-        ("default-most-played", "Most played", json!({ "match": one("playCount", "greater", json!(0)), "sort": sorted("playCount", true), "limit": 100 })),
-        ("default-recently-played", "Recently played", json!({ "match": one("lastPlayed", "withinDays", json!(30)), "sort": sorted("lastPlayed", true), "limit": 100 })),
-        ("default-recently-added", "Recently added", json!({ "match": one("added", "withinDays", json!(90)), "sort": sorted("added", true), "limit": 200 })),
-        ("default-never-played", "Never played", json!({ "match": one("playCount", "is", json!(0)), "sort": { "field": "random", "seed": 0 }, "limit": 100 })),
-        ("default-top-rated", "Top rated", json!({ "match": one("userRating", "greater", json!(3)), "sort": sorted("userRating", true), "limit": 200 })),
+        ("default-most-played", SmartBuiltin::MostPlayed, json!({ "match": one("playCount", "greater", json!(0)), "sort": sorted("playCount", true), "limit": 100 })),
+        ("default-recently-played", SmartBuiltin::RecentlyPlayed, json!({ "match": one("lastPlayed", "withinDays", json!(30)), "sort": sorted("lastPlayed", true), "limit": 100 })),
+        ("default-recently-added", SmartBuiltin::RecentlyAdded, json!({ "match": one("added", "withinDays", json!(90)), "sort": sorted("added", true), "limit": 200 })),
+        ("default-never-played", SmartBuiltin::NeverPlayed, json!({ "match": one("playCount", "is", json!(0)), "sort": { "field": "random", "seed": 0 }, "limit": 100 })),
+        ("default-top-rated", SmartBuiltin::TopRated, json!({ "match": one("userRating", "greater", json!(3)), "sort": sorted("userRating", true), "limit": 200 })),
         (
             "default-forgotten-favourites",
-            "Forgotten favourites",
+            SmartBuiltin::ForgottenFavourites,
             json!({ "match": { "all": true, "rules": [{ "field": "starred", "op": "isTrue" }, { "field": "lastPlayed", "op": "notWithinDays", "value": 180 }] },
                     "sort": sorted("lastPlayed", false), "limit": 100 }),
         ),
-        ("default-long-tracks", "Long tracks", json!({ "match": one("duration", "greater", json!(600)), "sort": sorted("duration", true), "limit": 100 })),
+        ("default-long-tracks", SmartBuiltin::LongTracks, json!({ "match": one("duration", "greater", json!(600)), "sort": sorted("duration", true), "limit": 100 })),
     ];
-    defs.into_iter().map(|(id, name, json)| SmartPlaylist { id: id.into(), name: name.into(), json: json.to_string() }).collect()
+    defs.into_iter().map(|(id, builtin, json)| SmartPlaylist { id: id.into(), name: String::new(), json: json.to_string(), builtin: Some(builtin) }).collect()
 }
 
 /// Checks a definition without running it; the error says where and what (`match.rules[1].op: ...`).
@@ -832,7 +832,8 @@ pub fn smart_defaults() -> Vec<SmartPlaylist> {
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SmartPage {
     pub songs: Vec<Song>,
-    pub caption: String,
+    /// The songs' summed length in seconds.
+    pub seconds: u64,
 }
 
 #[cfg(test)]

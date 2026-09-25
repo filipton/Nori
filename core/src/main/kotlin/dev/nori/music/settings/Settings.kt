@@ -17,7 +17,7 @@ import dev.nori.music.ffi.db.dbFileName
 import dev.nori.music.ffi.settings.settingsOpen
 import dev.nori.music.ffi.settings.settingsPut
 import dev.nori.music.ffi.settings.settingsSoundTool
-import dev.nori.music.ffi.settings.settingLabels
+import dev.nori.music.ffi.settings.eqModelGet
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 
@@ -37,17 +37,15 @@ enum class SwipeAction { NONE, QUEUE, PLAY_NEXT, FAVOURITE, DOWNLOAD }
  * listens to records wants the next record, not fifteen loose songs, so the two are separate choices:
  * what is added, and what it is chosen by.
  */
-enum class AutoFillKind { SONGS, ALBUMS; val label: String get() = LABELS.autoFillKinds[ordinal] }
+enum class AutoFillKind { SONGS, ALBUMS }
 
-enum class AutoFillBasis { SIMILAR, ARTIST, GENRE, ERA; val label: String get() = LABELS.autoFillBases[ordinal] }
+enum class AutoFillBasis { SIMILAR, ARTIST, GENRE, ERA }
 
-enum class HomeRow {
-    PINNED, PLAYLISTS, RECENT, NEWEST, FREQUENT, TOP_SONGS, RANDOM, STARRED;
-    val title: String get() = LABELS.homeRows[ordinal]
-}
+/** The home page's shelves; the app names each (`Say.homeRow`). */
+enum class HomeRow { PINNED, PLAYLISTS, RECENT, NEWEST, FREQUENT, TOP_SONGS, RANDOM, STARRED }
 
-/** What every enum here is called on screen, the band kinds and the equalizer's ranges: the core's (`settings::labels`), asked once. */
-val LABELS by lazy { settingLabels() }
+/** Whether each band kind has a gain and a slope, and the equalizer's ranges: the core's (`settings::eq_model`), asked once. */
+val EQ by lazy { eqModelGet() }
 
 /**
  * One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
@@ -82,18 +80,17 @@ data class ServerProfile(
 }
 
 /**
- * Mirrors `EqKind` in the core; the ordinals are the wire format, so the order must not change. What
- * each is called, whether it has a gain and whether its width is a slope are the core's.
+ * Mirrors `EqKind` in the core; the ordinals are the wire format, so the order must not change. Whether
+ * each has a gain and whether its width is a slope are the core's; the app names each (`Say.bandKind`).
  */
 enum class BandKind {
     PEAKING, LOW_SHELF, HIGH_SHELF, LOW_PASS, HIGH_PASS, BAND_PASS, NOTCH, ALL_PASS, LOW_SHELF_SLOPE, HIGH_SHELF_SLOPE;
-    val label: String get() = LABELS.bandKinds[ordinal].label
-    val usesGain: Boolean get() = LABELS.bandKinds[ordinal].usesGain
-    val slope: Boolean get() = LABELS.bandKinds[ordinal].slope
+    val usesGain: Boolean get() = EQ.bandKinds[ordinal].usesGain
+    val slope: Boolean get() = EQ.bandKinds[ordinal].slope
 }
 
-/** Which side a band applies to. */
-enum class BandChannel { BOTH, LEFT, RIGHT; val label: String get() = LABELS.bandChannels[ordinal] }
+/** Which side a band applies to; the app names each (`Say.bandChannel`). */
+enum class BandChannel { BOTH, LEFT, RIGHT }
 
 /** One equalizer filter. The ten default bands are peaking filters an octave apart. */
 data class Band(val kind: BandKind, val freq: Float, val gainDb: Float, val q: Float, val channel: BandChannel = BandChannel.BOTH) {
@@ -286,11 +283,6 @@ data class Prefs(
     val swipeLeft: SwipeAction,
     /** Songs the server marks explicit are skipped instead of played. */
     val skipExplicit: Boolean,
-    /**
-     * Which player plays: 0 ExoPlayer (the default), 1 nori-engine, the Rust path being measured against it
-     * ([dev.nori.music.playback.EnginePlayer]). Read when the playback service starts.
-     */
-    val playbackEngine: Int,
     /** Home shelves, in order; a row that is not listed is hidden. */
     val homeRows: List<HomeRow>,
     val pinnedPlaylists: List<String>,
@@ -376,7 +368,7 @@ fun Prefs.stored() = StoredPrefs(
     lyricsPreferWords = lyricsPreferWords, paxsenixKey = paxsenixKey, betterLyricsKey = betterLyricsKey, theme = theme.ordinal, amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = tapAction.ordinal, swipeRight = swipeRight.ordinal,
-    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = swipeLeft.ordinal, skipExplicit = skipExplicit, homeRows = homeRows.map { it.ordinal }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 
@@ -400,7 +392,7 @@ fun StoredPrefs.prefs() = Prefs(
     lyricsPreferWords = lyricsPreferWords, paxsenixKey = paxsenixKey, betterLyricsKey = betterLyricsKey, theme = ThemeMode.entries[theme], amoled = amoled,
     playerColours = playerColours, dynamicColor = dynamicColor, accent = accent, coverColors = coverColors, reduceMotion = reduceMotion,
     ignoreSystemMotion = ignoreSystemMotion, uiScale = uiScale, tapAction = TapAction.entries[tapAction], swipeRight = SwipeAction.entries[swipeRight],
-    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, playbackEngine = playbackEngine, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
+    swipeLeft = SwipeAction.entries[swipeLeft], skipExplicit = skipExplicit, homeRows = homeRows.map { HomeRow.entries[it] }, pinnedPlaylists = pinnedPlaylists,
     listPrefs = listPrefs,
 )
 

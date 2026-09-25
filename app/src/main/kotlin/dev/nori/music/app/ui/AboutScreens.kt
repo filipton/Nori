@@ -42,13 +42,13 @@ internal fun InfoRow(title: String, detail: String, end: String? = null, onClick
 /**
  * What this is and what it is built out of. Most of a bug report is answered here - which build, which
  * commit, which phone, which audio engine at which version - and a tap on the top row copies all of it.
- * The lines and the report are the core's (`words_about_android`); this hands it what only Android knows.
+ * The lines and the report are worded by [Say.about] from what only Android knows.
  */
 @Composable
 internal fun AboutContent(section: @Composable (String, @Composable ColumnScope.() -> Unit) -> Unit, openLicences: () -> Unit) {
     val clipboard = LocalClipboardManager.current
     val facts = remember {
-        dev.nori.music.ffi.words.wordsAboutAndroid(
+        say.about(
             BuildConfig.VERSION_NAME, BuildConfig.CORE_VERSIONS, BuildConfig.DEBUG, BuildConfig.GIT_SHA,
             Build.SUPPORTED_ABIS.firstOrNull(), Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
         )
@@ -71,7 +71,7 @@ internal fun AboutContent(section: @Composable (String, @Composable ColumnScope.
 /**
  * Everything the app is built from that is not ours, grouped: the core's crates, Android's libraries,
  * the typeface and the third parties' data. What each is, whose and under which terms is the core's
- * (`settings_schema::core_credits`, `android_credits`, `data_credits`), so every app on it lists them
+ * (`credits::core_credits`, `android_credits`, `data_credits`), so every app on it lists them
  * alike; each names the bundled text its terms are (`assets/licences/<file>.txt`; none for a service).
  */
 private val CREDITS by lazy {

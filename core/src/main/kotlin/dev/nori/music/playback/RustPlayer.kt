@@ -155,7 +155,7 @@ class RustBody internal constructor(private val source: DataSource, @JvmField va
 
 /**
  * The Rust player as media3 sees it, so the session, the notification, the lock screen, headset buttons,
- * Android Auto and the widget follow it as they follow ExoPlayer, through [PlaybackService]'s `Controls`.
+ * Android Auto and the widget follow it as they would any media3 player, through [PlaybackService]'s `Controls`.
  * The queue is the core's: `Controls` edits it there first, and this keeps the items the session shows
  * and tells the engine. The song shown is the one heard (the engine's song events, which come through a
  * mix at the moment the next song is audible); the position is the engine's, read when asked.
@@ -519,14 +519,14 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
                 EVENT_BUFFERING -> buffering = arg != 0
                 EVENT_LOOPED -> onLoop(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
                 EVENT_TITLE -> announced = RustPlayerJni.eventText(h)
-                // A mix began or ended being heard: the page is nudged as it is by the ExoPlayer path's
-                // sink, and reads [mixing] then. Nothing else changes, so nothing else is said.
-                EVENT_MIXING -> TransitionSink.onHeardChanged?.invoke()
+                // A mix began or ended being heard: the page is nudged, and reads [mixing] then. Nothing
+                // else changes, so nothing else is said.
+                EVENT_MIXING -> PlaybackService.onMixingChanged?.invoke()
                 EVENT_PLACED -> placed = true
                 // Handed on after the batch: the bridge edits and seeks this player itself.
                 EVENT_BRIDGE -> main.post { if (onBridge?.invoke() != true) { stoppedByItself(); follow(); invalidateState() } }
-                // The output device's own sound is DeviceSound's, from Outputs, as on the ExoPlayer path:
-                // its name is not asked for, which would only make a string to throw away.
+                // The output device's own sound is DeviceSound's, from Outputs: its name is not asked for,
+                // which would only make a string to throw away.
                 else -> {}
             }
         }
@@ -672,8 +672,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     // ---- what the Rust side asks for (RustBridge) ----
 
     /**
-     * The engine's AudioTrack, opened as the ExoPlayer path opens its own: music attributes, a deep buffer
-     * in the power-saving mode (the framework's deep-buffer output, which wakes least), pinned to a DAC
+     * The engine's AudioTrack: music attributes, a deep buffer in the power-saving mode (the framework's deep-buffer output, which wakes least), pinned to a DAC
      * when bit-perfect is on, and the route told to the engine whenever it changes. Called on the engine's
      * thread.
      */
@@ -702,7 +701,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         }, main)
         // The perf build's self test plays quietly; the engine's own volumes are scaled from its next one on.
         if (Quiet.level < 1f) track.setVolume(Quiet.level)
-        PlaybackService.track = OpenedTrack(track, "rust", frames * channels * width, mode)
+        PlaybackService.track = OpenedTrack(track, frames * channels * width, mode)
         val given = if (track.performanceMode == AudioTrack.PERFORMANCE_MODE_POWER_SAVING) "power saving" else "normal"
         android.util.Log.i("nori", "rust AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $frames frames (${track.bufferSizeInFrames * 1000L / rate} ms), $given, bitPerfect=$bitPerfect")
         track
@@ -749,7 +748,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             }, main)
             nori.dac.onTrack(rate, encoding, track.isOffloadedPlayback)
             if (Quiet.level < 1f) track.setVolume(Quiet.level)
-            PlaybackService.track = OpenedTrack(track, "rust", bytes, AudioTrack.PERFORMANCE_MODE_NONE)
+            PlaybackService.track = OpenedTrack(track, bytes, AudioTrack.PERFORMANCE_MODE_NONE)
             android.util.Log.i("nori", "rust offloaded AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $bytes bytes, offloaded=${track.isOffloadedPlayback}")
             track
         }.onFailure { android.util.Log.w("nori", "rust offloaded AudioTrack would not open", it); PlaybackService.observer?.error("rust offloaded AudioTrack would not open: $it") }.getOrNull()
@@ -772,7 +771,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
 
     /**
      * A song's bytes from [from] on, at the URL and under the cache key the core resolved (over the network
-     * state told it here), through the same data sources ExoPlayer reads: a download, then the stream
+     * state told it here), through media3's data sources (MediaSources): a download, then the stream
      * cache, then the network on the app's one OkHttp client (its TLS, certificates and headers). Called
      * on a loader thread; while one is open the service holds the Wi-Fi lock.
      */

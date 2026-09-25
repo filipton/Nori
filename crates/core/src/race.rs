@@ -36,8 +36,57 @@ impl LyricsShown for Keeping {
     }
 }
 
+/// Hands on only what differs from what it handed last ([`lyrics_replaces`]): the server's answer read
+/// again, or the lookup's choice from before, are not new lyrics to show.
+struct Screen {
+    to: Arc<dyn LyricsShown>,
+    last: parking_lot::Mutex<Option<LyricsPick>>,
+}
+
+impl Screen {
+    fn show(&self, pick: LyricsPick) {
+        let mut last = self.last.lock();
+        if lyrics_replaces(last.as_ref(), &pick) {
+            *last = Some(pick.clone());
+            drop(last);
+            self.to.show(pick);
+        }
+    }
+}
+
+impl LyricsShown for Screen {
+    fn show(&self, pick: LyricsPick) {
+        Screen::show(self, pick);
+    }
+}
+
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl Client {
+    /// Everything the lyrics page shows for song `id`, in order, each to `shown`: the server's own lyrics
+    /// (what is stored, then the server's answer when it differs; an empty answer is not shown while a
+    /// service may still have the song), then, when those are not timed, what the lyrics services find
+    /// ([`Client::lyrics_lookup`]), and at the end an empty answer from the server when nobody had
+    /// anything. Nothing is handed on twice. Returns when all is in; dropping the call cancels every
+    /// request in it.
+    pub async fn lyrics_for(&self, id: String, shown: Arc<dyn LyricsShown>) -> NetResult<()> {
+        let screen = Arc::new(Screen { to: shown, last: parking_lot::Mutex::new(None) });
+        let mut server: Option<crate::Lyrics> = None;
+        // A failure to read the server's is no lyrics from it: the services are asked all the same.
+        let _ = self
+            .read_each(crate::cache_policy::Read::LyricsBySong { song_id: id.clone() }, |p| {
+                if let crate::cache_policy::Page::LyricsPage { v } = p {
+                    if !v.lines.is_empty() {
+                        screen.show(LyricsPick { lyrics: v.clone(), origin: nori_settings::lyrics_sources::LyricsOrigin::Server });
+                    }
+                    server = Some(v);
+                }
+            })
+            .await;
+        let has_lines = server.as_ref().is_some_and(|l| !l.lines.is_empty());
+        let synced = server.as_ref().is_some_and(|l| l.synced);
+        self.lyrics_lookup(id, has_lines, synced, screen).await
+    }
+
     /// What to show once the server's own lyrics are in (`server_has_lines`, `server_synced` describe
     /// them; the platform shows them itself): the lyrics services the settings switch on, asked together,
     /// each better answer handed to `shown` as it comes. The server's synced lyrics win and nothing is
@@ -93,7 +142,7 @@ pub(crate) mod tests {
     use crate::client::NetProfile;
     use crate::transport::FailureKind;
     use nori_settings::lyrics_sources::LyricsService;
-    use nori_words::words::LyricsOrigin;
+    use nori_settings::lyrics_sources::LyricsOrigin;
     use parking_lot::Mutex;
 
     fn song() -> Song {
@@ -121,6 +170,45 @@ pub(crate) mod tests {
         let screen = Screen::default();
         block(c.lookup_with(s, has_lines, synced, asked, &screen));
         screen.0.into_inner()
+    }
+
+    #[derive(Default)]
+    struct Page(Mutex<Vec<LyricsPick>>);
+
+    impl LyricsShown for Page {
+        fn show(&self, pick: LyricsPick) {
+            self.0.lock().push(pick);
+        }
+    }
+
+    const SYNCED: &str = r#"{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[{"synced":true,"line":[{"start":1500,"value":"timed"}]}]}}}"#;
+    const NONE: &str = r#"{"subsonic-response":{"status":"ok","lyricsList":{}}}"#;
+
+    #[test]
+    fn the_servers_lyrics_come_first_and_nothing_is_shown_twice() {
+        let (c, fake) = setup();
+        // Titles of their own: a service that fails for a song rests for it, whichever test asked.
+        crate::queue::queue_register(vec![Song { id: "lf1".into(), title: "In Order One".into(), ..song() }, Song { id: "lf2".into(), title: "In Order Two".into(), ..song() }]);
+        fake.answer(SYNCED);
+        let page = Arc::new(Page::default());
+        block(c.lyrics_for("lf1".into(), page.clone())).unwrap();
+        let got = page.0.lock().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].origin, got[0].lyrics.lines[0].text.as_str()), (LyricsOrigin::Server, "timed"));
+        assert_eq!(fake.asked().len(), 1, "timed lyrics from the server: no service asked");
+        // Stale, and the server answers the same: not handed on again.
+        c.core.db.lock().execute("UPDATE cache SET ts = 0", []).unwrap();
+        fake.answer(SYNCED);
+        let again = Arc::new(Page::default());
+        block(c.lyrics_for("lf1".into(), again.clone())).unwrap();
+        assert_eq!(again.0.lock().len(), 1, "the stored answer only");
+        // No lyrics at the server: said once, at the end, not while services may still have them.
+        fake.answer(NONE);
+        let none = Arc::new(Page::default());
+        block(c.lyrics_for("lf2".into(), none.clone())).unwrap();
+        let got = none.0.lock().clone();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].lyrics.lines.is_empty() && got[0].origin == LyricsOrigin::Server);
     }
 
     #[test]

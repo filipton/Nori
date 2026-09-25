@@ -177,7 +177,7 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
             },
         ) {
             if (m.songs.isEmpty()) item(key = "empty") {
-                EmptyNote(if (m.favourites) dev.nori.music.ffi.words.Note.NO_FAVOURITE_SONGS else dev.nori.music.ffi.words.Note.NOTHING_TO_MIX)
+                EmptyNote(if (m.favourites) Note.NO_FAVOURITE_SONGS else Note.NOTHING_TO_MIX)
             }
             songRows(m.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, animated = true)
         }
@@ -192,7 +192,7 @@ fun SmartList(vm: SmartViewModel = viewModel()) {
         item { ActionRow(say.newSmartPlaylist, Icons.Filled.Add, { nav.smartEdit("") }) }
         items(saved, key = { it.id }) { p ->
             NavRow(
-                p.name, { nav.smart(p.id) },
+                remember(p) { say.smartName(p) }, { nav.smart(p.id) },
                 action = {
                     TextButton({ nav.smartEdit(p.id) }) { Text(say.edit) }
                     IconButton({ vm.delete(p.id) }, Modifier.size(40.dp)) { Icon(Icons.Filled.Close, say.delete, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
@@ -202,10 +202,10 @@ fun SmartList(vm: SmartViewModel = viewModel()) {
         item { SectionTitle(say.readyMade) }
         items(vm.defaults, key = { it.id }) { p ->
             Row(Modifier.fillMaxWidth().clickable { nav.smart(p.id) }.padding(start = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text(p.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text(say.copyIt) }
+                Text(remember(p) { say.smartName(p) }, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge); TextButton({ nav.smartEdit(p.id) }) { Text(say.copyIt) }
             }
         }
-        item { Text(noteText(dev.nori.music.ffi.words.Note.SMART_HELP), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        item { Text(noteText(Note.SMART_HELP), Modifier.padding(16.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     }
 }
 
@@ -224,7 +224,7 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
-            Text(playlist?.name ?: say.smartPlaylist, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+            Text(remember(playlist) { playlist?.let(say::smartName) ?: say.smartPlaylist }, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
             TextButton({ nav.smartEdit(id) }) { Text(say.edit) }
         }
         LoadBox(load) { page ->
@@ -236,7 +236,7 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
                         OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text(say.shuffle) }
                         TextButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Text(say.get) }
                     }
-                    Text(page.caption, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
+                    Text(remember(page) { say.listCaption(page.songs.size, page.seconds.toLong(), true) }, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
                 }
                 songRows(songs, actions, playing, done, selection.mapTo(HashSet()) { it.id }, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
             }
@@ -249,7 +249,7 @@ fun SmartEditScreen(id: String, vm: SmartViewModel = viewModel()) {
     val saved by vm.saved.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     // What the form opens with, and every change to its rules, are the core's (`smart/draft.rs`).
-    var draft by remember(id, saved.size) { mutableStateOf(dev.nori.music.ffi.library.smartEditOpen(vm.find(id))) }
+    var draft by remember(id, saved.size) { mutableStateOf(dev.nori.music.ffi.library.smartEditOpen(vm.find(id)?.let { it.copy(name = say.smartName(it)) })) }
     val fields = remember { dev.nori.music.ffi.library.smartEditFields() }
     val sorts = remember { dev.nori.music.ffi.library.smartEditSchema().sorts }
     var error by remember { mutableStateOf<String?>(null) }
@@ -318,7 +318,7 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
     val songs = remember(entries) { entries.map { it.song } }
     LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
         item { Row(Modifier.padding(horizontal = 8.dp)) { TextButton(nav::stats) { Text(say.listeningStats) }; TextButton(vm::clear) { Text(say.clearHistory) } } }
-        if (entries.isEmpty()) item { Text(noteText(dev.nori.music.ffi.words.Note.NO_HISTORY), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (entries.isEmpty()) item { Text(noteText(Note.NO_HISTORY), Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant) }
         songRows(songs, actions, null, emptySet(), emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "h")
     }
 }
@@ -326,9 +326,10 @@ fun HistoryList(actions: ActionsViewModel, vm: HistoryViewModel = viewModel()) {
 /** The year in review, any time of year: everything comes from one query in the core. */
 @Composable
 fun StatsScreen(vm: HistoryViewModel = viewModel()) {
-    val periods = remember { dev.nori.music.ffi.words.statsPeriods() }
-    var days by remember { mutableStateOf(dev.nori.music.ffi.words.statsDefaultDays()) }
-    LaunchedEffect(days) { vm.loadStats(days.toInt()) }
+    val periods = remember { say.statsPeriods }
+    // A year opens.
+    var days by remember { mutableStateOf(365) }
+    LaunchedEffect(days) { vm.loadStats(days) }
     val s by vm.stats.collectAsStateWithLifecycle()
     val nav = LocalNav.current
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = 24.dp + LocalChromeInset.current)) {
@@ -337,28 +338,29 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
             Text(say.listening, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
         }
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(periods) { p -> Chip(p.label, days == p.days) { days = p.days } }
+            items(periods) { (d, label) -> Chip(label, days == d) { days = d } }
         }
         val page = s ?: return@Column
         val st = page.stats
-        val words = page.words
-        val tiles = page.tiles
+        val tiles = remember(page) { say.statsTiles(page) }
+        val habit = remember(page) { say.statsHabit(page) }
+        val headline = remember(page) { say.statsHeadline(st.listenedMs) }
 
         // The headline: two numbers worth reading from across the room, the rest as a grid of tiles.
         Column(Modifier.padding(horizontal = Space.gutter, vertical = 14.dp)) {
             Text("${st.plays}", style = MaterialTheme.typography.displaySmall, color = MaterialTheme.colorScheme.primary)
-            Text(words.headline, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(headline, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Row(Modifier.padding(horizontal = 14.dp), Arrangement.spacedBy(8.dp)) {
-            tiles.take(3).forEach { StatTile(it.value, it.label, Modifier.weight(1f)) }
+            tiles.take(3).forEach { (value, label) -> StatTile(value, label, Modifier.weight(1f)) }
         }
         Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-            tiles.drop(3).forEach { StatTile(it.value, it.label, Modifier.weight(1f)) }
+            tiles.drop(3).forEach { (value, label) -> StatTile(value, label, Modifier.weight(1f)) }
         }
 
-        words.habit?.let { said ->
+        habit?.let { said ->
             SectionTitle(say.whenYouListen)
-            HourChart(words.hours)
+            HourChart(page.hours)
             Text(
                 said,
                 Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
@@ -369,7 +371,7 @@ fun StatsScreen(vm: HistoryViewModel = viewModel()) {
         if (st.topSongs.isNotEmpty()) SectionTitle(say.topSongs)
         st.topSongs.forEachIndexed { i, t -> RankRow(i + 1, t.song.title, t.song.artist, "${t.plays}") }
         if (st.topArtists.isNotEmpty()) SectionTitle(say.topArtists)
-        st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, words.artistTimes[i], "${t.plays}") }
+        st.topArtists.forEachIndexed { i, t -> RankRow(i + 1, t.name, duration(t.listenedMs / 1000), "${t.plays}") }
         if (st.topAlbums.isNotEmpty()) SectionTitle(say.topAlbums)
         st.topAlbums.forEachIndexed { i, t -> RankRow(i + 1, t.name, "", "${t.plays}") }
         if (st.topGenres.isNotEmpty()) SectionTitle(say.topGenres)
@@ -391,6 +393,9 @@ private fun StatTile(value: String, label: String, modifier: Modifier = Modifier
     }
 }
 
+/** The hours marked under the listening-day chart. */
+private val HOUR_TICKS = listOf("00", "06", "12", "18", "23")
+
 /** Twenty-four bars, drawn: the shape of a listening day says more than "most around 20:00" alone. */
 @Composable
 private fun HourChart(perHour: List<Float>) {
@@ -411,7 +416,7 @@ private fun HourChart(perHour: List<Float>) {
             }
         }
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), Arrangement.SpaceBetween) {
-            remember { dev.nori.music.ffi.words.statsHourTicks() }.forEach { Caption(it) }
+            HOUR_TICKS.forEach { Caption(it) }
         }
     }
 }

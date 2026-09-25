@@ -11,7 +11,7 @@ impl Core {
     /// unknown name keeps index order), only starred songs when `starred_only`, only the years
     /// `year_from..=year_to` when `year_to` is not 0. Nothing here touches the network.
     pub fn songs_page(&self, sort: String, starred_only: bool, year_from: u32, year_to: u32, offset: u32) -> Result<SongsPage> {
-        let (key, descending) = SONG_SORTS.iter().find(|s| s.0 == sort).map_or(("", false), |s| (s.1, s.3));
+        let (key, descending) = SONG_SORTS.iter().find(|s| s.0 == sort).map_or(("", false), |s| (s.1, s.2));
         let songs = self.browse_songs(key.into(), descending, starred_only, year_from, year_to, offset, SONG_PAGE)?;
         Ok(SongsPage { exhausted: (songs.len() as u32) < SONG_PAGE, songs })
     }
@@ -29,10 +29,9 @@ impl Core {
         Ok(history::summary(&self.db.lock(), from, now, STATS_TOP)?)
     }
 
-    /// [`Core::stats_days`] with its words and tiles, as the listening page shows them.
+    /// [`Core::stats_days`] with what the listening page reads out of them.
     pub fn stats_page(&self, days: u32) -> Result<StatsPage> {
-        let stats = self.stats_days(days)?;
-        Ok(StatsPage { words: crate::fmt::stats_words(&stats), tiles: crate::fmt::stats_tiles(&stats), stats })
+        Ok(StatsPage::new(self.stats_days(days)?))
     }
 
     /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
@@ -41,7 +40,7 @@ impl Core {
         let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE server=sid() AND kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
         let rows = st.query_map([db::SONG], |r| {
             let start: u32 = r.get(0)?;
-            Ok(Decade { start, name: crate::words::words_decade(start), song_count: r.get(1)? })
+            Ok(Decade { start, song_count: r.get(1)? })
         })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }

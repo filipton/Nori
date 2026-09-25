@@ -6,6 +6,12 @@ Font (app/src/main/res/font/inter.ttf)
   Inter — Copyright (c) 2016 The Inter Project Authors, SIL Open Font License 1.1
   (full text: app/src/main/assets/licences/OFL-1.1.txt)
 
+Beat model (an asset of the Android app, tools/beat-this/beat-this-small0-v1.onnx)
+  Beat This! (small0 checkpoint, exported to ONNX by tools/beat-this/export.py) — Copyright (c) 2024
+    Institute of Computational Perception, JKU Linz, Austria, MIT (code and weights; full text:
+    app/src/main/assets/licences/MIT.txt). Read only with "Better beat detection" on; a client that does
+    not ship it downloads it when the switch goes on.
+
 Linked into the Rust core (crates/core)
   SQLite — dedicated to the public domain
   uniffi, with its JNI runtime copied into crates/uniffi-jni-runtime — Mozilla Foundation, Mozilla
@@ -20,8 +26,9 @@ Linked into the Rust core (crates/core)
     Apache-2.0; miniz_oxide also Zlib)
   tract — Sonos, Inc. and the tract contributors, MIT or Apache-2.0; with the crates it builds on
     (ndarray, prost, nom, half, num-*, smallvec and others), each MIT, Apache-2.0 or both, some also
-    offered under the Unlicense, BSD-2-Clause or BlueOak-1.0.0. Runs the beat model; only in a build
-    with the `neural-beats` feature, and used only with "Better beat detection" on.
+    offered under the Unlicense, BSD-2-Clause or BlueOak-1.0.0. Runs the beat model; in a build with
+    the `neural-beats` feature (the Android app's builds have it), and used only with "Better beat
+    detection" on.
 
 The terminal client (crates/cli, nori-cli; not part of the Android app)
   ratatui, ratatui-image, crossterm — The Ratatui developers, Benjamin Große, Timon Post; MIT
@@ -41,9 +48,6 @@ Android libraries
 
 Fetched only when asked for, not bundled
   AutoEQ headphone curves — Copyright (c) 2018 Jaakko Pasanen, MIT
-  Beat This! beat model (small0 checkpoint, as ONNX) — Copyright (c) 2024 Institute of Computational
-    Perception, JKU Linz, Austria, MIT (code and weights); downloaded when "Better beat detection" is
-    switched on
   LRCLIB lyrics — lrclib.net; lyrics belong to their authors
   Unison lyrics — Lyrics from Unison (https://unison.boidu.dev), ODbL-1.0; lyrics belong to their authors
   NetEase Cloud Music lyrics — music.163.com; lyrics belong to their authors

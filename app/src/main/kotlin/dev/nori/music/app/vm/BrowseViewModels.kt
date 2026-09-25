@@ -40,7 +40,6 @@ import dev.nori.music.ffi.library.browsePaging
 import dev.nori.music.ffi.library.homePinned
 import dev.nori.music.ffi.library.homeRefreshDrops
 import dev.nori.music.ffi.library.homeShelves
-import dev.nori.music.ffi.library.songSorts
 
 /**
  * One row of the home page. Not every shelf is a shelf of albums: the playlists are playlists and the
@@ -250,16 +249,8 @@ class GenreViewModel(app: Application) : DetailViewModel<List<Song>>(app) {
     override fun load(id: String) = flow { emit(nori.library.songsByGenre(id)) }
 }
 
-/** The orders of the "all songs" list; what each sorts on, and its label, are the core's (`song_sorts`). */
-enum class SongSort {
-    TITLE, ARTIST, ALBUM, YEAR, ADDED, PLAYS, LONGEST;
-
-    val label: String get() = labels[name] ?: name
-
-    private companion object {
-        val labels: Map<String, String> by lazy { songSorts().associate { it.name to it.label } }
-    }
-}
+/** The orders of the "all songs" list; what each sorts on is the core's (`song_sorts`), its name Say's. */
+enum class SongSort { TITLE, ARTIST, ALBUM, YEAR, ADDED, PLAYS, LONGEST }
 
 /** Every song of the offline index, a page at a time. Nothing here touches the network. */
 class SongsViewModel(app: Application) : NoriViewModel(app) {

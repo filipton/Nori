@@ -22,7 +22,7 @@ fn main() {
     // The scaffolding is read out of the sources of every crate that exports something, which cargo does
     // not watch for this crate.
     println!("cargo:rerun-if-changed=build.rs");
-    for krate in ["core", "model", "db", "words", "net", "library", "automix", "settings", "lyrics", "devices", "queue", "transfers", "perf"] {
+    for krate in ["core", "model", "db", "net", "library", "automix", "settings", "lyrics", "devices", "queue", "transfers", "perf"] {
         for input in ["src", "Cargo.toml", "uniffi.toml"] {
             println!("cargo:rerun-if-changed=../{krate}/{input}");
         }

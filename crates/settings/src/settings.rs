@@ -173,9 +173,6 @@ pub struct StoredPrefs {
     pub swipe_right: i32,
     pub swipe_left: i32,
     pub skip_explicit: bool,
-    /// Which player plays: ExoPlayer (0) or nori-engine (1, the default for a new install). An install
-    /// that stored its choice keeps it. Read when the playback service starts.
-    pub playback_engine: i32,
     /// `HomeRow` ordinals, in order; a row that is not listed is hidden.
     pub home_rows: Vec<i32>,
     pub pinned_playlists: Vec<String>,
@@ -260,13 +257,14 @@ impl StoredPrefs {
     }
 }
 
-/// A sound that cannot be made: a preset with no filters in it, or the profiles not reachable.
+/// A sound that cannot be made: a preset with no filters in it, or the profiles not reachable. The
+/// client words each (the messages here are for the log).
 #[derive(Debug, thiserror::Error)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Error))]
 #[cfg_attr(feature = "ffi", uniffi(flat_error))]
 pub enum SoundError {
-    #[error("{0}")]
-    NoFilters(String),
+    #[error("no filters in the preset")]
+    NoFilters,
     #[error("database: {0}")]
     Db(String),
 }
@@ -301,37 +299,17 @@ pub(crate) const REPLAY_GAIN_PREAMP: (f32, f32) = (-12.0, 6.0);
 
 /// Each enum setting's values by name, in ordinal order: `AutoFillKind`, `AutoFillBasis`, `ReplayGainMode`,
 /// `ThemeMode`, `TapAction`, `SwipeAction`. A change by name takes these as well as the ordinals.
-const AUTO_FILL_KINDS: [&str; 2] = ["SONGS", "ALBUMS"];
-const AUTO_FILL_BASES: [&str; 4] = ["SIMILAR", "ARTIST", "GENRE", "ERA"];
-const REPLAY_GAIN_MODES: [&str; 4] = ["OFF", "TRACK", "ALBUM", "AUTO"];
-const THEME_MODES: [&str; 3] = ["SYSTEM", "LIGHT", "DARK"];
-const TAP_ACTION_NAMES: [&str; 4] = ["PLAY_LIST", "PLAY_ONE", "QUEUE", "PLAY_NEXT"];
-const SWIPE_ACTION_NAMES: [&str; 5] = ["NONE", "QUEUE", "PLAY_NEXT", "FAVOURITE", "DOWNLOAD"];
-/// The players the "Playback engine" setting chooses between.
-const PLAYBACK_ENGINE_NAMES: [&str; 2] = ["EXOPLAYER", "RUST"];
+pub(crate) const AUTO_FILL_KINDS: [&str; 2] = ["SONGS", "ALBUMS"];
+pub(crate) const AUTO_FILL_BASES: [&str; 4] = ["SIMILAR", "ARTIST", "GENRE", "ERA"];
+pub(crate) const REPLAY_GAIN_MODES: [&str; 4] = ["OFF", "TRACK", "ALBUM", "AUTO"];
+pub(crate) const THEME_MODES: [&str; 3] = ["SYSTEM", "LIGHT", "DARK"];
+pub(crate) const TAP_ACTION_NAMES: [&str; 4] = ["PLAY_LIST", "PLAY_ONE", "QUEUE", "PLAY_NEXT"];
+pub(crate) const SWIPE_ACTION_NAMES: [&str; 5] = ["NONE", "QUEUE", "PLAY_NEXT", "FAVOURITE", "DOWNLOAD"];
 const THEMES: i32 = THEME_MODES.len() as i32;
 const TAP_ACTIONS: i32 = TAP_ACTION_NAMES.len() as i32;
 const SWIPE_ACTIONS: i32 = SWIPE_ACTION_NAMES.len() as i32;
 /// `HomeRow`, by the names they are stored under, in their order.
 const HOME_ROWS: [&str; 8] = ["PINNED", "PLAYLISTS", "RECENT", "NEWEST", "FREQUENT", "TOP_SONGS", "RANDOM", "STARRED"];
-
-/// What each is called on screen, in the same order.
-pub(crate) const AUTO_FILL_KIND_LABELS: [&str; 2] = ["Songs", "Albums"];
-pub(crate) const AUTO_FILL_BASIS_LABELS: [&str; 4] = ["Similar music", "The same artist", "The same genre", "The same era"];
-const HOME_ROW_TITLES: [&str; 8] = [
-    "Favourite playlists",
-    "Playlists",
-    "Recently played",
-    "Recently added",
-    "Most played albums",
-    "Most played songs",
-    "Random",
-    "Favourite albums",
-];
-/// `EqKind`, in its order, as the band editor names each kind.
-const BAND_KIND_LABELS: [&str; BAND_KINDS as usize] =
-    ["Peak", "Low shelf", "High shelf", "Low pass", "High pass", "Band pass", "Notch", "All pass", "Low shelf (slope)", "High shelf (slope)"];
-const BAND_CHANNEL_LABELS: [&str; BAND_CHANNELS as usize] = ["Both", "Left", "Right"];
 
 /// The ten default bands: peaking filters an octave apart.
 pub fn graphic() -> Vec<SoundBand> {
@@ -425,7 +403,6 @@ impl Default for StoredPrefs {
             swipe_right: 1,
             swipe_left: 3,
             skip_explicit: false,
-            playback_engine: 1,
             home_rows: (0..HOME_ROWS.len() as i32).collect(),
             pinned_playlists: Vec::new(),
             list_prefs: HashMap::new(),
@@ -745,7 +722,6 @@ pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
         swipe_right: r.ordinal("swipeRight", SWIPE_ACTIONS, d.swipe_right),
         swipe_left: r.ordinal("swipeLeft", SWIPE_ACTIONS, d.swipe_left),
         skip_explicit: r.flag("skipExplicit", false),
-        playback_engine: r.ordinal("playbackEngine", PLAYBACK_ENGINE_NAMES.len() as i32, d.playback_engine),
         home_rows: r.text("homeRows").map_or(d.home_rows, |s| {
             s.split(',').filter_map(|n| HOME_ROWS.iter().position(|r| *r == n)).map(|i| i as i32).collect()
         }),
@@ -822,7 +798,6 @@ pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     int("tapAction", p.tap_action);
     int("swipeRight", p.swipe_right);
     int("swipeLeft", p.swipe_left);
-    int("playbackEngine", p.playback_engine);
     let mut float = |k: &str, v: f32| put.insert(k.to_string(), PrefValue::Decimal { v });
     float("preampDb", p.preamp_db);
     float("untaggedGainDb", p.untagged_gain_db);
@@ -1007,7 +982,6 @@ pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingCh
         "autoEqDownload" => (n.auto_eq_download, n.third_party_lookups) = (on, on || p.third_party_lookups),
         "profilePerOutput" => n.profile_per_output = on,
         "skipExplicit" => n.skip_explicit = on,
-        "playbackEngine" => n.playback_engine = named(&PLAYBACK_ENGINE_NAMES)?,
         "skipOnError" => n.skip_on_error = on,
         // One lyrics service switched on or off: `lyricsService:NETEASE`.
         _ if name.starts_with("lyricsService:") => {
@@ -1076,11 +1050,11 @@ pub fn apply_preset(s: SoundSettings, p: &NamedPreset) -> SoundSettings {
 }
 
 /// An AutoEQ "ParametricEQ.txt" / Equalizer APO preset, switched on with its own pre-amp. A file with no
-/// filters in it is refused with `empty`, what to tell the user.
-pub fn import(s: SoundSettings, text: &str, empty: &str) -> Result<SoundSettings, SoundError> {
+/// filters in it is refused ([`SoundError::NoFilters`]).
+pub fn import(s: SoundSettings, text: &str) -> Result<SoundSettings, SoundError> {
     let preset = parse_eq_preset(text.to_string());
     if preset.bands.is_empty() {
-        return Err(SoundError::NoFilters(empty.to_string()));
+        return Err(SoundError::NoFilters);
     }
     Ok(SoundSettings { eq_enabled: true, eq_preamp_db: Some(preset.preamp_db), eq_bands: preset.bands.iter().map(band_of).collect(), ..s })
 }
@@ -1145,48 +1119,33 @@ pub const EQ_RANGES: EqRanges = EqRanges {
     replay_gain_preamp: Span { min: REPLAY_GAIN_PREAMP.0, max: REPLAY_GAIN_PREAMP.1 },
 };
 
-/// One kind of band as the editor shows it: its name, whether it has a gain to set, and which marks
-/// its label gets.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One kind of band (`EqKind`, by its ordinal) as the editor needs it: whether it has a gain to set, and
+/// whether its width is a slope. The client names each kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct BandKindInfo {
-    pub label: String,
     pub uses_gain: bool,
     /// A shelf given by its slope rather than a Q.
     pub slope: bool,
 }
 
-/// The words every enum setting is shown with, in ordinal order; asked once.
+/// What the equalizer editor needs of the core besides the bands: each band kind's facts, in `EqKind`'s
+/// order, and the sliders' ranges; asked once. Every word on the screen is the client's.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
-pub struct SettingLabels {
-    pub auto_fill_kinds: Vec<String>,
-    pub auto_fill_bases: Vec<String>,
-    pub home_rows: Vec<String>,
+pub struct EqModel {
     pub band_kinds: Vec<BandKindInfo>,
-    pub band_channels: Vec<String>,
     pub eq_ranges: EqRanges,
 }
 
-fn strings(v: &[&str]) -> Vec<String> {
-    v.iter().map(|s| s.to_string()).collect()
-}
-
-pub fn labels() -> SettingLabels {
-    SettingLabels {
-        auto_fill_kinds: strings(&AUTO_FILL_KIND_LABELS),
-        auto_fill_bases: strings(&AUTO_FILL_BASIS_LABELS),
-        home_rows: strings(&HOME_ROW_TITLES),
-        band_kinds: BAND_KIND_LABELS
-            .iter()
-            .enumerate()
-            .map(|(k, l)| BandKindInfo {
-                label: l.to_string(),
-                uses_gain: nori_player::dsp::uses_gain(k as i32),
-                slope: k as i32 == EqKind::LowShelfSlope as i32 || k as i32 == EqKind::HighShelfSlope as i32,
+pub fn eq_model() -> EqModel {
+    EqModel {
+        band_kinds: (0..BAND_KINDS)
+            .map(|k| BandKindInfo {
+                uses_gain: nori_player::dsp::uses_gain(k),
+                slope: k == EqKind::LowShelfSlope as i32 || k == EqKind::HighShelfSlope as i32,
             })
             .collect(),
-        band_channels: strings(&BAND_CHANNEL_LABELS),
         eq_ranges: EQ_RANGES,
     }
 }
@@ -1251,43 +1210,79 @@ pub enum EqLevel {
     ReplayGainPreamp,
 }
 
+/// A balance near the middle is the middle: within 4 % of it the slider snaps to 0.
+pub fn balance_snap(v: f32) -> f32 {
+    if v.abs() < 0.04 { 0.0 } else { v }
+}
+
+/// Crossfeed under a decibel is none at all.
+pub fn crossfeed_snap(db: f32) -> f32 {
+    if db < 1.0 { 0.0 } else { db }
+}
+
 /// A level moved on the equalizer screen, held in its range; balance near the middle and crossfeed
-/// under a decibel snap to none (see `fmt::eq_balance_snap`, `fmt::eq_crossfeed_snap`).
+/// under a decibel snap to none ([`balance_snap`], [`crossfeed_snap`]).
 pub fn set_level(s: SoundSettings, level: EqLevel, value: f32) -> SoundSettings {
     let r = EQ_RANGES;
     match level {
         EqLevel::Preamp => SoundSettings { eq_preamp_db: Some(r.preamp.hold(value)), ..s },
-        EqLevel::Balance => SoundSettings { balance: nori_words::fmt::eq_balance_snap(r.balance.hold(value)), ..s },
+        EqLevel::Balance => SoundSettings { balance: balance_snap(r.balance.hold(value)), ..s },
         EqLevel::Limiter => SoundSettings { limiter_threshold_db: r.limiter.hold(value), ..s },
-        EqLevel::Crossfeed => SoundSettings { crossfeed_db: nori_words::fmt::eq_crossfeed_snap(r.crossfeed.hold(value)), ..s },
+        EqLevel::Crossfeed => SoundSettings { crossfeed_db: crossfeed_snap(r.crossfeed.hold(value)), ..s },
         EqLevel::ReplayGainPreamp => SoundSettings { preamp_db: r.replay_gain_preamp.hold(value), ..s },
     }
+}
+
+/// Why nothing on the equalizer screen reaches the sound; the client says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[repr(u8)]
+pub enum EqBypass {
+    /// Bit-perfect USB output is active.
+    BitPerfect,
+    /// High quality output is on (and can be turned off in the settings).
+    HiRes,
 }
 
 /// Why nothing on the equalizer screen reaches the sound, or `None` when it does. Bit-perfect output
 /// and high quality output both hand the file's samples to the DAC untouched, so the whole chain is
 /// out of the path; without this the screen looks broken.
-pub fn eq_bypass(hi_res: bool, bit_perfect: bool) -> Option<String> {
+pub fn eq_bypass(hi_res: bool, bit_perfect: bool) -> Option<EqBypass> {
     if bit_perfect {
-        Some("Bit-perfect USB output is active, so nothing here touches the audio.".into())
+        Some(EqBypass::BitPerfect)
     } else if hi_res {
-        Some("High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound.".into())
+        Some(EqBypass::HiRes)
     } else {
         None
     }
 }
 
-/// A band's label for the band list: its frequency and a mark for its channel or kind.
-pub fn band_label(b: &SoundBand) -> String {
-    let k = b.kind;
-    let low = k == EqKind::LowShelf as i32 || k == EqKind::LowShelfSlope as i32;
-    let high = k == EqKind::HighShelf as i32 || k == EqKind::HighShelfSlope as i32;
-    nori_words::fmt::eq_band_label(b.freq, b.channel == 1, b.channel == 2, low, high, nori_player::dsp::uses_gain(k))
+/// What a band's label marks after its frequency (the client draws it: "1k L", "63 ↙").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum BandMark {
+    None,
+    /// One channel only.
+    Left,
+    Right,
+    LowShelf,
+    HighShelf,
+    /// A band with no gain (a notch, a pass).
+    NoGain,
 }
 
-/// Under a saved profile: which devices use it, by name, or that choosing it loads it.
-pub fn profile_use(devices: &[String]) -> String {
-    if devices.is_empty() { "Choose to load".into() } else { format!("Used for {}", devices.join(", ")) }
+/// A band's mark: its channel, a shelf, or no gain, in that order of precedence.
+pub fn band_mark(kind: i32, channel: i32) -> BandMark {
+    let low = kind == EqKind::LowShelf as i32 || kind == EqKind::LowShelfSlope as i32;
+    let high = kind == EqKind::HighShelf as i32 || kind == EqKind::HighShelfSlope as i32;
+    match channel {
+        1 => BandMark::Left,
+        2 => BandMark::Right,
+        _ if low => BandMark::LowShelf,
+        _ if high => BandMark::HighShelf,
+        _ if !nori_player::dsp::uses_gain(kind) => BandMark::NoGain,
+        _ => BandMark::None,
+    }
 }
 
 // ---- server profiles ----
@@ -1373,10 +1368,10 @@ pub fn profile_from_form(p: SavedServer, headers: &str) -> SavedServer {
 
 // ---- the doors ----
 
-/// Every enum setting's words, the band kinds and the equalizer's ranges; asked once.
+/// The band kinds' facts and the equalizer's ranges; asked once.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn setting_labels() -> SettingLabels {
-    labels()
+pub fn eq_model_get() -> EqModel {
+    eq_model()
 }
 
 /// The settings as a fresh install has them.
@@ -1406,18 +1401,13 @@ pub fn eq_effective_preamp_db(sound: SoundSettings) -> f32 {
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<String> {
+pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<EqBypass> {
     eq_bypass(hi_res, bit_perfect)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn eq_band_name(band: SoundBand) -> String {
-    band_label(&band)
-}
-
-#[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn words_profile_use(devices: Vec<String>) -> String {
-    profile_use(&devices)
+pub fn eq_band_mark(band: SoundBand) -> BandMark {
+    band_mark(band.kind, band.channel)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -1489,7 +1479,7 @@ pub fn eq_apply_preset(sound: SoundSettings, preset: NamedPreset) -> SoundSettin
 /// A preset file the user picked or downloaded; an error, with what to say, when it has no filters.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn eq_import(sound: SoundSettings, text: String) -> Result<SoundSettings, SoundError> {
-    import(sound, &text, "that file had no filters in it")
+    import(sound, &text)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -1713,11 +1703,6 @@ mod tests {
         assert_eq!(set_by_name(&StoredPrefs { eq_preamp_db: Some(2.0), ..p.clone() }, "eqPreampDb", "auto").unwrap().prefs.eq_preamp_db, None);
         assert!(set_by_name(&p, "mono", "1").unwrap().prefs.mono);
         assert!(!set_by_name(&StoredPrefs { mono: true, ..p.clone() }, "mono", "yes").unwrap().prefs.mono);
-        assert_eq!(set_by_name(&p, "playbackEngine", "rust").unwrap().prefs.playback_engine, 1, "tools/app.sh set playbackEngine rust");
-        assert_eq!(set_by_name(&p, "playbackEngine", "exoplayer").unwrap().prefs.playback_engine, 0, "tools/app.sh set playbackEngine exoplayer");
-        assert_eq!(load(&save(&StoredPrefs { playback_engine: 1, ..p.clone() })).playback_engine, 1, "kept");
-        assert_eq!(load(&save(&StoredPrefs { playback_engine: 0, ..p.clone() })).playback_engine, 0, "an install that stored ExoPlayer keeps it");
-        assert_eq!(load(&HashMap::new()).playback_engine, 1, "a new install plays through nori-engine");
         assert_eq!(set_by_name(&p, "parallelDownloads", "99").unwrap().prefs.parallel_downloads, 10);
         assert_eq!(set_by_name(&p, "coversAhead", "x").unwrap().prefs.covers_ahead, 3, "unreadable keeps the value");
         let cache = set_by_name(&p, "cacheMb", "10").unwrap();
@@ -1824,28 +1809,11 @@ mod tests {
     }
 
     #[test]
-    fn labels_are_the_screens_words() {
-        let l = labels();
-        assert_eq!(l.auto_fill_kinds, ["Songs", "Albums"]);
-        assert_eq!(l.auto_fill_bases, ["Similar music", "The same artist", "The same genre", "The same era"]);
-        assert_eq!(l.home_rows[0], "Favourite playlists");
-        assert_eq!(l.home_rows[7], "Favourite albums");
-        assert_eq!(l.band_channels, ["Both", "Left", "Right"]);
-        let kinds: Vec<(&str, bool, bool)> = l.band_kinds.iter().map(|k| (k.label.as_str(), k.uses_gain, k.slope)).collect();
+    fn the_band_kinds_facts() {
+        let kinds: Vec<(bool, bool)> = eq_model().band_kinds.iter().map(|k| (k.uses_gain, k.slope)).collect();
         assert_eq!(
             kinds,
-            [
-                ("Peak", true, false),
-                ("Low shelf", true, false),
-                ("High shelf", true, false),
-                ("Low pass", false, false),
-                ("High pass", false, false),
-                ("Band pass", false, false),
-                ("Notch", false, false),
-                ("All pass", false, false),
-                ("Low shelf (slope)", true, true),
-                ("High shelf (slope)", true, true),
-            ]
+            [(true, false), (true, false), (true, false), (false, false), (false, false), (false, false), (false, false), (false, false), (true, true), (true, true)]
         );
     }
 
@@ -1898,21 +1866,19 @@ mod tests {
     #[test]
     fn why_the_equalizer_does_nothing() {
         assert_eq!(eq_bypass(false, false), None);
-        assert_eq!(eq_bypass(true, true).unwrap(), "Bit-perfect USB output is active, so nothing here touches the audio.");
-        assert_eq!(eq_bypass(true, false).unwrap(), "High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound.");
+        assert_eq!(eq_bypass(true, true), Some(EqBypass::BitPerfect));
+        assert_eq!(eq_bypass(true, false), Some(EqBypass::HiRes));
     }
 
     #[test]
-    fn band_labels_and_profile_lines() {
-        let b = |kind: i32, channel: i32| band_label(&SoundBand { kind, freq: 1000.0, gain_db: 0.0, q: 1.0, channel });
-        assert_eq!(b(0, 0), "1k");
-        assert_eq!(b(1, 1), "1k L");
-        assert_eq!(b(8, 0), "1k ↙");
-        assert_eq!(b(2, 0), "1k ↗");
-        assert_eq!(b(9, 2), "1k R");
-        assert_eq!(b(6, 0), "1k ∿");
-        assert_eq!(profile_use(&[]), "Choose to load");
-        assert_eq!(profile_use(&["Qudelix".into(), "Phone speaker".into()]), "Used for Qudelix, Phone speaker");
+    fn band_marks_and_snaps() {
+        assert_eq!(band_mark(0, 0), BandMark::None);
+        assert_eq!(band_mark(1, 1), BandMark::Left);
+        assert_eq!(band_mark(8, 0), BandMark::LowShelf);
+        assert_eq!(band_mark(2, 0), BandMark::HighShelf);
+        assert_eq!(band_mark(9, 2), BandMark::Right);
+        assert_eq!(band_mark(6, 0), BandMark::NoGain);
+        assert_eq!((balance_snap(0.03), crossfeed_snap(0.9), crossfeed_snap(2.0)), (0.0, 0.0, 2.0));
     }
 
     #[test]
@@ -1960,12 +1926,12 @@ mod tests {
 
     #[test]
     fn equalizer_edits() {
-        let flat = NamedPreset { name: "Flat".into(), preamp_db: 0.0, bands: vec![] };
+        let flat = NamedPreset { kind: nori_model::PresetKind::Flat, preamp_db: 0.0, bands: vec![] };
         let s = apply_preset(SoundSettings { eq_preamp_db: Some(-4.0), ..sound() }, &flat);
         assert!(s.eq_enabled);
         assert_eq!(s.eq_preamp_db, None, "a pre-amp of 0 is automatic");
         assert_eq!(s.eq_bands, graphic());
-        let bass = NamedPreset { name: "Bass".into(), preamp_db: -6.0, bands: vec![nori_model::EqBand { kind: EqKind::LowShelf, freq: 100.0, gain_db: 6.0, q: 0.7 }] };
+        let bass = NamedPreset { kind: nori_model::PresetKind::BassBoost, preamp_db: -6.0, bands: vec![nori_model::EqBand { kind: EqKind::LowShelf, freq: 100.0, gain_db: 6.0, q: 0.7 }] };
         let s = apply_preset(sound(), &bass);
         assert_eq!(s.eq_preamp_db, Some(-6.0));
         assert_eq!(s.eq_bands, [SoundBand { kind: 1, freq: 100.0, gain_db: 6.0, q: 0.7, channel: 0 }]);
@@ -1981,12 +1947,12 @@ mod tests {
 
     #[test]
     fn importing_a_preset() {
-        let s = import(sound(), "Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n", "empty").unwrap();
+        let s = import(sound(), "Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n").unwrap();
         assert!(s.eq_enabled);
         assert_eq!(s.eq_preamp_db, Some(-6.2));
         assert_eq!(s.eq_bands.len(), 1);
-        assert_eq!(import(sound(), "Preamp: 0 dB\n", "empty").unwrap_err().to_string(), "empty");
-        let zero = import(sound(), "Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n", "e").unwrap();
+        assert!(matches!(import(sound(), "Preamp: 0 dB\n"), Err(SoundError::NoFilters)));
+        let zero = import(sound(), "Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70\n").unwrap();
         assert_eq!(zero.eq_preamp_db, Some(0.0), "an imported pre-amp is kept even at 0");
     }
 

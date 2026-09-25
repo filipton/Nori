@@ -1,6 +1,7 @@
-//! The words a record carries about itself, made when it is read (model.rs): a song row's second line,
-//! an album card's subtitle, an artist's album count, a playlist's line. They live under the records so
-//! a record can dress itself; the rest of what the app says is nori-words', which uses these as they are.
+//! What a record carries about itself beyond the server's fields, made when it is read (model.rs): which
+//! service a provider's item comes from, a song row's second line and an album card's subtitle. None of
+//! it is worded: they put the record's own names together with a mark (🅴, ☁) and a " · ". Anything
+//! that says something in words ("12 songs") is each client's own.
 
 /// "ext-deezer-song-123" -> "Deezer": which service an octo-fiesta item comes from.
 pub fn provider_of(id: &str) -> Option<String> {
@@ -48,24 +49,4 @@ pub fn song_line(explicit_status: &str, artist: &str, page_artist: Option<&str>)
         out.push_str(artist);
     }
     out
-}
-
-/// "1 song", "2 songs": `n` and the word for one or for many.
-pub fn counted(n: u32, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
-/// How many songs a list holds: "1 song", "12 songs".
-pub fn songs(n: u32) -> String {
-    counted(n, "song", "songs")
-}
-
-/// How many albums an artist has: "1 album", "12 albums".
-pub fn albums(n: u32) -> String {
-    counted(n, "album", "albums")
-}
-
-/// A playlist's line in the library: "12 songs · 48:10".
-pub fn playlist_line(songs_in_it: u32, seconds: u32) -> String {
-    format!("{} · {}", songs(songs_in_it), nori_text::duration(seconds as i64, false))
 }

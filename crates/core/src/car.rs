@@ -10,7 +10,7 @@ pub use nori_library::car::*;
 impl Client {
     /// The root folder of the tree.
     pub fn browse_root(&self) -> BrowseFolder {
-        folder(ROOT, "nori")
+        folder(ROOT, CarFolder::Root)
     }
 
     /// What the folder `parent` holds; nothing for one that is not known or cannot be read now.
@@ -27,7 +27,7 @@ impl Client {
                 Ok(Page::Albums { v }) => BrowsePage {
                     folders: v
                         .iter()
-                        .map(|a| BrowseFolder { id: format!("album:{}", a.id), title: a.name.clone(), subtitle: Some(a.artist.clone()), art: art(&a.cover_art) })
+                        .map(|a| BrowseFolder { id: format!("album:{}", a.id), kind: None, title: a.name.clone(), subtitle: Some(a.artist.clone()), songs: None, art: art(&a.cover_art) })
                         .collect(),
                     songs: Vec::new(),
                 },
@@ -40,8 +40,10 @@ impl Client {
                         .iter()
                         .map(|p| BrowseFolder {
                             id: format!("playlist:{}", p.id),
+                            kind: None,
                             title: p.name.clone(),
-                            subtitle: Some(format!("{} songs", p.song_count)),
+                            subtitle: None,
+                            songs: Some(p.song_count),
                             art: art(&p.cover_art),
                         })
                         .collect(),
@@ -77,11 +79,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_playlist_folder_says_how_many_songs() {
+    fn a_playlist_folder_has_its_count_of_songs() {
         let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
         fake.answer(r#"{"subsonic-response":{"status":"ok","playlists":{"playlist":[{"id":"p1","name":"Evening","songCount":12}]}}}"#);
         let p = block(c.browse_children("playlists".into()));
-        assert_eq!(p.folders, vec![BrowseFolder { id: "playlist:p1".into(), title: "Evening".into(), subtitle: Some("12 songs".into()), art: None }]);
+        assert_eq!(p.folders, vec![BrowseFolder { id: "playlist:p1".into(), kind: None, title: "Evening".into(), subtitle: None, songs: Some(12), art: None }]);
         assert!(block(c.browse_children("nonsense".into())).folders.is_empty());
     }
 }

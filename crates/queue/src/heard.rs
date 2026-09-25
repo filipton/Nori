@@ -1,11 +1,11 @@
 //! Which song the ear is on and where, for the app's seek bar and now-playing page:
-//! `nori_player::heard` fed with the transition engine's latest reading. Asked every frame the bar is
-//! drawn, so the answer is a few numbers, packed into one `i64` for a platform that asks across a
-//! language boundary, and nothing is allocated.
+//! `nori_player::heard` over the player's own word. The player plays through its own transition engine
+//! and says itself which song is heard, so no held ending is ever told here: the tracker is given
+//! nothing held. Asked every frame the bar is drawn, so the answer is a few numbers, packed into one
+//! `i64` for a platform that asks across a language boundary, and nothing is allocated.
 
 use nori_player::engine::Heard;
 use nori_player::heard::{HeardTracker, Playhead, Seen};
-use parking_lot::Mutex;
 
 /// Nothing held and nothing mixing: the player's own word stands.
 const NOTHING: Heard = Heard {
@@ -20,35 +20,6 @@ const NOTHING: Heard = Heard {
     from_id: None,
     audible_us: i64::MAX,
 };
-
-/// The engine's latest word on what the ear has, for [`HeardClock`].
-static HEARD: Mutex<Heard> = Mutex::new(NOTHING);
-
-/// Forgets the last word: for a player with no transition engine publishing here (the Rust engine says
-/// itself which song is heard), so that what one let go of in the middle of a mix last said - a song
-/// held, the next one coming in - does not go on putting that song on the page.
-pub fn forget() {
-    *HEARD.lock() = NOTHING;
-}
-
-/// What the engine says the ear has now, after each call made on it. Asked about on every position
-/// query while a hold or mix runs, so it is copied in place, reusing the strings it already has.
-pub fn publish(heard: &Heard) {
-    let mut shared = HEARD.lock();
-    if *shared != *heard {
-        shared.assign(heard);
-    }
-}
-
-/// Whether a mix is being heard right now (for the test bridge and logs).
-pub fn mixing() -> bool {
-    HEARD.lock().mixing
-}
-
-/// Whether the ear is behind the player on a held ending (for logs).
-pub fn holding() -> bool {
-    HEARD.lock().id.is_some()
-}
 
 const MS_BITS: u32 = 43;
 
@@ -151,13 +122,12 @@ impl HeardClock {
     }
 
     fn seen(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64) -> Seen {
-        let heard = HEARD.lock();
         let rev = crate::playlist::playlist_rev();
         if self.rev != rev {
             self.rev = rev;
             self.t.set_queue(crate::playlist::with(|p| crate::queue::durations(p.ids())));
         }
-        self.t.at_index(&heard, now_ms, playing, on, next, position_ms)
+        self.t.at_index(&NOTHING, now_ms, playing, on, next, position_ms)
     }
 }
 

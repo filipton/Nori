@@ -363,13 +363,13 @@ pub(crate) mod tests {
     fn empty_error_status_is_a_failure_but_an_error_body_is_read() {
         let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
         fake.answers.lock().push_back(Ok((502, vec![])));
-        assert!(matches!(block(c.fetch("ping", vec![])), Err(NetError::Transport { kind: FailureKind::Io, detail: Some(d) }) if d == "HTTP 502"));
+        assert!(matches!(block(c.fetch("ping", vec![])), Err(NetError::Http { status: 502 })));
         fake.answers.lock().push_back(Ok((401, br#"{"subsonic-response":{"status":"failed","error":{"code":40,"message":"no"}}}"#.to_vec())));
         let body = block(c.fetch("ping", vec![])).unwrap();
         assert!(matches!(c.core.parse_status(body), Err(crate::CoreError::Api { code: 40, .. })));
         // A proxy's own page for a server that is down says its status, not that the answer did not parse.
         fake.answers.lock().push_back(Ok((522, b"<html><body>error code: 522</body></html>".to_vec())));
-        assert!(matches!(block(c.fetch("ping", vec![])), Err(NetError::Transport { kind: FailureKind::Io, detail: Some(d) }) if d == "HTTP 522"));
+        assert!(matches!(block(c.fetch("ping", vec![])), Err(NetError::Http { status: 522 })));
     }
 
     #[test]

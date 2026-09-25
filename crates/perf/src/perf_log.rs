@@ -351,8 +351,8 @@ pub fn perf_state(charging: bool, screen_on: bool, playing: bool, foreground: bo
 }
 
 /// The settings that change what playing costs, in one line, the playback path first: `engine` is the
-/// player the running service built ("exoplayer" or "rust"); with no service yet, the one the setting
-/// will start. A change of this line ends a stretch as a change of state does.
+/// player the running service built ("rust"; with no service yet, the one it will start). A change of
+/// this line ends a stretch as a change of state does.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_config(engine: Option<String>) -> String {
     let p = settings_store::current().unwrap_or_default();
@@ -361,7 +361,7 @@ pub fn perf_config(engine: Option<String>) -> String {
 
 fn config(engine: Option<String>, p: &nori_settings::settings::StoredPrefs) -> String {
     let on = |b: bool| if b { "on" } else { "off" };
-    let engine = engine.unwrap_or_else(|| if p.playback_engine == 1 { "rust" } else { "exoplayer" }.into());
+    let engine = engine.unwrap_or_else(|| "rust".into());
     format!(
         "engine {engine}, eq {}, automix {}, crossfade {} s, offload {}, hi-res {}, bit-perfect {}",
         on(p.eq_enabled),
@@ -586,10 +586,20 @@ fn state_name(key: &str) -> &str {
 
 // ---- saying them ----
 
-/// Java's `"%.{places}f"` as `Locale.ROOT` writes it: the report reads the same on every phone.
+/// Java's `"%.{places}f"` as `Locale.ROOT` writes it: the report reads the same on every phone. Halves
+/// round up on the number's shortest decimal form (0.15 is "0.2"), as Java's do and Rust's `{:.1}` does not.
 fn fixed(v: f64, places: i32) -> String {
     let v = if v.is_finite() { v } else { 0.0 };
-    nori_text::fixed_in(v, places, false, '.')
+    let places = places.max(0) as usize;
+    let shortest = format!("{}", v.abs());
+    let a = match shortest.split_once('.') {
+        Some((whole, frac)) if frac.len() > places => {
+            let kept: f64 = format!("{whole}.{}", &frac[..places]).parse().unwrap_or(v.abs());
+            if frac.as_bytes()[places] >= b'5' { kept + 10f64.powi(-(places as i32)) } else { kept }
+        }
+        _ => v.abs(),
+    };
+    format!("{}{:.*}", if v.is_sign_negative() { "-" } else { "" }, places, a)
 }
 
 fn cpu_pct(cpu_ms: i64, ms: i64) -> f64 {
@@ -1587,6 +1597,21 @@ mod tests {
         }
     }
 
+    /// Printed by Java's `String.format` (OpenJDK 21, root locale): value bits (f64), places, plus, result.
+    const JAVA_FIXED: &[(u64, i32, bool, &str)] = include!("../testdata/java_fixed.in");
+
+    #[test]
+    fn figures_round_as_java_does() {
+        for &(bits, places, plus, want) in JAVA_FIXED {
+            let v = f64::from_bits(bits);
+            let got = fixed(v, places);
+            let got = if plus && !v.is_sign_negative() { format!("+{got}") } else { got };
+            assert_eq!(got, want, "{v} to {places}");
+        }
+        assert_eq!((fixed(0.15, 1), fixed(62.5, 0), fixed(-0.04, 1), fixed(9.96, 1)), ("0.2".into(), "63".into(), "-0.0".into(), "10.0".into()));
+        assert_eq!((fixed(1e-7, 3), fixed(0.0005, 3), fixed(f64::NAN, 1)), ("0.000".into(), "0.001".into(), "0.0".into()));
+    }
+
     #[test]
     fn keeps_rows_in_order_and_forgets_old_ones() {
         let c = Connection::open_in_memory().unwrap();
@@ -1648,11 +1673,10 @@ mod tests {
             offload: true,
             hi_res: false,
             bit_perfect: false,
-            playback_engine: 1,
             ..Default::default()
         };
         assert_eq!(config(None, &p), "engine rust, eq on, automix off, crossfade 6 s, offload on, hi-res off, bit-perfect off");
-        assert!(config(Some("exoplayer".into()), &p).starts_with("engine exoplayer, "), "the running service's own path wins");
+        assert!(config(Some("other".into()), &p).starts_with("engine other, "), "the running service's own path wins");
     }
 
     #[test]

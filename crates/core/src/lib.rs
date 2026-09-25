@@ -16,7 +16,7 @@ pub mod browse;
 pub mod covers;
 pub mod motion;
 pub mod search;
-pub mod words;
+pub mod shown;
 pub mod client;
 pub mod cache_policy;
 pub mod race;
@@ -37,6 +37,7 @@ use serde::Deserialize;
 
 pub use nori_db::{self as db, background};
 pub use nori_model::{alog, lines, model, CoreError};
+pub use nori_automix::beat_model;
 pub use nori_devices::{autoeq, outputs};
 pub use nori_library::{menus, pages, rows, stars};
 pub use nori_lyrics::lyrics::lyrics_from_lrc;
@@ -45,9 +46,8 @@ pub use nori_net::{api, transport};
 pub use nori_perf::perf_log;
 pub use nori_queue::{heard, rules, scrobble};
 pub use nori_transfers::stream_cache;
-pub use nori_settings::{decoder, dsp, settings, settings_schema, settings_store};
+pub use nori_settings::{credits, dsp, lyrics_sources, settings, settings_model, settings_store};
 pub use nori_settings::settings::parse_eq_preset;
-pub use nori_words::fmt;
 pub use nori_model::model::*;
 pub use nori_library::pages::{AlbumDetail, ArtistDetail, PlaylistDetail, Starred};
 

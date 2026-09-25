@@ -15,23 +15,12 @@ import dev.nori.music.settings.Band
 import dev.nori.music.settings.HomeRow
 import dev.nori.music.ffi.devices.ChoiceKind
 import dev.nori.music.ffi.devices.SpecKind
-import dev.nori.music.ffi.devices.deviceNotice
 import dev.nori.music.ffi.devices.deviceRows
 import dev.nori.music.ffi.devices.deviceSpec
 import dev.nori.music.ffi.settings.eqPresets
 import dev.nori.music.ffi.settings.SoundTool
-import dev.nori.music.ffi.devices.AutoEqHit
-import dev.nori.music.ffi.settings.DacFacts
 import dev.nori.music.ffi.settings.EqLevel
 import dev.nori.music.ffi.settings.SettingChange
-import dev.nori.music.ffi.settings.SettingsFacts
-import dev.nori.music.ffi.settings.SettingsGroup
-import dev.nori.music.ffi.settings.SettingsHit
-import dev.nori.music.ffi.settings.SettingsPage
-import dev.nori.music.ffi.settings.StorageFacts
-import dev.nori.music.ffi.settings.SyncFacts
-import dev.nori.music.ffi.devices.autoeqCountWords
-import dev.nori.music.ffi.devices.autoeqHits
 import dev.nori.music.ffi.settings.serverNewId
 import dev.nori.music.ffi.settings.settingSet
 import dev.nori.music.ffi.settings.soundFromJson
@@ -78,6 +67,13 @@ data class AutoEqUi(
  */
 data class DeviceRow(val output: String, val name: String, val kind: String?, val current: Boolean, val sound: String, val choice: DeviceSound.Choice)
 
+/** One AutoEQ curve with the lines under it, in the app's words: [caption] in the browser, [short] in a device's sheet. */
+data class AutoEqHit(val entry: dev.nori.music.ffi.model.AutoEqEntry, val caption: String, val short: String) {
+    companion object {
+        fun of(e: dev.nori.music.ffi.model.AutoEqEntry) = AutoEqHit(e, dev.nori.music.app.ui.say.autoeqCaption(e), dev.nori.music.app.ui.say.autoeqShort(e))
+    }
+}
+
 /** A line for the snackbar about the device that just connected, with the one thing it offers to do. */
 data class EqNotice(val message: String, val action: String, val source: DeviceSound.Notice)
 
@@ -107,15 +103,29 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     fun update(change: (Prefs) -> Prefs) = nori.settings.update(change)
 
-    // ---- the settings screen, laid out by the core (settings_schema.rs) ----
+    // ---- the settings screen (SettingsPages.kt), on the core's settings model (nori-settings, settings_model.rs) ----
 
-    /** The groups the root of Settings lists. */
-    val settingsGroups: List<SettingsGroup> by lazy { dev.nori.music.ffi.settings.settingsGroups() }
+    /** The groups the root of Settings lists, in [res]'s language. */
+    fun settingsGroups(res: android.content.res.Resources): List<SettingsGroup> = dev.nori.music.app.vm.settingsGroups(res)
 
-    fun searchSettings(query: String): List<SettingsHit> = dev.nori.music.ffi.settings.settingsSearch(query)
+    private var search: Pair<android.content.res.Resources, SettingsSearch>? = null
 
-    /** One group's page for the settings as they are now; asked only when they or [settingsFacts] change. */
-    fun settingsPage(id: String, facts: SettingsFacts): SettingsPage? = dev.nori.music.ffi.settings.settingsPage(id, facts)
+    /** The rows whose title (first) or words (after) contain [query]; the index is built once per [res]. */
+    fun searchSettings(query: String, res: android.content.res.Resources): List<SettingsHit> {
+        val s = search?.takeIf { it.first === res }?.second
+            ?: SettingsSearch(res, dev.nori.music.ffi.settings.settingsState(false, false).beatModel !is dev.nori.music.ffi.settings.BeatModel.Unavailable).also { search = res to it }
+        return s.find(query)
+    }
+
+    /**
+     * One group's page for settings [p] and [facts], in [res]'s language: one call into the core for what
+     * its rules make of the settings, asked only when they or [facts] change.
+     */
+    fun settingsPage(id: String, p: Prefs, facts: SettingsFacts, res: android.content.res.Resources): SettingsPage? =
+        settingsPage(res, id, p, facts, dev.nori.music.ffi.settings.settingsState(facts.dac.bitPerfect, facts.dac.device != null))
+
+    /** Whether the settings action [action] asks first, and what it says; null for one done at once. */
+    fun actionAsks(action: String, res: android.content.res.Resources): ActionAsk? = settingsActionAsks(res, action, settingsFacts.value)
 
     /** What a settings page depends on besides the settings, from this platform. */
     val settingsFacts: StateFlow<SettingsFacts> by lazy {
@@ -124,16 +134,14 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     private fun factsOf(d: DacState, s: SyncUi, st: StorageUi, analysed: Int, folders: List<MusicFolder>) = SettingsFacts(
-        dac = DacFacts(d.device, d.bitPerfect, d.sampleRate.toUInt(), d.bits.toUInt(), d.supported, d.modes, d.blockedBy, d.playing, d.track),
+        dac = d,
         // Wallpaper colours and the blurred sleeve both need Android 12.
         wallpaperColours = android.os.Build.VERSION.SDK_INT >= 31,
         coverBlur = android.os.Build.VERSION.SDK_INT >= 31,
-        analysed = analysed.toUInt(),
-        sync = SyncFacts(s.running, s.indexed.songs, s.indexed.albums, s.indexed.artists, s.error),
-        storage = StorageFacts(st.streamBytes, st.coverBytes, st.downloadBytes, st.downloadSongs.toUInt(), st.indexBytes, st.busy, st.lyricsBytes),
+        analysed = analysed,
+        sync = s,
+        storage = st,
         folders = folders,
-        // A phone does everything the settings have rows for: none are left out.
-        lacks = emptyList(),
     )
 
     /** A row's setting changed: its name and the value picked, which the core reads and applies. */
@@ -363,7 +371,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         // Filled from the start, so the list is there on the screen's first frame rather than popping in.
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), deviceRowsOf(nori.outputs.known.value, currentOutput.value, profiles.value, devices.quiet.value))
 
-    /** The rows are the core's (nori_player::device::rows); only the choice is turned into the screen's type. */
+    /** The rows are the core's (nori_player::device::rows); their words are Say's, made once per change of the list. */
     private fun deviceRowsOf(known: List<String>, current: String, profiles: List<SoundProfile>, quiet: List<String>): List<DeviceRow> =
         deviceRows(known, current, profiles, quiet).map { r ->
             val choice = when (r.choice) {
@@ -372,7 +380,14 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 ChoiceKind.FLAT -> DeviceSound.Choice.Flat
                 ChoiceKind.PROFILE -> DeviceSound.Choice.Profile(r.profile.orEmpty())
             }
-            DeviceRow(r.output, r.name, r.kind, r.current, r.sound, choice)
+            val say = dev.nori.music.app.ui.say
+            val sound = when (r.choice) {
+                ChoiceKind.AUTOMATIC -> say.automatic
+                ChoiceKind.QUIET -> say.leaveAsIs
+                ChoiceKind.FLAT -> say.flat
+                ChoiceKind.PROFILE -> r.profile.orEmpty()
+            }
+            DeviceRow(r.output, say.outputName(r.port, r.name), say.outputKind(r.port), r.current, sound, choice)
         }
 
     private val _assigning = MutableStateFlow<String?>(null)
@@ -405,13 +420,13 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     /** What to say about the device that just connected; only while it is still the one playing. */
     val eqNotice: StateFlow<EqNotice?> = combine(devices.notice, currentOutput) { n, current ->
-        // The wording, and whether the device is still the one playing, are the core's (device_notice).
+        // Only about the device still playing; the words are Say's.
         val text = when (n) {
-            is DeviceSound.Offer -> deviceNotice(true, n.entry.name, n.output, current)
-            is DeviceSound.Applied -> deviceNotice(false, n.curve, n.output, current)
+            is DeviceSound.Offer -> dev.nori.music.app.ui.say.deviceNotice(true, n.entry.name)
+            is DeviceSound.Applied -> dev.nori.music.app.ui.say.deviceNotice(false, n.curve)
             null -> null
         }
-        if (n == null || text == null) null else EqNotice(text.message, text.action, n)
+        if (n == null || text == null || n.output != current) null else EqNotice(text.first, text.second, n)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** The notice is on screen now, so it is not shown again. */
@@ -445,7 +460,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     init { viewModelScope.launch { val n = runCatching { nori.core.autoeqCount() }.getOrDefault(0u); _autoEq.update { it.counted(n) } } }
 
-    private fun AutoEqUi.counted(n: UInt) = autoeqCountWords(n).let { w -> copy(count = n.toInt(), countWords = w.count, searchWords = w.search) }
+    private fun AutoEqUi.counted(n: UInt) = copy(count = n.toInt(), countWords = dev.nori.music.app.ui.say.autoeqCount(n.toInt()), searchWords = dev.nori.music.app.ui.say.autoeqSearch(n.toInt()))
 
     /**
      * Downloads the AutoEQ index (850 kB) now so searching is local afterwards; the core otherwise keeps
@@ -467,7 +482,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         _autoEq.update { it.copy(query = query) }
         // Too short a query, the limit and the lines under each hit are the core's (autoeq_browse).
         val found = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqBrowse(query) }.getOrNull() }
-        _autoEq.update { if (it.query == query) it.copy(hits = found?.hits.orEmpty(), tooShort = found?.tooShort ?: true) else it }
+        _autoEq.update { if (it.query == query) it.copy(hits = found?.hits.orEmpty().map(AutoEqHit::of), tooShort = found?.tooShort ?: true) else it }
     }
 
     /**
@@ -475,7 +490,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
      * "Sony WH-1000XM5". Empty when the index is not downloaded or the name says nothing (the speaker, a
      * generic "USB Audio").
      */
-    suspend fun autoEqFor(output: String): List<AutoEqHit> = autoeqHits(devices.curvesFor(output))
+    suspend fun autoEqFor(output: String): List<AutoEqHit> = devices.curvesFor(output).map(AutoEqHit::of)
 
     /** Fetches one headphone's parametric preset and makes it the current curve. */
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {
@@ -487,7 +502,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
             if (text == null) {
                 // The core has taken it out of the list: the search and the count say so at once.
                 val n = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqCount() }.getOrDefault(0u) }
-                _autoEq.update { it.counted(n).copy(busy = false, error = dev.nori.music.ffi.words.wordsUi().autoeqNoCurve) }
+                _autoEq.update { it.counted(n).copy(busy = false, error = dev.nori.music.app.ui.say.autoeqNoCurve) }
                 searchAutoEq(_autoEq.value.query)
                 return@launch
             }

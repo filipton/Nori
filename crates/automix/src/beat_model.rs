@@ -1,22 +1,26 @@
 //! The file behind "Better beat detection" and how its download stands. The model is Beat This!'s small0
-//! checkpoint as ONNX with its attention fused and fp16 weights (tools/beat-this/export.py makes it; 5 MB),
-//! fetched once from a pinned address and checked against its SHA-256 (the core's `beat_model` does that, on
-//! nori-engine's measuring thread), kept beside the app's database, and deleted when the switch goes off. What
-//! it found stays stored either way.
+//! checkpoint as ONNX with its attention fused and fp16 weights (tools/beat-this/export.py makes it; 5 MB).
 //!
-//! Nothing here runs while the switch is off: no thread, no listener, and the file is not there.
+//! Two ways it reaches a client. Shipped with the app ([`set_bundled`]: the Android app stores it uncompressed
+//! in its APK and says where, so it is read in place, never copied), it is there from the start and nothing is
+//! downloaded. Otherwise it is fetched once from [`URL`] and checked against its SHA-256 (the core's
+//! `beat_download` does that, on nori-engine's measuring thread), kept beside the app's database, and deleted when
+//! the switch goes off. What it found stays stored either way.
+//!
+//! Nothing here runs while the switch is off: no thread, no listener, and no file is read or fetched.
 
 use std::path::{Path, PathBuf};
 
 use parking_lot::Mutex;
 
-/// Pinned: the release asset and its SHA-256 (5,069,715 bytes). A new model gets a new name, and files of an
-/// earlier one are deleted when it arrives.
+/// Pinned: the file's name, its SHA-256 and size, and where a client that does not ship it downloads it from (the
+/// one place to change when it is hosted somewhere else). A new model gets a new name, and files of an earlier one
+/// are deleted when it arrives. The Android build checks the file it bundles against these (core/build.gradle.kts).
 pub const FILE_NAME: &str = "beat-this-small0-v1.onnx";
 pub const URL: &str = "https://github.com/filipton/Nori/releases/download/beat-this-small0-v1/beat-this-small0-v1.onnx";
-pub const SHA256: &str = "4c1008bb81b1ec0f4b707bbf870fa3a69d76f016b9a08779ce9c5f564caa1845";
-pub const BYTES: u64 = 5_069_715;
-/// What the settings say it costs to download.
+pub const SHA256: &str = "847b51aaef519a60a47c815fa58440782de73bff7000210396673b0353e2cc8c";
+pub const BYTES: u64 = 5_069_707;
+/// About what it costs to download, in megabytes, for a settings screen to say.
 pub const SIZE_MB: u32 = 5;
 
 /// Where the model's download stands.
@@ -28,7 +32,20 @@ pub enum State {
     WaitingForWifi,
     Downloading,
     Ready,
-    Failed(String),
+    Failed(BeatFailure),
+}
+
+/// Why the model's download did not work, for the client to say (the details go to the log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+#[repr(u8)]
+pub enum BeatFailure {
+    /// The request failed or the server answered with an error.
+    Network,
+    /// Something arrived, but not the pinned file.
+    WrongFile,
+    /// It could not be written to the device.
+    Storage,
 }
 
 struct Kept {
@@ -41,11 +58,67 @@ struct Kept {
 
 static KEPT: Mutex<Kept> = Mutex::new(Kept { dir: None, state: State::Absent, on: false });
 
+/// Where the model's bytes are: `len` bytes from `offset` in the file at `path`. A downloaded model is a whole
+/// file; one shipped with the app is a stretch of its package.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Source {
+    pub path: PathBuf,
+    pub offset: u64,
+    pub len: u64,
+}
+
+impl Source {
+    /// The whole file at `path`.
+    pub fn whole(path: PathBuf) -> std::io::Result<Source> {
+        let len = std::fs::metadata(&path)?.len();
+        Ok(Source { path, offset: 0, len })
+    }
+
+    /// The model's bytes, read in one go.
+    pub fn read(&self) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(&self.path)?;
+        f.seek(SeekFrom::Start(self.offset))?;
+        let mut bytes = Vec::with_capacity(self.len as usize);
+        f.take(self.len).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != self.len {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the model's file is shorter than said"));
+        }
+        Ok(bytes)
+    }
+}
+
+/// The model shipped with the app, when it is.
+static BUNDLED: Mutex<Option<Source>> = Mutex::new(None);
+
+/// The app ships the model: `len` bytes from `offset` in the file at `path` (an asset stored uncompressed in the
+/// APK). Called once as the app starts, before anything measures; nothing is read here.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn beat_model_bundled(path: String, offset: u64, len: u64) {
+    set_bundled(Some(Source { path: path.into(), offset, len }));
+}
+
+/// The name the model's file has, in the app's assets as anywhere else.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn beat_model_file_name() -> String {
+    FILE_NAME.into()
+}
+
+pub fn set_bundled(source: Option<Source>) {
+    *BUNDLED.lock() = source;
+}
+
+/// The model shipped with the app, if this one ships it.
+pub fn bundled() -> Option<Source> {
+    BUNDLED.lock().clone()
+}
+
 /// The model is kept in `models` beside the app's database at `db_path` (none for a database in memory).
 pub fn set_home(db_path: &str) {
     let dir = Path::new(db_path).parent().filter(|_| !db_path.is_empty()).map(|p| p.join("models"));
     let mut k = KEPT.lock();
-    if k.state == State::Absent && dir.as_ref().is_some_and(|d| d.join(FILE_NAME).is_file()) {
+    // Only a checked download is ever renamed into place, so a file there is ready, whatever an earlier try said.
+    if k.state != State::Downloading && dir.as_ref().is_some_and(|d| d.join(FILE_NAME).is_file()) {
         k.state = State::Ready;
     }
     k.dir = dir;
@@ -56,11 +129,17 @@ pub fn file() -> Option<PathBuf> {
     KEPT.lock().dir.as_ref().map(|d| d.join(FILE_NAME))
 }
 
-/// The model's file, when it is on the device and checked.
-pub fn ready() -> Option<PathBuf> {
+/// The model, when it is on the device: shipped with the app, or downloaded and checked.
+pub fn ready() -> Option<Source> {
+    if let Some(b) = bundled() {
+        return Some(b);
+    }
     let k = KEPT.lock();
     let f = k.dir.as_ref()?.join(FILE_NAME);
-    (k.state == State::Ready && f.is_file()).then_some(f)
+    if k.state != State::Ready {
+        return None;
+    }
+    Source::whole(f).ok()
 }
 
 pub fn state() -> State {
@@ -87,20 +166,6 @@ pub fn switched(on: bool) {
     }
 }
 
-/// What "Better beat detection" says under its title.
-pub fn detail(on: bool) -> String {
-    if !on {
-        return format!("Listens to the start and end of each song so mixes land on the beat. A one-time download of about {SIZE_MB} MB.");
-    }
-    match state() {
-        State::Absent => format!("Downloaded (about {SIZE_MB} MB) the next time AutoMix measures a song."),
-        State::WaitingForWifi => format!("Waiting for Wi-Fi to download it (about {SIZE_MB} MB)."),
-        State::Downloading => format!("Downloading (about {SIZE_MB} MB)…"),
-        State::Ready => "On. Each song is listened to once, just before it plays.".into(),
-        State::Failed(reason) => format!("The download didn't work ({reason}). It tries again at the next song."),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,9 +176,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("models")).unwrap();
         std::fs::write(dir.join("models").join(FILE_NAME), b"model").unwrap();
         set_home(&dir.join("nori.db").to_string_lossy());
-        assert_eq!(ready(), Some(dir.join("models").join(FILE_NAME)));
-        assert!(detail(true).starts_with("On."));
-        assert!(detail(false).contains("5 MB"));
+        assert_eq!(ready(), Some(Source { path: dir.join("models").join(FILE_NAME), offset: 0, len: 5 }));
+        assert_eq!(state(), State::Ready);
         // Turning it on keeps the file; off deletes it, on the background thread.
         switched(true);
         switched(true);
@@ -127,5 +191,16 @@ mod tests {
         }
         assert!(!dir.join("models").exists());
         assert_eq!((state(), ready()), (State::Absent, None));
+    }
+
+    #[test]
+    fn a_model_shipped_inside_another_file_is_read_in_place() {
+        let dir = nori_testdir::TempDir::new("bundled");
+        let apk = dir.join("base.apk");
+        std::fs::write(&apk, b"zip headers|the model|more zip").unwrap();
+        let s = Source { path: apk.clone(), offset: 12, len: 9 };
+        assert_eq!(s.read().unwrap(), b"the model");
+        assert!(Source { len: 99, ..s.clone() }.read().is_err());
+        assert_eq!(Source::whole(apk).unwrap().len, 30);
     }
 }

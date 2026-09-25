@@ -1,31 +1,17 @@
-//! The equalizer screen over plain JNI: each figure is asked on every step of a slider's drag (and the
-//! limiter's every 120 ms), and through uniffi each one was a call status, a buffer and a cleaner on the
-//! Java side for one short string. Here it is primitives in and one Java string out; the words are
-//! `nori_core::fmt`'s and the edits `nori_core::settings_store`'s.
+//! The equalizer screen over plain JNI: the edits are asked on every step of a slider's drag, so each is
+//! primitives in and out (`nori_core::settings_store`'s edits). The screen's words and figures are
+//! Kotlin's own; the one thing it asks here is what kind of band a label marks.
 
 use jni::objects::{JClass, JFloatArray};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
+use jni::sys::{jfloat, jint, jlong};
 use jni::JNIEnv;
-use nori_core::fmt;
-use nori_core::settings::{EqLevel, SoundBand};
+use nori_core::settings::{BandMark, EqLevel, SoundBand};
 
-use crate::{java_string, native, Class};
+use crate::{native, Class};
 
-pub(crate) static EQ_WORDS: Class = Class {
-    name: c"dev/nori/music/settings/EqWords",
-    methods: &[
-        native!(c"signedDb", c"(F)Ljava/lang/String;", signed_db),
-        native!(c"preamp", c"(FZ)Ljava/lang/String;", preamp),
-        native!(c"balance", c"(F)Ljava/lang/String;", balance),
-        native!(c"ceiling", c"(F)Ljava/lang/String;", ceiling),
-        native!(c"reduction", c"(F)Ljava/lang/String;", reduction),
-        native!(c"crossfeed", c"(F)Ljava/lang/String;", crossfeed),
-        native!(c"hzTitle", c"(F)Ljava/lang/String;", hz_title),
-        native!(c"shape", c"(ZF)Ljava/lang/String;", shape),
-        native!(c"bandName", c"(IFI)Ljava/lang/String;", band_name),
-        native!(c"freqToSlider", c"(F)F", freq_to_slider),
-        native!(c"sliderToFreq", c"(F)F", slider_to_freq),
-    ],
+pub(crate) static EQ_BANDS: Class = Class {
+    name: c"dev/nori/music/settings/EqBands",
+    methods: &[native!(c"mark", c"(II)I", band_mark)],
 };
 
 pub(crate) static SOUND_EDIT: Class = Class {
@@ -33,50 +19,17 @@ pub(crate) static SOUND_EDIT: Class = Class {
     methods: &[native!(c"setBand", c"(I[F)I", set_band), native!(c"setLevel", c"(IF)J", set_level)],
 };
 
-extern "system" fn signed_db(env: JNIEnv, _: JClass, db: jfloat) -> jstring {
-    java_string(&env, &fmt::signed_db(db))
-}
-
-extern "system" fn preamp(env: JNIEnv, _: JClass, db: jfloat, automatic: jboolean) -> jstring {
-    java_string(&env, &fmt::eq_preamp(db, automatic != 0))
-}
-
-extern "system" fn balance(env: JNIEnv, _: JClass, balance: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_balance(balance))
-}
-
-extern "system" fn ceiling(env: JNIEnv, _: JClass, db: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_ceiling(db))
-}
-
-extern "system" fn reduction(env: JNIEnv, _: JClass, db: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_reduction(db))
-}
-
-extern "system" fn crossfeed(env: JNIEnv, _: JClass, db: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_crossfeed(db))
-}
-
-extern "system" fn hz_title(env: JNIEnv, _: JClass, freq: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_hz_title(freq))
-}
-
-extern "system" fn shape(env: JNIEnv, _: JClass, slope: jboolean, q: jfloat) -> jstring {
-    java_string(&env, &fmt::eq_shape(slope != 0, q))
-}
-
-/// A band's label (`settings::band_label`) from the three things it reads.
-extern "system" fn band_name(env: JNIEnv, _: JClass, kind: jint, freq: jfloat, channel: jint) -> jstring {
-    let band = SoundBand { kind, freq, gain_db: 0.0, q: 1.0, channel };
-    java_string(&env, &nori_core::settings::band_label(&band))
-}
-
-extern "system" fn freq_to_slider(freq: jfloat) -> jfloat {
-    fmt::eq_freq_to_slider(freq)
-}
-
-extern "system" fn slider_to_freq(x: jfloat) -> jfloat {
-    fmt::eq_slider_to_freq(x)
+/// What a band's label marks after its frequency (`settings::band_mark`), as its place in `BandMark`: 0
+/// nothing, 1 left, 2 right, 3 low shelf, 4 high shelf, 5 no gain.
+extern "system" fn band_mark(kind: jint, channel: jint) -> jint {
+    match nori_core::settings::band_mark(kind, channel) {
+        BandMark::None => 0,
+        BandMark::Left => 1,
+        BandMark::Right => 2,
+        BandMark::LowShelf => 3,
+        BandMark::HighShelf => 4,
+        BandMark::NoGain => 5,
+    }
 }
 
 /// `settings_store::edit_band` on every step of a slider: the band comes in as `[kind, freq, gain, q,

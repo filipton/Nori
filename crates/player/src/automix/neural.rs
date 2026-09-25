@@ -198,11 +198,19 @@ impl BeatThis {
 
     /// With chunks of `chunk` frames (more than twice the border), for measuring what the chunk length changes.
     pub fn load_chunked(path: &Path, chunk: usize) -> TractResult<Self> {
+        Self::prepare(tract_onnx::onnx().model_for_path(path)?, chunk)
+    }
+
+    /// From the file's bytes, as the app holds them (read out of its package, or a download).
+    pub fn from_bytes(bytes: &[u8]) -> TractResult<Self> {
+        Self::prepare(tract_onnx::onnx().model_for_read(&mut std::io::Cursor::new(bytes))?, CHUNK)
+    }
+
+    fn prepare(model: InferenceModel, chunk: usize) -> TractResult<Self> {
         // Flash attention one head after another on this thread, rather than across rayon's pool of one thread per
         // core at normal priority: the caller's low priority has to hold for all the work.
         let _ = tract_onnx::prelude::tract_data::knobs::set_str("TRACT_FLASH_SDPA_ST", "true");
-        let model = tract_onnx::onnx()
-            .model_for_path(path)?
+        let model = model
             .with_input_fact(0, f32::fact([1, chunk, MELS]).into())?
             .into_optimized()?
             .into_runnable()?;
@@ -386,6 +394,43 @@ mod tests {
         let (tail, _) = ends.tail();
         let tail = mel.frames(&tail[tail.len() - 30 * 22_050..]).len();
         println!("ends kept in {:.1} ms, front end over both windows ({} frames) in {:.1} ms", kept.as_secs_f64() * 1e3, head + tail, t1.elapsed().as_secs_f64() * 1e3);
+    }
+
+    /// What one song costs with the model, as the measurer runs it: loading the model from its bytes, then its first
+    /// and last 30 s (mono 16-bit PCM in `NORI_SONG` at `NORI_SONG_RATE`, default 44.1 kHz), on this one thread. Peak
+    /// RSS is the process's, read before the model is loaded and after both windows.
+    /// `NORI_BEAT_THIS=<model.onnx> NORI_SONG=<x.s16> cargo test --release -p nori-player --features neural-beats
+    /// neural_song_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn neural_song_cost() {
+        let (Ok(model), Ok(song)) = (std::env::var("NORI_BEAT_THIS"), std::env::var("NORI_SONG")) else { return };
+        let rate: u32 = std::env::var("NORI_SONG_RATE").ok().and_then(|r| r.parse().ok()).unwrap_or(44_100);
+        let peak = || {
+            let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+            s.lines().find_map(|l| l.strip_prefix("VmHWM:").map(|v| v.trim().to_string())).unwrap_or_default()
+        };
+        let bytes = std::fs::read(song).unwrap();
+        let x: Vec<f32> = bytes.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0).collect();
+        let before = peak();
+        let t0 = std::time::Instant::now();
+        let m = BeatThis::from_bytes(&std::fs::read(model).unwrap()).unwrap();
+        let loaded = t0.elapsed().as_secs_f64();
+        let n = (30 * rate as usize).min(x.len());
+        let mut windows = Vec::new();
+        for (piece, intro) in [(&x[..n], true), (&x[x.len() - n..], false)] {
+            let t = std::time::Instant::now();
+            let got = m.track_window(piece, rate, intro).unwrap();
+            windows.push(t.elapsed().as_secs_f64());
+            assert!(!got.beats.is_empty());
+        }
+        println!(
+            "loaded in {loaded:.2} s; windows {:.2} s and {:.2} s; the song {:.2} s; peak RSS {before} before the model, {} after",
+            windows[0],
+            windows[1],
+            loaded + windows[0] + windows[1],
+            peak()
+        );
     }
 
     /// Writes the log-mel of a raw mono 16-bit file at 22.05 kHz as f32 frames, to compare with torchaudio:

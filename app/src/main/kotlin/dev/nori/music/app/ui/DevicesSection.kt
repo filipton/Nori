@@ -89,7 +89,7 @@ private fun DeviceItem(d: DeviceRow, onClick: () -> Unit) {
                 Row {
                     d.kind?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant) }
                     AnimatedVisibility(d.current, enter = fadeIn(tween(motion())) + expandHorizontally(tween(motion())), exit = fadeOut(tween(motion())) + shrinkHorizontally(tween(motion()))) {
-                        val playing = remember(d.kind != null) { dev.nori.music.ffi.devices.devicePlayingNow(d.kind != null) }
+                        val playing = remember(d.kind != null) { say.devicePlayingNow(d.kind != null) }
                         Text(playing, style = MaterialTheme.typography.bodySmall, color = scheme.primary)
                     }
                 }
@@ -152,12 +152,14 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
     val eq by vm.autoEq.collectAsStateWithLifecycle()
     val busy by vm.assigning.collectAsStateWithLifecycle()
     val error by vm.assignError.collectAsStateWithLifecycle()
-    val suggested by produceState(emptyList<dev.nori.music.ffi.devices.AutoEqHit>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
+    val suggested by produceState(emptyList<dev.nori.music.app.vm.AutoEqHit>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
     var query by remember { mutableStateOf("") }
-    // What it says, which profiles it offers and whether it can be forgotten are the core's (device_sheet).
-    val sheet = remember(d.output, d.kind, d.current, p.autoEqAuto, profiles) {
-        dev.nori.music.ffi.devices.deviceSheet(d.output, d.kind, d.current, p.autoEqAuto, profiles.map { it.name })
+    // Which profiles it offers and whether it can be forgotten are the core's (device_sheet); what it says, Say's.
+    val sheet = remember(d.output, d.current, profiles) {
+        dev.nori.music.ffi.devices.deviceSheet(d.output, d.current, profiles.map { it.name })
     }
+    val intro = remember(d.kind) { say.deviceIntro(d.kind) }
+    val automatic = remember(p.autoEqAuto) { say.deviceAutomatic(p.autoEqAuto) }
     val curves = if (!eq.tooShort && eq.query == query) eq.hits else suggested
     val pick = { c: DeviceSound.Choice -> vm.assignDevice(d.output, c, onDone) }
     val ms = motion()
@@ -168,7 +170,7 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
                 Column(Modifier.padding(bottom = 4.dp)) {
                     LargeTitle(d.name)
                     Text(
-                        sheet.intro,
+                        intro,
                         Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
@@ -176,7 +178,7 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
             item("auto") {
                 Option(
                     say.automatic,
-                    sheet.automatic,
+                    automatic,
                     d.choice == DeviceSound.Choice.Automatic,
                 ) { pick(DeviceSound.Choice.Automatic) }
             }

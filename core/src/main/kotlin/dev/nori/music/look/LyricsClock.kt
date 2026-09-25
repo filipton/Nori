@@ -1,6 +1,7 @@
 package dev.nori.music.look
 
 import dalvik.annotation.optimization.CriticalNative
+import dalvik.annotation.optimization.FastNative
 import dev.nori.music.ffi.model.Lyrics
 
 /**
@@ -72,6 +73,12 @@ class LyricsClock(lyrics: Lyrics, positionMs: Long) : AutoCloseable {
 
         /** How lit [line] is while [active] is sung (`nori_look::lyrics::line_strength`). Primitives only. */
         fun strength(synced: Boolean, line: Int, active: Int): Float = LyricsJni.strength(synced, line, active)
+
+        /**
+         * The line of the new lyrics ([next], each line's start) that stands for line [at] of the old ones
+         * ([old]) when finer lyrics replace them (`nori_look::lyrics::matching_line`).
+         */
+        fun matchingLine(old: LongArray, at: Int, next: LongArray, timed: Boolean): Int = LyricsJni.matchingLine(old, at, next, timed)
     }
 }
 
@@ -91,4 +98,5 @@ internal object LyricsJni {
     /** A clock on the lyrics the core read under [key]; 0 when it no longer keeps them. */
     @JvmStatic @CriticalNative external fun kept(key: Long, positionMs: Long): Long
     @JvmStatic @CriticalNative external fun strength(synced: Boolean, line: Int, active: Int): Float
+    @JvmStatic @FastNative external fun matchingLine(old: LongArray, at: Int, next: LongArray, timed: Boolean): Int
 }

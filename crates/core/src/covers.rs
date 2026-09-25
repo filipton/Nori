@@ -4,6 +4,8 @@
 //! this says at the sizes it says, with the same requests the rows and the player make, so a warmed
 //! cover is a cache hit.
 
+use crate::Core;
+
 /// The list rendition: a row's thumbnail and a grid's card share it. A Subsonic server renders each size
 /// it is asked for on demand and keeps it per size, so every extra size is another slow first fetch for
 /// every album - measured at over a second each on a real server.
@@ -28,9 +30,6 @@ pub struct CoverRules {
     /// What follows the signed prefix of `getCoverArt`: `&id=` and the encoded id, then `&size=`.
     pub id_param: String,
     pub size_param: String,
-    /// Ids that belong to a provider. octo-fiesta draws a "not downloaded" badge on their covers and
-    /// replaces the picture once the item is in the library, under the same id: never stored.
-    pub provider_prefixes: Vec<String>,
     /// The share of the app's memory decoded covers may hold, and the disk cache's size.
     pub memory_share: f64,
     pub disk_bytes: u64,
@@ -48,7 +47,6 @@ pub fn cover_rules() -> CoverRules {
         full: FULL,
         id_param: "&id=".into(),
         size_param: "&size=".into(),
-        provider_prefixes: PROVIDER_PREFIXES.map(String::from).to_vec(),
         memory_share: 0.15,
         disk_bytes: 256 * 1024 * 1024,
         hidden_share: 0.25,
@@ -86,6 +84,36 @@ pub fn cover_wants(arts: Vec<String>, cap: u32) -> Vec<CoverWant> {
         out.extend(SIZES.iter().map(|&size| CoverWant { id: art.clone(), size }));
     }
     out
+}
+
+/// The most covers one download fetches ahead.
+const DOWNLOAD_COVERS: u32 = 500;
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Core {
+    /// The address of cover `id` at `size` px, as every client asks for it ([`cover_url_into`]).
+    pub fn cover_address(&self, id: String, size: u32) -> String {
+        let mut out = String::new();
+        cover_url_into(&mut out, &self.url_prefix("getCoverArt".into()), &id, size as i32);
+        out
+    }
+
+    /// The covers of songs being downloaded (`arts`, their cover ids, in order), as addresses to fetch
+    /// onto the disk now and not decode (a cover loader's `warm`): covers are only kept once something
+    /// has drawn them, so a song downloaded from a menu, its cover never on screen, would arrive with no
+    /// picture and show a blank plate for the rest of its life offline. Both sizes the app draws, each
+    /// cover once, never a provider's, at most 500 covers.
+    pub fn download_cover_urls(&self, arts: Vec<String>) -> Vec<String> {
+        let prefix = self.url_prefix("getCoverArt".into());
+        cover_wants(arts, DOWNLOAD_COVERS)
+            .into_iter()
+            .map(|w| {
+                let mut out = String::new();
+                cover_url_into(&mut out, &prefix, &w.id, w.size as i32);
+                out
+            })
+            .collect()
+    }
 }
 
 /// The queue positions whose covers to fetch while `index` plays, nearest first: both neighbours first,
@@ -143,12 +171,12 @@ fn around(arts: &[Option<String>], index: i32, previous: i32, next: i32, ahead: 
     CoversAround { near, wants }
 }
 
-/// Whether the cover address `url` is an octo-fiesta provider item's (see [`CoverRules::provider_prefixes`]):
+/// Whether the cover address `url` is an octo-fiesta provider item's (an id starting `ext-` or `pl-`):
 /// such a cover is never stored, since the provider redraws it under the same id once the item is in the
 /// library. Asked for every cover a list draws, so it only looks, and allocates nothing.
 ///
-/// Twin of `Covers.isProvider` (core/.../data/Library.kt), which Android keeps: a string test where the
-/// cover is composed costs less than a crossing into the core would.
+/// Android asks it through a `@FastNative` door (`CoverPixels.isProvider`), which measured faster than
+/// the same test written in Kotlin and allocates nothing.
 pub fn is_provider_cover(url: &str) -> bool {
     url.match_indices("&id=").any(|(at, mark)| {
         let id = &url[at + mark.len()..];
@@ -222,6 +250,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_download_warms_its_covers_at_the_addresses_the_rows_ask_for() {
+        let core = crate::Core::new(String::new(), "t".into()).unwrap();
+        core.configure(crate::ServerConfig { url: "http://m".into(), user: "u".into(), password: "p".into(), ..Default::default() }).unwrap();
+        let urls = core.download_cover_urls(["al 1", "ext-2", "al 1"].map(String::from).to_vec());
+        let prefix = core.url_prefix("getCoverArt".into());
+        assert_eq!(urls, [format!("{prefix}&id=al%201&size=320"), format!("{prefix}&id=al%201&size=800")]);
+        assert_eq!(core.cover_address("al 1".into(), 320), urls[0]);
+    }
+
+    #[test]
     fn wants_skip_providers_repeat_nothing_and_stop_at_the_cap() {
         let arts = ["a", "ext-1", "b", "a", "pl-2", "c"].map(String::from).to_vec();
         let w = cover_wants(arts.clone(), 500);
@@ -230,11 +268,26 @@ mod tests {
     }
 
     #[test]
+    fn provider_covers_are_told_by_the_id_alone() {
+        for (url, provider) in [
+            ("https://m.example/rest/getCoverArt.view?u=a&t=b&s=c&id=ext-deezer-song-1&size=320", true),
+            ("https://m.example/rest/getCoverArt.view?u=a&id=pl-12&size=800", true),
+            ("https://m.example/rest/getCoverArt.view?u=a&id=al-3&size=320", false),
+            ("https://m.example/rest/getCoverArt.view?id=ext-1", false),
+            ("https://m.example/ext-1?xid=ext-2", false),
+            ("&id=pl-", true),
+            ("&id=p", false),
+            ("", false),
+        ] {
+            assert_eq!(is_provider_cover(url), provider, "{url}");
+        }
+    }
+
+    #[test]
     fn the_rules_the_app_sizes_and_keeps_covers_by() {
         let r = cover_rules();
         assert_eq!((r.row, r.card, r.full), (320, 320, 800));
         assert_eq!((r.id_param.as_str(), r.size_param.as_str()), ("&id=", "&size="));
-        assert_eq!(r.provider_prefixes, ["ext-", "pl-"]);
         assert_eq!((r.memory_share, r.disk_bytes, r.hidden_share), (0.15, 268_435_456, 0.25));
     }
 

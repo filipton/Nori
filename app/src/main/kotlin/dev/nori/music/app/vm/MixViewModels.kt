@@ -47,8 +47,8 @@ data class MixPage(
 
 /** The core names the covers; the list rendition of each, so they are cache hits. */
 private val tileSize: Int get() = dev.nori.music.data.Covers.rules.row.toInt()
-private fun NoriViewModel.card(t: MixTile) = MixCard(t.id, t.title, t.covers.mapNotNull { cover(it, tileSize) }, t.favourites)
-private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, s.title, s.songs, s.covers.mapNotNull { cover(it, tileSize) }, s.refreshable, s.favourites, s.caption)
+private fun NoriViewModel.card(t: MixTile) = MixCard(t.id, dev.nori.music.app.ui.say.mixName(t.name), t.covers.mapNotNull { cover(it, tileSize) }, t.favourites)
+private fun NoriViewModel.page(s: MixSheet) = MixPage(s.id, dev.nori.music.app.ui.say.mixName(s.name), s.songs, s.covers.mapNotNull { cover(it, tileSize) }, s.refreshable, s.favourites, if (s.songs.isEmpty()) "" else dev.nori.music.app.ui.say.listCaption(s.songs.size, s.seconds.toLong(), false))
 
 /**
  * Today's (or this week's) draw of each mix lives in the core (see mixes/board.rs), shared by the Home
@@ -125,7 +125,7 @@ class MixViewModel(app: Application) : NoriViewModel(app) {
         changes.map { withContext(Dispatchers.IO) { nori.core.mixPage(id) } }
             .transform { found ->
                 when (found) {
-                    is MixLookup.Unknown -> throw IllegalArgumentException(found.message)
+                    MixLookup.Unknown -> throw IllegalArgumentException(dev.nori.music.app.ui.say.mixUnknown(id))
                     is MixLookup.Ready -> emit(page(found.sheet))
                     MixLookup.NotDrawn -> {}
                 }

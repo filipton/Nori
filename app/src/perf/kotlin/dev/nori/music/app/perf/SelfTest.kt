@@ -49,9 +49,9 @@ import kotlin.coroutines.resume
  * The Performance page's self test: the checks the owner used to make by hand on his phone, made by the
  * app on it, one after another, then everything put back as it was. What runs in which order, how the
  * readings are judged, what is put back and how the result reads are SelfTestLogic.kt's; this drives the
- * player the way the app does (its one PlayerConnection, the settings, the player service started again
- * for the other engine) and reads what it needs: the page's state, the song the service arrived on, the
- * AudioTrack's play head and timestamp, and the Rust player's own figures.
+ * player the way the app does (its one PlayerConnection, the settings, the player service stopped and
+ * started again) and reads what it needs: the page's state, the song the service arrived on, the
+ * AudioTrack's play head and timestamp, and the player's own figures.
  *
  * It plays quietly unless asked to be heard: a player volume far under the music's ([Quiet]), never the
  * phone's. Only songs of the user's library, those on the phone first. Nothing of it exists until the
@@ -104,7 +104,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
         private var queue: List<Song> = emptyList()
         private var mp3: List<Song> = emptyList()
         private var aborted = false
-        private val started = HashMap<String, Boolean>()
+        private var started = false
         private var offloadWhyNot: String? = null
         private var offloadEntered = false
 
@@ -197,24 +197,21 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
         }
 
         private suspend fun dispatch(s: Step): Outcome {
-            if (s.section == EXO || s.section == RUST) {
-                if (s.id != "engine" && started[s.section] != true) return Outcome(s.section, s.name, Verdict.SKIP, "not run: the ${s.section} player did not start")
-            }
-            val rust = s.section == RUST
+            if (s.section == PLAYER && s.id != "start" && !started) return Outcome(s.section, s.name, Verdict.SKIP, "not run: the player did not start")
             return when (s.id) {
                 "prepare" -> prepare(s)
-                "engine" -> engine(s)
-                "play" -> play(s, rust)
-                "pause" -> pause(s, rust)
+                "start" -> start(s)
+                "play" -> play(s)
+                "pause" -> pause(s)
                 "seek" -> seek(s)
                 "nextprev" -> nextPrev(s)
-                "rapid" -> rapid(s, rust)
+                "rapid" -> rapid(s)
                 "endskip" -> endSkip(s)
-                "auto" -> auto(s, rust)
-                "eq" -> eq(s, rust)
-                "automix" -> autoMix(s, rust)
-                "crossfade" -> crossfade(s, rust)
-                "replaygain" -> replayGain(s, rust)
+                "auto" -> auto(s)
+                "eq" -> eq(s)
+                "automix" -> autoMix(s)
+                "crossfade" -> crossfade(s)
+                "replaygain" -> replayGain(s)
                 "offload" -> offload(s)
                 "offloadeq" -> offloadEq(s)
                 "lyrics" -> lyrics(s)
@@ -239,9 +236,9 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
                 val ts = AudioTimestamp()
                 if (t.getTimestamp(ts)) stamp = ts.framePosition
                 val r = PlaybackService.rustPlayer
-                if (r != null && opened.engine == "rust") frameBytes(t.audioFormat, t.channelCount).takeIf { it > 0 }?.let { written = r.bytesWritten / it }
+                if (r != null) frameBytes(t.audioFormat, t.channelCount).takeIf { it > 0 }?.let { written = r.bytesWritten / it }
             }
-            val offloaded = PlaybackService.rustPlayer?.offloaded ?: (t != null && Build.VERSION.SDK_INT >= 29 && runCatching { t.isOffloadedPlayback }.getOrDefault(false))
+            val offloaded = PlaybackService.rustPlayer?.offloaded ?: false
             return Reading(
                 SystemClock.elapsedRealtime(), player.positionMs, st.index, st.current?.id, recorder.heardId, st.playing,
                 head, stamp, written, offloaded, t?.let(System::identityHashCode) ?: 0,
@@ -270,7 +267,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
 
         private val st get() = player.state.value
         private fun durationMs(i: Int): Long = queue.getOrNull(i)?.duration?.toLong()?.times(1000) ?: 0L
-        private fun mixing(rust: Boolean): Boolean = if (rust) PlaybackService.rustPlayer?.mixing == true else dev.nori.music.playback.TransitionSink.mixing
+        private fun mixing(): Boolean = PlaybackService.rustPlayer?.mixing == true
 
         /** Queue place [i] playing from [ms]. */
         private suspend fun at(i: Int, ms: Long): Boolean {
@@ -299,12 +296,12 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
         // ---- settings ----
 
         private fun Prefs.knobs() = Knobs(
-            playbackEngine, eqEnabled, crossfeedDb, balance, mono, limiter, speed, pitch, skipSilence, offload, crossfadeSec, autoMix,
+            eqEnabled, crossfeedDb, balance, mono, limiter, speed, pitch, skipSilence, offload, crossfadeSec, autoMix,
             replayGain.ordinal, scrobble, autoFill, skipExplicit, previousAlwaysSkips, fadeMs,
         )
 
         private fun Prefs.with(k: Knobs) = copy(
-            playbackEngine = k.engine, eqEnabled = k.eq, crossfeedDb = k.crossfeedDb, balance = k.balance, mono = k.mono, limiter = k.limiter,
+            eqEnabled = k.eq, crossfeedDb = k.crossfeedDb, balance = k.balance, mono = k.mono, limiter = k.limiter,
             speed = k.speed, pitch = k.pitch, skipSilence = k.skipSilence, offload = k.offload, crossfadeSec = k.crossfadeSec, autoMix = k.autoMix,
             replayGain = ReplayGainMode.entries[k.replayGain], scrobble = k.scrobble, autoFill = k.autoFill, skipExplicit = k.skipExplicit,
             previousAlwaysSkips = k.previousAlwaysSkips, fadeMs = k.fadeMs,
@@ -325,8 +322,6 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
 
         // ---- the player service, as a start of the app has it ----
 
-        private fun engineName(engine: Int) = if (engine == 1) "rust" else "exoplayer"
-
         private suspend fun stopPlayer(): Boolean {
             if (st.playing) { player.toggle(); until(4_000) { !st.playing } }
             player.disconnect()
@@ -335,9 +330,9 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             return until(12_000) { PlaybackService.engine == null }
         }
 
-        private suspend fun startPlayer(engine: Int): Boolean {
+        private suspend fun startPlayer(): Boolean {
             player.connect()
-            return until(12_000) { PlaybackService.engine == engineName(engine) && st.connected }
+            return until(12_000) { PlaybackService.engine != null && st.connected }
         }
 
         // ---- the steps ----
@@ -351,7 +346,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             // Shuffle and repeat off while the service that has them runs; the settings the checks start from.
             if (st.connected && st.shuffle) player.setShuffle(false)
             for (k in 0 until 3) if (st.connected && st.repeat != Repeat.OFF) { player.cycleRepeat(); until(1_500) { st.repeat == Repeat.OFF } }
-            set { testKnobs(it, it.engine) }
+            set { testKnobs(it) }
             val cands = withContext(Dispatchers.IO) { candidates() }
             val picked = pickSongs(cands.map { it.first }, 6)
             val byId = cands.associate { it.first.id to it.second }
@@ -407,27 +402,24 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             return out.values.toList()
         }
 
-        private suspend fun engine(s: Step): Outcome {
-            val engine = if (s.section == RUST) 1 else 0
-            started[s.section] = false
-            set { it.copy(engine = engine) }
-            if (!stopPlayer()) return fail(s, "the player service would not stop")
-            if (!startPlayer(engine)) return fail(s, "the player service did not start with the ${s.section} engine (it says ${PlaybackService.engine})")
+        private suspend fun start(s: Step): Outcome {
+            started = false
+            if (!startPlayer()) return fail(s, "the player service did not start")
             player.play(queue, 0)
             if (!until(20_000) { st.playing && st.index == 0 && player.positionMs > 300 }) return fail(s, "the queue did not start playing")
-            started[s.section] = true
-            return pass(s, "the service runs ${PlaybackService.engine}, playing \"${queue[0].title}\"")
+            started = true
+            return pass(s, "playing \"${queue[0].title}\"")
         }
 
         private fun rate(): Int = PlaybackService.track?.track?.sampleRate ?: 48_000
 
-        private suspend fun play(s: Step, rust: Boolean): Outcome {
+        private suspend fun play(s: Step): Outcome {
             if (!at(0, 5_000)) return fail(s, "could not start the first song at 5 s")
             val r = sample(10_000)
-            return outcome(s, judgeProgress(r, written = rust && r.none { it.offloaded }))
+            return outcome(s, judgeProgress(r, written = r.none { it.offloaded }))
         }
 
-        private suspend fun pause(s: Step, rust: Boolean): Outcome {
+        private suspend fun pause(s: Step): Outcome {
             if (!st.playing && !at(0, 5_000)) return fail(s, "nothing playing to pause")
             player.toggle()
             if (!until(3_000) { !st.playing }) return fail(s, "still playing 3 s after pause")
@@ -436,7 +428,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             player.toggle()
             if (!until(5_000) { st.playing }) return fail(s, "did not play again within 5 s of resume", paused.problems)
             delay(500)
-            val resumed = judgeProgress(sample(3_000), written = rust && !(PlaybackService.rustPlayer?.offloaded ?: false))
+            val resumed = judgeProgress(sample(3_000), written = !(PlaybackService.rustPlayer?.offloaded ?: false))
             return outcome(s, Judged("${paused.measured}; resumed: ${resumed.measured}", paused.problems + resumed.problems.map { "after resuming: $it" }))
         }
 
@@ -472,13 +464,13 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             return outcome(s, Judged("next ${next.measured}; previous ${back.measured}; previous 10 s in restarted: $restarted", problems))
         }
 
-        private suspend fun rapid(s: Step, rust: Boolean): Outcome {
+        private suspend fun rapid(s: Step): Outcome {
             if (!at(0, 3_000)) return fail(s, "could not play the first song")
             val t = SystemClock.elapsedRealtime()
             repeat(3) { player.next(); delay(150) }
             delay(3_000)
             val end = reading()
-            val engineIndex = if (rust) dev.nori.music.ffi.perf.perfEngineSeen()?.index?.toInt() else null
+            val engineIndex = dev.nori.music.ffi.perf.perfEngineSeen()?.index?.toInt()
             val j = judgeMove(0, 3, end, queue[3].id, arrivalsSince(t).map { it.index }, engineIndex)
             delay(2_500)
             val later = reading()
@@ -503,7 +495,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             return outcome(s, Judged("pressed ${secs(left)} before the end; ${j.measured}", j.problems))
         }
 
-        private suspend fun auto(s: Step, rust: Boolean): Outcome {
+        private suspend fun auto(s: Step): Outcome {
             if (!at(2, 0)) return fail(s, "could not play the third song")
             val d = durationMs(2).takeIf { it > 0 } ?: st.durationMs
             player.seekTo(d - 4_000)
@@ -512,7 +504,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             delay(500)
             val arr = arrivalsSince(t)
             val r = sample(2_500)
-            val j = judgeProgress(r, written = rust && r.none { it.offloaded })
+            val j = judgeProgress(r, written = r.none { it.offloaded })
             val problems = j.problems.toMutableList()
             if (arr.none { it.auto && it.index == 3 }) problems += "the service did not say it moved on by itself: arrivals ${arr.map { "${it.index}${if (it.auto) " (by itself)" else ""}" }}"
             if (r.first().positionMs > 6_000) problems += "the next song started at ${secs(r.first().positionMs)}"
@@ -520,19 +512,19 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             return outcome(s, Judged("into the next song; ${j.measured}", problems))
         }
 
-        private suspend fun eq(s: Step, rust: Boolean): Outcome {
+        private suspend fun eq(s: Step): Outcome {
             if (!at(0, 8_000)) return fail(s, "could not play the first song")
             val before = PlaybackService.rustPlayer?.chainIn == true
             val t = SystemClock.elapsedRealtime()
             set { it.copy(eq = true) }
-            val inChain = if (rust) until(1_500, 20) { PlaybackService.rustPlayer?.chainIn == true } else true
+            val inChain = until(1_500, 20) { PlaybackService.rustPlayer?.chainIn == true }
             val tookMs = SystemClock.elapsedRealtime() - t
-            val on = judgeProgress(sample(2_500), written = rust)
+            val on = judgeProgress(sample(2_500), written = true)
             set { it.copy(eq = false) }
-            val off = judgeProgress(sample(2_500), written = rust)
+            val off = judgeProgress(sample(2_500), written = true)
             val problems = (if (!inChain) listOf("the equalizer was not in the samples' path 1.5 s after it was switched on") else emptyList()) +
                 on.problems.map { "equalizer on: $it" } + off.problems.map { "equalizer off: $it" }
-            val chain = if (rust) (if (before) "the chain was in the path already (flat)" else "in the path after $tookMs ms") else "ExoPlayer keeps it in the chain, flat when off"
+            val chain = if (before) "the chain was in the path already (flat)" else "in the path after $tookMs ms"
             return outcome(s, Judged("$chain; on: ${on.measured}; off: ${off.measured}", problems))
         }
 
@@ -546,7 +538,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             ids.associateWith { id -> runCatching { nori.core.analysisGet(id) != null }.getOrDefault(false) }
         }
 
-        private suspend fun autoMix(s: Step, rust: Boolean): Outcome {
+        private suspend fun autoMix(s: Step): Outcome {
             val i = pair() ?: return skip(s, "no two songs of different albums, a minute long or more, follow each other in the test queue")
             if (!at(i, 15_000)) return fail(s, "could not play queue place $i")
             val wall = System.currentTimeMillis()
@@ -559,8 +551,8 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
                 while (!ahead.values.all { it } && SystemClock.elapsedRealtime() < end) { delay(500); ahead = measured(ids) }
                 player.seekTo(durationMs(i) - 30_000)
                 var mixed = false
-                val moved = until(45_000, 150) { if (mixing(rust)) mixed = true; st.index != i }
-                until(4_000, 150) { if (mixing(rust)) mixed = true; false }
+                val moved = until(45_000, 150) { if (mixing()) mixed = true; st.index != i }
+                until(4_000, 150) { if (mixing()) mixed = true; false }
                 val lines = withContext(Dispatchers.IO) { logSince(wall) }
                 val j = judgeAutoMix(queue[i].title, lines, ahead, mixed)
                 val problems = j.problems + if (moved) emptyList() else listOf("the song did not end within 45 s")
@@ -570,7 +562,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             }
         }
 
-        private suspend fun crossfade(s: Step, rust: Boolean): Outcome {
+        private suspend fun crossfade(s: Step): Outcome {
             val j0 = pair(1) ?: pair() ?: return skip(s, "no two songs of different albums follow each other in the test queue")
             if (!at(j0, 0)) return fail(s, "could not play queue place $j0")
             player.seekTo(durationMs(j0) - 15_000)
@@ -579,8 +571,8 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             set { it.copy(crossfadeSec = 6) }
             try {
                 var mixed = false
-                val moved = until(25_000, 150) { if (mixing(rust)) mixed = true; st.index != j0 }
-                until(4_000, 150) { if (mixing(rust)) mixed = true; false }
+                val moved = until(25_000, 150) { if (mixing()) mixed = true; st.index != j0 }
+                until(4_000, 150) { if (mixing()) mixed = true; false }
                 val lines = withContext(Dispatchers.IO) { logSince(wall) }
                 val j = judgeCrossfade(6, queue[j0].title, lines, mixed)
                 return outcome(s, Judged(j.measured, j.problems + if (moved) emptyList() else listOf("the song did not end within 25 s")))
@@ -589,7 +581,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             }
         }
 
-        private suspend fun replayGain(s: Step, rust: Boolean): Outcome {
+        private suspend fun replayGain(s: Step): Outcome {
             val k = queue.indexOfFirst { it.replayGain != null }.takeIf { it >= 0 } ?: 0
             if (!at(k, 5_000)) return fail(s, "could not play queue place $k")
             val user = knobs?.replayGain ?: 0
@@ -597,20 +589,12 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
                 set { it.copy(replayGain = ReplayGainMode.OFF.ordinal) }
                 delay(1_200)
                 val gOff = dev.nori.music.ffi.queue.playlistGain(false)
-                val vOff = dev.nori.music.playback.TransitionSink.askedVolume
                 set { it.copy(replayGain = ReplayGainMode.TRACK.ordinal) }
                 delay(1_200)
                 val gTrack = dev.nori.music.ffi.queue.playlistGain(false)
-                val vTrack = dev.nori.music.playback.TransitionSink.askedVolume
-                val r = judgeProgress(sample(2_000), written = rust && !(PlaybackService.rustPlayer?.offloaded ?: false))
-                val problems = r.problems.toMutableList()
-                if (!rust) {
-                    if (kotlin.math.abs(vOff - gOff) > 0.02f) problems += "ReplayGain off: the output's volume is $vOff a second later, expected $gOff"
-                    if (kotlin.math.abs(vTrack - gTrack) > 0.02f) problems += "ReplayGain by track: the output's volume is $vTrack a second later, expected $gTrack"
-                }
+                val r = judgeProgress(sample(2_000), written = !(PlaybackService.rustPlayer?.offloaded ?: false))
                 val tags = if (queue[k].replayGain == null) " (the song has no ReplayGain tags)" else ""
-                val heard = if (rust) "the Rust player puts it on the samples, which cannot be read from here" else "output volume $vOff then $vTrack"
-                return outcome(s, Judged("level off ${fmt(gOff)}, by track ${fmt(gTrack)}$tags; $heard; ${r.measured}", problems))
+                return outcome(s, Judged("level off ${fmt(gOff)}, by track ${fmt(gTrack)}$tags; the player puts it on the samples, which cannot be read from here; ${r.measured}", r.problems))
             } finally {
                 set { it.copy(replayGain = user) }
             }
@@ -788,10 +772,10 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             }
             if (RestoreStep.QUEUE in steps) putQueue()
             if (RestoreStep.START_PLAYER in steps) {
-                if (!startPlayer(before.knobs.engine)) problems += "the player service did not start again"
+                if (!startPlayer()) problems += "the player service did not start again"
                 if (RestoreStep.QUEUE in steps && !until(8_000) { st.queue.map { it.id } == before.ids }) {
                     // Written over once more by a save that came late: again, once.
-                    stopPlayer(); putQueue(); startPlayer(before.knobs.engine)
+                    stopPlayer(); putQueue(); startPlayer()
                     until(8_000) { st.queue.map { it.id } == before.ids }
                 }
             }
@@ -801,7 +785,7 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
             delay(500)
             val after = if (before.serviceRunning || before.ids.isNotEmpty()) snap() else snap().copy(serviceRunning = before.serviceRunning)
             problems += restoreProblems(before, after)
-            val m = "${before.ids.size} songs at queue place ${before.index}, ${secs(before.positionMs)}, ${if (before.playing) "playing" else "paused"}, the ${engineName(before.knobs.engine)} engine"
+            val m = "${before.ids.size} songs at queue place ${before.index}, ${secs(before.positionMs)}, ${if (before.playing) "playing" else "paused"}"
             return outcome(s, Judged(m, problems))
         }
     }

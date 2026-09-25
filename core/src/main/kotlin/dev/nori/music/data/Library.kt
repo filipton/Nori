@@ -9,14 +9,14 @@ import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.Core
 import dev.nori.music.ffi.model.Genre
 import dev.nori.music.ffi.model.IngestStats
-import dev.nori.music.ffi.model.Lyrics
-import dev.nori.music.ffi.words.LyricsOrigin
 import dev.nori.music.ffi.lyrics.LyricsPick
 import dev.nori.music.ffi.lyrics.LyricsShown
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.channelFlow
 import dev.nori.music.ffi.Page
+import dev.nori.music.ffi.PageShown
+import dev.nori.music.ffi.StarsShown
 import dev.nori.music.ffi.model.Playlist
 import dev.nori.music.ffi.library.PlaylistDetail
 import dev.nori.music.ffi.model.RadioStation
@@ -30,18 +30,16 @@ import dev.nori.music.ffi.library.StarMarks
 import dev.nori.music.ffi.library.AlbumSort
 import dev.nori.music.ffi.library.albumSortApi
 import dev.nori.music.ffi.library.librarySizes
-import dev.nori.music.ffi.library.starMarks
 import dev.nori.music.ffi.net.Write
-import dev.nori.music.ffi.library.starMark
 import dev.nori.music.net.lifted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 
@@ -61,16 +59,13 @@ fun StarMarks.of(kind: StarKind, id: String): Boolean? = when (kind) {
 object Covers {
     val rules: dev.nori.music.ffi.CoverRules by lazy { dev.nori.music.ffi.coverRules() }
 
-    /** "&id=ext-", "&id=pl-": what a provider's cover address carries. */
-    private val providerMarks: List<String> by lazy { rules.providerPrefixes.map { rules.idParam + it } }
-
     /**
      * A cover of an octo-fiesta provider item (external song, album, artist or playlist), which is never
      * kept: octo-fiesta draws a "not downloaded" badge on it and replaces the picture under the same id
-     * once the item is in the library. Which ids those are is nori-core's (`cover_rules`); this is only
-     * the string test, made where a cover is asked for, without a crossing.
+     * once the item is in the library. The core's (`is_provider_cover`), through a `@FastNative` door:
+     * 0.2 µs and nothing allocated, where the same test in Kotlin took 0.5 µs and 32 bytes.
      */
-    fun isProvider(url: String): Boolean = providerMarks.any { url.contains(it) }
+    fun isProvider(url: String): Boolean = dev.nori.music.look.CoverPixels.isProvider(url)
 }
 
 /**
@@ -109,16 +104,16 @@ class Library(
 
     /**
      * The stored answer paints the screen at once; the server is asked unless that answer is fresh, and
-     * its answer is emitted only when it differs. When a failure is an error is the core's (`read_refresh`:
-     * offline with something stored is not).
+     * its answer is emitted only when it differs. All of it, and when a failure is an error (offline with
+     * something stored is not), is the core's (`Client::read_cached`); this only hands each page on.
      */
-    private inline fun <T> cached(read: Read, crossinline pick: (Page) -> T): Flow<T> = flow {
+    private inline fun <T> cached(read: Read, crossinline pick: (Page) -> T): Flow<T> = channelFlow {
         val c = client
-        val stored = lifted { c.readStored(read) }
-        stored.page?.let { emit(pick(it)) }
-        if (stored.fresh) return@flow
-        lifted { c.readRefresh(read, stored.digest) }?.let { emit(pick(it)) }
-    }.flowOn(Dispatchers.IO)
+        val shown = object : PageShown {
+            override fun show(page: Page) { trySend(page) }
+        }
+        lifted { c.readCached(read, shown) }
+    }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO).map { pick(it) }
 
     /**
      * Throws away the stored answers whose key starts with one of [prefixes], so the next read of them
@@ -182,7 +177,6 @@ class Library(
     }.flowOn(Dispatchers.IO)
     fun genres(): Flow<List<Genre>> = cached(Read.GenreList) { (it as Page.Genres).v }
     fun radio(): Flow<List<RadioStation>> = cached(Read.RadioList) { (it as Page.Stations).v }
-    fun lyrics(songId: String): Flow<Lyrics> = cached(Read.LyricsBySong(songId)) { (it as Page.LyricsPage).v }
 
     /**
      * The server's lyrics, and when it has no timed ones and the settings allow it, what the lyrics
@@ -191,16 +185,12 @@ class Library(
      * every request in it.
      */
     fun lyricsFor(song: Song): Flow<FoundLyrics> = channelFlow {
-        var fromServer: Lyrics? = null
-        // An empty answer from the server is not shown here while a service may still have the song; the
-        // core hands it back below if nothing better follows.
-        lyrics(song.id).catch { }.collect { fromServer = it; if (it.lines.isNotEmpty()) send(FoundLyrics(it, LyricsOrigin.SERVER)) }
-        val server = fromServer
-        val hasLines = server != null && server.lines.isNotEmpty()
+        // The server's first, then the services', each only when it is new, in the core's order
+        // (`Client::lyrics_for`).
         val shown = object : LyricsShown {
             override fun show(pick: LyricsPick) { trySend(FoundLyrics(pick.lyrics, pick.origin)) }
         }
-        lifted { client.lyricsLookup(song.id, hasLines, server?.synced == true, shown) }
+        lifted { client.lyricsFor(song.id, shown) }
     }.buffer(Channel.UNLIMITED).flowOn(Dispatchers.IO)
 
     // ---- local only: history, mixes, smart playlists (all computed in the Rust core from the index) ----
@@ -275,20 +265,16 @@ class Library(
     suspend fun flushPending() = withContext(Dispatchers.IO) { lifted { client.flushPending() } }
 
     suspend fun star(kind: StarKind, id: String, on: Boolean) {
-        // The mark goes up first, so the heart fills under the finger. Doing it after the request meant
-        // waiting a round trip to the server - which is what "favourites do not refresh" was.
-        val marked = starMark(kind.target, id, on)
-        _starMarks.value = marked.marks
-        _starsVersion.update { it + 1 }
-        try {
-            withContext(Dispatchers.IO) { lifted { client.starSend(kind.target, id, on, marked.previous) } }
-        } catch (e: Exception) {
-            // Refused (offline is not: the core keeps those and replays them). The core has put the mark
-            // from before back, so the screen stops showing a favourite the server never took.
-            _starMarks.value = starMarks()
-            _starsVersion.update { it + 1 }
-            throw e
+        // The core puts the mark up before it asks the server, so the heart fills under the finger, and
+        // puts the one from before back if the server refuses (offline is not refusing: the core keeps
+        // those and replays them), handing the marks over each time (`Client::star`).
+        val shown = object : StarsShown {
+            override fun marks(marks: StarMarks) {
+                _starMarks.value = marks
+                _starsVersion.update { it + 1 }
+            }
         }
+        withContext(Dispatchers.IO) { lifted { client.star(kind.target, id, on, shown) } }
         // Now the server has it, so the lists that come from it can be asked again.
         _starsVersion.update { it + 1 }
     }

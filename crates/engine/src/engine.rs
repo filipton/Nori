@@ -527,7 +527,7 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> {
     offload: bool,
     blocked: Option<&'static str>,
     /// The output tore its offloaded track down, or would not open one: offload is given up for the
-    /// engine's life, as ExoPlayer gives it up for the service's.
+    /// engine's life.
     offload_refused: bool,
     tear_downs: u32,
     /// The next song, opened as packets to see whether the output decodes it: the CPU then plays the

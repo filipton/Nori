@@ -16,11 +16,6 @@ fun list(xs: List<Any?>): String = if (xs.isEmpty()) "_" else xs.joinToString(",
 
 fun row(vararg f: Any?) = println(f.joinToString("\t"))
 
-// ---- core/.../data/Library.kt: Covers.isProvider (ui's isProviderCover), over the core's cover_rules ----
-
-val providerMarks: List<String> = listOf("ext-", "pl-").map { "&id=$it" }
-fun isProviderCover(url: String): Boolean = providerMarks.any { url.contains(it) }
-
 // ---- core/.../data/Library.kt: coverUrl, with the prefix the core signs handed in ----
 
 fun coverUrl(urlPrefix: String, id: String?, size: Int): String? {
@@ -84,10 +79,6 @@ fun ahead(missing: List<String>, onDevice: (String) -> Boolean): Pair<List<Strin
     return measured to waiting
 }
 
-// ---- core/.../playback/Precacher.kt update, after the core's queueFetchable ----
-
-fun precache(fetchable: List<String>, fetching: Set<String>): List<String> = fetchable.filterNot { it in fetching }
-
 // ---- app/.../vm/PlayerViewModel.kt: setVolumeFraction and volumeFraction ----
 
 fun volumeStep(f: Float, max: Int): Int? {
@@ -144,17 +135,6 @@ fun trim(order: List<Pair<String, Long>>, max: Long): List<String> {
 }
 
 fun main() {
-    for (url in listOf(
-        "https://m.example/rest/getCoverArt.view?u=a&t=b&s=c&id=ext-deezer-song-1&size=320",
-        "https://m.example/rest/getCoverArt.view?u=a&id=pl-12&size=800",
-        "https://m.example/rest/getCoverArt.view?u=a&id=al-3&size=320",
-        "https://m.example/rest/getCoverArt.view?id=ext-1",
-        "https://m.example/ext-1?xid=ext-2",
-        "&id=pl-",
-        "&id=p",
-        "",
-    )) row("provider", hx(url), isProviderCover(url))
-
     val prefix = "https://m.example/rest/getCoverArt.view?u=admin&t=26719a1196d2a940705a59634eb18eab&s=c19b2d&f=json&v=1.16.1&c=nori"
     for (id in listOf("al-123", "a b/c?d&e=f", "!'()*~._-", "Ünïcödé", "日本語", "note 🎵 end", "", "%41", "+plus", "tab\there", "x\u007f\u0080")) {
         for (size in listOf(320, 800, 0, -1)) row("cover_url", hx(prefix), hx(id), size, hx(coverUrl(prefix, id, size)))
@@ -198,13 +178,6 @@ fun main() {
         val (measured, waiting) = ahead(m) { it in here }
         row("ahead", list(m), list(here.toList()), list(measured), waiting)
     }
-
-    for ((ids, fetching) in listOf(
-        listOf("1", "2", "3") to setOf("2"),
-        listOf("1", "2", "3") to emptySet(),
-        listOf("4") to setOf("4"),
-        emptyList<String>() to setOf("1"),
-    )) row("precache", list(ids), list(fetching.toList()), list(precache(ids, fetching)))
 
     for (max in listOf(-1, 0, 1, 7, 15, 25, 150)) {
         for (f in listOf(-0.5f, 0f, 0.01f, 0.1f, 1f / 3f, 0.5f, 0.5f / 15f * 3f, 1f / 14f, 3f / 14f, 0.99f, 1f, 1.5f, Float.NaN)) {

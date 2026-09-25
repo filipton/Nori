@@ -11,7 +11,7 @@
 //! material gains from the mono sum) and is the only stage that can decide what leaves the chain.
 
 
-use crate::types::{EqBand, EqKind, NamedPreset};
+use crate::types::{EqBand, EqKind, NamedPreset, PresetKind};
 
 pub const PEAKING: i32 = 0;
 pub const LOW_SHELF: i32 = 1;
@@ -606,27 +606,27 @@ pub fn auto_preamp_db(bands: impl IntoIterator<Item = (i32, f32)>) -> f32 {
 /// The built-in curves, as data, so the UI (and the settings store) never holds a frequency of its own.
 /// Every preset that boosts carries a pre-amp that pays the boost back, so a preset cannot clip on its own.
 pub fn eq_presets() -> Vec<NamedPreset> {
-    let preset = |name: &str, preamp_db: f32, bands: Vec<EqBand>| NamedPreset { name: name.to_string(), preamp_db, bands };
+    let preset = |kind: PresetKind, preamp_db: f32, bands: Vec<EqBand>| NamedPreset { kind, preamp_db, bands };
     vec![
-        preset("Flat", 0.0, vec![]),
-        preset("Bass boost", -6.0, vec![band(EqKind::LowShelf, 100.0, 6.0, 0.7), band(EqKind::Peaking, 60.0, 3.0, 1.0)]),
-        preset("Bass cut", 0.0, vec![band(EqKind::LowShelf, 110.0, -6.0, 0.7)]),
-        preset("Treble boost", -5.0, vec![band(EqKind::HighShelf, 6000.0, 5.0, 0.7)]),
-        preset("Treble cut", 0.0, vec![band(EqKind::HighShelf, 6000.0, -5.0, 0.7)]),
+        preset(PresetKind::Flat, 0.0, vec![]),
+        preset(PresetKind::BassBoost, -6.0, vec![band(EqKind::LowShelf, 100.0, 6.0, 0.7), band(EqKind::Peaking, 60.0, 3.0, 1.0)]),
+        preset(PresetKind::BassCut, 0.0, vec![band(EqKind::LowShelf, 110.0, -6.0, 0.7)]),
+        preset(PresetKind::TrebleBoost, -5.0, vec![band(EqKind::HighShelf, 6000.0, 5.0, 0.7)]),
+        preset(PresetKind::TrebleCut, 0.0, vec![band(EqKind::HighShelf, 6000.0, -5.0, 0.7)]),
         preset(
-            "Vocal boost",
+            PresetKind::VocalBoost,
             -4.0,
             vec![band(EqKind::Peaking, 300.0, -2.0, 1.0), band(EqKind::Peaking, 2500.0, 4.0, 1.2), band(EqKind::Peaking, 5000.0, 2.0, 1.5)],
         ),
         // The equal-loudness smile: what quiet listening takes away at both ends.
         preset(
-            "Loudness",
+            PresetKind::Loudness,
             -7.0,
             vec![band(EqKind::LowShelfSlope, 80.0, 7.0, 0.8), band(EqKind::Peaking, 1000.0, -2.0, 1.0), band(EqKind::HighShelfSlope, 10000.0, 5.0, 0.8)],
         ),
         // Phone and laptop drivers: throw away what they can only rattle on, then put the body back an octave up.
         preset(
-            "Small speakers",
+            PresetKind::SmallSpeakers,
             -4.0,
             vec![band(EqKind::HighPass, 90.0, 0.0, 0.71), band(EqKind::Peaking, 220.0, 4.0, 1.0), band(EqKind::Peaking, 3000.0, 2.0, 1.2)],
         ),
@@ -988,29 +988,27 @@ mod tests {
     #[test]
     fn presets_are_sane_and_flat_really_is_flat() {
         let presets = eq_presets();
-        assert!(presets.iter().any(|p| p.name == "Flat" && p.bands.is_empty()));
-        let mut names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), presets.len(), "preset names are unique");
+        assert!(presets.iter().any(|p| p.kind == PresetKind::Flat && p.bands.is_empty()));
+        let kinds: std::collections::HashSet<PresetKind> = presets.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds.len(), presets.len(), "each kind once");
 
         for p in &presets {
-            assert!((-12.0..=0.0).contains(&p.preamp_db), "{} pre-amp {}", p.name, p.preamp_db);
+            assert!((-12.0..=0.0).contains(&p.preamp_db), "{:?} pre-amp {}", p.kind, p.preamp_db);
             let boost = p.bands.iter().fold(0f32, |m, b| m.max(b.gain_db));
-            assert!(p.preamp_db <= -boost, "{} boosts {boost} dB but only pays back {}", p.name, p.preamp_db);
+            assert!(p.preamp_db <= -boost, "{:?} boosts {boost} dB but only pays back {}", p.kind, p.preamp_db);
             let mut eq = Equalizer::new(48000, 2);
             let bands: Vec<Band> = p.bands.iter().map(Band::from).collect();
             for band in &bands {
-                assert!((20.0..=20000.0).contains(&band.freq), "{} band at {} Hz", p.name, band.freq);
-                assert!(band.q > 0.0 && band.q <= 10.0, "{} band Q {}", p.name, band.q);
-                assert!(band.gain_db.abs() <= 12.0, "{} band gain {}", p.name, band.gain_db);
+                assert!((20.0..=20000.0).contains(&band.freq), "{:?} band at {} Hz", p.kind, band.freq);
+                assert!(band.q > 0.0 && band.q <= 10.0, "{:?} band Q {}", p.kind, band.q);
+                assert!(band.gain_db.abs() <= 12.0, "{:?} band gain {}", p.kind, band.gain_db);
             }
             eq.configure(&bands, p.preamp_db as f64, 0.0);
-            assert_eq!(eq.is_identity(), p.bands.is_empty() && p.preamp_db == 0.0, "{}", p.name);
+            assert_eq!(eq.is_identity(), p.bands.is_empty() && p.preamp_db == 0.0, "{:?}", p.kind);
             // With its own pre-amp a preset must stay near unity everywhere, so picking one cannot clip on its own.
             for f in [30.0, 60.0, 100.0, 220.0, 440.0, 1000.0, 2500.0, 4000.0, 8000.0, 12000.0] {
                 let g = gain_at(&mut eq, f);
-                assert!(g.is_finite() && g < 3.5, "{} is {g} dB at {f} Hz", p.name);
+                assert!(g.is_finite() && g < 3.5, "{:?} is {g} dB at {f} Hz", p.kind);
             }
         }
     }

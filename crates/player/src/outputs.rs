@@ -4,8 +4,50 @@
 //! media goes to, and keeps the list of every output ever seen, so a device can be given its own sound
 //! while it is unplugged.
 
-/// The phone's own speaker. Always in the list of outputs, and never forgotten.
+/// The phone's own speaker's key. Always in the list of outputs, and never forgotten.
+///
+/// The keys are identifiers, stored with the settings (the known outputs, the profiles bound to them) and
+/// kept as they always were; a client shows an output by its [`parts`], in its own words.
 pub const SPEAKER: &str = "Phone speaker";
+const WIRED: &str = "Wired headphones";
+const USB: &str = "USB: ";
+const BLUETOOTH: &str = "Bluetooth: ";
+/// What a nameless USB device, a nameless Bluetooth one and a nameless other output are keyed by.
+const NAMELESS_USB: &str = "DAC";
+const NAMELESS_BLUETOOTH: &str = "device";
+const OTHER: &str = "Other output";
+
+/// Where an output is plugged in, as a client names it ("USB", "Bluetooth"; the speaker and wired
+/// headphones by that alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum OutputPort {
+    Speaker,
+    Wired,
+    Usb,
+    Bluetooth,
+    /// A dock, HDMI, a line out or anything else, known by its own name when it has one.
+    Other,
+}
+
+/// An output key read back: where it is plugged in, and the name the device gives itself (none when it
+/// gave none, or for the speaker and wired headphones).
+pub fn parts(key: &str) -> (OutputPort, Option<&str>) {
+    fn named_or<'a>(nameless: &str, name: &'a str) -> Option<&'a str> {
+        (name != nameless).then_some(name)
+    }
+    if key == SPEAKER {
+        (OutputPort::Speaker, None)
+    } else if key == WIRED {
+        (OutputPort::Wired, None)
+    } else if let Some(name) = key.strip_prefix(USB) {
+        (OutputPort::Usb, named_or(NAMELESS_USB, name))
+    } else if let Some(name) = key.strip_prefix(BLUETOOTH) {
+        (OutputPort::Bluetooth, named_or(NAMELESS_BLUETOOTH, name))
+    } else {
+        (OutputPort::Other, named_or(OTHER, key))
+    }
+}
 
 /// What an attached output is, as far as routing and naming go. The platform maps its own device
 /// types onto these.
@@ -47,10 +89,10 @@ pub fn key(kind: OutputKind, name: &str) -> String {
     let or = |fallback: &str| if name.is_empty() { fallback.to_string() } else { name.to_string() };
     match kind {
         OutputKind::Speaker => SPEAKER.to_string(),
-        OutputKind::Wired => "Wired headphones".to_string(),
-        OutputKind::Usb => format!("USB: {}", or("DAC")),
-        OutputKind::Bluetooth => format!("Bluetooth: {}", or("device")),
-        OutputKind::UsbAccessory | OutputKind::Line | OutputKind::Other => or("Other output"),
+        OutputKind::Wired => WIRED.to_string(),
+        OutputKind::Usb => format!("{USB}{}", or(NAMELESS_USB)),
+        OutputKind::Bluetooth => format!("{BLUETOOTH}{}", or(NAMELESS_BLUETOOTH)),
+        OutputKind::UsbAccessory | OutputKind::Line | OutputKind::Other => or(OTHER),
     }
 }
 
@@ -72,7 +114,7 @@ pub struct Seen {
 /// without the hardware.
 pub fn refresh(attached: &[(OutputKind, &str)], known: &[String], fake_usb: Option<&str>) -> Seen {
     // Android routes media to the most recently attached of these, in this order of precedence.
-    let fake = fake_usb.map(|n| format!("USB: {n}"));
+    let fake = fake_usb.map(|n| format!("{USB}{n}"));
     let mut best: Option<&(OutputKind, &str)> = None;
     for d in attached {
         // The first of the lowest rank, like minByOrNull.
@@ -131,6 +173,23 @@ mod tests {
         assert_eq!(key(OutputKind::Speaker, "whatever"), SPEAKER);
         assert_eq!(key(OutputKind::Line, "TV"), "TV");
         assert_eq!(key(OutputKind::Other, ""), "Other output");
+    }
+
+    #[test]
+    fn a_key_reads_back_as_its_parts() {
+        assert_eq!(parts("USB: FiiO K3"), (OutputPort::Usb, Some("FiiO K3")));
+        assert_eq!(parts("USB: DAC"), (OutputPort::Usb, None));
+        assert_eq!(parts("Bluetooth: device"), (OutputPort::Bluetooth, None));
+        assert_eq!(parts("Bluetooth: WH-1000XM5"), (OutputPort::Bluetooth, Some("WH-1000XM5")));
+        assert_eq!(parts(SPEAKER), (OutputPort::Speaker, None));
+        assert_eq!(parts("Wired headphones"), (OutputPort::Wired, None));
+        assert_eq!(parts("TV"), (OutputPort::Other, Some("TV")));
+        assert_eq!(parts("Other output"), (OutputPort::Other, None));
+        for (k, n) in [(OutputKind::Usb, "K3"), (OutputKind::Usb, ""), (OutputKind::Bluetooth, ""), (OutputKind::Line, "TV"), (OutputKind::Other, "")] {
+            let key = key(k, n);
+            let (port, name) = parts(&key);
+            assert_eq!(name.unwrap_or(""), n, "{k:?} {port:?}");
+        }
     }
 
     #[test]

@@ -146,7 +146,7 @@ impl<L: Library> Sources<L> {
     }
 
     /// What the songs other than `id` leave of the memory cap, for `id` fetched ahead: the cap is one
-    /// budget for the songs kept, as it is for the ExoPlayer path's one buffer, not one per song. Never
+    /// budget for the songs kept, not one per song. Never
     /// less than a sixth of it, a minute or more of any song, so a mix into it has its start at hand.
     fn left_for(&self, id: &str) -> u64 {
         let cap = self.load[4].max(1) as u64;

@@ -390,7 +390,7 @@ echo "-- automix over a real album"
 # Read from a running capture, not `adb logcat -d`: every app.sh call clears the log to read its own
 # answer back, and the songs coming up are measured within a few seconds of play - long gone by the time
 # the seek below has been sent. Only the song after the boundary was left to see, measured some seconds
-# after it (the precache delay), which fell outside the wait on either engine unless the album was slow to
+# after it (the precache delay), which fell outside the wait unless the album was slow to
 # arrive: the check passed or failed on timing, not on what the app did.
 automix_log=$(mktemp)
 adb logcat -c

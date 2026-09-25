@@ -11,7 +11,7 @@ name = "nori_lyrics"
 [features]
 # The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
 # crate without them.
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-settings/ffi", "nori-net/ffi", "nori-words/ffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-settings/ffi", "nori-net/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
@@ -33,8 +33,6 @@ nori-settings = { path = "../settings" }
 nori-look = { path = "../look" }
 # The services are asked through the core's Transport.
 nori-net = { path = "../net" }
-# Whose lyrics they are, as the credit line says it.
-nori-words = { path = "../words" }
 
 [dev-dependencies]
 # The tests' fake transport implements the async Transport trait.

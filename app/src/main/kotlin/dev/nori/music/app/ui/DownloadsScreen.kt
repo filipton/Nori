@@ -80,6 +80,7 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.downloads.DownloadMark
 import dev.nori.music.downloads.DownloadPhase
 import dev.nori.music.downloads.DownloadLines
+import androidx.compose.ui.platform.LocalContext
 import dev.nori.music.downloads.DownloadState
 import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.flow.StateFlow
@@ -263,7 +264,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
     val s = sections
     val unfinished = s?.let { it.active.size + it.queued.size + it.failed.size } ?: 0
     // Whether stopping everything asks first, and what it says, are the core's (`words_stop_all`).
-    val stop = remember(unfinished) { dev.nori.music.ffi.words.wordsStopAll(unfinished.toUInt()) }
+    val stop = remember(unfinished) { StopAll(unfinished > 1, say.stopAllTitle, say.stopAllText(unfinished)) }
     if (confirm) AlertDialog(
         onDismissRequest = { confirm = false },
         title = { Text(stop.title) },
@@ -284,7 +285,8 @@ fun DownloadsScreen(actions: ActionsViewModel) {
             }
         }
         LargeTitle(say.downloads)
-        val summary = s?.let { beat.let { _ -> DownloadLines.summary(it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
+        val res = LocalContext.current.resources
+        val summary = s?.let { beat.let { _ -> DownloadLines.summary(res, it.active.size, it.queued.size, it.failed.size) } }.orEmpty()
         AnimatedContent(
             summary, Modifier.padding(start = Space.gutter, end = Space.gutter, bottom = 6.dp),
             transitionSpec = { fadeIn(tween(if (plain) 0 else 180)) togetherWith fadeOut(tween(if (plain) 0 else 120)) },
@@ -334,9 +336,9 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Icon(Icons.Outlined.Downloading, null, Modifier.size(44.dp), MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                    Text(noteText(dev.nori.music.ffi.words.Note.NO_DOWNLOADS), Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                    Text(noteText(Note.NO_DOWNLOADS), Modifier.padding(top = 14.dp), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                     Text(
-                        noteText(dev.nori.music.ffi.words.Note.NO_DOWNLOADS_HELP),
+                        noteText(Note.NO_DOWNLOADS_HELP),
                         Modifier.padding(top = 6.dp), textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -348,7 +350,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
 
 /**
  * An active row's second line: the artist, then where its song stands ("45% · 2.1 MB/s · 1:20 left"),
- * in the core's words. It is asked again whenever the ring's progress moves, so the line and the ring
+ * from the core's facts. It is asked again whenever the ring's progress moves, so the line and the ring
  * never disagree.
  */
 @Composable
@@ -356,8 +358,11 @@ private fun activeSub(song: Song): String {
     val all = LocalDownloadMarks.current
     val progress = all?.marks?.value?.get(song.id)
         ?.takeIf { it.phase == DownloadPhase.DOWNLOADING }?.progress?.collectAsStateWithLifecycle()?.value
-    return progress.let { _ -> DownloadLines.row(song.id) }
+    return progress.let { _ -> DownloadLines.row(LocalContext.current.resources, song.id) }
 }
+
+/** Stopping every download: whether it asks first (more than one song would leave the queue), and how. */
+private class StopAll(val asks: Boolean, val title: String, val text: String)
 
 /** A song on the downloads screen: the same proportions as a row in any song list. */
 @Composable
@@ -367,7 +372,7 @@ private fun DownloadRow(
     onClick: (() -> Unit)? = null, trailing: @Composable RowScope.() -> Unit,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val couldNot = noteText(dev.nori.music.ffi.words.Note.DOWNLOAD_FAILED)
+    val couldNot = noteText(Note.DOWNLOAD_FAILED)
     Column(modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)

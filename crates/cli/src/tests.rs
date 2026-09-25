@@ -4,7 +4,6 @@
 use std::time::{Duration, Instant};
 
 use nori_core::settings::StoredPrefs;
-use nori_core::settings_schema::{self, SettingRow, SettingsFacts};
 use nori_core::{Album, Song};
 use nori_engine::State;
 use ratatui::backend::TestBackend;
@@ -14,6 +13,7 @@ use ratatui::Terminal;
 
 use crate::app::{App, Cmd, Hit, ListRef, Overlay, Screen};
 use crate::backend::{Data, Msg, Req};
+use crate::settings_view::{Facts, Line, Row, SettingsView, GROUPS};
 
 fn app() -> App {
     let mut a = App::new(StoredPrefs::default());
@@ -216,63 +216,77 @@ fn with_the_mouse_off_clicks_do_nothing() {
 }
 
 #[test]
-fn every_settings_page_is_drawn_from_the_schema() {
+fn every_settings_page_is_drawn_with_its_rows() {
     let mut a = app();
     a.go(Screen::Settings);
-    a.settings.set_facts(SettingsFacts::default());
-    let groups = settings_schema::settings_groups();
-    for (i, g) in groups.iter().enumerate() {
+    a.settings.set_facts(Facts { devices: vec!["hw:0".into()], ..Facts::default() });
+    for (i, g) in GROUPS.iter().enumerate() {
         a.settings.pane = 0;
-        a.settings.group.at = i + 1;
+        a.settings.group.at = i;
         a.settings.invalidate();
         let s = draw(&mut a, 160, 70);
         dump(&format!("settings-{}", g.id), &s);
-        let terminal = SettingsFacts { lacks: settings_schema::Capability::ALL.to_vec(), ..SettingsFacts::default() };
-        let Some(page) = settings_schema::page(&g.id, &a.prefs, &terminal) else { continue };
+        assert!(s.contains(g.title), "{}: group missing", g.id);
+        let page = a.settings.page(&a.prefs.clone()).clone();
         for section in &page.sections {
             if !section.title.is_empty() {
                 assert!(s.contains(&section.title), "{}: section {} missing", g.id, section.title);
             }
             for row in &section.rows {
                 let title = match row {
-                    SettingRow::Toggle { title, .. } | SettingRow::Choice { title, .. } | SettingRow::Link { title, .. } | SettingRow::Action { title, .. } => title,
+                    Row::Toggle { title, .. } | Row::Choice { title, .. } | Row::Link { title, .. } | Row::Action { title, .. } => title.trim(),
                     _ => continue,
                 };
-                assert!(s.contains(title.as_str()), "{}: {title} missing:\n{s}", g.id);
+                assert!(s.contains(title), "{}: {title} missing:\n{s}", g.id);
             }
         }
     }
     // What only a phone can do is not listed here.
-    for i in 0..groups.len() {
-        a.settings.group.at = i + 1;
+    for i in 0..GROUPS.len() {
+        a.settings.group.at = i;
         a.settings.invalidate();
         let s = draw(&mut a, 160, 70);
-        for phone in ["System audio effects", "Save battery while playing", "Swipe left", "Playback engine", "Moving covers"] {
+        for phone in ["System audio effects", "Save battery", "Swipe", "Moving covers", "Black background"] {
             assert!(!s.contains(phone), "{phone} listed in a terminal:\n{s}");
         }
     }
     // A switch shows its state, and enter on it asks the core to change it by its own name.
-    a.settings.group.at = 2;
+    a.settings.group.at = GROUPS.iter().position(|g| g.id == "sound").unwrap();
     a.settings.pane = 0;
     a.settings.invalidate();
     draw(&mut a, 160, 70);
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.settings.pane, 1);
     a.cmds.clear();
-    // Down to the AutoMix switch.
-    let page = settings_schema::page("playing", &a.prefs, &SettingsFacts::default()).unwrap();
-    let rows: Vec<&SettingRow> = page.sections[0].rows.iter().collect();
-    let at = rows.iter().position(|r| matches!(r, SettingRow::Toggle { name, .. } if name == "autoMix")).unwrap();
-    for _ in 0..at {
+    // Down to the AutoMix switch, counting the lines above it (titles are skipped over).
+    let page = a.settings.page(&a.prefs.clone()).clone();
+    let lines = SettingsView::lines(&page);
+    let at = lines.iter().position(|l| matches!(l, Line::Row(Row::Toggle { name, .. }) if name == "autoMix")).unwrap();
+    while a.settings.row.at < at {
         key(&mut a, KeyCode::Down);
     }
     key(&mut a, KeyCode::Enter);
     assert_eq!(a.cmds.last(), Some(&Cmd::Setting("autoMix".into(), "true".into())));
-    // ← and → change a choice; here they do not seek.
+    // ← and → change a choice (the crossfade, just above); here they do not seek.
     key(&mut a, KeyCode::Up);
     a.cmds.clear();
     key(&mut a, KeyCode::Right);
     assert!(matches!(a.cmds.last(), Some(Cmd::Setting(n, _)) if n == "crossfadeSec"), "{:?}", a.cmds);
+    // The output device is the terminal's own: kept for the next start.
+    a.settings.group.at = 0;
+    a.settings.pane = 0;
+    a.settings.invalidate();
+    draw(&mut a, 160, 70);
+    key(&mut a, KeyCode::Enter);
+    let page = a.settings.page(&a.prefs.clone()).clone();
+    let lines = SettingsView::lines(&page);
+    let at = lines.iter().position(|l| matches!(l, Line::Row(Row::Choice { name, .. }) if name == "!device")).unwrap();
+    while a.settings.row.at < at {
+        key(&mut a, KeyCode::Down);
+    }
+    a.cmds.clear();
+    key(&mut a, KeyCode::Right);
+    assert_eq!(a.cmds.last(), Some(&Cmd::Device("hw:0".into())));
 }
 
 #[test]
@@ -363,7 +377,8 @@ fn lyrics_follow_the_song_word_by_word() {
         LyricLine { start_ms: 1000, end_ms: 2000, text: "Hello world".into(), words, ..Default::default() },
         LyricLine { start_ms: 3000, end_ms: 4000, text: "Second line".into(), ..Default::default() },
     ];
-    a.handle(Msg::Lyrics { song: "s1".into(), lyrics: Lyrics { synced: true, word_timed: true, lines, key: 0 }, origin: crate::lyrics::LyricsOrigin::Server });
+    let pick = nori_core::race::LyricsPick { lyrics: Lyrics { synced: true, word_timed: true, lines, key: 0 }, origin: nori_core::lyrics_sources::LyricsOrigin::Server };
+    a.handle(Msg::Lyrics { song: "s1".into(), pick });
     let l = a.lyrics.as_ref().unwrap();
     l.advance(1250, true, true);
     let s = draw(&mut a, 80, 20);
@@ -405,6 +420,17 @@ fn the_equalizer_draws_its_bands_as_bars() {
     a.go(Screen::Equalizer);
     a.go(Screen::Home);
     assert!(!a.cmds.iter().any(|c| matches!(c, Cmd::Tuning(_))), "{:?}", a.cmds);
+    // With the equalizer off nothing changed on it is heard: the output is left alone.
+    a.prefs.eq_enabled = false;
+    a.go(Screen::Equalizer);
+    assert!(!a.sound_edited());
+    // Switched off while the shallow buffer was held: given back.
+    a.prefs.eq_enabled = true;
+    assert!(a.sound_edited());
+    a.cmds.clear();
+    let off = StoredPrefs { eq_enabled: false, ..a.prefs.clone() };
+    a.prefs_changed(off);
+    assert_eq!(a.cmds, [Cmd::Tuning(false)]);
 }
 
 #[test]
