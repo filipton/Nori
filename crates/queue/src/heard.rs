@@ -7,8 +7,8 @@ use nori_player::engine::Heard;
 use nori_player::heard::{HeardTracker, Playhead, Seen};
 use parking_lot::Mutex;
 
-/// The engine's latest word on what the ear has, for [`HeardClock`].
-static HEARD: Mutex<Heard> = Mutex::new(Heard {
+/// Nothing held and nothing mixing: the player's own word stands.
+const NOTHING: Heard = Heard {
     id: None,
     us: 0,
     at_ms: 0,
@@ -19,7 +19,17 @@ static HEARD: Mutex<Heard> = Mutex::new(Heard {
     next_rate: 1.0,
     from_id: None,
     audible_us: i64::MAX,
-});
+};
+
+/// The engine's latest word on what the ear has, for [`HeardClock`].
+static HEARD: Mutex<Heard> = Mutex::new(NOTHING);
+
+/// Forgets the last word: for a player with no transition engine publishing here (the Rust engine says
+/// itself which song is heard), so that what one let go of in the middle of a mix last said - a song
+/// held, the next one coming in - does not go on putting that song on the page.
+pub fn forget() {
+    *HEARD.lock() = NOTHING;
+}
 
 /// What the engine says the ear has now, after each call made on it. Asked about on every position
 /// query while a hold or mix runs, so it is copied in place, reusing the strings it already has.

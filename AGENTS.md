@@ -126,7 +126,7 @@ crates/engine/  Rust, platform-free: the whole player for a platform without one
                 tests/engine.rs checks it against sim.rs sample for sample; tests/core.rs over the core,
                 tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
-crates/mpris/   Rust, Linux: the desktop's media controls (MPRIS over libdbus), for nori-cli --mpris.
+crates/mpris/   Rust, Linux: the desktop's media controls (MPRIS over libdbus), served by nori-cli.
 crates/covers/  Rust, platform-free: all cover art, Android's included (package nori-covers; the app has no
                 image library). Fetched through the core's Transport at the core's addresses, kept on disk
                 under a size limit, least recently used out first (disk.rs, the index rebuilt from the
@@ -139,9 +139,17 @@ crates/covers/  Rust, platform-free: all cover art, Android's included (package 
                 crates/android covers.rs). Kotlin keeps only the Bitmaps (`CoverLoader`) and draws them
                 (ui `Cover`).
 crates/http/    Rust, desktop: the core's Transport and the engine's ByteSource over one ureq agent.
-crates/cli/     Rust, desktop: nori-cli, the terminal client that proves the split - log in, search,
-                queue and play through the core, the engine and output-cpal, or `--wav` to a file;
-                `--download`, `--offline`, `--replay-gain`, `--hi-res`, `--mpris`.
+crates/cli/     Rust, desktop: nori-cli, the reference terminal client and the proof that a new client
+                writes only its interface: a full-screen player (ratatui over crossterm) with login and
+                server profiles, home, library, search, album/artist/playlist pages, the queue, now
+                playing, synced lyrics word by word, downloads, the equalizer and every setting drawn
+                from the settings schema; covers through ratatui-image (kitty, sixel, iTerm2 or half
+                blocks) decoded by nori-covers and tinted by nori-look; MPRIS. app.rs is the state and
+                what input does (no I/O: `Cmd`s out, `Msg`s in), ui.rs draws it, backend.rs is the
+                core, engine and cover loader, runner.rs the event loop (asleep unless something is
+                due), settings_view.rs the schema's rows, tests.rs the screens in a TestBackend.
+                `--script` (or `--search`, `--play`, `--wav`) is the old non-interactive player
+                (script.rs): `--download`, `--offline`, `--replay-gain`, `--hi-res`, `--mpris`.
 crates/android/ Rust, Android only: the library the app loads (package nori-android, cdylib `norimusic`, so
                 libnorimusic.so): the core with its uniffi scaffolding, and the JNI doors with primitives
                 and direct buffers on every hot path. The scaffolding is JNI too: build.rs generates it
@@ -202,14 +210,31 @@ word, colour and piece of state - lives in the crates; the Kotlin is a front end
 ./gradlew :app:assemblePerf                         # perf and release builds default to arm64-v8a (phones)
 cargo test                                          # the Rust tests
 cargo test -p nori-player --test pipeline           # the player end to end on a virtual clock (sim.rs)
-cargo test -p nori-engine                           # the desktop player on real threads, against sim.rs
-cargo run --release -p nori-cli -- --url http://localhost:4533 --user admin --password admin \
+cargo test -p nori-engine                           # the desktop player on its own thread, on a clock the test moves
+cargo run --release -p nori-cli                     # the terminal client; asks for a server the first time
+cargo run --release -p nori-cli -- --url http://localhost:4533 --user admin --password admin   # adds and uses one
+cargo run --release -p nori-cli -- --script --url http://localhost:4533 --user admin --password admin \
     --search Noise --songs 2 --start 570 --crossfade 6 --wav out.wav   # a render through the whole client
 tools/dev-server.sh                                 # Navidrome at http://10.0.2.2:4533 from the emulator, admin/admin
 tools/twins.sh                                      # the Kotlin originals of the core's twins, run for their test vectors
 ```
 
 Run `cargo test` and a build before committing.
+
+The engine's tests (crates/engine/tests/engine.rs, paths.rs) run it on a clock the test moves
+(`tests/common`, `Engine::start_on`): time only moves while the engine sleeps, and the test's sound card
+pulls on that time. Wait with the rig's `wait_for`/`wait` (until a condition, within a limit) and `run` (a
+stretch of music); never `thread::sleep`, and read the ear from what the card heard rather than from the
+status, which the engine updates only when it wakes. Something a test does that wakes the engine outside a
+command (a fake device's callback) goes through `Virtual::woke_engine`, so the test waits for it.
+
+The terminal client keeps its database, covers, downloads and stream cache in `$XDG_DATA_HOME/nori`
+(`--data DIR` elsewhere) and writes stderr to `nori.log` there while the screen is up. `?` lists every
+key; `m` turns the mouse off (the terminal selects text again), `I` the covers; `--no-images`,
+`--no-mouse`, `--no-mpris`, `--offline` and `--device NAME` start it that way. Its screens are tested in
+ratatui's TestBackend (`cargo test -p nori-cli`; `NORI_TUI_DUMP=dir` writes each screen drawn there as
+text). Drive it in tmux (`tmux send-keys`, `tmux capture-pane -p`) to check it by hand; a detached tmux
+answers no terminal queries, so the first key after start is swallowed there.
 
 Every compile goes through `sccache` (`.cargo/config.toml`), a compiler cache shared by this checkout and every
 worktree beside it, so an agent's fresh worktree reuses the built dependencies. Install it once with

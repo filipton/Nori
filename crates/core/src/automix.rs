@@ -77,7 +77,9 @@ impl Core {
             a.take_features()
         };
         let a = finish(&song_id, &f).track;
-        Ok(Some(put_measured(&self.db.lock(), a)?))
+        let stored = put_measured(&self.db.lock(), a)?;
+        nori_automix::planner::analyses_changed();
+        Ok(Some(stored))
     }
 }
 
@@ -98,6 +100,9 @@ impl Core {
         let Some(mut row) = get(&c, song_id)? else { return Ok(false) };
         let adopted = nori_automix::beats::merge(&mut row, end, grid);
         put(&c, &row)?;
+        if adopted {
+            nori_automix::planner::analyses_changed();
+        }
         Ok(adopted)
     }
 }

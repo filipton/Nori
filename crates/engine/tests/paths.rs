@@ -6,16 +6,21 @@
 //!
 //! The compressed songs are made by ffmpeg on the machine running the tests; without it the tests that
 //! need them say so and pass.
+//!
+//! The engine runs on a clock the test moves (`common::Virtual`), as in tests/engine.rs: the CPU's card
+//! pulls on it, and the chip's play head wakes the engine through it.
+
+mod common;
 
 use std::collections::VecDeque;
 use std::io::{Cursor, Read};
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::Thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use common::{Stepper, Virtual};
 use nori_engine::{AudioOutput, Body, ByteSource, Coded, Coding, Config, Engine, Event, Feed, Library, Located, OffloadOutput, OutputFacts, OutputFormat, Settings, SharedQueue, Source, State, Support};
 use nori_player::dsp::Band;
 use nori_player::engine::{Host, Plan};
@@ -131,13 +136,57 @@ impl Library for Songs {
 
 // ---- the CPU's output ----
 
-/// A sound card on a fast clock that keeps everything it plays, as float, and the formats it was opened in.
+/// What the CPU's card pulls from, on the test's clock.
+#[derive(Default)]
+struct Pull {
+    feed: Option<Feed>,
+    playing: bool,
+    due_ns: i64,
+    heard: Arc<Mutex<Vec<f32>>>,
+    block: Vec<f32>,
+    /// The offloaded track, which plays on the same clock when it plays on its own ([`Fake::runs`]).
+    chip: Option<Fake>,
+}
+
+/// Frames the card pulls at a time.
+const BLOCK: usize = 512;
+
+impl common::Device for Pull {
+    fn due_ns(&self) -> i64 {
+        self.due_ns
+    }
+
+    fn tick(&mut self, now_ns: i64) -> bool {
+        let rate = self.feed.as_ref().map_or(44_100, |f| f.format().rate);
+        self.due_ns = now_ns + (BLOCK as i64 * 1_000_000_000) / rate as i64;
+        // The chip's request for more wakes the engine as the card's pull does.
+        let asked = self.chip.as_ref().is_some_and(|c| c.0.lock().sync(now_ns));
+        let Some(feed) = self.feed.as_mut() else { return asked };
+        if !self.playing || (feed.available() < BLOCK && !feed.ending()) {
+            return false;
+        }
+        let ch = feed.format().channels;
+        self.block.resize(BLOCK * ch, 0.0);
+        let waits = feed.engine_waits();
+        let got = feed.pull(&mut self.block);
+        self.heard.lock().extend_from_slice(&self.block[..got * ch]);
+        asked || waits && !feed.engine_waits()
+    }
+}
+
+/// A sound card that keeps everything it plays, as float, and the formats it was opened in.
 #[derive(Clone, Default)]
 struct Card {
     heard: Arc<Mutex<Vec<f32>>>,
-    playing: Arc<AtomicBool>,
     opened: Arc<Mutex<Vec<OutputFormat>>>,
-    closed: Arc<AtomicBool>,
+    pull: Arc<Mutex<Pull>>,
+}
+
+impl Card {
+    fn new() -> Card {
+        let heard: Arc<Mutex<Vec<f32>>> = Arc::default();
+        Card { heard: heard.clone(), opened: Arc::default(), pull: Arc::new(Mutex::new(Pull { heard, ..Pull::default() })) }
+    }
 }
 
 impl AudioOutput for Card {
@@ -146,32 +195,17 @@ impl AudioOutput for Card {
         Ok(want)
     }
 
-    fn start(&mut self, mut feed: Feed) -> Result<(), String> {
-        let closed = Arc::new(AtomicBool::new(false));
-        self.closed = closed.clone();
-        let (heard, playing) = (self.heard.clone(), self.playing.clone());
-        std::thread::spawn(move || {
-            let f = feed.format();
-            let mut block = vec![0f32; 512 * f.channels];
-            let period = Duration::from_secs_f64(512.0 / f.rate as f64 / 20.0);
-            while !closed.load(Ordering::Acquire) {
-                std::thread::sleep(period);
-                if !playing.load(Ordering::Acquire) || (feed.available() < 512 && !feed.ending()) {
-                    continue;
-                }
-                let got = feed.pull(&mut block);
-                heard.lock().extend_from_slice(&block[..got * f.channels]);
-            }
-        });
+    fn start(&mut self, feed: Feed) -> Result<(), String> {
+        self.pull.lock().feed = Some(feed);
         Ok(())
     }
 
     fn pause(&mut self) {
-        self.playing.store(false, Ordering::Release);
+        self.pull.lock().playing = false;
     }
 
     fn resume(&mut self) {
-        self.playing.store(true, Ordering::Release);
+        self.pull.lock().playing = true;
     }
 
     fn latency_us(&self) -> u64 {
@@ -183,7 +217,7 @@ impl AudioOutput for Card {
     }
 
     fn close(&mut self) {
-        self.closed.store(true, Ordering::Release);
+        self.pull.lock().feed = None;
     }
 }
 
@@ -220,6 +254,8 @@ struct Chip {
     torn: bool,
     open: bool,
     engine: Option<Thread>,
+    /// The test's clock: the engine is woken through it, so the test knows to wait for it.
+    clock: Option<Virtual>,
     /// Playing, as Android's track would say: an end of stream is taken only then.
     playing: bool,
     /// Readings the platform gives before its true count, one each time it is asked: none for a call
@@ -237,10 +273,159 @@ struct Chip {
     notes: Vec<String>,
     /// Ends of stream it refuses though it plays (Android's track still stopping from the one before).
     refuse_eos: u32,
+    /// It plays on its own, at the music's pace on the test's clock, while it is told to play (none: the
+    /// test moves its play head).
+    runs: bool,
+    /// When it was last moved on, ns, and the part of a frame owed since.
+    synced_ns: Option<i64>,
+    owed: f64,
+    /// The bytes the platform grants a track, whatever it was asked for (64 KB on a Galaxy S22).
+    grant: Option<usize>,
+    /// Its play head reads nought for ever (`getRenderPosition` failing, as on a Galaxy S22).
+    head_stuck: bool,
+    /// It gives timestamps: the true count of what it presented, or this one for ever.
+    stamps: bool,
+    frozen_stamp: Option<u64>,
+    /// It asked for more (`onDataRequest`) since the engine last looked, and whether it asks again the
+    /// next time it holds under half its buffer.
+    requested: bool,
+    armed: bool,
+    /// Frames of music it had nothing to play for while playing, before the end of what it was given.
+    starved: u64,
+    /// Its timestamps misbehave as a Galaxy S22's do ([`Fake::jittery`]).
+    jittery: bool,
+    /// What the timestamps read next while it plays, before the true count: a track's start, or the
+    /// count from before a flush.
+    stamp_script: VecDeque<u64>,
+    /// The least the timestamp reads while its start's glitch lasts (the platform holds its own count
+    /// from going back).
+    stamp_floor: u64,
+    /// The last timestamp given, and the random numbers its steps back come from.
+    last_stamp: u64,
+    seed: u64,
+    /// Times the track was flushed.
+    flushes: u32,
 }
 
 #[derive(Clone, Default)]
 struct Fake(Arc<Mutex<Chip>>);
+
+impl Chip {
+    /// Plays `frames` more of what it holds, as far as it holds: the frames played.
+    fn play_frames(&mut self, frames: u64) -> u64 {
+        let to = (self.head + frames).min(self.written);
+        let played = to - self.head;
+        let mut n = played;
+        self.head = to;
+        while n > 0 {
+            let Some((bytes, f)) = self.held.front_mut() else { break };
+            if *f <= n {
+                n -= *f;
+                self.held.pop_front();
+            } else {
+                let part = (*bytes as u128 * n as u128 / *f as u128) as usize;
+                *bytes -= part;
+                *f -= n;
+                n = 0;
+            }
+        }
+        played
+    }
+
+    /// What its timestamps read as a track starts, after `stale` (the count before a flush) twice.
+    fn start_script(&mut self, stale: Option<u64>) {
+        self.stamp_script.clear();
+        if !self.jittery {
+            return;
+        }
+        if let Some(s) = stale {
+            self.stamp_script.extend([s, s]);
+        }
+        self.stamp_script.extend([10, 6, 5, 4, 4, 6, 7_074, 7_066, 7_065, 7_067, 7_065, 7_066, 7_064]);
+        self.stamp_floor = 7_056;
+        self.last_stamp = 0;
+    }
+
+    /// The timestamp now, as a jittery phone gives it.
+    fn jittery_stamp(&mut self) -> u64 {
+        let truth = self.head - self.offset;
+        // The start's glitches last its first 300 ms.
+        if truth > 13_230 {
+            self.stamp_script.clear();
+        }
+        if self.playing {
+            if let Some(s) = self.stamp_script.pop_front() {
+                self.last_stamp = s;
+                return s;
+            }
+        }
+        if truth >= self.stamp_floor {
+            self.stamp_floor = 0;
+        }
+        // xorshift64
+        self.seed ^= self.seed << 13;
+        self.seed ^= self.seed >> 7;
+        self.seed ^= self.seed << 17;
+        let back = if self.seed.is_multiple_of(3) { 1 + (self.seed >> 8) % 80 } else { 0 };
+        // A step back from the reading before when the two are a moment apart; behind the true count by
+        // as much otherwise.
+        let stamp = match back {
+            0 => truth.max(self.stamp_floor),
+            _ if self.last_stamp + 1_024 >= truth => self.last_stamp.saturating_sub(back),
+            _ => (truth - back).max(self.stamp_floor),
+        };
+        self.last_stamp = stamp;
+        stamp
+    }
+
+    fn held_bytes(&self) -> usize {
+        self.held.iter().map(|h| h.0).sum()
+    }
+
+    /// A chip that plays on its own is moved on to `now_ns`, counting what it had nothing to play for:
+    /// true when that took it under half its buffer, where it asks for more.
+    fn sync(&mut self, now_ns: i64) -> bool {
+        if !self.runs {
+            return false;
+        }
+        let last = self.synced_ns.replace(now_ns).unwrap_or(now_ns);
+        if !self.open || !self.playing || self.torn {
+            self.owed = 0.0;
+            return false;
+        }
+        let due = (now_ns - last).max(0) as f64 * 44_100.0 / 1e9 + self.owed;
+        let frames = due as u64;
+        self.owed = due - frames as f64;
+        let played = self.play_frames(frames);
+        // Out of music before the end of stream said last: silence where there should be none.
+        if played < frames && self.ended_at != Some(self.written) {
+            self.starved += frames - played;
+        }
+        if self.armed && self.held_bytes() < self.capacity / 2 {
+            self.armed = false;
+            self.requested = true;
+            return true;
+        }
+        false
+    }
+
+    /// [`Chip::sync`] to the clock's time, from the engine's own calls: a request made then wakes it.
+    fn sync_now(&mut self) {
+        let Some(now) = self.clock.as_ref().map(Virtual::now_ns) else { return };
+        if self.sync(now) {
+            self.wake();
+        }
+    }
+
+    /// The engine is told, as the platform tells it.
+    fn wake(&self) {
+        match (&self.clock, &self.engine) {
+            (Some(c), _) => c.woke_engine(),
+            (None, Some(t)) => t.unpark(),
+            (None, None) => {}
+        }
+    }
+}
 
 impl Fake {
     fn new(support: &[(Coding, Support)]) -> Fake {
@@ -262,32 +447,43 @@ impl Fake {
 
     fn play_on(&self, frames: u64, wake: bool) {
         let mut c = self.0.lock();
-        let to = (c.head + frames).min(c.written);
-        let mut n = to - c.head;
-        c.head = to;
-        while n > 0 {
-            let Some((bytes, f)) = c.held.front_mut() else { break };
-            if *f <= n {
-                n -= *f;
-                c.held.pop_front();
-            } else {
-                let part = (*bytes as u128 * n as u128 / *f as u128) as usize;
-                *bytes -= part;
-                *f -= n;
-                n = 0;
-            }
+        c.play_frames(frames);
+        if wake {
+            c.wake();
         }
-        if let Some(t) = c.engine.as_ref().filter(|_| wake) {
-            t.unpark();
-        }
+    }
+
+    /// A Galaxy S22's offloaded track: 64 KB granted whatever was asked, playing on its own at the
+    /// music's pace and asking for more under half its buffer; its play head reads nought for ever
+    /// (`head_stuck`), its timestamps are true (`stamps`).
+    fn phone(&self, stamps: bool, head_stuck: bool) {
+        let mut c = self.0.lock();
+        c.runs = true;
+        c.pace = Some(1.0);
+        c.grant = Some(64 * 1024);
+        c.stamps = stamps;
+        c.head_stuck = head_stuck;
+    }
+
+    /// Its timestamps as a Galaxy S22's are (perf10): in a track's first 300 ms they read 10, 6, 5, 4,
+    /// 4, 6 frames, then 160 ms ahead of what it presented, held there by the platform until the true
+    /// count passes it; as it plays, about one reading in three steps back 1 to 80 frames from the one
+    /// before; and the first two after a flush are the count from before it.
+    fn jittery(&self) {
+        let mut c = self.0.lock();
+        c.jittery = true;
+        c.seed = 0x9e37_79b9_7f4a_7c15;
+        c.start_script(None);
+    }
+
+    fn starved_ms(&self) -> u64 {
+        self.0.lock().starved * 1000 / 44_100
     }
 
     fn tear_down(&self) {
         let mut c = self.0.lock();
         c.torn = true;
-        if let Some(t) = &c.engine {
-            t.unpark();
-        }
+        c.wake();
     }
 
     fn calls(&self) -> Vec<Call> {
@@ -302,9 +498,7 @@ impl Fake {
     fn read_as(&self, readings: &[Option<u64>]) {
         let mut c = self.0.lock();
         c.readings.extend(readings.iter().copied());
-        if let Some(t) = &c.engine {
-            t.unpark();
-        }
+        c.wake();
     }
 
     /// The platform starts counting again from nought, where the head is.
@@ -330,7 +524,10 @@ impl OffloadOutput for Fake {
     fn open(&mut self, coded: Coded, bytes: usize) -> Result<usize, String> {
         let mut c = self.0.lock();
         c.calls.push(Call::Open(coded));
+        let bytes = c.grant.unwrap_or(bytes);
         c.capacity = bytes * c.takes.max(1);
+        c.armed = true;
+        c.requested = false;
         c.held.clear();
         c.written = 0;
         c.head = 0;
@@ -340,11 +537,13 @@ impl OffloadOutput for Fake {
         c.open = true;
         c.playing = false;
         c.engine = Some(std::thread::current());
+        c.start_script(None);
         Ok(bytes)
     }
 
     fn write(&mut self, data: &[u8], frames: u64) -> Result<usize, i32> {
         let mut c = self.0.lock();
+        c.sync_now();
         if c.torn {
             return Err(-6);
         }
@@ -356,6 +555,9 @@ impl OffloadOutput for Fake {
             c.written += f;
             c.calls.push(Call::Write(n, f));
             c.bytes.extend_from_slice(&data[..n]);
+        }
+        if c.held_bytes() >= c.capacity / 2 {
+            c.armed = true;
         }
         Ok(n)
     }
@@ -382,12 +584,14 @@ impl OffloadOutput for Fake {
 
     fn play(&mut self) {
         let mut c = self.0.lock();
+        c.sync_now();
         c.calls.push(Call::Play);
         c.playing = true;
     }
 
     fn pause(&mut self) {
         let mut c = self.0.lock();
+        c.sync_now();
         c.calls.push(Call::Pause);
         c.playing = false;
     }
@@ -395,6 +599,9 @@ impl OffloadOutput for Fake {
     fn flush(&mut self) {
         let mut c = self.0.lock();
         c.calls.push(Call::Flush);
+        let stale = c.head - c.offset;
+        c.start_script(Some(stale));
+        c.flushes += 1;
         c.held.clear();
         c.written = 0;
         c.head = 0;
@@ -408,10 +615,30 @@ impl OffloadOutput for Fake {
 
     fn head(&mut self) -> Option<u64> {
         let mut c = self.0.lock();
+        c.sync_now();
         match c.readings.pop_front() {
             Some(r) => r,
+            None if c.head_stuck => Some(0),
             None => Some(c.head - c.offset),
         }
+    }
+
+    fn timestamp(&mut self) -> Option<u64> {
+        let mut c = self.0.lock();
+        c.sync_now();
+        if let Some(f) = c.frozen_stamp {
+            return Some(f);
+        }
+        if c.jittery {
+            return Some(c.jittery_stamp());
+        }
+        c.stamps.then(|| c.head - c.offset)
+    }
+
+    fn data_requested(&mut self) -> bool {
+        let mut c = self.0.lock();
+        c.sync_now();
+        std::mem::take(&mut c.requested)
     }
 
     fn presented(&mut self) -> bool {
@@ -443,6 +670,7 @@ impl OffloadOutput for Fake {
 
 struct Rig {
     engine: Engine,
+    time: Stepper<Pull>,
     card: Card,
     queue: SharedQueue,
     events: Arc<Mutex<Vec<Event>>>,
@@ -457,25 +685,34 @@ impl Rig {
     fn albums(server: Arc<Server>, songs: Vec<(String, String, i64)>, albums: Vec<(String, String, i32)>, app: impl App + Send + 'static, fake: Option<Fake>, settings: Settings) -> Rig {
         let queue = SharedQueue::default();
         queue.0.lock().set(songs.iter().map(|s| s.0.clone()).collect(), Some(0), false, 0);
-        let card = Card::default();
+        let card = Card::new();
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         let config = Config { memory_mb: 256, settings, ..Config::default() };
+        let clock = Virtual::default();
+        if let Some(f) = &fake {
+            f.0.lock().clock = Some(clock.clone());
+            card.pull.lock().chip = Some(f.clone());
+        }
         let offload = fake.map(|f| Box::new(f) as Box<dyn OffloadOutput>);
-        let engine = Engine::start_with(Songs(server, songs, albums), app, queue.clone(), Box::new(card.clone()), offload, config, move |e| seen.lock().push(e));
+        let engine = Engine::start_on(Songs(server, songs, albums), app, queue.clone(), Box::new(card.clone()), offload, config, clock.clone(), move |e| seen.lock().push(e));
         engine.queue_changed();
-        Rig { engine, card, queue, events }
+        Rig { engine, time: Stepper::new(clock, card.pull.clone()), card, queue, events }
     }
 
+    /// Runs the music on until `done`, for `secs` of the old card's time at most: it played on a real
+    /// clock twenty times faster than the music, and the limits the tests wait with are in its seconds.
     fn wait(&self, secs: u64, mut done: impl FnMut(&Rig) -> bool) -> bool {
-        let until = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < until {
-            if done(self) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        false
+        self.time.until(Duration::from_secs(secs * 20), || done(self))
+    }
+
+    /// Runs the engine's clock on by `ms`.
+    fn run(&self, ms: u64) {
+        self.time.run(Duration::from_millis(ms));
+    }
+
+    fn now_ms(&self) -> i64 {
+        self.time.clock.now_ns() / 1_000_000
     }
 
     fn heard_song(&self, id: &str) -> bool {
@@ -487,6 +724,60 @@ fn app() -> sim::App {
     let mut a = sim::App::new();
     a.prefs = sim::prefs_off();
     a
+}
+
+/// [`app`], shared, so a test can read the engine's log: every reason it gave for playing on the CPU is
+/// there, in the order given, however quickly the next one followed.
+#[derive(Clone)]
+struct Logged(Arc<Mutex<sim::App>>);
+
+impl Logged {
+    fn new() -> Logged {
+        Logged(Arc::new(Mutex::new(app())))
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.0.lock().log.clone()
+    }
+}
+
+impl Host for Logged {
+    fn plan_for(&mut self, id: &str) -> Option<Plan> {
+        self.0.lock().plan_for(id)
+    }
+    fn wants_analysis(&mut self, id: &str) -> Option<u64> {
+        self.0.lock().wants_analysis(id)
+    }
+    fn analysed(&mut self, id: &str, a: Analyzer, channels: usize, frames: u64, rate: u32) {
+        self.0.lock().analysed(id, a, channels, frames, rate)
+    }
+    fn log(&mut self, message: &str) {
+        self.0.lock().log(message)
+    }
+    fn now_ms(&self) -> i64 {
+        self.0.lock().now_ms()
+    }
+}
+
+impl App for Logged {
+    fn clock(&mut self, now_ms: i64) {
+        self.0.lock().clock(now_ms)
+    }
+    fn auto_mix(&self) -> bool {
+        self.0.lock().auto_mix()
+    }
+    fn window(&mut self, window: Vec<WindowSong>, shuffling: bool) {
+        self.0.lock().window(window, shuffling)
+    }
+    fn measure_ahead<S: nori_player::pipeline::Songs>(&mut self, songs: &mut S, ids: &[String]) {
+        self.0.lock().measure_ahead(songs, ids)
+    }
+    fn transitions_off(&mut self, off: bool) {
+        self.0.lock().transitions_off(off)
+    }
+    fn gain(&mut self, index: usize, id: &str) -> f32 {
+        self.0.lock().gain(index, id)
+    }
 }
 
 fn offload() -> Settings {
@@ -604,15 +895,17 @@ fn offload_is_taken_up_where_the_ear_is_once_nothing_touches_the_samples_and_giv
     let rig = Rig::new(server, songs, app(), Some(fake.clone()), Settings { sound: eq.clone(), ..offload() });
     rig.engine.play_at(0, 0);
     assert!(rig.wait(10, |r| r.card.heard.lock().len() > 2 * 44_100), "the CPU plays a");
-    let (before, asked) = (rig.engine.status().position_ms, Instant::now());
+    // Where the ear is: what the card played (the status has it as of the engine's last wake).
+    let (before, asked) = ((rig.card.heard.lock().len() / 2) as i64 * 1000 / 44_100, rig.now_ms());
     // The equalizer off: nothing touches the samples any more.
     rig.engine.set_settings(offload());
     // Not at the next song: at once, where the ear is, behind a dip.
     assert!(rig.wait(10, |r| r.engine.status().offloaded), "{:?}", rig.engine.status().pcm_why);
     let s = rig.engine.status();
-    // The card plays twenty times faster than the music: what it moved on while the switch was made.
-    let moved = asked.elapsed().as_millis() as i64 * 20 + 500;
-    assert!(s.index == Some(0) && s.position_ms >= before && s.position_ms <= before + moved, "a from where it was ({before} ms): {s:?}");
+    // What the music moved on while the switch was made; and the chip starts at the packet the place
+    // lands in, a few frames back for the decoder's reservoir.
+    let moved = rig.now_ms() - asked + 500;
+    assert!(s.index == Some(0) && s.position_ms >= before - 200 && s.position_ms <= before + moved, "a from where it was ({before} ms): {s:?}");
     let calls = fake.calls();
     assert!(matches!(calls.iter().find(|c| matches!(c, Call::DelayPadding(..))), Some(Call::DelayPadding(0, _))), "a from part way in, no delay to cut: {calls:?}");
     // The equalizer on: off offload at once, where the ear is.
@@ -624,8 +917,10 @@ fn offload_is_taken_up_where_the_ear_is_once_nothing_touches_the_samples_and_giv
     assert!(rig.wait(10, |r| r.card.heard.lock().len() > heard + 44_100), "the CPU plays a on");
     assert!(fake.calls().contains(&Call::Close));
     assert!(rig.wait(5, |r| !r.engine.status().offloaded), "the status follows once the burst is in");
+    // From where the chip's ear was: the status has the place the CPU took it up at (the engine has not
+    // woken since), each reading cut to the millisecond.
     let s = rig.engine.status();
-    assert!(s.index == Some(0) && s.position_ms >= at + 10_000, "{s:?}");
+    assert!(s.index == Some(0) && s.position_ms >= at + 9_990, "{s:?}");
     rig.engine.stop();
     let _ = std::fs::remove_dir_all(d);
 }
@@ -709,7 +1004,7 @@ fn repeat_one_on_the_chip_joins_the_song_to_itself_and_says_each_loop() {
     assert!(rig.wait(10, |_| fake.calls().iter().filter(|c| matches!(c, Call::DelayPadding(..))).count() >= 2), "{:?} {:?}", fake.calls().iter().filter(|c| !matches!(c, Call::Write(..))).collect::<Vec<_>>(), rig.events.lock());
     for _ in 0..2 {
         fake.advance(5 * 44_100);
-        std::thread::sleep(Duration::from_millis(100));
+        rig.run(100);
     }
     assert!(rig.wait(5, |r| r.events.lock().iter().filter(|e| matches!(e, Event::Looped { index: 0, .. })).count() == 2), "{:?}", rig.events.lock());
     rig.engine.stop();
@@ -831,7 +1126,7 @@ fn bit_perfect_hands_every_sample_over_as_the_file_stores_it_at_its_own_rate_and
     let songs = vec![("a".into(), "wav".into(), 1_000), ("b".into(), "wav".into(), 1_000)];
     let rig = Rig::new(server, songs, app, None, Settings { sound: eq, ..Settings::default() });
     rig.engine.set_output(OutputFacts { usb: true, bit_perfect: true });
-    std::thread::sleep(Duration::from_millis(50));
+    rig.run(50);
     rig.engine.play_at(0, 0);
     assert!(rig.wait(20, |r| r.events.lock().contains(&Event::State(State::Ended))), "{:?}", rig.events.lock());
     let opened = rig.card.opened.lock().clone();
@@ -926,16 +1221,15 @@ impl Library for Radio {
 fn a_live_stream_plays_as_it_comes_with_its_announcements_taken_out() {
     let queue = SharedQueue::default();
     queue.0.lock().set(vec!["radio:1".into()], Some(0), false, 0);
-    let card = Card::default();
+    let card = Card::new();
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = events.clone();
-    let engine = Engine::start(Radio, app(), queue, Box::new(card.clone()), Config::default(), move |e| seen.lock().push(e));
+    let clock = Virtual::default();
+    let engine = Engine::start_on(Radio, app(), queue, Box::new(card.clone()), None, Config::default(), clock.clone(), move |e| seen.lock().push(e));
+    let time = Stepper::new(clock, card.pull.clone());
     engine.queue_changed();
     engine.play_at(0, 0);
-    let until = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < until && card.heard.lock().len() < 200_000 {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    time.until(Duration::from_secs(400), || card.heard.lock().len() >= 200_000);
     let heard = card.heard.lock().clone();
     assert!(heard.len() >= 200_000, "it plays: {} samples", heard.len());
     // The music is the station's bytes with not one byte of announcement in it.
@@ -945,12 +1239,8 @@ fn a_live_stream_plays_as_it_comes_with_its_announcements_taken_out() {
         let want = i16::from_le_bytes([byte(at), byte(at + 1)]) as f32 / 32768.0;
         assert_eq!(*v, want, "sample {k}");
     }
-    // Said when the ear reaches it: after what the output held when the reader passed it, which on this
-    // card's fast clock is a while in real time.
-    let until = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < until && !events.lock().contains(&Event::Title("Artist - Song".into())) {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // Said when the ear reaches it: after what the output held when the reader passed it.
+    time.until(Duration::from_secs(400), || events.lock().contains(&Event::Title("Artist - Song".into())));
     assert!(events.lock().contains(&Event::Title("Artist - Song".into())), "{:?}", events.lock());
     assert_eq!(engine.status().state, State::Playing, "it goes on");
     engine.stop();
@@ -1189,6 +1479,10 @@ fn without_gapless_offload_the_cpu_takes_an_album_over_at_its_first_song_and_han
 /// Two songs of `secs` on one gapless track, playing, both written, a second heard; the play head moved
 /// by the test only as fast as the clock (`pace` 1), until a test lets it run.
 fn two_on_the_chip(d: &Path, secs: u32) -> Option<(Rig, Fake)> {
+    two_on_the_chip_with(d, secs, app())
+}
+
+fn two_on_the_chip_with(d: &Path, secs: u32, app: impl App + Send + 'static) -> Option<(Rig, Fake)> {
     if !ffmpeg() {
         eprintln!("ffmpeg is not installed: nothing to offload");
         return None;
@@ -1199,20 +1493,47 @@ fn two_on_the_chip(d: &Path, secs: u32) -> Option<(Rig, Fake)> {
     let fake = Fake::new(MP3_ONLY);
     fake.pace(Some(1.0));
     let ms = secs as i64 * 1000;
-    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), ms), ("b".into(), "mp3".into(), ms)], app(), Some(fake.clone()), offload());
+    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), ms), ("b".into(), "mp3".into(), ms)], app, Some(fake.clone()), offload());
     rig.engine.play_at(0, 0);
-    assert!(rig.wait(10, |_| fake.written() == 2 * secs as u64 * 44_100), "both written: {}", fake.written());
+    let both = 2 * secs as u64 * 44_100;
+    assert!(written_up_to(&rig, &fake, both), "both written: {}", fake.written());
+    assert_eq!(fake.written(), both, "both written, not a frame more");
     // A second of music, as a second goes by.
-    std::thread::sleep(Duration::from_millis(1_200));
+    rig.run(1_200);
     fake.advance(44_100);
     assert!(rig.wait(5, |r| r.engine.status().position_ms >= 990), "{:?}", rig.engine.status());
     Some((rig, fake))
 }
 
+/// Waits until the engine has written `frames` to the chip, however slowly the loader brings the bytes on
+/// a busy machine. The time waiting for them in [`common::Virtual::settle`] is capped in real time, and
+/// past that cap the test's clock would run on for as long as the loader is starved, through any limit
+/// on it. So the bytes are given real time first, and the clock is moved only when nothing came for a
+/// while: then the engine waits for its own timer, not for bytes.
+fn written_up_to(rig: &Rig, fake: &Fake, frames: u64) -> bool {
+    let started = std::time::Instant::now();
+    let mut last = (fake.written(), std::time::Instant::now());
+    while fake.written() < frames {
+        if started.elapsed() > Duration::from_secs(120) || rig.now_ms() > 60_000 {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+        rig.time.clock.settle();
+        let now = fake.written();
+        if now != last.0 {
+            last = (now, std::time::Instant::now());
+        } else if last.1.elapsed() > Duration::from_millis(50) {
+            rig.run(10);
+        }
+    }
+    rig.time.clock.settle();
+    true
+}
+
 /// Waits for the engine to have read what the play head was set to say, and a little more.
 fn read_all(rig: &Rig, fake: &Fake) {
     assert!(rig.wait(5, |_| fake.0.lock().readings.is_empty()), "the engine read the play head");
-    std::thread::sleep(Duration::from_millis(400));
+    rig.run(400);
 }
 
 #[test]
@@ -1249,11 +1570,11 @@ fn a_play_head_counting_again_from_nought_after_a_pause_skips_no_song() {
     fake.count_again();
     rig.engine.play();
     assert!(rig.wait(5, |r| r.engine.status().state == State::Playing));
-    std::thread::sleep(Duration::from_millis(400));
+    rig.run(400);
     fake.advance(13_230);
-    std::thread::sleep(Duration::from_millis(400));
+    rig.run(400);
     fake.read_as(&[]);
-    std::thread::sleep(Duration::from_millis(100));
+    rig.run(100);
     let s = rig.engine.status();
     assert!(!rig.heard_song("b") && s.index == Some(0) && s.offloaded, "still a: {s:?} {:?}", rig.events.lock());
     assert!((1_250..=1_450).contains(&s.position_ms), "a second and 300 ms into a: {s:?}");
@@ -1271,15 +1592,18 @@ fn a_play_head_counting_again_from_nought_after_a_pause_skips_no_song() {
 #[test]
 fn a_play_head_ahead_of_the_clock_hands_the_song_to_the_cpu_where_the_ear_is() {
     let d = dir();
-    let Some((rig, fake)) = two_on_the_chip(&d, 20) else { return };
+    let app = Logged::new();
+    let Some((rig, fake)) = two_on_the_chip_with(&d, 20, app.clone()) else { return };
     // Ten seconds on in a moment (a count in other units, a jump), a failed call, the jump again.
     fake.read_as(&[Some(11 * 44_100), None, Some(11 * 44_100)]);
     assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 44_100), "the CPU took over: {:?}", rig.engine.status());
     let s = rig.engine.status();
     assert!(!rig.heard_song("b") && s.index == Some(0), "a, on the CPU: {s:?} {:?}", rig.events.lock());
     assert!(s.position_ms >= 990 && s.position_ms < 11_000, "from where the ear was, not where the head said: {s:?}");
-    let why = s.pcm_why.unwrap_or_default();
-    assert!(why.contains("could not be followed") && why.contains("ahead of the clock"), "{why}");
+    // Why, as the CPU took over (by now it may say the chip takes the next song, as it does).
+    let log = app.log();
+    let why = log.iter().filter_map(|l| l.strip_prefix("playing on the CPU: ")).next().unwrap_or_default();
+    assert!(why.contains("could not be followed") && why.contains("ahead of the clock"), "{why}: {log:?}");
     assert!(fake.notes().iter().any(|n| n.starts_with("offload given up")), "{:?}", fake.notes());
     rig.engine.stop();
     let _ = std::fs::remove_dir_all(d);
@@ -1307,10 +1631,10 @@ fn a_late_word_that_everything_was_presented_ends_no_song() {
     assert!(rig.wait(5, |_| opens(&fake) == 2 && fake.written() > 0), "{:?}", fake.calls());
     fake.0.lock().stale_presented = true;
     fake.read_as(&[]);
-    std::thread::sleep(Duration::from_millis(300));
+    rig.run(300);
     assert!(!rig.events.lock().contains(&Event::State(State::Ended)), "not ended by a word about another end of stream");
     assert!(rig.wait(5, |_| fake.calls().iter().filter(|c| **c == Call::EndOfStream).count() == 2), "said again until taken: {:?}", fake.calls());
-    std::thread::sleep(Duration::from_millis(200));
+    rig.run(200);
     let s = rig.engine.status();
     assert!(s.state == State::Playing && s.offloaded, "{s:?}");
     // Played to its end: ended, and the perf notes say how.
@@ -1361,7 +1685,7 @@ fn the_track_holds_four_minutes_at_most_whatever_the_platform_would_take() {
     let rig = Rig::new(server, vec![("a".into(), "mp3".into(), 300_000)], app(), Some(fake.clone()), offload());
     rig.engine.play_at(0, 0);
     assert!(rig.wait(10, |_| fake.written() >= 240 * 44_100), "{}", fake.written());
-    std::thread::sleep(Duration::from_millis(300));
+    rig.run(300);
     let written = fake.written();
     // Four minutes, and the last write's quarter megabyte past them (16 s at 128 kbps).
     assert!(written <= 257 * 44_100, "four minutes ahead at most: {} s", written / 44_100);
@@ -1379,17 +1703,426 @@ fn a_pause_after_the_engine_slept_through_the_music_keeps_the_ear_where_it_is() 
     let d = dir();
     let Some((rig, fake)) = two_on_the_chip(&d, 20) else { return };
     // The engine sleeps while the chip plays on; the pause comes before it looked again.
-    std::thread::sleep(Duration::from_millis(1_500));
+    rig.run(1_500);
     fake.advance_quietly(44_100);
     rig.engine.pause();
     assert!(rig.wait(5, |r| r.engine.status().state == State::Paused));
-    std::thread::sleep(Duration::from_millis(300));
+    rig.run(300);
     rig.engine.play();
     fake.read_as(&[]);
     read_all(&rig, &fake);
     let s = rig.engine.status();
     assert!(s.offloaded && s.index == Some(0) && s.position_ms >= 1_990, "two seconds into a, still on the chip: {s:?}");
     assert!(!fake.notes().iter().any(|n| n.contains("ahead of the clock")), "{:?}", fake.notes());
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// Two songs of `secs` on a Galaxy S22's offloaded track ([`Fake::phone`]).
+fn two_on_a_phone(d: &Path, secs: u32, stamps: bool, head_stuck: bool) -> Option<(Rig, Fake)> {
+    two_on_a_phone_with(d, secs, stamps, head_stuck, false)
+}
+
+/// [`two_on_a_phone`], its timestamps jittery from the start ([`Fake::jittery`]) if `jittery`.
+fn two_on_a_phone_with(d: &Path, secs: u32, stamps: bool, head_stuck: bool, jittery: bool) -> Option<(Rig, Fake)> {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return None;
+    }
+    let (a, b) = (mp3(d, "a", secs, 440), mp3(d, "b", secs, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let fake = Fake::new(MP3_ONLY);
+    fake.phone(stamps, head_stuck);
+    if jittery {
+        fake.jittery();
+    }
+    let ms = secs as i64 * 1000;
+    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), ms), ("b".into(), "mp3".into(), ms)], app(), Some(fake.clone()), offload());
+    rig.engine.play_at(0, 0);
+    Some((rig, fake))
+}
+
+/// Both songs play through on the phone's small track, to the end of the queue, without a moment of
+/// silence and on the chip all along.
+fn plays_through_on_the_phone(rig: &Rig, fake: &Fake, secs: u32) {
+    let ended = rig.time.until(Duration::from_secs(2 * secs as u64 + 10), || rig.events.lock().contains(&Event::State(State::Ended)));
+    assert!(ended, "{:?} {:?} {:?}", rig.engine.status(), fake.notes(), rig.events.lock());
+    assert!(rig.heard_song("b"), "{:?}", rig.events.lock());
+    assert_eq!(fake.written(), 2 * secs as u64 * 44_100, "every frame of both songs: {:?} {:?}", fake.notes(), fake.calls().iter().filter(|c| !matches!(c, Call::Write(..))).collect::<Vec<_>>());
+    let head = fake.0.lock().head;
+    assert_eq!(head, fake.written(), "all of it played");
+    assert_eq!(fake.starved_ms(), 0, "never out of music: {:?}", fake.notes());
+    assert_eq!(opens(fake), 1, "one track for both");
+    assert!(rig.card.opened.lock().is_empty(), "the CPU's output was never opened");
+    let notes = fake.notes();
+    assert!(!notes.iter().any(|n| n.contains("given up")), "{notes:?}");
+    // What the platform granted, and how often the thread wakes for it, for the perf report.
+    assert!(notes.iter().any(|n| n.contains("granted a track of 64 KB of the") && n.contains("topped up about every")), "{notes:?}");
+}
+
+#[test]
+fn a_phone_that_grants_64_kb_and_whose_play_head_never_moves_plays_by_its_timestamps() {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_phone(&d, secs, true, true) else { return };
+    // Ten seconds into a, the ear is where the timestamp says, not at nought.
+    assert!(rig.time.until(Duration::from_secs(20), || fake.0.lock().head >= 10 * 44_100));
+    rig.run(100);
+    let s = rig.engine.status();
+    // As of the engine's last wake: it wakes about twice in what the track holds.
+    assert!(s.offloaded && s.index == Some(0) && (7_000..=10_200).contains(&s.position_ms), "{s:?}");
+    plays_through_on_the_phone(&rig, &fake, secs);
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_phone_that_grants_64_kb_without_timestamps_plays_by_its_play_head() {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_phone(&d, secs, false, false) else { return };
+    plays_through_on_the_phone(&rig, &fake, secs);
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_track_whose_play_head_and_timestamp_never_move_hands_the_song_to_the_cpu_where_the_clock_puts_the_ear() {
+    let d = dir();
+    let Some((rig, fake)) = two_on_a_phone(&d, 30, false, true) else { return };
+    // The track holds about four seconds; its count stands at nought longer than that, and the CPU
+    // takes over where the clock says the ear is.
+    let took = rig.time.until(Duration::from_secs(20), || !rig.engine.status().offloaded && rig.card.heard.lock().len() > 2 * 44_100);
+    assert!(took, "the CPU took over: {:?} {:?}", rig.engine.status(), fake.notes());
+    let s = rig.engine.status();
+    assert!(s.index == Some(0) && !rig.heard_song("b"), "a, on the CPU: {s:?}");
+    // About six seconds in: what the track holds and two seconds more, by the clock the chip played by.
+    assert!((5_000..=8_000).contains(&s.position_ms), "where the clock puts the ear, not at nought: {s:?}");
+    let notes = fake.notes();
+    let given_up = notes.iter().find(|n| n.starts_with("offload given up, the CPU plays on from")).cloned().unwrap_or_default();
+    assert!(given_up.contains("play head stood at 0") && given_up.contains("asked for more"), "{notes:?}");
+    // Its requests kept it fed until then: no silence before the CPU took over.
+    assert_eq!(fake.starved_ms(), 0, "{notes:?}");
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_timestamp_that_stands_still_gives_way_to_a_play_head_that_moves() {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_phone(&d, secs, true, false) else { return };
+    assert!(rig.time.until(Duration::from_secs(10), || fake.0.lock().head >= 3 * 44_100));
+    // The timestamp stops where it is (the platform no longer updates it); the play head goes on.
+    let at = fake.0.lock().head;
+    fake.0.lock().frozen_stamp = Some(at);
+    plays_through_on_the_phone(&rig, &fake, secs);
+    assert!(fake.notes().iter().any(|n| n.contains("the play head is followed instead")), "{:?}", fake.notes());
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_phone_whose_timestamp_jitters_keeps_the_ear_where_the_chip_is() {
+    let d = dir();
+    let secs = 20;
+    let Some((rig, fake)) = two_on_a_phone_with(&d, secs, true, true, true) else { return };
+    // Where the status puts the ear against where the chip is, after every wake: the ear is never
+    // further on than the chip presented (a restart taken from a moment's jitter put it 160 to 320 ms on).
+    let mut ahead_ms = 0i64;
+    let mut looked = 0;
+    let mut watch = |rig: &Rig| {
+        // The engine looks at the count at every step, as often as fades and the screen have it look.
+        fake.0.lock().wake();
+        let s = rig.engine.status();
+        let (head, flushes) = {
+            let c = fake.0.lock();
+            (c.head, c.flushes)
+        };
+        // a on the track before the skip, b from nought on the track flushed for it.
+        if s.offloaded && !s.switching && s.state == State::Playing && s.index == Some(flushes as usize) {
+            let truth = (head * 1000 / 44_100) as i64;
+            ahead_ms = ahead_ms.max(s.position_ms - truth);
+            looked += 1;
+        }
+    };
+    assert!(rig.time.until(Duration::from_secs(20), || {
+        watch(&rig);
+        fake.0.lock().head >= 5 * 44_100
+    }));
+    let at = rig.engine.status().position_ms;
+    assert!((4_000..=5_100).contains(&at), "five seconds into a, not further: {at} {:?} {:?}", fake.notes(), rig.engine.status());
+    // A skip: the track flushed, and its first timestamps are a's count from before.
+    rig.engine.go_to(1, 0);
+    let ended = rig.time.until(Duration::from_secs(secs as u64 + 10), || {
+        watch(&rig);
+        rig.events.lock().contains(&Event::State(State::Ended))
+    });
+    let notes = fake.notes();
+    assert!(ended, "{:?} {notes:?}", rig.engine.status());
+    assert!(looked > 20, "the ear was looked at often: {looked}");
+    assert!(ahead_ms <= 20, "the ear {ahead_ms} ms ahead of the chip: {notes:?}");
+    assert!(rig.heard_song("b"));
+    let c = fake.0.lock();
+    // b ends where the chip is within the engine's 100 ms of slack at the end, not earlier.
+    assert!(c.flushes == 1 && c.head + 4_410 >= secs as u64 * 44_100, "all of b played on the flushed track: {}", c.head);
+    drop(c);
+    assert_eq!(fake.starved_ms(), 0, "never out of music: {notes:?}");
+    assert!(rig.card.opened.lock().is_empty(), "the CPU's output was never opened");
+    assert!(!notes.iter().any(|n| n.contains("given up") || n.contains("counts again from nought")), "no count taken as started again: {notes:?}");
+    // The two stale readings after the flush are said (the second may be left out), and nothing else of
+    // the count: the steps back are said once, with how the song ended.
+    let of_count: Vec<&String> = notes.iter().filter(|n| !n.contains("granted a track") && !n.contains(" ended ")).collect();
+    assert!(of_count.len() <= 2 && of_count.iter().all(|n| n.contains("ahead of the clock")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains(" ended ") && n.contains("a moment back")), "{notes:?}");
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn next_pressed_quickly_on_the_chip_moves_one_song_per_press() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let ids = ["a", "b", "c", "d", "e"];
+    let files: Vec<Vec<u8>> = ids.iter().enumerate().map(|(k, id)| mp3(&d, id, 10, 440 + 110 * k as u32)).collect();
+    for gap in [0u64, 150] {
+        let server = Arc::new(Server::default());
+        serve(&server, &ids.iter().zip(&files).map(|(id, f)| (*id, f.as_slice())).collect::<Vec<_>>());
+        let fake = Fake::new(MP3_ONLY);
+        let songs = ids.iter().map(|id| (id.to_string(), "mp3".to_string(), 10_000)).collect();
+        let rig = Rig::new(server, songs, app(), Some(fake.clone()), offload());
+        rig.engine.play_at(0, 0);
+        assert!(rig.wait(10, |_| fake.written() > 0));
+        fake.advance(2 * 44_100);
+        assert!(rig.wait(5, |r| r.engine.status().position_ms >= 1_900));
+        let mut last = 0;
+        for to in 1..=3 {
+            last = rig.engine.go_to(to, 0);
+            rig.run(gap);
+        }
+        assert!(rig.wait(5, |r| r.engine.status().index == Some(3)), "gap {gap}: {:?}", rig.events.lock());
+        // The chip plays on into d a second.
+        assert!(rig.wait(5, |_| fake.written() > 0));
+        fake.advance(44_100);
+        rig.run(300);
+        let events = rig.events.lock().clone();
+        let said: Vec<(usize, u64)> = events.iter().filter_map(|e| if let Event::Song { index, jumps, .. } = e { Some((*index, *jumps)) } else { None }).collect();
+        let after: Vec<usize> = said.iter().filter(|s| s.1 >= last).map(|s| s.0).collect();
+        assert_eq!(after, vec![3], "gap {gap}: d once after the last press: {said:?}");
+        assert!(said.windows(2).all(|w| w[0].0 < w[1].0), "gap {gap}: forwards only: {said:?}");
+        let s = rig.engine.status();
+        assert_eq!(s.index, Some(3), "gap {gap}");
+        assert!((900..2_000).contains(&s.position_ms), "gap {gap}: a second into d: {}", s.position_ms);
+        rig.engine.stop();
+    }
+    let _ = std::fs::remove_dir_all(d);
+}
+
+// ---- the transition settings and offload, changed while music plays ----
+
+/// The simulated app, shared, so a test can change the planner's settings (the core's, which change the
+/// moment the user touches them) and read its log while the engine plays.
+#[derive(Clone)]
+struct Watched(Arc<Mutex<sim::App>>);
+
+impl Watched {
+    fn automix() -> Watched {
+        let mut a = sim::App::new();
+        a.prefs = nori_player::transitions::TransitionPrefs { auto_mix: true, auto_mix_max_s: 6, echo_out: false, ..sim::prefs_off() };
+        Watched(Arc::new(Mutex::new(a)))
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.0.lock().log.clone()
+    }
+}
+
+impl Host for Watched {
+    fn plan_for(&mut self, id: &str) -> Option<Plan> {
+        self.0.lock().plan_for(id)
+    }
+    fn wants_analysis(&mut self, id: &str) -> Option<u64> {
+        self.0.lock().wants_analysis(id)
+    }
+    fn analysed(&mut self, id: &str, a: Analyzer, channels: usize, frames: u64, rate: u32) {
+        self.0.lock().analysed(id, a, channels, frames, rate)
+    }
+    fn log(&mut self, message: &str) {
+        self.0.lock().log(message)
+    }
+    fn now_ms(&self) -> i64 {
+        self.0.lock().now_ms()
+    }
+}
+
+impl App for Watched {
+    fn clock(&mut self, now_ms: i64) {
+        self.0.lock().clock(now_ms)
+    }
+    fn auto_mix(&self) -> bool {
+        false
+    }
+    fn window(&mut self, window: Vec<WindowSong>, shuffling: bool) {
+        self.0.lock().window(window, shuffling)
+    }
+    fn measure_ahead<S: nori_player::pipeline::Songs>(&mut self, _: &mut S, _: &[String]) {}
+}
+
+fn automix() -> Settings {
+    Settings { auto_mix: true, ..offload() }
+}
+
+#[test]
+fn automix_switched_on_while_the_chip_plays_takes_the_music_to_the_cpu_at_once_and_mixes() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let (a, b) = (mp3(&d, "a", 40, 440), mp3(&d, "b", 30, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let fake = Fake::new(MP3_ONLY);
+    let app = Watched::automix();
+    let songs = vec![("a".into(), "mp3".into(), 40_000), ("b".into(), "mp3".into(), 30_000)];
+    let rig = Rig::new(server, songs, app.clone(), Some(fake.clone()), offload());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.engine.status().offloaded && fake.written() > 0), "{:?}", rig.engine.status().pcm_why);
+    fake.advance(5 * 44_100);
+    assert!(rig.wait(5, |r| r.engine.status().position_ms >= 4_900), "{:?}", rig.engine.status());
+    // Switched on in the settings: the chip cannot mix, so the CPU takes the song over where the ear is,
+    // not at the next song - whose join with this one is the mix.
+    rig.engine.set_settings(automix());
+    rig.engine.replan();
+    assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 2 * 44_100), "the CPU took over: {:?}", rig.engine.status());
+    assert!(fake.calls().contains(&Call::Close), "the chip's track was let go");
+    assert_eq!(rig.engine.status().pcm_why.as_deref(), Some("AutoMix is on"));
+    let s = rig.engine.status();
+    assert!(s.index == Some(0) && s.position_ms >= 5_000, "a from where the ear was: {s:?}");
+    // And the song's ending is mixed into the next one.
+    assert!(rig.wait(20, |r| r.events.lock().contains(&Event::State(State::Ended))), "{:?}", app.log());
+    let log = app.log();
+    assert!(log.iter().any(|l| l.contains("transition a -> b")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// As a phone had it: the chip plays with AutoMix off, the equalizer is switched on (the CPU takes the song
+/// over), and AutoMix a few seconds later, the planner's own settings flipping only then.
+#[test]
+fn automix_switched_on_after_the_equalizer_took_the_song_off_the_chip_mixes() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let (a, b) = (mp3(&d, "a", 40, 440), mp3(&d, "b", 30, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let fake = Fake::new(MP3_ONLY);
+    let app = Watched::automix();
+    app.0.lock().prefs = sim::prefs_off();
+    let songs = vec![("a".into(), "mp3".into(), 40_000), ("b".into(), "mp3".into(), 30_000)];
+    let rig = Rig::new(server, songs, app.clone(), Some(fake.clone()), offload());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.engine.status().offloaded && fake.written() > 0), "{:?}", rig.engine.status().pcm_why);
+    fake.advance(5 * 44_100);
+    assert!(rig.wait(5, |r| r.engine.status().position_ms >= 4_900), "{:?}", rig.engine.status());
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    rig.engine.set_settings(Settings { sound: eq.clone(), ..offload() });
+    assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 2 * 44_100), "the CPU took over: {:?}", rig.engine.status());
+    std::thread::sleep(Duration::from_millis(1_000));
+    app.0.lock().prefs = Watched::automix().0.lock().prefs;
+    rig.engine.set_settings(Settings { sound: eq, ..automix() });
+    rig.engine.replan();
+    assert!(rig.wait(40, |r| r.events.lock().contains(&Event::State(State::Ended))), "{:?}", app.log());
+    let log = app.log();
+    assert!(log.iter().any(|l| l.contains("transition a -> b")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn automix_switched_off_hands_the_song_back_to_the_chip_where_the_ear_is() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let (a, b) = (mp3(&d, "a", 60, 440), mp3(&d, "b", 30, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let fake = Fake::new(MP3_ONLY);
+    let app = Watched::automix();
+    let songs = vec![("a".into(), "mp3".into(), 60_000), ("b".into(), "mp3".into(), 30_000)];
+    let rig = Rig::new(server, songs, app.clone(), Some(fake.clone()), automix());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.card.heard.lock().len() > 2 * 44_100), "the CPU plays a");
+    assert!(!rig.engine.status().offloaded);
+    app.0.lock().prefs = sim::prefs_off();
+    let before = rig.engine.status().position_ms;
+    rig.engine.set_settings(offload());
+    rig.engine.replan();
+    assert!(rig.wait(10, |r| r.engine.status().offloaded), "{:?}", rig.engine.status().pcm_why);
+    let s = rig.engine.status();
+    assert!(s.index == Some(0) && s.position_ms >= before, "a from where the ear was ({before} ms): {s:?}");
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn automix_switched_off_leaves_an_album_in_order_on_the_cpu_without_gapless_offload() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let server = Arc::new(Server::default());
+    let songs = lame_songs(&d, &server, &["a1", "a2"]);
+    let fake = Fake::new(PLAIN_MP3);
+    let app = Watched::automix();
+    let rig = Rig::albums(server, songs, on(&[("a1", "A", 1), ("a2", "A", 2)]), app.clone(), Some(fake.clone()), automix());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.card.heard.lock().len() > 2 * 44_100), "the CPU plays a1");
+    app.0.lock().prefs = sim::prefs_off();
+    rig.engine.set_settings(offload());
+    rig.engine.replan();
+    // Offload is wanted again, but a1 joins a2 without a gap, which this chip cannot do: the CPU plays on.
+    let why = "joins a song of its album without a gap";
+    assert!(rig.wait(10, |r| r.engine.status().pcm_why.is_some_and(|w| w.contains(why))), "{:?}", rig.engine.status().pcm_why);
+    assert!(rig.engine.status().offload_wanted && !rig.engine.status().offloaded);
+    assert!(fake.calls().iter().all(|c| !matches!(c, Call::Open(_))), "no track for the chip: {:?}", fake.calls());
+    rig.engine.stop();
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn offload_switched_off_and_on_while_playing_moves_the_song_at_once_both_ways() {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return;
+    }
+    let d = dir();
+    let a = mp3(&d, "a", 60, 440);
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a)]);
+    let fake = Fake::new(MP3_ONLY);
+    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), 60_000)], app(), Some(fake.clone()), offload());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(10, |r| r.engine.status().offloaded && fake.written() > 0), "{:?}", rig.engine.status().pcm_why);
+    assert!(rig.wait(5, |r| { fake.advance(4_410); r.engine.status().position_ms >= 4_900 }), "{:?}", rig.engine.status());
+    rig.engine.set_settings(Settings::default());
+    assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 44_100), "the CPU took over");
+    assert_eq!(rig.engine.status().pcm_why.as_deref(), Some("offload is off in the settings"));
+    assert!(rig.engine.status().position_ms >= 4_900, "{:?}", rig.engine.status());
+    rig.engine.set_settings(offload());
+    assert!(rig.wait(10, |r| r.engine.status().offloaded), "back on the chip: {:?}", rig.engine.status().pcm_why);
     rig.engine.stop();
     let _ = std::fs::remove_dir_all(d);
 }

@@ -62,14 +62,19 @@ pub(crate) fn finish(mut lines: Vec<Timed>) -> Lyrics {
     lines.sort_by_key(|l| l.start);
     let starts: Vec<i64> = lines.iter().map(|l| l.start).collect();
     let word_timed = lines.iter().any(|l| !l.words.is_empty() || l.backing.as_ref().is_some_and(|b| !b.words.is_empty()));
-    /// The words of `text` in UTF-16, each running to its own end, or the next word's start, or `end`.
-    fn timed(words: &[Word], text: &str, end: i64) -> Vec<LyricWord> {
+    /// The words of `text` in UTF-16, each running to its own end, or the next word's start; the last
+    /// one without an end to the line's own end when the source gave one, otherwise for as long as a
+    /// word that long is sung, and no further than `until` (the next line). A last word ended at its own
+    /// start was filled in one frame; one ended at the next line crept through the pause before it.
+    fn timed(words: &[Word], text: &str, end: Option<i64>, until: i64) -> Vec<LyricWord> {
         words
             .iter()
             .enumerate()
             .map(|(k, w)| {
-                let until = w.end.or_else(|| words.get(k + 1).map(|n| n.start)).unwrap_or(end);
-                LyricWord { start_ms: w.start, end_ms: until.max(w.start), start: utf16_at(text, w.from), end: utf16_at(text, w.to) }
+                let (from, to) = (utf16_at(text, w.from), utf16_at(text, w.to));
+                let guessed = || end.unwrap_or_else(|| (w.start + nori_look::lyrics::word_ms_estimate(to - from)).min(until));
+                let ends = w.end.or_else(|| words.get(k + 1).map(|n| n.start)).unwrap_or_else(guessed);
+                LyricWord { start_ms: w.start, end_ms: ends.max(w.start), start: from, end: to }
             })
             .collect()
     }
@@ -78,17 +83,18 @@ pub(crate) fn finish(mut lines: Vec<Timed>) -> Lyrics {
         .enumerate()
         .map(|(i, l)| {
             let next_line = starts[i + 1..].iter().copied().find(|n| *n > l.start);
-            let backing_words = l.backing.iter().flat_map(|b| b.words.iter());
-            let last_word = l.words.iter().chain(backing_words).filter_map(|w| w.end.or(Some(w.start))).max();
-            let end = l.end.filter(|e| *e > l.start).or(last_word.filter(|e| *e > l.start)).or(next_line).unwrap_or(l.start + 5_000);
-            let words = timed(&l.words, &l.text, end);
+            let given = l.end.filter(|e| *e > l.start);
+            let until = next_line.unwrap_or(l.start + 5_000);
+            let words = timed(&l.words, &l.text, given, until);
             let (backing, backing_words) = match l.backing {
                 Some(b) => {
-                    let w = timed(&b.words, &b.text, end);
+                    let w = timed(&b.words, &b.text, given, until);
                     (b.text, w)
                 }
                 None => (String::new(), Vec::new()),
             };
+            let last_word = words.iter().chain(&backing_words).map(|w| w.end_ms).max();
+            let end = given.or(last_word.filter(|e| *e > l.start)).unwrap_or(until);
             LyricLine { start_ms: l.start, end_ms: end, text: l.text, words, translation: None, background: l.background, backing, backing_words, voice: l.voice }
         })
         .collect::<Vec<_>>();
@@ -670,6 +676,14 @@ mod tests {
         assert_eq!((polish.words[1].start, polish.words[1].end), (7, 12), "UTF-16 offsets, not bytes");
         assert!(l.lines[2].words.is_empty(), "a line timed as a whole is never given word times");
         assert_eq!(l.lines[2].end_ms, 23000);
+    }
+
+    #[test]
+    fn a_last_word_without_an_end_is_neither_instant_nor_stretched_over_the_pause() {
+        let l = from_lyricsfile("version: '1.0'\nmetadata: {title: t, artist: a}\nlines:\n  - {text: hold on tonight, start_ms: 10000, words: [{text: 'hold ', start_ms: 10000}, {text: 'on ', start_ms: 10400}, {text: tonight, start_ms: 10800}]}\n  - {text: again, start_ms: 40000}\n");
+        let last = l.lines[0].words.last().unwrap().clone();
+        assert!(last.end_ms > 10_800 && last.end_ms <= 12_800, "{last:?}");
+        assert_eq!(l.lines[0].end_ms, last.end_ms, "the line ends with it");
     }
 
     #[test]

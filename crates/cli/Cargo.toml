@@ -3,7 +3,7 @@ name = "nori-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A terminal client built from the core, nori-engine and the cpal output: the proof that a new client writes no player"
+description = "The terminal client: a full-screen music player built from the core, nori-engine and the cpal output, the proof that a new client writes only its interface"
 
 [[bin]]
 name = "nori-cli"
@@ -20,3 +20,15 @@ nori-engine = { path = "../engine", features = ["core"] }
 nori-output-cpal = { path = "../output-cpal" }
 nori-http = { path = "../http" }
 nori-mpris = { path = "../mpris" }
+nori-covers = { path = "../covers" }
+nori-look = { path = "../look" }
+parking_lot = "0.12"
+# The screen: ratatui over crossterm (its re-export, so the two always agree on a version). MIT.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+# Covers in the terminal: kitty graphics, sixel, iTerm2 or half blocks, whichever the terminal answers to.
+# Without its default features: no chafa, and image with no codecs (nori-covers decodes). MIT.
+ratatui-image = { version = "10.0.8", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false }
+libc = "0.2"
+# Text cut to the columns it has (already in the tree through ratatui). MIT or Apache-2.0.
+unicode-width = "0.2"

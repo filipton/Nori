@@ -3,9 +3,11 @@ package dev.nori.music.playback
 import android.util.Log
 import androidx.annotation.Keep
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.audio.AudioOffloadSupport
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import java.nio.ByteBuffer
@@ -67,6 +69,10 @@ class TransitionSink(sink: AudioSink) : ForwardingAudioSink(sink) {
          * background can report a stale one, so a test watching either could pass in silence.
          */
         val bytesWritten: Long get() = TransitionEngineJni.bytesWritten()
+
+        /** The volume the player last set on the output (ReplayGain, a fade), before [Quiet]: for the perf build's self test. */
+        @Volatile var askedVolume = 1f
+            private set
     }
 
 
@@ -99,6 +105,25 @@ class TransitionSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     fun replan() = TransitionEngineJni.replan(engine)
 
     private fun now() = android.os.SystemClock.elapsedRealtime()
+
+    // ---- what the output below takes ----
+
+    /**
+     * An AAC stream that says AAC-LC at a core's rate is HE-AAC in all likelihood (a station's AAC+ over
+     * ADTS, whose SBR is signalled only inside the stream). Handed whole to the audio chip, the chip is
+     * set up for AAC-LC at half the rate the music plays at; decoded on the CPU, the platform's decoder
+     * finds the SBR and says the real rate. So it is never offloaded (nor passed through).
+     */
+    private fun implicitSbr(format: Format): Boolean {
+        val mime = format.sampleMimeType ?: return false
+        return mime != MimeTypes.AUDIO_RAW && RustDecoderJni.implicitSbr(mime, format.codecs, format.sampleRate)
+    }
+
+    override fun getFormatOffloadSupport(format: Format): AudioOffloadSupport =
+        if (implicitSbr(format)) AudioOffloadSupport.DEFAULT_UNSUPPORTED else super.getFormatOffloadSupport(format)
+
+    override fun getFormatSupport(format: Format): Int =
+        if (implicitSbr(format)) AudioSink.SINK_FORMAT_UNSUPPORTED else super.getFormatSupport(format)
 
     // ---- media3 into the engine ----
 
@@ -152,6 +177,17 @@ class TransitionSink(sink: AudioSink) : ForwardingAudioSink(sink) {
     // Resuming is a fresh start for the burst bookkeeping: the output may have been stopped and its
     // clock reset while the app sat in the background.
     override fun play() { TransitionEngineJni.restartBurst(engine); super.play() }
+
+    /** Under the perf build's self test the output plays at [Quiet.level] of what the player asks. */
+    override fun setVolume(volume: Float) {
+        askedVolume = volume
+        super.setVolume(volume * Quiet.level)
+    }
+
+    init {
+        // The player tells a new output its volume only when it changes: a quiet one starts quiet.
+        if (Quiet.level < 1f) super.setVolume(Quiet.level)
+    }
     override fun pause() { TransitionEngineJni.restartBurst(engine); super.pause() }
     override fun isEnded(): Boolean = TransitionEngineJni.queueEmpty(engine, this, now()) && super.isEnded()
 

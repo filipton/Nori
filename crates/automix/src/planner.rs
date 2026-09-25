@@ -56,6 +56,13 @@ pub fn settings_changed(prefs: TransitionPrefs) {
     }
 }
 
+/// An analysis was stored by someone other than the engine's own tap (the measurer ahead, the beat
+/// model): a pair that was gapless for want of it may mix now, so a "no transition" worked out before is
+/// not taken as the answer again.
+pub fn analyses_changed() {
+    PLANNER.lock().generation += 1;
+}
+
 /// The songs the player will play: the one before the current one first, then the current one and those
 /// after it, in play order. Handed in whenever that window changes.
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -100,6 +107,15 @@ pub fn plan_for(outgoing_id: &str) -> Option<Plan> {
     let t = nori_player::automix::plan::plan(a.as_ref(), b.as_ref(), o.duration_ms, n.duration_ms, &chosen.settings);
     let plan = engine_plan(&t, &n.id);
     PLANNER.lock().none = plan.is_none().then(|| (outgoing_id.to_string(), generation, None));
+    note(TransitionNote {
+        outgoing_id: o.id.clone(),
+        incoming_id: n.id.clone(),
+        kind: if plan.is_some() { format!("{:?}", t.kind) } else { "Gapless".into() },
+        start_ms: t.out_start_ms,
+        duration_ms: if plan.is_some() { t.duration_ms } else { 0 },
+        tempo_ratio: t.tempo_ratio as f32,
+        reason: t.reason.to_string(),
+    });
     match &plan {
         None => alog::info(&format!("planFor: gapless ({})", t.reason)),
         Some(_) => alog::info(&format!(
@@ -114,6 +130,44 @@ pub fn plan_for(outgoing_id: &str) -> Option<Plan> {
         )),
     }
     plan
+}
+
+/// A transition as planned, for a screen that says how the next song comes in: its kind as the planner
+/// names it (`BeatMatched`, `EchoOut`, `Gapless`, ...), where in the outgoing song it starts and how long
+/// it lasts (0 for gapless), the incoming song's speed during it, and the planner's reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransitionNote {
+    pub outgoing_id: String,
+    pub incoming_id: String,
+    pub kind: String,
+    pub start_ms: i64,
+    pub duration_ms: i64,
+    pub tempo_ratio: f32,
+    pub reason: String,
+}
+
+/// The last few plans made, newest last: a plan is made once per song, so this is written as rarely.
+static NOTES: Mutex<Vec<TransitionNote>> = Mutex::new(Vec::new());
+
+fn note(n: TransitionNote) {
+    let mut notes = NOTES.lock();
+    notes.retain(|k| k.outgoing_id != n.outgoing_id);
+    if notes.len() >= 4 {
+        notes.remove(0);
+    }
+    notes.push(n);
+}
+
+/// How the planner last planned to leave `outgoing_id`, if it has: read by a screen when the song
+/// playing changes, never per frame.
+pub fn transition_note(outgoing_id: &str) -> Option<TransitionNote> {
+    NOTES.lock().iter().rev().find(|n| n.outgoing_id == outgoing_id).cloned()
+}
+
+/// How the planner last planned to come into `incoming_id`: the mix in progress once the ear is on the
+/// incoming song.
+pub fn transition_into(incoming_id: &str) -> Option<TransitionNote> {
+    NOTES.lock().iter().rev().find(|n| n.incoming_id == incoming_id).cloned()
 }
 
 /// `BeatMix` as the app's logs have always named it: `BEAT_MIX`.
@@ -203,4 +257,28 @@ fn finish(mut f: Finished) {
         f.rate,
         if stored { "" } else { " (not stored: no database)" }
     ));
+}
+
+#[cfg(test)]
+mod note_tests {
+    use super::*;
+
+    fn n(out: &str, inc: &str) -> TransitionNote {
+        TransitionNote { outgoing_id: out.into(), incoming_id: inc.into(), kind: "BeatMatched".into(), start_ms: 1, duration_ms: 8000, tempo_ratio: 1.0, reason: String::new() }
+    }
+
+    #[test]
+    fn the_last_plans_are_kept_for_a_screen_by_either_song() {
+        note(n("note-a", "note-b"));
+        note(n("note-b", "note-c"));
+        assert_eq!(transition_note("note-a").map(|x| x.incoming_id), Some("note-b".into()));
+        assert_eq!(transition_into("note-c").map(|x| x.outgoing_id), Some("note-b".into()));
+        // A plan made again replaces the one before it, and only the last few are kept.
+        note(TransitionNote { kind: "EchoOut".into(), ..n("note-a", "note-b") });
+        assert_eq!(transition_note("note-a").map(|x| x.kind), Some("EchoOut".into()));
+        for i in 0..8 {
+            note(n(&format!("note-x{i}"), "note-y"));
+        }
+        assert_eq!(transition_note("note-a"), None);
+    }
 }

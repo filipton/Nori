@@ -106,6 +106,18 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
     /** The page's fixed words, the core's. */
     val words by lazy { dev.nori.music.ffi.words.wordsPerf() }
 
+    /** The self test behind the page's button; made when the page first shows it. */
+    val selfTest by lazy { SelfTest(app, this) }
+
+    /** The song the player service last arrived on: the one heard, for the self test and the watch. */
+    @Volatile var heardId: String? = null
+        private set
+
+    /** The service's arrivals (queue place, by itself or not, when), kept only while the self test runs. */
+    class Arrival(val tMs: Long, val index: Int, val auto: Boolean)
+    val arrivals = java.util.concurrent.CopyOnWriteArrayList<Arrival>()
+    @Volatile var testing = false
+
     private val events = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
@@ -173,6 +185,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             addAction(PlaybackService.ACTION_STATE)
         }
         ContextCompat.registerReceiver(app, events, filter, null, handler, ContextCompat.RECEIVER_NOT_EXPORTED)
+        // The invariant watch (the core's invariants.rs): from here on every event below is looked at too.
+        dev.nori.music.ffi.perf.perfWatch(true)
         handler.post {
             charging = batteryIntent()?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0)?.let { it != 0 } ?: false
             // A settings change that alters the cost ends the stretch as a change of state does. The line
@@ -183,7 +197,27 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             // Every change goes on the timeline, told first so that it lands in the stretch it ends; the
             // first value only tells the core where changes count from.
             scope.launch {
-                prefs.collect { dev.nori.music.ffi.perf.perfNoteSettings(System.currentTimeMillis()) }
+                var first = true
+                prefs.collect {
+                    dev.nori.music.ffi.perf.perfNoteSettings(System.currentTimeMillis())
+                    // A change is in the engine a second later: looked at once then, never otherwise.
+                    if (!first) { handler.removeCallbacks(settingsLook); handler.postDelayed(settingsLook, 1_000) }
+                    first = false
+                }
+            }
+            // The song on the screen against the one heard, and the queue's lengths under AutoMix: each
+            // looked at as the page's state changes, which it does by itself on every song.
+            val player = Nori.get(app).player
+            scope.launch {
+                player.state.map { it.current?.id }.distinctUntilChanged().collect { id ->
+                    dev.nori.music.ffi.perf.perfWatchShown(System.currentTimeMillis(), id, grace())
+                }
+            }
+            scope.launch {
+                player.state.map { it.queue }.distinctUntilChanged { a, b -> a === b }.collect { q ->
+                    val missing = q.filter { it.duration == 0u && !it.id.startsWith("radio:") }.map { it.id }
+                    dev.nori.music.ffi.perf.perfWatchQueue(System.currentTimeMillis(), missing, q.size.toUInt())
+                }
             }
             scope.launch {
                 prefs.map { cfg() }.distinctUntilChanged().collect { settings = it; changed() }
@@ -202,7 +236,10 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
 
     override fun song(id: String) {
         val t = System.currentTimeMillis()
+        heardId = id
         handler.post {
+            dev.nori.music.ffi.perf.perfWatchHeard(t, id, grace())
+            exoOutput()
             underruns(t)
             val nori = Nori.get(app)
             // A song the queue does not know comes back with its id only.
@@ -244,6 +281,59 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         handler.post { note(t, PerfNote.Tuning(on)) }
     }
 
+    override fun skipped(index: Int) {
+        val t = System.currentTimeMillis()
+        handler.post { dev.nori.music.ffi.perf.perfWatchSkip(t, index.toLong()) }
+    }
+
+    override fun arrived(index: Int, auto: Boolean, shuffled: Boolean) {
+        val t = System.currentTimeMillis()
+        if (testing) arrivals += Arrival(SystemClock.elapsedRealtime(), index, auto)
+        handler.post { dev.nori.music.ffi.perf.perfWatchArrived(t, index.toLong(), auto, shuffled) }
+    }
+
+    override fun lyricsShown(songId: String) {
+        val t = System.currentTimeMillis()
+        handler.post { dev.nori.music.ffi.perf.perfWatchLyrics(t, songId) }
+    }
+
+    /**
+     * How long the screen may trail the song the service is on beyond a second: through a mix on the
+     * ExoPlayer path the service moves to the next song while the ear, and the screen, stay on the last.
+     */
+    private fun grace(): Long {
+        val p = Nori.get(app).settings.value
+        return if (PlaybackService.engine == "exoplayer" && (p.crossfadeSec > 0 || p.autoMix)) (maxOf(p.crossfadeSec, p.autoMixMaxS) + 1) * 1000L else 0L
+    }
+
+    /** A second after the settings changed: what the engine shows against them (the core's call). */
+    private val settingsLook = Runnable {
+        if (PlaybackService.engine == null) return@Runnable
+        val nori = Nori.get(app)
+        dev.nori.music.ffi.perf.perfWatchSettings(System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain, nori.outputs.usb.value)
+    }
+
+    /**
+     * ExoPlayer's output, read at a moment this thread was awake anyway: what it presented against what
+     * was handed to it. The Rust player's is watched where it is written.
+     */
+    private fun exoOutput() {
+        if (PlaybackService.engine != "exoplayer") return
+        val opened = PlaybackService.track ?: return
+        val t = opened.track
+        runCatching {
+            val frame = frameBytes(t.audioFormat, t.channelCount)
+            val offloaded = Build.VERSION.SDK_INT >= 29 && t.isOffloadedPlayback
+            // Without the frames written (offloaded, or a format not read here) nothing can be judged.
+            if (frame <= 0 || offloaded || t.state != android.media.AudioTrack.STATE_INITIALIZED) return@runCatching
+            val written = dev.nori.music.playback.TransitionSink.bytesWritten / frame
+            dev.nori.music.ffi.perf.perfWatchOutput(
+                "exoplayer", System.identityHashCode(t).toLong(), SystemClock.elapsedRealtime(), t.playState == android.media.AudioTrack.PLAYSTATE_PLAYING, false,
+                written.toULong(), (t.playbackHeadPosition.toLong() and 0xFFFF_FFFFL).toULong(), t.sampleRate.toUInt(),
+            )
+        }
+    }
+
     private fun note(t: Long, note: PerfNote) = runCatching { dev.nori.music.ffi.perf.perfNote(t, note) }
 
     /** The output's underrun count, read now: the core notes it when it grew. A getter, no wakeup of its own. */
@@ -267,6 +357,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
 
     /** Something happened: when it moved the app into another state, one stretch ends and the next begins. */
     private fun changed() {
+        exoOutput()
+        dev.nori.music.ffi.perf.perfWatchLook(System.currentTimeMillis(), grace())
         // The service may have started (or stopped) since, and with it the path that plays.
         settings = cfg()
         val key = key()
@@ -432,6 +524,16 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
 
     private fun runtimeStat(name: String) = Debug.getRuntimeStat(name)?.toLongOrNull() ?: 0L
 
+}
+
+/** Bytes of one frame of PCM [encoding] with [channels]; 0 for anything compressed. */
+internal fun frameBytes(encoding: Int, channels: Int): Int = channels * when (encoding) {
+    android.media.AudioFormat.ENCODING_PCM_16BIT -> 2
+    android.media.AudioFormat.ENCODING_PCM_FLOAT -> 4
+    android.media.AudioFormat.ENCODING_PCM_24BIT_PACKED -> 3
+    android.media.AudioFormat.ENCODING_PCM_32BIT -> 4
+    android.media.AudioFormat.ENCODING_PCM_8BIT -> 1
+    else -> 0
 }
 
 /** The page as the core laid it out, and the stretch under way it was read with (for the report). */

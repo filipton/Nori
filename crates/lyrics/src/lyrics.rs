@@ -196,10 +196,15 @@ pub fn build(mut all: Vec<Structured>) -> Lyrics {
             let (text, marks) = inline_words(&l.value);
             if synced && !marks.is_empty() {
                 word_timed = true;
+                // A word runs to the next word's mark; the last one, unless a closing mark ends it, for
+                // as long as a word that long is sung - not to the next line, which after a pause is
+                // seconds away.
                 let words = marks.iter().enumerate().filter_map(|(k, (ms, at))| {
                     let to = marks.get(k + 1).map(|m| m.1).unwrap_or(text.len());
-                    let end_ms = marks.get(k + 1).map(|m| m.0 - offset).unwrap_or(next);
-                    (to > *at).then(|| LyricWord { start_ms: ms - offset, end_ms, start: utf16_at(&text, *at), end: utf16_at(&text, to) })
+                    let (start, end) = (utf16_at(&text, *at), utf16_at(&text, to));
+                    let guessed = || (ms - offset + nori_look::lyrics::word_ms_estimate(end - start)).min(next.max(ms - offset));
+                    let end_ms = marks.get(k + 1).map(|m| m.0 - offset).unwrap_or_else(guessed);
+                    (to > *at).then(|| LyricWord { start_ms: ms - offset, end_ms, start, end })
                 }).collect();
                 (text, next, words, false)
             } else {
@@ -255,6 +260,21 @@ mod tests {
         let plain = parse(r#"[{"synced":false,"line":[{"value":"just text"}]}]"#);
         assert_eq!((plain.synced, plain.lines[0].start_ms, plain.lines[0].words.len()), (false, -1, 0));
         assert!(parse("[]").lines.is_empty());
+    }
+
+    #[test]
+    fn an_lrc_lines_last_word_before_a_long_pause_ends_by_itself() {
+        // The last word has no closing mark and the next line is thirty seconds away.
+        let l = from_lrc("[00:10.00]<00:10.00>Hold <00:10.40>on <00:10.80>tonight\n[00:40.00]<00:40.00>Again\n");
+        let last = l.lines[0].words.last().unwrap().clone();
+        assert_eq!(last.start_ms, 10_800);
+        assert!(last.end_ms > 10_800 && last.end_ms <= 10_800 + 2_000, "sung for about as long as the word: {last:?}");
+        assert_eq!(l.lines[0].words[1].end_ms, 10_800, "a word before it runs to the next mark");
+        // A closing mark says when it ends; a next line sooner than the guess ends it there.
+        let closed = from_lrc("[00:10.00]<00:10.00>Hold <00:10.40>on <00:10.80>tonight <00:14.00>\n[00:40.00]Again\n");
+        assert_eq!(closed.lines[0].words.last().unwrap().end_ms, 14_000);
+        let quick = from_lrc("[00:10.00]<00:10.00>Hold <00:10.40>on <00:10.80>tonight\n[00:11.00]Again\n");
+        assert_eq!(quick.lines[0].words.last().unwrap().end_ms, 11_000);
     }
 
     #[test]

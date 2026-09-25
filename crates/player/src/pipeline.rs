@@ -1012,7 +1012,8 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
 
     /// The ReplayGain settings changed (or whether they may apply): every song handed to the output is
     /// heard at its new volume from now on. The music the output still holds is scaled there (as far as
-    /// the track can), and the song being read is scaled from its next buffer.
+    /// the track can), so is what the transition engine holds on its way to it, and the song being read
+    /// is scaled from its next buffer.
     pub fn gain_changed(&mut self) {
         for k in 0..self.periods.len() {
             let p = self.periods[k];
@@ -1024,6 +1025,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             let from = self.sink.media_frames(p.offset_us).unwrap_or(0.0);
             let to = self.periods.get(k + 1).and_then(|n| self.sink.media_frames(n.offset_us)).unwrap_or(f64::MAX);
             self.sink.track.rescale(from, to, gain / p.gain);
+            // And what the engine took in of it and the sink has not taken yet: the rest of a buffer the
+            // sink took only part of goes on at the new level from where the track's music ends.
+            self.engine.rescale(p.offset_us, gain / p.gain);
             self.periods[k].gain = gain;
         }
         if let Some(i) = self.reading.as_ref().map(|r| r.index) {
@@ -1282,13 +1286,19 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// settings as they are now, and the song read again from where it is.
     fn rebuild_sink(&mut self) {
         self.resound = false;
-        let at_ms = self.position_ms();
+        // From where the ear is: inside a held ending, the song before the one the player moved on to.
+        let ear = self.ear();
         self.call(|e, _, a| e.reset(a));
         self.burst.restart();
         let capacity = self.depth();
         self.sink.rebuild(capacity, self.chain_in(), self.sound.clone());
         self.sink.set_stages(self.speed.0, self.speed.1, self.skip_silence);
-        if let Some(i) = self.current {
+        if let Some((i, at_ms)) = ear {
+            if self.current != Some(i) {
+                self.current = Some(i);
+                self.queue.moved_to(i);
+                self.sync_queue();
+            }
             let offset = self.fresh_offset();
             let r = match self.tracks.open(&self.id_at(i), at_ms.max(0)) {
                 Ok(r) => r,
@@ -1486,6 +1496,41 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.engine.heard().mixing
     }
 
+    /// The song the ear is on and the place in it, ms. While an ending is held for a mix (or the mix is
+    /// made and not heard yet) the player has been told that ending has played, and is on the next song
+    /// already: the ear is still in the ending.
+    pub fn ear(&mut self) -> Option<(usize, i64)> {
+        let current = self.current?;
+        if self.engine.heard().id.is_some() {
+            if let Some(i) = self.bar().index {
+                let heard = self.engine.heard();
+                // Read at `at_ms`; the sound has moved on since, if it plays.
+                let since = if self.playing { (self.now_ms - heard.at_ms).max(0) } else { 0 };
+                let ms = (heard.us + since * 1000) / 1000;
+                return Some((i, ms));
+            }
+        }
+        Some((current, self.position_ms()))
+    }
+
+    /// How much of the ending of song `cur` (the one the ear is on) the output already holds, and what
+    /// it was made with: the plan whose hold has begun or that its last buffer went out with
+    /// (`Some(None)`: gapless), and `Some(None)` too while it is still being read but past `start_us`,
+    /// where a plan starting there would have begun - everything read up to here went out as it is.
+    /// `None` while nothing a plan starting at `start_us` would change has been made: the plan is then
+    /// simply taken up there.
+    pub fn ending_made(&self, cur: usize, start_us: Option<i64>) -> Option<Option<crate::engine::Plan>> {
+        let id = self.id_at(cur);
+        let reading = self.reading.as_ref().filter(|r| r.index == cur);
+        if let Some(made) = self.engine.made(&id) {
+            if self.engine.holding() || reading.is_none() {
+                return Some(made.cloned());
+            }
+        }
+        let r = reading?;
+        (start_us? < r.r.at_us()).then_some(None)
+    }
+
     /// The last song has been read to its end and handed over.
     pub fn source_ended(&self) -> bool {
         self.source_ended
@@ -1510,6 +1555,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// The song being read is waiting for its bytes, or still opening.
     pub fn starved(&self) -> bool {
         self.opening.is_some() || self.reading.as_ref().is_some_and(|r| !r.left() && !r.ended && r.waiting)
+    }
+
+    /// Nothing can be read on until a song's bytes come: the song being read is waiting for them (or
+    /// opening), or it is read to its end and the next one's first bytes are on their way.
+    pub fn waiting_for_bytes(&self) -> bool {
+        self.starved() || (self.failed.is_none() && self.next.as_ref().is_some_and(|(_, n)| n.is_ok()) && self.reading.as_ref().is_some_and(|r| r.ended && r.waiting && !r.left()))
     }
 
     /// One turn of the renderer at `now_ms`: the position is read, and the output is offered audio

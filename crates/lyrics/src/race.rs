@@ -21,6 +21,7 @@ use nori_settings::lyrics_sources::{LyricsLookup, LyricsService};
 use nori_words::words::LyricsOrigin;
 use parking_lot::Mutex;
 
+use crate::fit::{agree, plausible};
 use crate::formats::{from_cache, timing, to_cache};
 use crate::services::{self, Ask, Lookup, Shared};
 
@@ -67,6 +68,11 @@ pub trait LyricsCache: Send + Sync {
 /// by line from the top service is held back while a lower one may still time the words. Without it, any
 /// timed answer beats untimed words, and between timed answers rank alone decides. The server's own
 /// untimed words (`server_timing` 1) rank above every service's untimed words.
+///
+/// Once there is a winner, an answer takes its place only when it is the same song's words
+/// ([`agree`]): a service that fell back to another song must not replace lyrics already found. And once
+/// lyrics are on screen they are replaced only by finer timing, never by an equal answer from a
+/// higher-ranked service: the words do not swap under the listener for nothing they could see.
 pub struct Race {
     best: Vec<u8>,
     prefer_words: bool,
@@ -123,7 +129,8 @@ impl Race {
         self.done[rank] = true;
         self.waiting.retain(|w| *w != rank);
         let t = found.as_ref().map_or(0, timing);
-        if let Some(l) = found.filter(|_| self.beats(t, rank)) {
+        let same_song = |l: &Lyrics| self.lyrics.as_ref().is_none_or(|had| agree(had, l));
+        if let Some(l) = found.filter(|l| self.beats(t, rank) && same_song(l)) {
             self.leader = Some(rank);
             self.leader_timing = t;
             self.lyrics = Some(l);
@@ -145,12 +152,13 @@ impl Race {
     }
 
     /// What to put on screen now, if anything: the leader, when it is new and either finer than what is
-    /// shown (worth showing at once, while better may still come) or `last`. A change between two answers
-    /// timed alike waits for the end, so the words do not swap back and forth while services answer.
+    /// shown (worth showing at once, while better may still come) or, at the `last`, the first lyrics
+    /// found at all. An answer timed alike never replaces lyrics already on screen.
     pub fn to_show(&mut self, last: bool) -> Option<(usize, Lyrics)> {
         let found = self.lyrics.as_ref()?;
         let leader = self.leader?;
-        if self.shown == Some(leader) || !(last || self.leader_timing > self.shown_timing) {
+        let finer = self.leader_timing > self.shown_timing;
+        if self.shown == Some(leader) || !(finer || (last && self.shown.is_none())) {
             return None;
         }
         self.shown = Some(leader);
@@ -178,10 +186,15 @@ enum Remembered {
     Unknown,
 }
 
-fn remembered(cache: &dyn LyricsCache, key: &str) -> Remembered {
+fn remembered(cache: &dyn LyricsCache, key: &str, song: &Song) -> Remembered {
     match cache.get(key) {
-        // An entry that no longer reads falls through to asking again.
-        Some(b) if !b.is_empty() => Some(from_cache(&String::from_utf8_lossy(&b))).filter(|l| !l.lines.is_empty()).map_or(Remembered::Unknown, Remembered::Hit),
+        // An entry that no longer reads falls through to asking again; one kept before answers were
+        // checked, which cannot be this song's, is the miss it should have been.
+        Some(b) if !b.is_empty() => match Some(from_cache(&String::from_utf8_lossy(&b))).filter(|l| !l.lines.is_empty()) {
+            Some(l) if plausible(&l, song) => Remembered::Hit(l),
+            Some(_) => Remembered::Miss,
+            None => Remembered::Unknown,
+        },
         Some(_) if cache.fresh(key, MISS_KEPT_MS) => Remembered::Miss,
         _ => Remembered::Unknown,
     }
@@ -269,7 +282,7 @@ pub async fn lookup(
         if !race.worth(rank) {
             continue;
         }
-        match remembered(cache, &keys[rank]) {
+        match remembered(cache, &keys[rank], song) {
             Remembered::Hit(l) => race.answer(rank, Some(l)),
             Remembered::Miss => race.answer(rank, None),
             Remembered::Unknown if FAILURES.lock().resting(services[rank], &keys[rank], now) => race.answer(rank, None),
@@ -305,10 +318,17 @@ pub async fn lookup(
 async fn ask(transport: &dyn Transport, cache: &dyn LyricsCache, lookup: &LyricsLookup, shared: &Shared, service: LyricsService, key: &str, song: &Song) -> Option<Lyrics> {
     let a = Ask::new(transport, lookup, shared, service);
     match services::ask(service, &a, song).await {
-        Lookup::Found(l) => {
+        Lookup::Found(l) if plausible(&l, song) => {
             FAILURES.lock().answered(service);
             cache.put(key, to_cache(&l).into_bytes());
             Some(l)
+        }
+        // Words that cannot be this song's (a fragment, lines past its end) are another song's: a miss.
+        Lookup::Found(_) => {
+            nori_model::alog::info(&format!("{} lyrics do not fit the song: taken as a miss", service.name()));
+            FAILURES.lock().answered(service);
+            cache.put(key, Vec::new());
+            None
         }
         Lookup::Missing => {
             FAILURES.lock().answered(service);
@@ -416,6 +436,38 @@ mod tests {
         screen.0.into_inner()
     }
 
+    const VERSE: [&str; 6] = [
+        "Paper boats drift down the harbour",
+        "Lanterns burning low tonight",
+        "Every wave that takes you farther",
+        "Brings the morning into sight",
+        "Hold on, hold on to the water",
+        "Hold on, hold on to the light",
+    ];
+
+    /// `lines` as LRC across the song, a line every ten seconds; `words` times each word inline.
+    fn lrc(lines: &[&str], words: bool) -> String {
+        let at = |ms: usize| format!("{:02}:{:02}.{:02}", ms / 60_000, ms / 1000 % 60, ms % 1000 / 10);
+        let mut out = String::new();
+        for (i, line) in lines.iter().cycle().take(18).enumerate() {
+            let ms = 10_000 + i * 10_000;
+            out.push_str(&format!("[{}]", at(ms)));
+            if words {
+                for (k, w) in line.split(' ').enumerate() {
+                    out.push_str(&format!("<{}>{w} ", at(ms + k * 400)));
+                }
+            } else {
+                out.push_str(line);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn lrclib_synced(web: &Web, body: &str) {
+        web.answer("https://lrclib.net/api/get", 200, &json!({"syncedLyrics": body}).to_string());
+    }
+
     fn unison(web: &Web, body: &str) {
         web.answer("https://unison.boidu.dev/", 200, &json!({"success": true, "data": {"lyrics": body, "format": "lrc", "duration": 239}}).to_string());
     }
@@ -423,7 +475,7 @@ mod tests {
     #[test]
     fn a_song_is_asked_once_and_remembered_with_every_word() {
         let (web, cache) = (Web::default(), Kept::default());
-        unison(&web, "[00:01.00]<00:01.00>hel<00:01.50>lo");
+        unison(&web, &lrc(&VERSE, true));
         web.answer("https://lrclib.net/", 404, r#"{"statusCode":404}"#);
         let s = Song { title: "Remembered".into(), ..song() };
         let l = asked(&[LyricsService::Unison, LyricsService::Lrclib]);
@@ -462,13 +514,60 @@ mod tests {
     #[test]
     fn line_timed_words_show_first_and_word_timed_ones_replace_them() {
         let (web, cache) = (Web::default(), Kept::default());
-        unison(&web, "[00:01.00]<00:01.00>hel<00:01.50>lo");
-        web.answer("https://lrclib.net/api/get", 200, r#"{"syncedLyrics":"[00:01.00]hello"}"#);
+        unison(&web, &lrc(&VERSE, true));
+        lrclib_synced(&web, &lrc(&VERSE, false));
         let s = Song { title: "Both".into(), ..song() };
         // LRCLIB first in rank, Unison below it: LRCLIB's lines are shown, then Unison's words win.
         let picks = run(&web, &cache, &s, (true, false), &asked(&[LyricsService::Lrclib, LyricsService::Unison]));
         let origins: Vec<LyricsOrigin> = picks.iter().map(|p| p.origin).collect();
         assert_eq!(*origins.last().unwrap(), LyricsOrigin::Unison);
         assert!(picks.last().unwrap().lyrics.word_timed);
+    }
+
+    /// Three lines of another song, over and over: what took the place of the right lyrics.
+    const OTHER: [&str; 3] = ["Pour another glass for me", "The whisky's on the table", "Drink until the morning comes"];
+
+    #[test]
+    fn another_songs_words_never_replace_the_lyrics_shown() {
+        let (web, cache) = (Web::default(), Kept::default());
+        // LRCLIB's lines are found first; Unison, below it, times words - but of another song.
+        lrclib_synced(&web, &lrc(&VERSE, false));
+        unison(&web, &lrc(&OTHER, true));
+        let s = Song { title: "Stable".into(), ..song() };
+        let picks = run(&web, &cache, &s, (false, false), &asked(&[LyricsService::Lrclib, LyricsService::Unison]));
+        assert_eq!(picks.len(), 1, "shown once: {picks:?}");
+        assert_eq!((picks[0].origin, picks[0].lyrics.lines[0].text.as_str()), (LyricsOrigin::Lrclib, VERSE[0]));
+    }
+
+    #[test]
+    fn a_fragment_is_a_miss_and_one_kept_before_the_check_is_not_shown() {
+        let (web, cache) = (Web::default(), Kept::default());
+        let s = Song { title: "Fragment".into(), ..song() };
+        let only = asked(&[LyricsService::Unison]);
+        unison(&web, "[00:05.00]<00:05.00>Pour <00:05.50>another\n[00:09.00]<00:09.00>The <00:09.50>whisky\n[00:13.00]Drink\n[00:17.00]<00:17.00>Pour <00:17.50>another\n");
+        let picks = run(&web, &cache, &s, (false, false), &only);
+        assert_eq!(picks, [LyricsPick { lyrics: Lyrics::default(), origin: LyricsOrigin::Server }], "nothing found");
+        assert_eq!(cache.0.lock().values().next(), Some(&Vec::new()), "kept as a miss");
+        // The same fragment, kept for good by a build before the check: not shown either.
+        let (web, cache) = (Web::default(), Kept::default());
+        let junk = crate::lyrics::from_lrc("[00:05.00]Pour another\n[00:09.00]The whisky\n[00:13.00]Pour another\n");
+        cache.put(&cache_key(LyricsService::Unison, &s, &only), to_cache(&junk).into_bytes());
+        assert_eq!(run(&web, &cache, &s, (false, false), &only)[0].origin, LyricsOrigin::Server);
+        assert!(web.asked().is_empty(), "a miss for the week, not asked again");
+    }
+
+    #[test]
+    fn lyrics_on_screen_are_not_swapped_for_an_answer_timed_alike() {
+        let (web, cache) = (Web::default(), Kept::default());
+        let s = Song { title: "Alike".into(), ..song() };
+        // Unison's lines (rank 1) come out of the cache and are shown at once; LRCLIB's (rank 0), timed
+        // the same, arrive later: what is on screen stays.
+        let l = asked(&[LyricsService::Lrclib, LyricsService::Unison]);
+        let mut lines = crate::lyrics::from_lrc(&lrc(&VERSE, false));
+        lines.lines[0].text = "Paper boats drift down the harbor".into();
+        cache.put(&cache_key(LyricsService::Unison, &s, &l), to_cache(&lines).into_bytes());
+        lrclib_synced(&web, &lrc(&VERSE, false));
+        let picks = run(&web, &cache, &s, (false, false), &l);
+        assert_eq!(picks.iter().map(|p| p.origin).collect::<Vec<_>>(), [LyricsOrigin::Unison]);
     }
 }

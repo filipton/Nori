@@ -10,7 +10,7 @@
 //! moves a stream on the default device elsewhere (cpal reports that on PipeWire, CoreAudio and
 //! WASAPI; ALSA cannot tell), with the kind cpal describes it as, so each device can have its own sound.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -27,6 +27,31 @@ pub struct CpalOutput {
     latency_us: Arc<AtomicU64>,
     /// Told which device the music goes to.
     watch: Option<Arc<DeviceWatch>>,
+    /// The listener's volume, a factor's bits (see [`Volume`]).
+    volume: Volume,
+}
+
+/// The listener's volume on this output, 0 to 1, set from any thread and applied to every buffer on the
+/// device's thread. At 1 (the default) the samples are handed on untouched; anything else is one
+/// multiplication a sample, after the engine's chain, so ReplayGain, the limiter and the fades still see
+/// the music at full scale.
+#[derive(Clone)]
+pub struct Volume(Arc<AtomicU32>);
+
+impl Volume {
+    pub fn set(&self, v: f32) {
+        self.0.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn get(&self) -> f32 {
+        f32::from_bits(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Volume(Arc::new(AtomicU32::new(1.0f32.to_bits())))
+    }
 }
 
 /// What the engine is told of a device: its kind as the core ranks outputs, and its name.
@@ -47,7 +72,12 @@ fn described(device: &Device) -> Option<nori_engine::Device> {
 impl CpalOutput {
     /// The system's default output device.
     pub fn new() -> CpalOutput {
-        CpalOutput { wanted: None, device: None, config: None, stream: None, latency_us: Arc::new(AtomicU64::new(0)), watch: None }
+        CpalOutput { wanted: None, device: None, config: None, stream: None, latency_us: Arc::new(AtomicU64::new(0)), watch: None, volume: Volume::default() }
+    }
+
+    /// The handle the listener's volume is set through, for as long as the output lives.
+    pub fn volume(&self) -> Volume {
+        self.volume.clone()
     }
 
     /// The output device called `name` (as [`CpalOutput::devices`] lists them).
@@ -89,6 +119,10 @@ fn rank(f: SampleFormat) -> Option<u8> {
     }
 }
 
+/// The period asked of the device, ms: long enough that the sound path sleeps between callbacks, short
+/// enough that a pause or a seek is heard at once.
+const PERIOD_MS: u32 = 100;
+
 impl AudioOutput for CpalOutput {
     fn open(&mut self, want: OutputFormat) -> Result<OutputFormat, String> {
         let device = self.pick()?;
@@ -107,7 +141,14 @@ impl AudioOutput for CpalOutput {
         if rank(format).is_none() {
             return Err(format!("the device only takes {format:?} samples"));
         }
-        let config = StreamConfig { channels: chosen.channels(), sample_rate: chosen.sample_rate(), buffer_size: BufferSize::Default };
+        // A period of about [`PERIOD_MS`] where the device allows one: the sound server's default is a few ms, so
+        // its thread and the callback wake hundreds of times a second for music the engine made seconds ago.
+        let frames = chosen.sample_rate() * PERIOD_MS / 1000;
+        let buffer_size = match *chosen.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } if max >= min => BufferSize::Fixed(frames.clamp(min, max)),
+            _ => BufferSize::Default,
+        };
+        let config = StreamConfig { channels: chosen.channels(), sample_rate: chosen.sample_rate(), buffer_size };
         let got = OutputFormat { rate: config.sample_rate, channels: config.channels as usize, bits: 0 };
         if let (Some(w), Some(d)) = (&self.watch, described(&device)) {
             w(d);
@@ -120,6 +161,7 @@ impl AudioOutput for CpalOutput {
     fn start(&mut self, mut feed: Feed) -> Result<(), String> {
         let (Some(device), Some((config, format))) = (&self.device, &self.config) else { return Err("not open".into()) };
         let latency = self.latency_us.clone();
+        let (volume, volume_i16) = (self.volume.clone(), self.volume.clone());
         let note = move |info: &cpal::OutputCallbackInfo| {
             let t = info.timestamp();
             latency.store(t.playback.saturating_duration_since(t.callback).as_micros() as u64, Ordering::Relaxed);
@@ -140,6 +182,10 @@ impl AudioOutput for CpalOutput {
                 config.clone(),
                 move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     feed.pull(data);
+                    let v = volume.get();
+                    if v != 1.0 {
+                        data.iter_mut().for_each(|s| *s *= v);
+                    }
                     note(info);
                 },
                 err,
@@ -149,6 +195,10 @@ impl AudioOutput for CpalOutput {
                 config.clone(),
                 move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
                     feed.pull_i16(data);
+                    let v = volume_i16.get();
+                    if v != 1.0 {
+                        data.iter_mut().for_each(|s| *s = (*s as f32 * v) as i16);
+                    }
                     note(info);
                 },
                 err,

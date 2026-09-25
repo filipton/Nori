@@ -288,7 +288,9 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         // song that changes by itself slides its record in over the same stretch (see SleeveCarousel).
         // Theme colours (text, Play, heart) travel with the wash via mixPalette - snapping the theme
         // while only the wash faded left the controls jumping a frame ahead of the page.
-        if (fades) washFade.animateTo(1f, androidx.compose.animation.core.tween(stage.colourFadeMs))
+        // Counted in frames: this runs on the frames that compose the new song, and timed by the clock
+        // a slow one of those carried the page most of the way to its new colour in one step.
+        if (fades) washFade.fadeByFrames(1f, stage.colourFadeMs.toFloat())
         fadingFrom = null
     }
 

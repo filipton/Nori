@@ -23,6 +23,18 @@ Linked into the Rust core (crates/core)
     offered under the Unlicense, BSD-2-Clause or BlueOak-1.0.0. Runs the beat model; only in a build
     with the `neural-beats` feature, and used only with "Better beat detection" on.
 
+The terminal client (crates/cli, nori-cli; not part of the Android app)
+  ratatui, ratatui-image, crossterm — The Ratatui developers, Benjamin Große, Timon Post; MIT
+  image, icy_sixel, rand, unicode-width, base64-simd (covers drawn in the terminal) — MIT (dual-licensed
+    MIT or Apache-2.0 where the crate offers both)
+  symphonia (the desktop player's format readers, crates/engine) — Philip Deljanov and the Symphonia
+    contributors, Mozilla Public License 2.0
+  cpal, alsa (the sound card, crates/output-cpal) — Apache-2.0 (alsa also MIT)
+  ureq, rustls, ring, webpki-roots (HTTP and TLS, crates/http) — MIT or Apache-2.0; rustls also ISC;
+    ring Apache-2.0 and ISC; webpki-roots' certificate data CDLA-Permissive-2.0
+  dbus, dbus-crossroads (the desktop's media controls, crates/mpris) — MIT or Apache-2.0; libdbus is
+    the system's own, linked at run time
+
 Android libraries
   AndroidX (Media3, Compose, Material 3, Palette, Navigation, Lifecycle, Activity, Core), Material
   Icons, OkHttp, kotlinx.coroutines — Apache License 2.0

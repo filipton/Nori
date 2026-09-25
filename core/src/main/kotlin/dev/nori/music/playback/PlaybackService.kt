@@ -373,6 +373,7 @@ class PlaybackService : MediaLibraryService() {
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
             item?.let { observer?.song(it.mediaId) }
+            observer?.arrived(player.currentMediaItemIndex, reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO, player.shuffleModeEnabled)
             val looped = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
             // The Rust player walked the core's queue itself (explicit songs skipped, the ReplayGain volume
             // set): this is only the song the ear arrived on.
@@ -804,13 +805,14 @@ class PlaybackService : MediaLibraryService() {
 
         override fun seekTo(positionMs: Long) = softly(Switch.SEEK) { super.seekTo(positionMs) }
         override fun seekTo(mediaItemIndex: Int, positionMs: Long) = softly(Switch.TO_SONG) { super.seekTo(mediaItemIndex, positionMs) }
-        override fun seekToNext() = andPlay { softly(Switch.SKIP) { super.seekToNext() } }
-        override fun seekToNextMediaItem() = andPlay { softly(Switch.SKIP) { super.seekToNextMediaItem() } }
-        override fun seekToPreviousMediaItem() = andPlay { softly(Switch.SKIP) { super.seekToPreviousMediaItem() } }
+        override fun seekToNext() { observer?.skipped(currentMediaItemIndex); andPlay { softly(Switch.SKIP) { super.seekToNext() } } }
+        override fun seekToNextMediaItem() { observer?.skipped(currentMediaItemIndex); andPlay { softly(Switch.SKIP) { super.seekToNextMediaItem() } } }
+        override fun seekToPreviousMediaItem() { observer?.skipped(currentMediaItemIndex); andPlay { softly(Switch.SKIP) { super.seekToPreviousMediaItem() } } }
         // Well into a song this goes back to 0:00 rather than to the song before (media3's own rule,
         // three seconds, unless the user has previous always skip: nori_player::queue::previous_restarts),
         // which paused means: start this one again, from the top, playing.
         override fun seekToPrevious() = andPlay {
+            observer?.skipped(currentMediaItemIndex)
             softly(Switch.SKIP) {
                 if (!dev.nori.music.ffi.queue.queuePreviousRestarts(currentPosition, hasPreviousMediaItem()) && hasPreviousMediaItem()) super.seekToPreviousMediaItem()
                 else super.seekToPrevious()
@@ -1102,4 +1104,10 @@ interface PlaybackObserver {
 
     /** The equalizer screen's tuning mode came on or off. */
     fun tuning(on: Boolean)
+
+    /** The user pressed next or previous (the session's buttons: the app, the notification, a headset) on queue place [index]. */
+    fun skipped(index: Int) {}
+
+    /** The player arrived on queue place [index]: by itself ([auto], a song that ended) or by a jump; [shuffled] under shuffle. */
+    fun arrived(index: Int, auto: Boolean, shuffled: Boolean) {}
 }

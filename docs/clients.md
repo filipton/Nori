@@ -39,6 +39,54 @@ platform opens and re-exports every crate below it by its module name (`nori_cor
 | Moving album covers: finding an album's motion artwork in Apple Music's catalogue (the search, the web player's token, the square video's address), remembered per album | `nori-core::motion` (`Client::motion_video`, `motion_forget`) |
 | The car browse tree | `nori-library::car` |
 
+## The reference terminal client
+
+`crates/cli` (nori-cli) is a whole music client for a terminal, and the check that the list below is
+complete: it links the core, nori-engine, nori-output-cpal, nori-http, nori-covers, nori-look and
+nori-mpris and writes only its interface. What it built itself, item by item, is what any new client
+builds:
+
+- **Screens** (ratatui over crossterm, ui.rs): login and server profiles (`check_login` is the core's
+  `Client::login`, profiles are the settings' `servers`), home (the core's album lists), the library
+  (albums, artists, playlists from the stored reads; songs from the offline index), search
+  (`SearchSession`: the index at every key, the server once typing pauses, `live_search_delay_ms`),
+  album, artist and playlist pages (`AlbumDetail`, `ArtistDetail`, `PlaylistDetail` with their captions),
+  the queue (`playlist_view` in play order; `playlist_remove`, `playlist_move`, `playlist_shuffle`,
+  `set_repeat`), now playing (the song heard is the engine's `Event::Song`/`Status`; how the next comes in
+  is the planner's `planner::transition_note`), lyrics (the server's, then `Client::lyrics_lookup`;
+  timed by `nori_look::lyrics::LyricClock`, lit by `line_strength` and `UNSUNG`, filled a character at a
+  time), downloads (`download_sections`, `Downloader`), the equalizer (the bands as bars; `edit_band`,
+  `edit_level`, `settings_sound_tool`) and settings.
+- **Settings, generically**: every group, section and row is `settings_schema`'s (`settings_groups`,
+  `page`), drawn by the row's kind (a switch, a choice, a slider, swatches, a ranked source, a key typed
+  in, a link, an action) and changed by the row's own name through `setting_set`, `edit_level` or the
+  sound tools. A row Android gains appears in the terminal with no code. What a change asks of the player
+  (`SettingChange::effect`) is applied to the engine as Android applies it: `set_settings` for the sound,
+  the fades and high quality output, `gain_changed`, `replan`. The client's own few settings (mouse,
+  covers, volume) are kept beside the app's (`settings_store::app_value`, `keep_app_value`) and drawn as
+  rows of the same kinds.
+- **Plays and the queue's end**: `scrobble_playing` and `scrobble_track` on the engine's events (the
+  history and the scrobbles are the core's), and `autofill_start`/`autofill_next` with
+  `Client::autofill` when the queue runs out.
+- **Pictures**: nori-covers decodes the cover (fetched through the same `Transport`), nori-look's
+  `cover::derive` gives the page, text and accent colours, and ratatui-image draws the picture in
+  whichever protocol the terminal answers to (kitty graphics, sixel, iTerm2) or in half blocks. ratatui
+  0.30 takes a cell's text width as the columns it covers, so the cell holding a picture's escape
+  sequence is marked one column wide (`CellDiffOption::ForcedWidth`), or the rest of the frame is
+  skipped.
+- **Input**: one table of key bindings (keys.rs) that both dispatch and the help (`?`) read; every
+  clickable place recorded as it is drawn; mouse capture off on request, so the terminal selects text.
+- **Cost**: one thread blocked on the terminal, and the screen's loop asleep on one channel for input,
+  the engine's events and the workers' answers. It wakes by itself only for the clock's next second while
+  music plays and, with the lyrics on screen, when the lyric clock says (`Step::wait`, `still`); paused
+  or idle it does not wake at all. Measured on a release build: idle and paused 0 wakeups and 0.00 % CPU
+  of its own over 30 s; playing, the screen's thread wakes 1.0 times a second (0.03 to 0.1 % CPU), 5 to
+  9 a second with word-by-word lyrics on screen (0.3 to 0.4 %); the engine's thread 0.1 to 3.4 a second.
+  What wakes most while music plays is the sound card's path under cpal (ALSA's thread and PipeWire's
+  data loop, about 270 a second together), which a larger cpal buffer in nori-output-cpal would cut.
+- **Everything else is the core's**: a failure's words (`describe_error`), times and captions
+  (`nori_words::fmt`), the lyrics' credit, the queue saved for next time (`playlist_save`, `load_queue`).
+
 ## What each client builds
 
 ### 1. Talking to the network
@@ -62,7 +110,8 @@ only what touches the hardware:
   `Feed::pull` for every buffer it plays (lock-free, allocation-free), say whether it plays float
   (`takes_float`, for high quality output) and, where the platform can tell, which device the music goes
   to (`watch`) - or use `nori-output-cpal` (PipeWire/ALSA, CoreAudio, WASAPI; device changes on
-  PipeWire, CoreAudio and WASAPI). `WavOutput` renders to a file instead (16-bit, or float with
+  PipeWire, CoreAudio and WASAPI; `CpalOutput::volume` is the listener's volume, one multiplication a
+  sample after the chain, nothing at all at 100 %). `WavOutput` renders to a file instead (16-bit, or float with
   `in_float`), on a clock of its own. An output whose device holds seconds of music (Android's
   AudioTrack) also runs the fades at its own volume (`ramp`), empties the device when the ring is
   flushed (`flush`, with `Feed::flushed` saying which pull starts the new music) and says what it still
@@ -327,8 +376,8 @@ native heaps before and after.
   per pixel and the times from pre-laid-out glyphs; a paused player draws nothing.
 
 ## Calling the core cheaply
-- `crates/cli` (nori-cli) is a whole terminal client in a few hundred lines: arguments, commands and
-  printing, and nothing else.
+- `crates/cli` (nori-cli) is a whole terminal client that is only an interface (above); its `--script`
+  mode is the few hundred lines of arguments, commands and printing it started as.
 - Rust clients call the crates directly. The core (`crates/core`, package `nori-core`, lib
   `nori_core`, over the domain crates nori-model, nori-db, nori-words, nori-net, nori-library,
   nori-automix, nori-settings, nori-lyrics, nori-devices, nori-queue, nori-transfers and nori-perf) is a

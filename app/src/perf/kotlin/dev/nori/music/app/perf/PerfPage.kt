@@ -89,6 +89,8 @@ private fun Recorded(shown: Shown, calls: String, covers: String, recorder: Reco
             PillButton(w.startFresh, Icons.Outlined.Delete, recorder::clear)
         }
 
+        SelfTestSection(recorder.selfTest)
+
         SectionHeader(w.byState)
         if (page.totals.isEmpty()) Note(w.nothingRecorded)
         page.totals.forEach { Figures(it.title, it.detail) }
@@ -169,6 +171,63 @@ private fun Log(recorder: Recorder) {
             )
         }
     }
+}
+
+/**
+ * The self test: its button, the switches it runs with, and while it runs where it is, each check's
+ * verdict as it comes, and a way to stop; afterwards the result, which Share carries too.
+ */
+@Composable
+private fun SelfTestSection(test: SelfTest) {
+    val p = test.progress
+    val running = p?.running == true
+    val activity = LocalContext.current as? android.app.Activity
+    SectionHeader("Self test")
+    Note(
+        "Plays songs of your library (those on the phone first) through both players, quietly unless you listen, and checks " +
+            "playback, the controls, offload, settings applied live, lyrics and covers. Takes about six minutes; your settings, " +
+            "queue, place and player are put back afterwards.",
+    )
+    FlowRow(
+        Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PillButton(if (running) "Cancel" else "Run self test", Icons.Outlined.Speed, { if (running) test.cancel() else test.start(activity) }, prominent = !running)
+        dev.nori.music.app.ui.Chip("Listen", test.listen) { if (!running) test.listen = !test.listen }
+        dev.nori.music.app.ui.Chip("Downloads", test.downloads) { if (!running) test.downloads = !test.downloads }
+    }
+    AnimatedVisibility(p != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
+        p?.let { SelfTestProgress(it) }
+    }
+}
+
+@Composable
+private fun SelfTestProgress(p: SelfTest.Progress) {
+    Column(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp).animateContentSize()) {
+        if (p.running) {
+            Text("Step ${p.step} of ${p.total}: ${p.current}", style = MaterialTheme.typography.bodyLarge)
+            androidx.compose.material3.LinearProgressIndicator(
+                progress = { (p.step - 1).coerceAtLeast(0) / p.total.coerceAtLeast(1).toFloat() },
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            )
+        }
+        val failed = p.outcomes.count { it.verdict == Verdict.FAIL }
+        if (!p.running) {
+            Text(
+                if (failed == 0) "All checks passed" else "$failed checks failed",
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (failed == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+            )
+        }
+        SelectionContainer {
+            Text(
+                p.report ?: p.outcomes.joinToString("\n") { "${it.verdict.name}  ${it.section}: ${it.name}" + if (it.measured.isNotEmpty()) " - ${it.measured}" else "" },
+                Modifier.padding(top = 4.dp),
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Hairline()
 }
 
 @Composable

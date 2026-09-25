@@ -282,6 +282,12 @@ impl Feed {
         self.ring.engine.unpark();
     }
 
+    /// Whether the engine sleeps until a pull takes the ring down to its low mark: a pull that finds it
+    /// so, and leaves it not so, woke it. For a test's device on a clock it moves by hand.
+    pub fn engine_waits(&self) -> bool {
+        self.ring.waiting.load(Ordering::Acquire)
+    }
+
     /// Frames of music waiting in the ring.
     pub fn available(&self) -> usize {
         self.ring.filled() as usize

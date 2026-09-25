@@ -19,6 +19,8 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::Arc;
 use std::thread::Thread;
 
+use nori_player::automix::resample::Resampler;
+use nori_player::automix::PCM_FLOAT;
 use nori_player::decode::{Codec, Decoder, MP3_DECODER_DELAY};
 use nori_player::pcm::{Encoding, Format};
 use nori_player::pipeline::Reading;
@@ -26,6 +28,7 @@ use nori_player::queue::PlaybackError;
 use parking_lot::Mutex;
 use symphonia::core::codecs::audio::well_known::*;
 use symphonia::core::codecs::audio::AudioCodecId;
+use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions};
@@ -191,6 +194,39 @@ struct Stream {
     coded: Option<CodedSong>,
     packet_frames: u64,
     first_packet: bool,
+    /// The format has been told (from the first packet): anything decoded in another shape from here on
+    /// is converted to it.
+    settled: bool,
+    /// Decoded audio in another shape than the one told, converted to it: a live stream whose station
+    /// changed its rate or channels (the next song of a chained Ogg stream).
+    reshape: Option<Reshape>,
+}
+
+/// Audio of one shape made into another, as floats.
+struct Reshape {
+    from: (u32, usize),
+    resampler: Resampler,
+    input: Vec<u8>,
+    output: Vec<u8>,
+}
+
+/// `samples` (interleaved float, `from` rate and channels) into `out` in `to`'s rate, channels and
+/// encoding, through `reshape` (made for `from` if it is not): the frames made.
+fn reshaped(reshape: &mut Option<Reshape>, from: (u32, usize), to: Format, samples: &[f32], out: &mut Vec<u8>) -> usize {
+    if reshape.as_ref().is_none_or(|r| r.from != from) {
+        let Some(resampler) = Resampler::new(from.0 as i32, from.1 as i32, to.rate as i32, to.channels as i32) else { return 0 };
+        *reshape = Some(Reshape { from, resampler, input: Vec::new(), output: Vec::new() });
+    }
+    let r = reshape.as_mut().expect("made above");
+    r.input.clear();
+    r.input.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
+    let frames = samples.len() / from.1.max(1);
+    r.output.resize((frames * to.rate as usize / from.0.max(1) as usize + 4) * to.channels * 4, 0);
+    let Some((_, made)) = r.resampler.process(&r.input, PCM_FLOAT, &mut r.output, PCM_FLOAT) else { return 0 };
+    for b in r.output[..made].chunks_exact(4) {
+        put(f32::from_le_bytes([b[0], b[1], b[2], b[3]]), to.encoding, out);
+    }
+    made / 4 / to.channels
 }
 
 impl Stream {
@@ -220,7 +256,7 @@ impl Stream {
         let delay_known = track.delay.is_some();
         let inner = match (codec, Pcm::of(params.codec)) {
             _ if packets => Inner::Raw,
-            (Some(c), _) => Inner::Coded(Decoder::new(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
+            (Some(c), _) => Inner::Coded(decoder(c, rate, channels, params.extra_data.as_deref(), c == Codec::Mp3 && delay_known)?),
             (None, Some(p)) => Inner::Pcm(p),
             _ => return Err(format!("{:?} is not decoded here", params.codec)),
         };
@@ -237,7 +273,7 @@ impl Stream {
             _ => track.num_frames.map(|n| n as i64),
         };
         let duration_us = frames.map(|n| n * 1_000_000 / rate as i64).or(duration_ms.map(|d| d * 1000)).unwrap_or(0);
-        let coded = packets.then(|| coding(codec, setup.as_deref())).flatten().map(|coding| {
+        let coded = packets.then(|| coding(codec, setup.as_deref(), rate)).flatten().map(|coding| {
             let bitrate = match byte_len {
                 Some(b) if duration_us > 0 => (b as i128 * 8_000_000 / duration_us as i128).min(u32::MAX as i128) as u32,
                 _ => 0,
@@ -258,7 +294,7 @@ impl Stream {
             CodedSong { coded: Coded { coding, rate, channels }, bitrate, delay, padding, setup: setup.clone(), from_frame: 0 }
         });
         let compression = match (codec, Pcm::of(params.codec)) {
-            (Some(Codec::Aac), _) => match coding(codec, setup.as_deref()) {
+            (Some(Codec::Aac), _) => match coding(codec, setup.as_deref(), rate) {
                 Some(_) => "AAC-LC",
                 None => "HE-AAC",
             },
@@ -293,6 +329,8 @@ impl Stream {
             coded,
             packet_frames: 0,
             first_packet: true,
+            settled: false,
+            reshape: None,
         };
         if from_ms > 0 {
             d.seek(from_ms)?;
@@ -308,6 +346,7 @@ impl Stream {
             d.format.rate = dec.rate();
             d.format.channels = dec.channels();
         }
+        d.settled = true;
         Ok(d)
     }
 
@@ -394,6 +433,8 @@ impl Stream {
         loop {
             let packet = match self.reader.next_packet() {
                 Ok(Some(p)) => p,
+                // The next stream of a chained Ogg one (a station's next song): read on in it.
+                Err(SymphoniaError::ResetRequired) if self.chain_on() => continue,
                 // The end, or a stream that cannot be read any further: either way the song is over.
                 Ok(None) | Err(_) => {
                     self.ended = true;
@@ -409,16 +450,16 @@ impl Stream {
                 None => self.song_frame(packet.pts.get()),
             };
             // The samples as the decoder lends them (or as the file stores them), where they lie.
-            let (samples, pcm, ch): (&[f32], Option<(Pcm, usize)>, usize) = match &mut self.inner {
+            let (samples, pcm, ch, rate): (&[f32], Option<(Pcm, usize)>, usize, u32) = match &mut self.inner {
                 Inner::Coded(dec) => match dec.decode_lent(&packet.data) {
-                    Ok(lent) => (lent.samples, None, lent.channels.max(1)),
+                    Ok(lent) => (lent.samples, None, lent.channels.max(1), lent.rate),
                     Err(nori_player::decode::Fault::Broken) => {
                         self.ended = true;
                         return false;
                     }
                     Err(_) => continue,
                 },
-                Inner::Pcm(p) => (&[], Some((*p, p.width())), ch),
+                Inner::Pcm(p) => (&[], Some((*p, p.width())), ch, self.format.rate),
                 Inner::Raw => return false,
             };
             let n = match pcm {
@@ -460,7 +501,18 @@ impl Stream {
                         p.put(b, enc, &mut self.buf);
                     }
                 }
+                // Decoded in another shape than the one told (the station's next song, of another rate or
+                // channel count): converted to it, which the output below goes on playing at. Handed on
+                // as it is, it would play at the wrong speed and pitch.
+                None if self.settled && (rate, ch) != (self.format.rate, self.format.channels) => {
+                    let made = reshaped(&mut self.reshape, (rate, ch), self.format, &samples[from * ch..to * ch], &mut self.buf);
+                    self.frame = Some(first + made as i64);
+                    if made == 0 {
+                        continue;
+                    }
+                }
                 None => {
+                    self.reshape = None;
                     for &v in &samples[from * ch..to * ch] {
                         put(v, enc, &mut self.buf);
                     }
@@ -470,6 +522,31 @@ impl Stream {
             return true;
         }
     }
+}
+
+impl Stream {
+    /// A chained Ogg stream began its next logical stream (an Ogg station's next song, with headers of
+    /// its own): its track and a decoder for it, read on at the format told. False when it cannot be.
+    fn chain_on(&mut self) -> bool {
+        let Some(track) = self.reader.default_track(TrackType::Audio) else { return false };
+        let Some(params) = track.codec_params.as_ref().and_then(|p| p.audio()) else { return false };
+        let (Some(codec), Some(rate)) = (codec_of(params.codec), params.sample_rate) else { return false };
+        let channels = params.channels.as_ref().map_or(2, |c| c.count()).max(1);
+        let id = track.id;
+        let Ok(dec) = decoder(codec, rate, channels, params.extra_data.as_deref(), false) else { return false };
+        if !matches!(self.inner, Inner::Coded(_)) {
+            return false;
+        }
+        self.inner = Inner::Coded(dec);
+        self.codec = Some(codec);
+        self.track = id;
+        true
+    }
+}
+
+/// A decoder for a song read here.
+fn decoder(codec: Codec, rate: u32, channels: usize, extra: Option<&[u8]>, delay_known: bool) -> Result<Decoder, String> {
+    Decoder::new(codec, rate, channels, extra, delay_known)
 }
 
 impl Stream {
@@ -600,11 +677,13 @@ impl MediaSource for After {
 }
 
 /// Which of the compressions an output may decode itself `codec` is, by its setup: AAC only as Low
-/// Complexity (object type 2), which is all `AudioFormat.ENCODING_AAC_LC` promises.
-fn coding(codec: Option<Codec>, setup: Option<&[u8]>) -> Option<Coding> {
+/// Complexity (object type 2), which is all `AudioFormat.ENCODING_AAC_LC` promises - and not at 24 kHz or
+/// less, where "AAC-LC" is how HE-AAC whose SBR is signalled only inside the stream announces itself
+/// (`nori_settings::decoder::implicit_sbr`): an output set up for what it says would play it at half its rate.
+fn coding(codec: Option<Codec>, setup: Option<&[u8]>, rate: u32) -> Option<Coding> {
     match codec? {
         Codec::Mp3 => Some(Coding::Mp3),
-        Codec::Aac if setup.and_then(|s| s.first()).is_some_and(|b| b >> 3 == 2) => Some(Coding::Aac),
+        Codec::Aac if rate > 24_000 && setup.and_then(|s| s.first()).is_some_and(|b| b >> 3 == 2) => Some(Coding::Aac),
         Codec::Opus => Some(Coding::Opus),
         _ => None,
     }

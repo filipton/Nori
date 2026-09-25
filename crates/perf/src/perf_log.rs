@@ -322,6 +322,9 @@ pub fn perf_log_clear() {
     if crash_table(&c).is_ok() {
         let _ = c.execute("DELETE FROM perf_crashes", []);
     }
+    if selftest_table(&c).is_ok() {
+        let _ = c.execute("DELETE FROM perf_selftest", []);
+    }
     timeline().forget();
 }
 
@@ -806,13 +809,14 @@ fn page(kept: Vec<PerfStretch>, live: Option<PerfStretch>) -> PerfPage {
 /// had when it was shared, which goes at the end with any crash kept.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_report(live: Option<PerfStretch>, device: PerfDevice, calls: String, covers: String, logs: PerfLogs) -> String {
-    let mut out = report(all(perf_log_rows(0), live), &device, &calls, &covers);
+    let test = perf_selftest_kept();
+    let mut out = report(all(perf_log_rows(0), live), &device, &calls, &covers, test.as_deref());
     out.push('\n');
     out.push_str(&log_section(&logs, &perf_crashes_kept()));
     out
 }
 
-fn report(all: Vec<PerfStretch>, d: &PerfDevice, calls: &str, covers: &str) -> String {
+fn report(all: Vec<PerfStretch>, d: &PerfDevice, calls: &str, covers: &str, selftest: Option<&str>) -> String {
     let mut out = String::from("Nori perf report\n");
     out.push_str(&format!("Device: {} {} ({}), Android {} (API {})\n", d.manufacturer, d.model, d.device, d.release, d.sdk));
     out.push_str(&format!("Build: {} ({}, {})\n", d.version, d.sha, d.build_type));
@@ -820,7 +824,14 @@ fn report(all: Vec<PerfStretch>, d: &PerfDevice, calls: &str, covers: &str) -> S
         out.push_str(&format!("Recorded: {} to {}, {} stretches\n", when(first.start_wall), when(last.start_wall + last.ms), all.len()));
     }
     let counter = if all.iter().any(|s| s.uah.is_some()) { "yes (mAh)" } else { "no (battery % only)" };
-    out.push_str(&format!("Battery counter: {counter}\n\nBy state\n"));
+    out.push_str(&format!("Battery counter: {counter}\n\n"));
+    out.push_str(&invariant_section(&all));
+    if let Some(test) = selftest {
+        out.push('\n');
+        out.push_str(test.trim_end());
+        out.push('\n');
+    }
+    out.push_str("\nBy state\n");
     let by_state = totals(&all);
     out.push_str(&columns(&by_state));
     let offloaded: Vec<String> = by_state.iter().filter_map(|t| t.offloaded().map(|o| format!("{}: {o}", state_name(&t.state)))).collect();
@@ -879,6 +890,46 @@ fn columns(totals: &[Totals]) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The report's first section: every invariant break the stretches recorded, newest first, or that none did.
+fn invariant_section(all: &[PerfStretch]) -> String {
+    let breaks: Vec<&PerfEvent> = all.iter().flat_map(|s| s.ev.iter()).filter(|e| e.kind == "invariant").collect();
+    if breaks.is_empty() {
+        return "Invariant breaks: none recorded\n".into();
+    }
+    let mut out = format!("Invariant breaks: {} (newest first)\n", breaks.len());
+    for e in breaks.iter().rev().take(40) {
+        out.push_str(&format!("  {} {} {}\n", when(e.wall_ms).split(' ').next().unwrap_or_default(), clock(e.wall_ms), e.detail));
+    }
+    if breaks.len() > 40 {
+        out.push_str(&format!("  ({} older ones in the stretches below)\n", breaks.len() - 40));
+    }
+    out
+}
+
+fn selftest_table(c: &Connection) -> rusqlite::Result<()> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS perf_selftest(id INTEGER PRIMARY KEY CHECK (id = 1), at_ms INTEGER NOT NULL, text TEXT NOT NULL)")
+}
+
+/// The self test's result, kept in place of the last one: the report carries it near the top.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn perf_selftest_keep(at_ms: i64, text: String) {
+    let Some(db) = settings_store::app_db() else { return };
+    let c = db.lock();
+    let kept = selftest_table(&c).and_then(|_| c.execute("INSERT OR REPLACE INTO perf_selftest(id, at_ms, text) VALUES(1, ?1, ?2)", params![at_ms, text]));
+    if let Err(e) = kept {
+        nori_model::alog::info(&format!("perf log: could not keep the self test: {e}"));
+    }
+}
+
+/// The last self test's result, as kept; none before the first.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn perf_selftest_kept() -> Option<String> {
+    let db = settings_store::app_db()?;
+    let c = db.lock();
+    selftest_table(&c).ok()?;
+    c.query_row("SELECT text FROM perf_selftest WHERE id = 1", [], |r| r.get(0)).ok()
 }
 
 // ---- what happened in them ----
@@ -1163,6 +1214,34 @@ pub fn perf_note(wall_ms: i64, note: PerfNote) {
 pub fn perf_note_settings(wall_ms: i64) {
     let Some(p) = settings_store::current() else { return };
     timeline().settings(wall_ms, nori_settings::settings::save(&p));
+}
+
+/// An invariant that did not hold (invariants.rs), on the timeline of the stretch under way.
+pub(crate) fn note_invariant(wall_ms: i64, line: &str) {
+    timeline().push(wall_ms, "invariant", line.chars().take(600).collect());
+}
+
+/// "21:05:12", for the invariants' own list.
+pub(crate) fn clock_words(wall_ms: i64) -> String {
+    clock(wall_ms)
+}
+
+/// Why the settings keep offload off, for the invariants' look at the engine.
+pub(crate) fn offload_blocked() -> Option<&'static str> {
+    offload_reason()
+}
+
+/// The timeline since `since_ms` (wall clock), one line per event as the report prints them: the
+/// stretches that ended since and the one under way. For the self test, which quotes what happened
+/// while a check ran.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn perf_events_since(since_ms: i64) -> Vec<String> {
+    let mut events: Vec<PerfEvent> = perf_log_rows(since_ms).into_iter().flat_map(|s| s.ev).collect();
+    events.extend(timeline().events.iter().cloned());
+    events.retain(|e| e.wall_ms >= since_ms);
+    events.sort_by_key(|e| e.wall_ms);
+    events.dedup();
+    events.iter().map(|e| format!("{} {}: {}", clock(e.wall_ms), e.kind, e.detail)).collect()
 }
 
 /// Why the settings keep the audio chip from decoding (`nori_player::policy::offload_blocked`, over the
@@ -1713,22 +1792,52 @@ mod tests {
         charging.out = Some(output());
         charging.rx = Some(3 * 1024 * 1024 + 300 * 1024);
         charging.tx = Some(20 * 1024);
-        let r = report(vec![playing, charging], &d, "", "12 ns");
+        let r = report(vec![playing, charging], &d, "", "12 ns", None);
         let lines: Vec<&str> = r.lines().collect();
         assert_eq!(lines[0], "Nori perf report");
         assert_eq!(lines[1], "Device: Google Pixel 8 (shiba), Android 16 (API 36)");
         assert_eq!(lines[2], "Build: 0.3.4 (abc1234, perf)");
         assert!(lines[3].starts_with("Recorded: ") && lines[3].ends_with(", 2 stretches"));
         assert_eq!(lines[4], "Battery counter: yes (mAh)");
-        assert_eq!(lines[6], "By state");
-        assert_eq!(lines[7], "state                      time  CPU %  wakeups/s  KB/min  GCs  PSS MB   mAh  mAh/h   %/h  frames  janky %");
-        assert_eq!(lines[8], "Screen off, playing  1 h 00 min   1.00       10.0      60    2     150  40.0   40.0  3.00       -        -");
-        assert_eq!(lines[9], "Charging             1 min 30 s   1.00       10.0      60    2     150     -      -     -       -        -");
-        assert_eq!(lines[11], "Stretches, newest first");
-        assert!(lines[12].starts_with("Charging: ") && lines[12].contains(", network 3.3 MB in, 20 KB out"), "{}", lines[12]);
-        assert!(lines[13].starts_with("    output: rust, "), "the output under its stretch: {}", lines[13]);
-        assert!(lines[14].starts_with("Screen off, playing: "));
-        assert_eq!(&lines[15..], ["", "Cover benchmark: 12 ns"], "a benchmark not run is left out");
+        assert_eq!(lines[6], "Invariant breaks: none recorded", "the breaks come first, even when there are none");
+        assert_eq!(lines[8], "By state");
+        assert_eq!(lines[9], "state                      time  CPU %  wakeups/s  KB/min  GCs  PSS MB   mAh  mAh/h   %/h  frames  janky %");
+        assert_eq!(lines[10], "Screen off, playing  1 h 00 min   1.00       10.0      60    2     150  40.0   40.0  3.00       -        -");
+        assert_eq!(lines[11], "Charging             1 min 30 s   1.00       10.0      60    2     150     -      -     -       -        -");
+        assert_eq!(lines[13], "Stretches, newest first");
+        assert!(lines[14].starts_with("Charging: ") && lines[14].contains(", network 3.3 MB in, 20 KB out"), "{}", lines[14]);
+        assert!(lines[15].starts_with("    output: rust, "), "the output under its stretch: {}", lines[15]);
+        assert!(lines[16].starts_with("Screen off, playing: "));
+        assert_eq!(&lines[17..], ["", "Cover benchmark: 12 ns"], "a benchmark not run is left out");
+    }
+
+    #[test]
+    fn the_report_opens_with_the_invariant_breaks_and_the_self_test() {
+        let d = PerfDevice {
+            manufacturer: "Samsung".into(),
+            model: "SM-S901B".into(),
+            device: "r0s".into(),
+            release: "16".into(),
+            sdk: 36,
+            version: "0.3.4".into(),
+            sha: "abc1234".into(),
+            build_type: "perf".into(),
+        };
+        let mut older = stretch("off-playing", 600_000);
+        older.ev = vec![PerfEvent { wall_ms: at(21, 0, 0), kind: "invariant".into(), detail: "skip: 3 skip presses moved 4 songs, from queue place 0 to 4".into() }];
+        let mut newer = stretch("on-playing-app", 600_000);
+        newer.ev = vec![
+            PerfEvent { wall_ms: at(22, 0, 0), kind: "song".into(), detail: "a".into() },
+            PerfEvent { wall_ms: at(22, 0, 5), kind: "invariant".into(), detail: "offload-starved: engine: playing, but ...".into() },
+        ];
+        let r = report(vec![older, newer], &d, "", "", Some("Self test: 20 passed, 1 failed\nFAIL  Rust: offload\n"));
+        let lines: Vec<&str> = r.lines().collect();
+        assert_eq!(lines[6], "Invariant breaks: 2 (newest first)");
+        assert!(lines[7].ends_with("22:00:05 offload-starved: engine: playing, but ..."), "{}", lines[7]);
+        assert!(lines[8].ends_with("21:00:00 skip: 3 skip presses moved 4 songs, from queue place 0 to 4"), "{}", lines[8]);
+        assert_eq!(lines[10], "Self test: 20 passed, 1 failed");
+        assert_eq!(lines[11], "FAIL  Rust: offload");
+        assert_eq!(lines[13], "By state");
     }
 
     #[test]
@@ -1910,7 +2019,7 @@ mod tests {
             sha: "abc1234".into(),
             build_type: "perf".into(),
         };
-        let r = report(vec![s], &d, "", "");
+        let r = report(vec![s], &d, "", "", None);
         let lines: Vec<&str> = r.lines().collect();
         let at = lines.iter().position(|l| *l == "Really offloaded (the output as it was opened, not the settings)").unwrap();
         assert_eq!(lines[at + 1], "Screen off, playing: offloaded 45 min 00 s of 1 h 00 min (75 %)");

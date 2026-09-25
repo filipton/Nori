@@ -193,13 +193,20 @@ impl From<TransportError> for NetError {
 }
 
 /// One GET through the platform. octo-fiesta reports auth failures as 401 with a normal Subsonic error
-/// body, so the body is read whatever the status; only an error status with nothing in it is a failure.
+/// body, so the body is read whatever the status; an error status with nothing in it, or with a page
+/// that is no Subsonic answer at all (a proxy's "522: the origin is down"), is a failure, said by its status.
 pub async fn get(transport: &dyn Transport, url: String, timeout_ms: u32) -> Result<Vec<u8>, NetError> {
     let r = transport.get(url, timeout_ms).await?;
-    if r.body.is_empty() && !(200..300).contains(&r.status) {
+    if !(200..300).contains(&r.status) && (r.body.is_empty() || !subsonic_body(&r.body)) {
         return Err(NetError::io(format!("HTTP {}", r.status)));
     }
     Ok(r.body)
+}
+
+/// Whether a body is a Subsonic answer (JSON, or the XML one), by its first bytes.
+fn subsonic_body(body: &[u8]) -> bool {
+    let start = body.iter().position(|b| !b.is_ascii_whitespace()).map_or(&[][..], |i| &body[i..]);
+    start.starts_with(b"{") || (start.starts_with(b"<") && body.windows(17).take(512).any(|w| w == b"subsonic-response"))
 }
 
 // ---- what a failure means to a person -------------------------------------------------------------------
@@ -435,6 +442,14 @@ mod tests {
         assert!(!failure_networkish(false, vec![f(FailureKind::Metered, Some("This server is set to Wi-Fi only"))]));
         assert!(!failure_networkish(false, vec![f(FailureKind::Io, Some("bad file"))]));
         assert!(!failure_networkish(false, vec![f(FailureKind::Tls, None), f(FailureKind::Cleartext, None)]));
+    }
+
+    #[test]
+    fn an_error_status_with_a_page_that_is_no_subsonic_answer_is_its_status() {
+        assert!(subsonic_body(br#"  {"subsonic-response":{"status":"failed"}}"#));
+        assert!(subsonic_body(br#"<?xml version="1.0"?><subsonic-response status="failed"/>"#));
+        assert!(!subsonic_body(b"<html><body>error code: 522</body></html>"));
+        assert!(!subsonic_body(b""));
     }
 
     #[test]

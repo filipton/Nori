@@ -383,26 +383,37 @@ echo "-- automix over a real album"
 "$app" set crossfadeKeepAlbums false >/dev/null
 # From nothing measured, so the measuring ahead is this run's work and not an earlier one's.
 "$app" set clearAnalyses true >/dev/null
+# Read from a running capture, not `adb logcat -d`: every app.sh call clears the log to read its own
+# answer back, and the songs coming up are measured within a few seconds of play - long gone by the time
+# the seek below has been sent. Only the song after the boundary was left to see, measured some seconds
+# after it (the precache delay), which fell outside the wait on either engine unless the album was slow to
+# arrive: the check passed or failed on timing, not on what the app did.
+automix_log=$(mktemp)
 adb logcat -c
+adb logcat -v time -s nori:I > "$automix_log" 2>/dev/null &
+automix_watch=$!
+sleep 0.5
 "$app" play "album:6Lt5zppPoP7FGBYqInxzZB" >/dev/null; sleep 10
 # Jump to just before the end so the next track starts decoding and a transition has to be planned.
 dur=$(field durationMs); "$app" do "seek $(( ${dur:-240000} - 14000 ))" >/dev/null; sleep 18
-planned=$(adb logcat -d -s nori:I | grep -cE "transition .* -> ")
-analysed=$(adb logcat -d -s nori:I | grep -c "analysed")
-ahead=$(adb logcat -d -s nori:I | grep -c "analysed .* ahead")
+kill "$automix_watch" 2>/dev/null; wait "$automix_watch" 2>/dev/null
+planned=$(grep -cE "transition .* -> " "$automix_log")
+analysed=$(grep -c "analysed" "$automix_log")
+ahead=$(grep -c "analysed .* ahead" "$automix_log")
 check "a transition is planned at a track boundary ($planned)" test "${planned:-0}" -ge 1
 # The tracks are measured before they are played, so the first meeting of two songs is a real mix
 # rather than a fade; the measurement only runs on audio already on the device, so this is a report
 # rather than a check - an empty cache legitimately has nothing to measure yet.
 # Only a song on the device can be measured: when every unmeasured one is still to be fetched (an earlier
 # section cleared the stream cache), there is nothing to measure yet, and that is said rather than failed.
-away=$(adb logcat -d -s nori:I | grep -oE "measuring ahead: [0-9]+ of [0-9]+ unmeasured, [0-9]+ not on" | tail -1 | awk '{print $3, $7}')
+away=$(grep -oE "measuring ahead: [0-9]+ of [0-9]+ unmeasured, [0-9]+ not on" "$automix_log" | tail -1 | awk '{print $3, $7}')
 if [ "${ahead:-0}" -eq 0 ] && [ -n "$away" ] && [ "${away% *}" = "${away#* }" ] && [ "${away% *}" -gt 0 ]; then
   echo "  NOTE  the tracks coming up are not on the device yet (${away% *} unmeasured, all still to fetch)"
 else
   check "the tracks coming up are measured before they are played ($ahead)" test "${ahead:-0}" -ge 1
 fi
 echo "     (analysis events seen: $analysed)"
+rm -f "$automix_log"
 "$app" set crossfadeKeepAlbums true >/dev/null
 
 echo "-- what plays when the queue runs out"

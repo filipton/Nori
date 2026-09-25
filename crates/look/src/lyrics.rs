@@ -46,6 +46,19 @@ pub const GLOW_FADE_MS: i64 = 500;
 /// being sung is inside this, the platform draws every frame rather than every second one.
 pub const MOTION_TAIL_MS: i64 = if SETTLE_MS > GLOW_FADE_MS { SETTLE_MS } else { GLOW_FADE_MS };
 
+/// How long a word is sung when its source says only when it starts, by its length in UTF-16 units:
+/// the last word of an LRC line, whose end the file leaves to the next line - and after a long pause
+/// that is many seconds away, over which the word used to creep and stay part filled. Only a word
+/// that runs on to the next line and longer than any word is guessed to be sung shows it: a held note
+/// that stops where the next line starts is left as it was given.
+pub fn word_ms_estimate(units: u32) -> i64 {
+    (i64::from(units) * WORD_MS_PER_UNIT + WORD_MS_BASE).clamp(WORD_MS_MIN, WORD_MS_MAX)
+}
+const WORD_MS_PER_UNIT: i64 = 110;
+const WORD_MS_BASE: i64 = 250;
+const WORD_MS_MIN: i64 = 400;
+const WORD_MS_MAX: i64 = 2_000;
+
 /// One press of "Sooner" or "Later", for the few songs whose timings are wrong.
 pub const NUDGE_STEP_MS: i64 = 250;
 
@@ -173,6 +186,20 @@ impl LyricTiming {
             backing_spans.push((from, words.len() as u32));
         }
         let n = starts.len();
+        // A line's last word that runs on to the next line's start is a guess made from a file that
+        // said only when the word starts (lyrics read before the parsers estimated it themselves, and
+        // kept): it is sung for as long as a word that long is, not through the whole pause after it.
+        for i in 0..n.saturating_sub(1) {
+            let next = starts[i + 1];
+            for &(from, to) in [&spans[i], &backing_spans[i]] {
+                if let Some(w) = (from < to).then(|| &mut words[to as usize - 1]) {
+                    let longest = word_ms_estimate(w.end.saturating_sub(w.start));
+                    if next > starts[i] && w.end_ms >= next && w.end_ms - w.start_ms > WORD_MS_MAX {
+                        w.end_ms = w.start_ms + longest;
+                    }
+                }
+            }
+        }
         let glide: Vec<i32> = (0..n)
             .map(|i| {
                 let gap = if i + 1 < n { starts[i + 1].wrapping_sub(starts[i]) } else { i64::MAX };
@@ -245,19 +272,24 @@ impl LyricTiming {
         self.sung_in(span, len, start, ms)
     }
 
+    /// The last word runs to the end of the text (a closing bracket, a stop the source left outside
+    /// it), so a line whose words are all sung is filled all the way, and gets there within the word
+    /// rather than with a step after it.
     fn sung_in(&self, (from, to): (u32, u32), len: u32, start: i64, ms: i64) -> f32 {
         if from == to {
             return if ms >= start { len as f32 } else { 0.0 };
         }
         let mut at = 0f32;
-        for w in &self.words[from as usize..to as usize] {
+        let last = to as usize - 1;
+        for (i, w) in self.words.iter().enumerate().take(to as usize).skip(from as usize) {
+            let end = if i == last { w.end.max(len) } else { w.end };
             if ms >= w.end_ms {
-                at = w.end as f32;
+                at = end as f32;
                 continue;
             }
             if ms > w.start_ms {
                 let through = (ms - w.start_ms) as f32 / (w.end_ms - w.start_ms).max(1) as f32;
-                at = w.start as f32 + (w.end as i32 - w.start as i32) as f32 * through;
+                at = w.start as f32 + (end as i32 - w.start as i32) as f32 * through;
             }
             break;
         }
@@ -524,6 +556,37 @@ mod tests {
         // A word with no length is done the moment it starts; a line without words is all or nothing.
         let t = LyricTiming::new(true, true, vec![Line { start_ms: 0, len: 4, words: vec![w(500, 500, 0, 4)], ..Default::default() }, Line { start_ms: 800, len: 7, words: vec![], ..Default::default() }]);
         assert_eq!((t.sung_offset(0, 499), t.sung_offset(0, 500), t.sung_offset(1, 799), t.sung_offset(1, 800)), (0.0, 4.0, 0.0, 7.0));
+    }
+
+    #[test]
+    fn a_last_word_before_a_long_pause_is_filled_by_its_own_end_not_the_next_lines_start() {
+        // "Hold on tonight" at 10 s, the last word's end left to the next line, 30 s later.
+        let words = vec![w(10_000, 10_400, 0, 4), w(10_400, 10_800, 5, 7), w(10_800, 40_000, 8, 15)];
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 10_000, len: 15, words, ..Default::default() }, Line { start_ms: 40_000, len: 5, ..Default::default() }]);
+        let full_by = 10_800 + word_ms_estimate(7);
+        assert!(full_by < 12_000, "a seven-letter word is sung in about a second");
+        assert_eq!(t.sung_offset(0, full_by), 15.0, "full by its own end");
+        assert_eq!(t.sung_offset(0, 25_000), 15.0, "and stays full through the pause");
+        // On its way there it moves a little every frame, never a step (the space before it is crossed
+        // as the word starts, as between any two words).
+        let mut was = t.sung_offset(0, 10_801);
+        for ms in (10_816..=full_by).step_by(16) {
+            let now = t.sung_offset(0, ms);
+            assert!(now >= was && now - was < 0.25, "{was} -> {now} at {ms}");
+            was = now;
+        }
+        // A note held up to the next line, as long as a note is held, is left alone.
+        let held = vec![w(1_000, 1_300, 0, 4), w(1_300, 3_000, 5, 9)];
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 1_000, len: 9, words: held, ..Default::default() }, Line { start_ms: 3_000, len: 3, ..Default::default() }]);
+        assert_eq!(t.sung_offset(0, 2_150), 7.0);
+    }
+
+    #[test]
+    fn a_line_whose_words_are_sung_is_filled_to_its_end() {
+        // The source's last word stops before the closing bracket.
+        let t = LyricTiming::new(true, true, vec![Line { start_ms: 0, len: 10, words: vec![w(0, 500, 1, 4), w(500, 1_000, 5, 9)], ..Default::default() }]);
+        assert_eq!(t.sung_offset(0, 1_000), 10.0);
+        assert_eq!(t.sung_offset(0, 750), 7.5, "the bracket is filled within the last word");
     }
 
     #[test]

@@ -13,7 +13,8 @@ use crate::{native, region, string, with_str, Class};
 pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/RustDecoderJni",
     methods: &[
-        native!(c"takes", c"(Ljava/lang/String;Ljava/lang/String;IZ)I", takes),
+        native!(c"takes", c"(Ljava/lang/String;Ljava/lang/String;IIZ)I", takes),
+        native!(c"implicitSbr", c"(Ljava/lang/String;Ljava/lang/String;I)Z", implicit_sbr),
         native!(c"takesExtracted", c"(Ljava/lang/String;Ljava/lang/String;I)I", takes_extracted),
         native!(c"create", c"(III[BZ)J", create),
         native!(c"destroy", c"(J)V", destroy),
@@ -41,9 +42,16 @@ extern "system" fn takes_extracted(env: JNIEnv, _: JClass, mime: JString, codecs
 }
 
 /// The codec number for `mime`, or 0 when the platform's decoder should take the stream.
-extern "system" fn takes(env: JNIEnv, _: JClass, mime: JString, codecs: JString, channels: jint, chip_takes_it: jboolean) -> jint {
+extern "system" fn takes(env: JNIEnv, _: JClass, mime: JString, codecs: JString, channels: jint, rate: jint, chip_takes_it: jboolean) -> jint {
     let c = string(&env, &codecs);
-    with_str(&env, &mime, |m| nori_core::decoder::takes(m, c.as_deref(), channels, chip_takes_it != 0).map_or(0, Codec::id)).unwrap_or(0)
+    with_str(&env, &mime, |m| nori_core::decoder::takes(m, c.as_deref(), channels, rate, chip_takes_it != 0).map_or(0, Codec::id)).unwrap_or(0)
+}
+
+/// [`nori_core::decoder::implicit_sbr`]: an AAC stream that says AAC-LC at a core's rate, HE-AAC in all
+/// likelihood, which must not go to the audio chip as what it says it is.
+extern "system" fn implicit_sbr(env: JNIEnv, _: JClass, mime: JString, codecs: JString, rate: jint) -> jboolean {
+    let c = string(&env, &codecs);
+    with_str(&env, &mime, |m| nori_core::decoder::implicit_sbr(m, c.as_deref(), rate)).unwrap_or(false) as jboolean
 }
 
 /// A decoder for one stream; 0 when it cannot be made (the platform's decoder then takes over).

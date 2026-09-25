@@ -40,8 +40,9 @@ internal object RustPlayerJni {
     /** [float] is the high quality output setting; [memoryMb] the app's memory class. 0 when it could not start. */
     @JvmStatic external fun create(sdk: Int, float: Boolean, memoryMb: Int): Long
     @JvmStatic external fun destroy(h: Long)
-    @JvmStatic @CriticalNative external fun playAt(h: Long, index: Int, ms: Long)
-    @JvmStatic @CriticalNative external fun goTo(h: Long, index: Int, ms: Long)
+    /** Both answer the jump's number, which the song events it leads to carry ([eventJumps]). */
+    @JvmStatic @CriticalNative external fun playAt(h: Long, index: Int, ms: Long): Long
+    @JvmStatic @CriticalNative external fun goTo(h: Long, index: Int, ms: Long): Long
     @JvmStatic @CriticalNative external fun pauseAtEnd(h: Long, on: Boolean)
     @JvmStatic @CriticalNative external fun play(h: Long)
     @JvmStatic @CriticalNative external fun pause(h: Long)
@@ -67,6 +68,8 @@ internal object RustPlayerJni {
      * made of them), so a fast door.
      */
     @JvmStatic @FastNative external fun eventText(h: Long): String?
+    /** The jumps the engine had made when it said the song or loop [event] last gave (see `EnginePlayer.onSong`). */
+    @JvmStatic @CriticalNative external fun eventJumps(h: Long): Long
     /** The track's route changed: [type] is `AudioDeviceInfo.TYPE_*`. */
     @JvmStatic external fun device(h: Long, type: Int, name: String?)
     /** What the engine cannot see of the output: something USB attached, a DAC playing bit-perfect. */
@@ -186,6 +189,13 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     private var current = 0
     /** A song the engine was sent to, whose song event is that jump, not a song ending. */
     private var expecting = -1
+    /**
+     * The number of the last jump the engine was sent. A song event said before the engine made it is
+     * from the place already left: pressed quickly, next went 1, 2 and the engine's word that 1 was heard
+     * (said as it got there, taken here after the second press) put the page back on 1, and then on 2
+     * again as a song ending by itself - two changes more than were asked for.
+     */
+    private var sent = 0L
     private var prepared = false
     private var playWhenReady = false
     private var whyPlayWhenReady = Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
@@ -323,7 +333,12 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     private fun goTo(index: Int, ms: Long) {
         if (index != current) expecting = index
         current = index
-        RustPlayerJni.goTo(h, index, ms)
+        jumped(RustPlayerJni.goTo(h, index, ms))
+    }
+
+    /** The engine was sent jump [n] (0: nothing was sent). */
+    private fun jumped(n: Long) {
+        if (n > 0) sent = n
     }
 
     override fun handleSetPlayWhenReady(playWhenReady: Boolean): ListenableFuture<*> {
@@ -396,7 +411,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         // Playing, the new list plays at once, as ExoPlayer's does; paused, the engine holds its start.
         expecting = at
         current = at
-        RustPlayerJni.goTo(h, at, if (startPositionMs == C.TIME_UNSET) 0 else startPositionMs)
+        jumped(RustPlayerJni.goTo(h, at, if (startPositionMs == C.TIME_UNSET) 0 else startPositionMs))
         if (audible()) start()
         return done()
     }
@@ -437,7 +452,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         } else if (gone) {
             // The song playing went: the one after it plays (or waits, paused), as media3 moves on.
             expecting = current
-            RustPlayerJni.goTo(h, current, 0)
+            jumped(RustPlayerJni.goTo(h, current, 0))
         }
         return done()
     }
@@ -486,11 +501,11 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             val arg = e.toInt()
             when ((e ushr 32).toInt()) {
                 EVENT_STATE -> onState(arg)
-                EVENT_SONG -> onSong(arg, RustPlayerJni.eventText(h))
+                EVENT_SONG -> onSong(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
                 EVENT_ERROR -> "rust player: ${RustPlayerJni.eventText(h)}".let { android.util.Log.w("nori", it); PlaybackService.observer?.error(it) }
                 EVENT_STOPPED -> stoppedByItself()
                 EVENT_BUFFERING -> buffering = arg != 0
-                EVENT_LOOPED -> onLoop(arg, RustPlayerJni.eventText(h))
+                EVENT_LOOPED -> onLoop(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
                 EVENT_TITLE -> announced = RustPlayerJni.eventText(h)
                 // Handed on after the batch: the bridge edits and seeks this player itself.
                 EVENT_BRIDGE -> main.post { if (onBridge?.invoke() != true) { stoppedByItself(); follow(); invalidateState() } }
@@ -527,7 +542,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         whyPlayWhenReady = Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM
     }
 
-    private fun onSong(index: Int, id: String?) {
+    private fun onSong(index: Int, id: String?, jumps: Long) {
+        // Said before the engine made the last jump sent: the page is already where that jump goes.
+        if (jumps < sent) return
         // The engine's index is into the queue it last read; the id says which song, should an edit have
         // moved it since.
         val i = if (items.getOrNull(index)?.mediaId == id) index else items.indices.filter { items[it].mediaId == id }.minByOrNull { kotlin.math.abs(it - index) } ?: return
@@ -541,8 +558,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     }
 
     /** The song playing started again by itself (repeat one): a transition media3 reports as a repeat. */
-    private fun onLoop(index: Int, id: String?) {
-        if (items.getOrNull(index)?.mediaId != id) return
+    private fun onLoop(index: Int, id: String?, jumps: Long) {
+        if (jumps < sent || items.getOrNull(index)?.mediaId != id) return
         current = index
         loops++
         moved = true
@@ -658,6 +675,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         track.addOnRoutingChangedListener(AudioRouting.OnRoutingChangedListener { r ->
             r.routedDevice?.let { d -> RustPlayerJni.device(h, d.type, d.productName?.toString()) }
         }, main)
+        // The perf build's self test plays quietly; the engine's own volumes are scaled from its next one on.
+        if (Quiet.level < 1f) track.setVolume(Quiet.level)
         PlaybackService.track = OpenedTrack(track, "rust", frames * channels * width, mode)
         val given = if (track.performanceMode == AudioTrack.PERFORMANCE_MODE_POWER_SAVING) "power saving" else "normal"
         android.util.Log.i("nori", "rust AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $frames frames (${track.bufferSizeInFrames * 1000L / rate} ms), $given, bitPerfect=$bitPerfect")
@@ -704,6 +723,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
                 r.routedDevice?.let { d -> RustPlayerJni.device(h, d.type, d.productName?.toString()) }
             }, main)
             nori.dac.onTrack(rate, encoding, track.isOffloadedPlayback)
+            if (Quiet.level < 1f) track.setVolume(Quiet.level)
             PlaybackService.track = OpenedTrack(track, "rust", bytes, AudioTrack.PERFORMANCE_MODE_NONE)
             android.util.Log.i("nori", "rust offloaded AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $bytes bytes, offloaded=${track.isOffloadedPlayback}")
             track
@@ -812,9 +832,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
  */
 @androidx.annotation.RequiresApi(29)
 private class OffloadEvents(private val tell: (Int) -> Unit) : AudioTrack.StreamEventCallback() {
-    override fun onDataRequest(track: AudioTrack, sizeInFrames: Int) = tell(0)
-    override fun onPresentationEnded(track: AudioTrack) = tell(1)
-    override fun onTearDown(track: AudioTrack) = tell(2)
+    override fun onDataRequest(track: AudioTrack, sizeInFrames: Int) { OffloadCalls.dataRequests++; tell(0) }
+    override fun onPresentationEnded(track: AudioTrack) { OffloadCalls.presented++; tell(1) }
+    override fun onTearDown(track: AudioTrack) { OffloadCalls.tornDown++; tell(2) }
 }
 
 /**

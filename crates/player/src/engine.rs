@@ -160,13 +160,16 @@ enum Phase {
 }
 
 /// A queued piece of output. `measure`: the first chunk of a mix, whose timestamp jump the output
-/// below applies the moment it is offered; see [`TransitionEngine::drain`].
+/// below applies the moment it is offered; see [`TransitionEngine::drain`]. `stream_us`: the stream
+/// offset of the one song it is made of, or `TIME_UNSET` for a mix of two, so a change of that song's
+/// volume reaches what the output has not taken of it yet ([`TransitionEngine::rescale`]).
 struct Chunk {
     data: Vec<u8>,
     pos: usize,
     pts_us: i64,
     resync: bool,
     measure: bool,
+    stream_us: i64,
 }
 
 /// Staged decode-ahead formats: which song, its format, and the platform's token for it.
@@ -189,6 +192,14 @@ pub struct TransitionEngine<C: Clone> {
     playing_id: Option<String>,
     /// Flushed, and nothing has flowed since: the next configure is for the stream about to play.
     fresh: bool,
+    /// A discontinuity that began no mix, and nothing has flowed since: a new stream announced now is
+    /// the one about to flow, not decode-ahead. media3 says it in this order - the discontinuity once
+    /// the last buffer of the stream before has gone (`onProcessedStreamChange`), the next stream's
+    /// format only with its first buffer - where this engine's own pipeline announces first.
+    awaiting_stream: bool,
+    /// A mix began (the plan and how late) before its incoming stream was announced, in media3's order:
+    /// the domain the incoming side is stretched and skipped in is set once its format is known.
+    awaiting_incoming: Option<(Plan, i64)>,
     /// The decoder's buffer went straight down and the output took only part of it. The platform offers
     /// the rest again, and it must go down the same way: an output like media3's insists on being given
     /// the same buffer until it has all of it, and anything else throws. So a plan that arrived in
@@ -201,6 +212,10 @@ pub struct TransitionEngine<C: Clone> {
     plan_for: Option<String>,
     replan_wanted: bool,
     last_null_at: i64,
+    /// The last song whose ending went out, and the plan it went out with (`None`: gapless): what the
+    /// output already holds past that song's end, so a plan asked again late can tell whether it would
+    /// sound any different.
+    made: Option<(String, Option<Plan>)>,
     tail: Vec<u8>,
     /// The capacity of the hold for this transition, bytes.
     tail_limit: usize,
@@ -270,10 +285,16 @@ pub struct TransitionEngine<C: Clone> {
     /// and the output below follows it.
     pub lock_rate: bool,
 
-    /// The volume the buffers arriving now are heard at (their song's ReplayGain), and the one the next
-    /// buffer taken whole starts at; see [`TransitionEngine::set_gain`].
+    /// The volume the buffers arriving now are heard at (their song's ReplayGain); see
+    /// [`TransitionEngine::set_gain`].
     gain: f32,
-    next_gain: f32,
+    /// The host sets volumes, and may change one while its song plays: every buffer then goes down as a
+    /// copy of the engine's own, never as the platform's memory, so what the output took only part of
+    /// can still be brought to the new level ([`TransitionEngine::rescale`]). A host that never sets
+    /// one (media3's own path, where the volume is not the engine's) keeps the zero-copy pass.
+    levels: bool,
+    /// A volume told while `input_owed`, taken up with the next buffer.
+    pending_gain: Option<f32>,
 
     queue: VecDeque<Chunk>,
     pool: Vec<Vec<u8>>,
@@ -295,6 +316,8 @@ impl<C: Clone> TransitionEngine<C> {
             current_id: None,
             playing_id: None,
             fresh: false,
+            awaiting_stream: false,
+            awaiting_incoming: None,
             input_owed: false,
             offset_us: 0,
             phase: Phase::Pass,
@@ -302,6 +325,7 @@ impl<C: Clone> TransitionEngine<C> {
             plan_for: None,
             replan_wanted: false,
             last_null_at: 0,
+            made: None,
             tail: Vec::new(),
             tail_limit: 0,
             tail_len: 0,
@@ -343,7 +367,8 @@ impl<C: Clone> TransitionEngine<C> {
             mix_source_id: None,
             lock_rate: true,
             gain: 1.0,
-            next_gain: 1.0,
+            levels: false,
+            pending_gain: None,
             queue: VecDeque::new(),
             pool: Vec::new(),
             heard: Heard { until_us: i64::MAX, audible_us: i64::MAX, next_rate: 1.0, ..Default::default() },
@@ -359,6 +384,20 @@ impl<C: Clone> TransitionEngine<C> {
     /// for the track playing is asked for again at the next buffer.
     pub fn replan(&mut self) {
         self.replan_wanted = true;
+    }
+
+    /// How the ending of `id` was made, when it has been: the plan whose hold has begun, or the one its
+    /// last buffer went out with (`None` inside: gapless). `None` while its ending is still to come.
+    pub fn made(&self, id: &str) -> Option<Option<&Plan>> {
+        if matches!(self.phase, Phase::Hold) && self.plan_for.as_deref() == Some(id) {
+            return Some(self.plan.as_ref());
+        }
+        self.made.as_ref().filter(|(m, _)| m == id).map(|(_, p)| p.as_ref())
+    }
+
+    /// The ending of the song playing is held, waiting for the next song's first buffers.
+    pub fn holding(&self) -> bool {
+        matches!(self.phase, Phase::Hold)
     }
 
     // ---- configuration ----
@@ -377,9 +416,15 @@ impl<C: Clone> TransitionEngine<C> {
         // was staged to be armed "when its buffers flow", but a flush had just emptied the stage and no
         // discontinuity was coming: a 48 kHz song skipped to under a 44.1 kHz latch then played
         // unconverted, 8.8 % slow and flat, with a timestamp resync - a stutter - every two seconds.
-        let for_current = id.is_none() || id == self.current_id || self.fresh;
-        if self.fresh {
+        // Likewise just after a boundary nothing has flowed across yet (media3's order): a new stream is the
+        // one whose buffers come next. Left waiting for a discontinuity that had already been, a 48 kHz
+        // song or station after a 44.1 kHz one played unconverted all the way through.
+        let new_stream = id.is_some() && id != self.current_id;
+        let awaited = self.awaiting_stream && new_stream;
+        let for_current = id.is_none() || id == self.current_id || self.fresh || awaited;
+        if self.fresh || awaited {
             self.fresh = false;
+            self.awaiting_stream = false;
             if id.is_some() {
                 self.playing_id = id.clone();
             }
@@ -416,6 +461,22 @@ impl<C: Clone> TransitionEngine<C> {
             host.log(&format!("sink pins {} Hz x{} for the queue", f.rate, f.channels));
             return;
         };
+        if self.phase == Phase::Mix && new_stream {
+            if let Some((p, late)) = self.awaiting_incoming.take() {
+                // The incoming side of a mix that began before it was announced: its buffers are the next
+                // to come, into the mix.
+                if f == out {
+                    self.drop_converter();
+                } else if !self.arm_conversion(host, id.clone(), f) {
+                    self.abandon_transition(host);
+                    self.pending_config = Some((Some(f), config));
+                    return;
+                }
+                self.mix_source_id = id;
+                self.enter_incoming(&p, late);
+                return;
+            }
+        }
         if f == out {
             // At the pinned format already. The output below was opened for exactly this and stays
             // open: forwarding the configure would rebuild it on every track change. Decode-ahead for
@@ -479,9 +540,9 @@ impl<C: Clone> TransitionEngine<C> {
     }
 
     /// Whether the buffers arriving now are made over into one of the engine's own (converted, or at a
-    /// song's volume) rather than handed down as the platform gave them.
+    /// volume the host sets) rather than handed down as the platform gave them.
     fn copying(&self) -> bool {
-        self.converting() || self.gain != 1.0
+        self.converting() || self.levels
     }
 
     /// The staged format of `id` (its buffers flow now): arm it, or drop the converter when it is
@@ -532,9 +593,45 @@ impl<C: Clone> TransitionEngine<C> {
     /// first buffer. Each song's samples are scaled as they arrive, before anything is held or mixed,
     /// so a mix is made of two songs each at its own level. One volume for the whole output cannot be
     /// right while two songs sound at once: wherever it changed, the whole mix jumped by the difference.
-    /// The analyser still hears the song as it is. At 1 nothing is copied or scaled.
+    /// The analyser still hears the song as it is. At 1 nothing is scaled.
+    ///
+    /// The next buffer is at this volume from its first sample. Once a host sets volumes, every buffer
+    /// goes down as a copy of the engine's own (see `levels`), so no rest of one the output took only
+    /// part of is ever owed from the platform's memory at the old volume; what was taken in already is
+    /// [`TransitionEngine::rescale`]'s.
     pub fn set_gain(&mut self, gain: f32) {
-        self.next_gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
+        let gain = if gain.is_finite() { gain.clamp(0.0, 1.0) } else { 1.0 };
+        if self.input_owed && gain != self.gain {
+            // The first volume told while the platform's own buffer is only partly taken (media3 offers
+            // the rest again, and it must go down as it is): the rest is heard as it came, once.
+            self.pending_gain = Some(gain);
+            self.levels = true;
+            return;
+        }
+        self.gain = gain;
+        self.pending_gain = None;
+        self.levels = true;
+    }
+
+    /// The song on the stream at `stream_offset_us` is to be heard `ratio` times as loud (the ReplayGain
+    /// settings changed): what the engine took in of it and the output below has not taken yet is scaled
+    /// where it lies - the rest of a chunk the output took only part of (the same memory is offered
+    /// again, as media3 insists, now at the new level), the chunks queued behind it and a held ending. A
+    /// mix of two songs is left as it was made. With the output's own rescale of what it holds, the
+    /// change is heard from the output's read head on, and the samples on either side of every join are
+    /// at one level. Nothing is allocated.
+    pub fn rescale(&mut self, stream_offset_us: i64, ratio: f32) {
+        let Some(out) = self.out else { return };
+        if !ratio.is_finite() || ratio < 0.0 || ratio == 1.0 {
+            return;
+        }
+        for c in self.queue.iter_mut().filter(|c| c.stream_us == stream_offset_us) {
+            crate::pcm::scale(&mut c.data[c.pos..], out.encoding, ratio);
+        }
+        if self.tail_len > 0 && matches!(self.phase, Phase::Hold | Phase::Mix) && self.held_offset_us == stream_offset_us {
+            // All of it, not only what is still to be read: a looped hold reads it again.
+            crate::pcm::scale(&mut self.tail[..self.tail_len], out.encoding, ratio);
+        }
     }
 
     // ---- the audio path ----
@@ -543,6 +640,14 @@ impl<C: Clone> TransitionEngine<C> {
     /// the platform offers the rest again later.
     pub fn handle_buffer<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, buffer: &[u8], pts_us: i64) -> (bool, usize) {
         self.fresh = false;
+        self.awaiting_stream = false;
+        if let Some((p, late)) = self.awaiting_incoming.take() {
+            // The incoming side of the mix flows without a word of its format: it is the one already here.
+            if self.phase == Phase::Mix {
+                self.mix_source_id = self.current_id.clone();
+                self.enter_incoming(&p, late);
+            }
+        }
         if let Some((f, config)) = self.pending_config.take() {
             if !self.drain(down) {
                 self.pending_config = Some((f, config));
@@ -555,10 +660,13 @@ impl<C: Clone> TransitionEngine<C> {
             return (false, 0);
         }
         let native = self.conv_in.unwrap_or(out);
-        // A new volume starts with a buffer of its own: the rest of one the output took only part of
-        // goes down as the first part did.
-        if !self.input_owed {
-            self.gain = self.next_gain;
+        // The rest of the platform's buffer the output took only part of goes down as the first part
+        // did; a volume told meanwhile starts with the next one.
+        if self.input_owed {
+            return self.pass(down, host, buffer, buffer.len(), pts_us, false);
+        }
+        if let Some(g) = self.pending_gain.take() {
+            self.gain = g;
         }
         let scaled = (self.gain != 1.0).then(|| {
             let mut b = self.copy_of(buffer);
@@ -632,9 +740,6 @@ impl<C: Clone> TransitionEngine<C> {
     /// planned start of a transition - the head through and the rest into the hold. `Some` is the
     /// answer to give the caller now; `None` means the buffer was taken in whole.
     fn pass_or_hold<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, buf: &[u8], whole: usize, pts_us: i64, out: Format) -> Option<(bool, usize)> {
-        if self.input_owed && !self.copying() {
-            return Some(self.pass(down, host, buf, whole, pts_us, false));
-        }
         if self.playing_id.is_none() {
             self.playing_id = self.current_id.clone();
         }
@@ -665,7 +770,7 @@ impl<C: Clone> TransitionEngine<C> {
         }
         if before > 0 {
             let head = self.copy_of(&buf[..before]);
-            self.enqueue(head, pts_us);
+            self.enqueue(head, pts_us, self.offset_us);
         }
         // A seek landed inside the transition: the mix will run from this far in, as it would
         // have sounded had the song played on into it (see handle_discontinuity).
@@ -708,7 +813,7 @@ impl<C: Clone> TransitionEngine<C> {
                 self.feed_analysis(host, buffer, out);
             }
             let c = self.copy_of(buffer);
-            self.enqueue(c, pts_us);
+            self.enqueue(c, pts_us, self.offset_us);
             self.drain(down);
             return (true, whole);
         }
@@ -809,12 +914,20 @@ impl<C: Clone> TransitionEngine<C> {
     /// held ending goes out unmixed.
     pub fn handle_discontinuity<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H) {
         let p = self.plan.clone();
+        let ending = self.plan_for.clone().or_else(|| self.playing_id.clone());
+        // Whether the next stream was announced before this (this engine's own pipeline), or comes with
+        // its first buffer (media3): the stream announced last is still the ending one.
+        let announced = self.current_id.is_some() && self.current_id != ending;
+        let mixed = matches!(self.phase, Phase::Hold) && self.tail_len > 0 && self.out.is_some();
+        self.made = ending.map(|id| (id, if mixed { p.clone() } else { None }));
         match (self.phase, p, self.out) {
             (Phase::Hold, Some(p), Some(out)) if self.tail_len > 0 => {
                 // Its format was staged while it decoded ahead; arm it now, so the stretcher and the
                 // skip below measure the incoming track in its own domain and the mix runs at the pinned one.
-                self.arm_staged_for(host, self.current_id.clone());
-                self.mix_source_id = self.current_id.clone();
+                if announced {
+                    self.arm_staged_for(host, self.current_id.clone());
+                    self.mix_source_id = self.current_id.clone();
+                }
                 self.playing_id = Some(p.incoming_id.clone());
                 let key = out.rate as u64 * 100 + out.channels as u64;
                 if self.mixer.is_none() || self.mixer_format != key {
@@ -830,22 +943,12 @@ impl<C: Clone> TransitionEngine<C> {
                         m.seek((late * out.rate as i64 / 1_000_000) as u64);
                     }
                 }
-                let stretching = p.stretching();
-                let in_late_us = if stretching { (late as f64 * p.tempo_ratio as f64) as i64 } else { late };
-                // The stretcher works in the incoming domain when the sides disagree (converted after
-                // stretching), else in the outgoing one; the skip is in the same domain.
-                let s_fmt = self.conv_in.unwrap_or(out);
-                if stretching {
-                    let taken = if !self.converting() { self.pending_stretch.take().filter(|(_, k)| *k == p.keep_pitch).map(|(s, _)| s) } else { None };
-                    self.pending_stretch = None;
-                    let mut s = taken.unwrap_or_else(|| ByteStretcher::new(s_fmt.rate, s_fmt.channels, p.keep_pitch));
-                    s.configure(
-                        p.tempo_ratio as f64,
-                        ((p.duration_us - late) * s_fmt.rate as i64 / 1_000_000).max(0) as u64,
-                        (p.ramp_us * s_fmt.rate as i64 / 1_000_000).max(0) as u64,
-                    );
-                    self.stretch = Some(s);
-                    self.stretch_format = Some(s_fmt);
+                // The stretcher and the skip work in the incoming domain, known once the incoming stream is.
+                self.skip_left = 0;
+                if announced {
+                    self.enter_incoming(&p, late);
+                } else {
+                    self.awaiting_incoming = Some((p.clone(), late));
                 }
                 let at = down.position_us(false);
                 host.log(&format!(
@@ -856,7 +959,6 @@ impl<C: Clone> TransitionEngine<C> {
                 // The held audio is about to go out as the mix, so it stops counting as played-but-unheard.
                 // What was already reported stands until the sound really catches up with it.
                 self.held_us = 0;
-                self.skip_left = s_fmt.bytes(p.in_skip_us + in_late_us);
                 self.tail_read = 0;
                 self.mix_out_frame = 0;
                 self.mix_out_frames = ((p.duration_us - late) * out.rate as i64 / 1_000_000).max(0) as usize;
@@ -873,11 +975,34 @@ impl<C: Clone> TransitionEngine<C> {
                 self.playing_id = self.current_id.clone();
                 self.arm_staged_for(host, self.current_id.clone());
                 self.mix_source_id = None;
+                self.awaiting_stream = true;
                 down.handle_discontinuity();
             }
         }
         self.plan = None;
         self.plan_for = None;
+    }
+
+    /// The incoming side of a mix, once its format is known: stretched (when the plan changes its tempo)
+    /// and skipped into in its own domain when it is converted to the pinned one, else in the pinned one.
+    fn enter_incoming(&mut self, p: &Plan, late: i64) {
+        let Some(out) = self.out else { return };
+        let stretching = p.stretching();
+        let in_late_us = if stretching { (late as f64 * p.tempo_ratio as f64) as i64 } else { late };
+        let s_fmt = self.conv_in.unwrap_or(out);
+        if stretching {
+            let taken = if !self.converting() { self.pending_stretch.take().filter(|(_, k)| *k == p.keep_pitch).map(|(s, _)| s) } else { None };
+            self.pending_stretch = None;
+            let mut s = taken.unwrap_or_else(|| ByteStretcher::new(s_fmt.rate, s_fmt.channels, p.keep_pitch));
+            s.configure(
+                p.tempo_ratio as f64,
+                ((p.duration_us - late) * s_fmt.rate as i64 / 1_000_000).max(0) as u64,
+                (p.ramp_us * s_fmt.rate as i64 / 1_000_000).max(0) as u64,
+            );
+            self.stretch = Some(s);
+            self.stretch_format = Some(s_fmt);
+        }
+        self.skip_left = s_fmt.bytes(p.in_skip_us + in_late_us);
     }
 
     /// The incoming track, mixed into the held ending of the outgoing one.
@@ -934,7 +1059,7 @@ impl<C: Clone> TransitionEngine<C> {
                 let at = self.stamp(pts_us, frames, out);
                 let c = self.copy_of(&chunk);
                 self.loop_buf = chunk;
-                self.enqueue(c, at);
+                self.enqueue(c, at, TIME_UNSET);
                 self.mixed_end_us = at + frames as i64 * 1_000_000 / out.rate as i64;
                 self.mix_out_frame += frames;
             } else {
@@ -946,7 +1071,7 @@ impl<C: Clone> TransitionEngine<C> {
                 let at = self.stamp(pts_us, frames, out);
                 let mut c = self.take_pooled(bytes);
                 c.extend_from_slice(&self.tail[r..r + bytes]);
-                self.enqueue(c, at);
+                self.enqueue(c, at, TIME_UNSET);
                 self.mixed_end_us = at + frames as i64 * 1_000_000 / out.rate as i64;
                 self.tail_read += bytes;
             }
@@ -956,7 +1081,7 @@ impl<C: Clone> TransitionEngine<C> {
             let rest = &src[used..];
             let at = self.stamp(pts_us, rest.len() / fb, out);
             let c = self.copy_of(rest);
-            self.enqueue(c, at);
+            self.enqueue(c, at, self.offset_us);
             self.mixed_end_us = at + (rest.len() / fb) as i64 * 1_000_000 / out.rate as i64;
         }
         if let Some(b) = converted {
@@ -1086,7 +1211,7 @@ impl<C: Clone> TransitionEngine<C> {
         // Finished: the track's own timestamps begin with the buffer after this audio, and that is where
         // the output takes its new reference.
         let resync = self.stretch.is_none() && std::mem::take(&mut self.resync_next);
-        self.enqueue(o, at);
+        self.enqueue(o, at, self.offset_us);
         self.resync_next |= resync;
         // Only a running clock moves on: the stretcher may have just finished and handed the track
         // back to its own timestamps. (The Kotlin sink added to the unset marker here, leaving a garbage
@@ -1136,7 +1261,7 @@ impl<C: Clone> TransitionEngine<C> {
                 };
                 let rest = self.tail[from..self.tail_len].to_vec();
                 let c = self.copy_of(&rest);
-                self.enqueue(c, at);
+                self.enqueue(c, at, self.held_offset_us);
             }
         }
         if self.phase != Phase::Pass {
@@ -1146,6 +1271,7 @@ impl<C: Clone> TransitionEngine<C> {
         self.heard.next_id = None;
         self.heard.from_id = None;
         self.phase = Phase::Pass;
+        self.awaiting_incoming = None;
         self.tail_len = 0;
         self.held_from_us = TIME_UNSET;
         self.held_us = 0;
@@ -1199,12 +1325,13 @@ impl<C: Clone> TransitionEngine<C> {
 
     // ---- output queue ----
 
-    fn enqueue(&mut self, data: Vec<u8>, pts_us: i64) {
+    /// Queues `data` at `pts_us`, made of the song on the stream at `stream_us` alone (`TIME_UNSET`: a mix).
+    fn enqueue(&mut self, data: Vec<u8>, pts_us: i64, stream_us: i64) {
         if data.is_empty() {
             self.recycle(data);
             return;
         }
-        self.queue.push_back(Chunk { data, pos: 0, pts_us, resync: self.resync_next, measure: self.measure_next });
+        self.queue.push_back(Chunk { data, pos: 0, pts_us, resync: self.resync_next, measure: self.measure_next, stream_us });
         self.resync_next = false;
         self.measure_next = false;
     }
@@ -1272,7 +1399,7 @@ impl<C: Clone> TransitionEngine<C> {
     pub fn position_us<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H, source_ended: bool) -> i64 {
         let at = down.position_us(source_ended);
         if at == POSITION_NOT_SET {
-            return at;
+            return self.held_from_nothing(host);
         }
         if self.phase == Phase::Hold && self.held_from_us != TIME_UNSET && self.held_from_us - at < DRY_US && host.now_ms() - self.held_at > HOLD_GRACE_MS {
             host.log(&format!("transition: nothing to mix in yet with {} ms of sound left, letting the ending play", (self.held_from_us - at) / 1000));
@@ -1337,6 +1464,28 @@ impl<C: Clone> TransitionEngine<C> {
         self.reported
     }
 
+    /// The output below has nothing to say, having been given nothing: a seek or a jump landed inside a
+    /// planned transition, and everything from the first buffer on is being held. The held audio is
+    /// counted as played all the same - else the player never reads on into the next song, the mix never
+    /// comes, and the music never starts - and the ear is where the hold began.
+    fn held_from_nothing<H: Host>(&mut self, host: &mut H) -> i64 {
+        if self.phase != Phase::Hold || self.held_from_us == TIME_UNSET || self.held_us <= 0 {
+            return POSITION_NOT_SET;
+        }
+        self.reported = self.reported.max(self.held_from_us + self.held_us);
+        if let Some(id) = self.held_id.as_ref() {
+            let start = self.held_from_us - self.held_offset_us;
+            self.heard.us = start;
+            self.heard.until_us = start + self.takeover_us;
+            self.heard.at_ms = host.now_ms();
+            if self.heard.id.as_ref() != Some(id) {
+                self.heard.id = Some(id.clone());
+                host.heard_changed();
+            }
+        }
+        self.reported
+    }
+
     /// The source ended: whatever is held goes out, and the analysis of the last track is finished.
     /// Returns whether everything queued went down, so the platform may tell the output to play to its end.
     pub fn play_to_end_of_stream<D: Downstream<Config = C>, H: Host>(&mut self, down: &mut D, host: &mut H) -> bool {
@@ -1362,6 +1511,8 @@ impl<C: Clone> TransitionEngine<C> {
             self.recycle(c.data);
         }
         self.phase = Phase::Pass;
+        self.awaiting_stream = false;
+        self.awaiting_incoming = None;
         self.tail_len = 0;
         self.tail_read = 0;
         self.skip_left = 0;
@@ -1383,6 +1534,7 @@ impl<C: Clone> TransitionEngine<C> {
         }
         self.plan = None;
         self.plan_for = None;
+        self.made = None;
         self.mix_source_id = None;
         self.resync_next = false;
         self.measure_next = false;
@@ -1564,7 +1716,8 @@ mod tests {
         let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
         e.configure(&mut d, &mut h, stream("a", FMT), 1);
         feed(&mut e, &mut d, &mut h, &tone(1000, 0.5), 0, 0);
-        // As a decoder does it: the next stream is announced while this one still plays, then the boundary.
+        // As this crate's pipeline does it: the next stream is announced while this one still plays, then
+        // the boundary (media3's order is the other way round; see below).
         let f48 = Format { rate: 48_000, ..FMT };
         e.configure(&mut d, &mut h, stream("b", f48), 2);
         e.handle_discontinuity(&mut d, &mut h);
@@ -1652,6 +1805,88 @@ mod tests {
             at += n;
         }
         assert!(h.log.iter().any(|l| l.starts_with("transition: late hold")), "the transition still happens, just late: {:?}", h.log);
+    }
+
+    /// Feeds `data` in 4096-byte buffers the way media3 does: a buffer not taken whole is offered again
+    /// (what is left of it), and `between` runs between offers. `at_buffer` arms a partial take of 1024
+    /// bytes by the output below on that buffer.
+    fn offer(e: &mut TransitionEngine<u32>, d: &mut Down, h: &mut Host_, data: &[u8], at_buffer: usize, mut between: impl FnMut(&mut TransitionEngine<u32>)) {
+        for (i, slice) in data.chunks(4096).enumerate() {
+            if i == at_buffer {
+                d.take_only = Some(1024);
+            }
+            let mut from = 0;
+            loop {
+                let (all, used) = e.handle_buffer(d, h, &slice[from..], FMT.us(i * 4096 + from));
+                from += used;
+                if all {
+                    break;
+                }
+                between(e);
+            }
+            if i == at_buffer {
+                between(e);
+            }
+        }
+    }
+
+    #[test]
+    fn a_volume_changed_while_the_output_holds_part_of_a_buffer_reaches_the_rest_of_it() {
+        // At a song's ReplayGain the output below, filling up, takes only part of a buffer: media3 must be
+        // offered the rest as the same buffer. Then the settings change. The rest goes down as that same
+        // memory - the output checks - but at the new level: nothing after the change is heard at the old one.
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        e.set_gain(0.5);
+        let mut changed = false;
+        offer(&mut e, &mut d, &mut h, &tone(1000, 1.0), 10, |e| {
+            if !std::mem::replace(&mut changed, true) {
+                e.rescale(0, 0.25 / 0.5);
+                e.set_gain(0.25);
+            }
+        });
+        let s = d.samples();
+        let cut = (10 * 4096 + 1024) / 2;
+        assert_eq!(s.len(), tone(1000, 1.0).len() / 2, "every sample, once");
+        assert!(s[..cut].iter().all(|&v| v == 500), "what was taken before the change at the old level");
+        assert!(s[cut..].iter().all(|&v| v == 250), "and everything after it at the new one, the rest of that buffer too");
+    }
+
+    #[test]
+    fn a_first_volume_told_while_the_platform_s_buffer_is_owed_waits_for_the_next_buffer() {
+        // Nothing has set a volume (media3's own path): buffers go straight down as the platform's memory,
+        // and one is taken only in part. A volume told now cannot reach the rest of it - the output insists on
+        // that very buffer - so the rest goes down as it came, and the volume starts with the next buffer.
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        let mut told = false;
+        offer(&mut e, &mut d, &mut h, &tone(1000, 1.0), 10, |e| {
+            if !std::mem::replace(&mut told, true) {
+                e.set_gain(0.5);
+            }
+        });
+        let s = d.samples();
+        let next = 11 * 4096 / 2;
+        assert!(s[..next].iter().all(|&v| v == 1000), "the buffer owed goes down whole as it came");
+        assert!(s[next..].iter().all(|&v| v == 500), "the volume from the next buffer on");
+    }
+
+    #[test]
+    fn a_volume_changed_while_an_ending_is_held_reaches_the_held_ending() {
+        // The ending held for a mix is music on its way too: let go unmixed, it is at the new level.
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        d.position = 0;
+        h.plans.insert("a".into(), fade("b", 2_000_000));
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        e.set_gain(0.5);
+        feed(&mut e, &mut d, &mut h, &tone(1000, 3.0), 0, 0);
+        assert!(e.holding(), "the ending is held");
+        e.rescale(0, 0.25 / 0.5);
+        e.abandon_transition(&mut h);
+        e.drain(&mut d);
+        let s = d.samples();
+        let held = FMT.bytes(2_000_000) / 2;
+        assert!(s[..held].iter().all(|&v| v == 500) && s[held..].iter().all(|&v| v == 250) && s.len() > held, "held at 0.5, let go at 0.25");
     }
 
     #[test]
@@ -1764,5 +1999,253 @@ mod tests {
         feed(&mut e, &mut d, &mut h, &tone(1000, 1.0), 0, 0);
         e.configure(&mut d, &mut h, stream("b", FMT), 2);
         assert_eq!(h.analysed, vec!["a".to_string()]);
+    }
+
+    /// `secs` of a constant stereo 16-bit value at `rate`.
+    fn tone_at(v: i16, rate: u32, secs: f64) -> Vec<u8> {
+        let frames = (rate as f64 * secs) as usize;
+        (0..frames * 2).flat_map(|_| v.to_le_bytes()).collect()
+    }
+
+    /// Seconds of output at `f` the output took after its first `from` bytes.
+    fn secs_after(d: &Down, from: usize, f: Format) -> f64 {
+        let got = d.taken.iter().map(|(b, _)| b.len()).sum::<usize>() - from;
+        got as f64 / f.frame_bytes() as f64 / f.rate as f64
+    }
+
+    fn taken(d: &Down) -> usize {
+        d.taken.iter().map(|(b, _)| b.len()).sum()
+    }
+
+    #[test]
+    fn a_stream_announced_after_the_boundary_is_converted_from_its_first_buffer() {
+        // media3's order: the discontinuity comes once the last buffer of the song before has gone
+        // (onProcessedStreamChange), and the next song's format only with its first buffer. That format
+        // was once taken for decode-ahead and left waiting for a discontinuity that had already been: a
+        // 48 kHz song or station after a 44.1 kHz one played unconverted, 8.8 % slow and flat.
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        feed(&mut e, &mut d, &mut h, &tone(1000, 0.5), 0, 0);
+        e.handle_discontinuity(&mut d, &mut h);
+        let f48 = Format { rate: 48_000, ..FMT };
+        e.configure(&mut d, &mut h, stream("b", f48), 2);
+        let before = taken(&d);
+        feed(&mut e, &mut d, &mut h, &tone_at(500, 48_000, 1.0), 0, 1_000_000);
+        assert_eq!(d.configured, vec![1], "the output stays as it was opened");
+        let secs = secs_after(&d, before, FMT);
+        assert!((secs - 1.0).abs() < 0.01, "one second of 48 kHz comes out as one second at 44.1: {secs}");
+        assert!(h.log.iter().any(|l| l.starts_with("converting 48000 Hz")), "{:?}", h.log);
+    }
+
+    #[test]
+    fn a_stream_at_the_pinned_format_after_the_boundary_is_not_converted_as_the_one_before() {
+        // Pinned at 48 kHz, a 44.1 kHz song converted, then a 48 kHz one in media3's order: it must go
+        // down as it is, not through the converter armed for the song before (8.8 % fast and sharp).
+        let f48 = Format { rate: 48_000, ..FMT };
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        e.configure(&mut d, &mut h, stream("a", f48), 1);
+        feed(&mut e, &mut d, &mut h, &tone_at(1000, 48_000, 0.5), 0, 0);
+        e.handle_discontinuity(&mut d, &mut h);
+        e.configure(&mut d, &mut h, stream("b", FMT), 2);
+        let before = taken(&d);
+        feed(&mut e, &mut d, &mut h, &tone(700, 1.0), 0, 1_000_000);
+        let secs = secs_after(&d, before, f48);
+        assert!((secs - 1.0).abs() < 0.01, "the 44.1 kHz song is converted: {secs}");
+        e.handle_discontinuity(&mut d, &mut h);
+        e.configure(&mut d, &mut h, stream("c", f48), 3);
+        let before = taken(&d);
+        let c = tone_at(300, 48_000, 1.0);
+        feed(&mut e, &mut d, &mut h, &c, 0, 2_000_000);
+        // What the converter still held of b may come first; then c exactly as it is.
+        let got = taken(&d) - before;
+        assert!(got <= c.len() + 64 && got + 64 >= c.len(), "c goes down sample for sample: {got} of {} bytes", c.len());
+        let s = d.samples();
+        assert!(s[s.len() - 1000..].iter().all(|&v| v == 300));
+        assert_eq!(d.configured, vec![1]);
+    }
+
+    #[test]
+    fn a_mix_into_a_stream_announced_after_the_boundary_converts_it() {
+        // The same order inside a planned fade: the incoming song's format comes after the discontinuity
+        // that starts the mix. Its opening must be mixed in at the pinned rate, not as if it were at it.
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        h.plans.insert("a".into(), fade("b", 1_000_000));
+        d.position = POSITION_NOT_SET;
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        feed(&mut e, &mut d, &mut h, &tone(8000, 3.0), 0, 0);
+        e.handle_discontinuity(&mut d, &mut h);
+        e.configure(&mut d, &mut h, stream("b", Format { rate: 48_000, ..FMT }), 2);
+        feed(&mut e, &mut d, &mut h, &tone_at(-8000, 48_000, 3.0), 0, 3_000_000);
+        let frames = d.samples().len() / 2;
+        // 1 s alone, then b's 3 s, 2 of them mixed into the held ending: 4 s at 44.1 kHz.
+        let want = RATE as usize * 4;
+        assert!(frames.abs_diff(want) < 64, "{frames} frames, not {want}");
+        let s = d.samples();
+        assert!(s[s.len() - 1000..].iter().all(|&v| v == -8000), "b plays alone after the fade");
+        assert_eq!(d.configured, vec![1]);
+    }
+
+    #[test]
+    fn a_stretched_mix_into_a_stream_announced_after_the_boundary_stretches_it_in_its_own_rate() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        let mut p = fade("b", 1_000_000);
+        p.tempo_ratio = 1.03;
+        p.ramp_us = 500_000;
+        h.plans.insert("a".into(), p);
+        d.position = POSITION_NOT_SET;
+        e.configure(&mut d, &mut h, stream("a", FMT), 1);
+        feed(&mut e, &mut d, &mut h, &tone(4000, 3.0), 0, 0);
+        e.handle_discontinuity(&mut d, &mut h);
+        e.configure(&mut d, &mut h, stream("b", Format { rate: 48_000, ..FMT }), 2);
+        feed(&mut e, &mut d, &mut h, &tone_at(-4000, 48_000, 6.0), 0, 3_000_000);
+        let frames = d.samples().len() / 2;
+        // 1 s alone, then 6 s of b, the first 2.5 of them played 3 % fast at most: about 6.9 s more.
+        let secs = frames as f64 / RATE as f64;
+        assert!((6.8..7.05).contains(&secs), "{secs} s");
+        let s = d.samples();
+        assert!(s[s.len() - 10..].iter().all(|&v| v == -4000), "after the stretch the track plays as it is");
+    }
+
+    // ---- a beat-matched mix's tempo, and what is left of it after a seek, a skip or a pause ----
+
+    const F48: Format = Format { rate: 48_000, ..FMT };
+    const HZ: f64 = 1000.0;
+
+    /// `secs` of a stereo 16-bit sine of `hz` at `rate`, starting at frame `from`.
+    fn sine(hz: f64, rate: u32, secs: f64, from: usize) -> Vec<u8> {
+        let frames = (rate as f64 * secs) as usize;
+        (from..from + frames)
+            .flat_map(|k| {
+                let v = ((k as f64 * hz * std::f64::consts::TAU / rate as f64).sin() * 8000.0).round() as i16;
+                [v, v]
+            })
+            .flat_map(i16::to_le_bytes)
+            .collect()
+    }
+
+    /// Feeds `data` (at `f`) in decoder-sized buffers, stamped from `from_us` on the stream's timeline.
+    fn feed_in(e: &mut TransitionEngine<u32>, d: &mut Down, h: &mut Host_, data: &[u8], f: Format, from_us: i64) {
+        let mut at = 0;
+        while at < data.len() {
+            let n = 4096.min(data.len() - at);
+            let (all, used) = e.handle_buffer(d, h, &data[at..at + n], from_us + f.us(at));
+            assert!(all && used == n, "the fake output takes everything");
+            at += n;
+        }
+    }
+
+    /// The pitch of the last second the output took, at `f`, from its zero crossings.
+    fn last_second_hz(d: &Down, f: Format) -> f64 {
+        let s = d.samples();
+        let left: Vec<i16> = s.chunks_exact(2).map(|c| c[0]).collect();
+        let w = &left[left.len() - f.rate as usize..];
+        w.windows(2).filter(|p| (p[0] < 0) != (p[1] < 0)).count() as f64 / 2.0
+    }
+
+    /// A beat-matched AutoMix out of `b` into `c`: 1 s into `b`, 2 s long, `c` played 4 % fast (speed
+    /// and pitch together) and ramped back to its own tempo over the second after the mix.
+    fn beat_matched() -> Plan {
+        Plan { tempo_ratio: 1.04, keep_pitch: false, ramp_us: 1_000_000, ..fade("c", 1_000_000) }
+    }
+
+    /// Three songs as media3 hands them over (each announced after the discontinuity before it): `a` at
+    /// 48 kHz pins the output, `b` at 44.1 kHz is converted, and the mix out of `b` begins into `c` (48
+    /// kHz, as the output). Returns with `secs` of `c` fed.
+    fn into_the_mix(e: &mut TransitionEngine<u32>, d: &mut Down, h: &mut Host_, secs: f64) {
+        h.plans.insert("b".into(), beat_matched());
+        d.position = POSITION_NOT_SET;
+        e.configure(d, h, stream("a", F48), 1);
+        feed_in(e, d, h, &sine(HZ, 48_000, 1.0, 0), F48, 0);
+        e.handle_discontinuity(d, h);
+        e.configure(d, h, stream("b", FMT), 2);
+        e.set_output_stream_offset_us(1_000_000);
+        feed_in(e, d, h, &sine(HZ, RATE, 3.0, 0), FMT, 1_000_000);
+        assert!(h.log.iter().any(|l| l.starts_with("holding the ending")), "{:?}", h.log);
+        e.handle_discontinuity(d, h);
+        e.configure(d, h, stream("c", F48), 3);
+        e.set_output_stream_offset_us(4_000_000);
+        feed_in(e, d, h, &sine(HZ, 48_000, secs, 0), F48, 4_000_000);
+    }
+
+    fn assert_own_pitch(d: &Down, what: &str) {
+        let hz = last_second_hz(d, F48);
+        assert!((hz - HZ).abs() < 3.0, "{what}: the song plays at {hz} Hz, not {HZ} (x{:.4})", hz / HZ);
+    }
+
+    #[test]
+    fn after_a_beat_matched_mix_the_song_plays_at_its_own_tempo() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        into_the_mix(&mut e, &mut d, &mut h, 6.0);
+        assert_own_pitch(&d, "after the mix and the ramp");
+    }
+
+    #[test]
+    fn a_seek_during_a_beat_matched_mix_leaves_the_song_at_its_own_tempo() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        into_the_mix(&mut e, &mut d, &mut h, 0.5);
+        // The seek bar tapped near the end: media3 flushes, and reads on in the same stream.
+        e.flush(&mut h);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 3.0, 48_000 * 20), F48, 24_000_000);
+        assert_own_pitch(&d, "after a seek in the mix");
+    }
+
+    #[test]
+    fn a_seek_during_the_tempo_ramp_after_a_mix_leaves_the_song_at_its_own_tempo() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        // The mix is 2 s; half a second later c is still being brought back to its own tempo.
+        into_the_mix(&mut e, &mut d, &mut h, 2.5);
+        e.flush(&mut h);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 3.0, 48_000 * 20), F48, 24_000_000);
+        assert_own_pitch(&d, "after a seek in the ramp");
+    }
+
+    #[test]
+    fn a_skip_during_a_beat_matched_mix_plays_the_next_song_at_its_own_tempo() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        into_the_mix(&mut e, &mut d, &mut h, 0.5);
+        e.flush(&mut h);
+        e.configure(&mut d, &mut h, stream("d", F48), 4);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 3.0, 0), F48, 30_000_000);
+        assert_own_pitch(&d, "the song skipped to");
+        // And back to c, as the one way out the report found.
+        e.flush(&mut h);
+        e.configure(&mut d, &mut h, stream("c", F48), 5);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 3.0, 0), F48, 40_000_000);
+        assert_own_pitch(&d, "the song skipped back to");
+    }
+
+    #[test]
+    fn a_pause_during_a_beat_matched_mix_leaves_the_song_at_its_own_tempo() {
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        into_the_mix(&mut e, &mut d, &mut h, 0.5);
+        // Paused: the platform only asks where the ear is, for a while, with nothing flowing.
+        for k in 0..50 {
+            h.now += 100;
+            e.position_us(&mut d, &mut h, false);
+            let _ = k;
+        }
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 5.0, 24_000), F48, 4_500_000);
+        assert_own_pitch(&d, "after a pause in the mix");
+    }
+
+    #[test]
+    fn a_seek_during_a_mix_into_a_song_the_player_announces_first_leaves_it_at_its_own_tempo() {
+        // The same in this crate's own pipeline's order (the next song announced before the boundary).
+        let (mut e, mut d, mut h) = (TransitionEngine::<u32>::new(), Down::default(), Host_::default());
+        h.plans.insert("b".into(), beat_matched());
+        d.position = POSITION_NOT_SET;
+        e.configure(&mut d, &mut h, stream("a", F48), 1);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 1.0, 0), F48, 0);
+        e.configure(&mut d, &mut h, stream("b", FMT), 2);
+        e.handle_discontinuity(&mut d, &mut h);
+        e.set_output_stream_offset_us(1_000_000);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, RATE, 3.0, 0), FMT, 1_000_000);
+        e.configure(&mut d, &mut h, stream("c", F48), 3);
+        e.handle_discontinuity(&mut d, &mut h);
+        e.set_output_stream_offset_us(4_000_000);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 0.5, 0), F48, 4_000_000);
+        e.flush(&mut h);
+        feed_in(&mut e, &mut d, &mut h, &sine(HZ, 48_000, 3.0, 48_000 * 20), F48, 24_000_000);
+        assert_own_pitch(&d, "after a seek in the mix");
     }
 }

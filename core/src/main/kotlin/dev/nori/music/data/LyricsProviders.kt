@@ -9,3 +9,10 @@ import dev.nori.music.ffi.words.LyricsOrigin
  * line under them says it, are the core's (`LyricsOrigin`, `words_lyrics_credit`).
  */
 data class FoundLyrics(val lyrics: Lyrics, val source: LyricsOrigin)
+
+/**
+ * The same words from the same place as [other], whatever key the core kept their timing under: the
+ * same lyrics read again (the lookup run again for a song come back to) are not new lyrics to show.
+ */
+fun FoundLyrics.sameAs(other: FoundLyrics): Boolean =
+    this === other || (source == other.source && lyrics.copy(key = 0uL) == other.lyrics.copy(key = 0uL))

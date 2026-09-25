@@ -5,6 +5,7 @@ import android.media.AudioManager
 import dev.nori.music.ffi.model.Lyrics
 import dev.nori.music.data.FoundLyrics
 import dev.nori.music.data.followSong
+import dev.nori.music.data.sameAs
 import dev.nori.music.ffi.words.LyricsOrigin
 import dev.nori.music.net.said
 import dev.nori.music.playback.PlayerState
@@ -20,6 +21,10 @@ import kotlinx.coroutines.flow.stateIn
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 
+/** Two answers that show the same thing: the same lyrics read again are not new ones. */
+internal fun sameLyrics(a: Load<FoundLyrics>, b: Load<FoundLyrics>): Boolean =
+    a == b || (a is Load.Ready && b is Load.Ready && a.data.sameAs(b.data))
+
 class PlayerViewModel(app: Application) : NoriViewModel(app) {
     private val player = nori.player
     val state: StateFlow<PlayerState> = player.state
@@ -32,6 +37,8 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     /** Just the play/pause flag, for the same reason: the marked row's bars move only while it sounds. */
     val sounding: StateFlow<Boolean> = state.map { it.playing }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    private val lyricsKept = dev.nori.music.data.SongAnswers<Load<FoundLyrics>>()
+
     /**
      * Lyrics of whatever is heard (the page's song, [PlayerState.current]); fetched only while a lyrics
      * view is collecting. Each song starts from Loading, so the view shows its loader and then the new
@@ -40,8 +47,14 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
      * Every answer names the song it is for, and the view shows it only under that song
      * ([dev.nori.music.data.ForSong.of]): the last answer outlives the collecting, and the panel opened
      * again after the song had changed used to be handed the old song's words first - under the new
-     * title, with the new song's playhead, so nothing lit and nothing scrolled. Nothing is replayed once
-     * the upstream stops either, so a reopened panel starts from the loader, not from what it last had.
+     * title, with the new song's playhead, so nothing lit and nothing scrolled. Because of that tag the
+     * last answer is kept when the panel stops watching: under the same song it is the right one, and
+     * the panel opened again shows it at once instead of the loader and a lookup all over again.
+     *
+     * The answers of the last few songs are kept too ([lyricsKept]): a song come back to - the panel
+     * reopened after the upstream stopped, or the song heard for a moment again around a skip - starts
+     * from its words, and is not looked up again once its lookup had finished. The same words read again
+     * are not handed on as new ones ([sameLyrics]), which faded them out and in and reset their clock.
      */
     val lyrics: StateFlow<dev.nori.music.data.ForSong<Load<FoundLyrics>>> = state.map { it.current }
         .followSong(
@@ -49,8 +62,11 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
             loading = Load.Loading,
             none = { Load.Ready(FoundLyrics(dev.nori.music.ffi.library.lyricsNone(), LyricsOrigin.SERVER)) },
             failed = { Load.Failed(it.said ?: it.javaClass.simpleName) },
+            answers = lyricsKept,
+            same = ::sameLyrics,
+            keep = { it is Load.Ready && it.data.lyrics.lines.isNotEmpty() },
         ) { song -> nori.library.lyricsFor(song).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000, replayExpirationMillis = 0), dev.nori.music.data.ForSong(null, Load.Loading))
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), dev.nori.music.data.ForSong(null, Load.Loading))
 
     /**
      * The moving cover of the album playing (Settings, Look): an HLS address, or null when it has none,
@@ -139,6 +155,9 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
 
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs
+
+    /** [positionMs] while the song playing is still [songId]; null once the player has left it. */
+    fun positionIn(songId: String?): Long? = dev.nori.music.data.playheadFor(songId, state.value.current?.id) { player.positionMs }
 
     fun connect() = player.connect()
     fun toggle() = player.toggle()

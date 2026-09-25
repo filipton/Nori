@@ -486,6 +486,13 @@ impl<R: Ring> Writer<R> {
     fn read_clock(&mut self) {
         if let Some((frames, ns)) = self.sink.heard(self.playing) {
             self.clock.anchor(frames, ns, self.playing);
+            // The perf build's watch: the device's own count against what it was given, at a wake this
+            // thread made anyway (nori_perf::invariants). Timed by the clock now: a reading that stopped
+            // moving keeps its old time.
+            if nori_perf::invariants::on() {
+                let given = self.clock.0.lock().given;
+                nori_perf::invariants::track_seen(mono_ns() / 1_000_000, self.playing && !self.dead, given, frames, self.rate);
+            }
         }
     }
 

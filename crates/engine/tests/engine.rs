@@ -1,13 +1,19 @@
-//! The engine end to end on real threads: songs served as WAV bytes by a fake HTTP client that counts
-//! every request, an output that records what a sound card would have played on a clock twenty times
-//! faster than real time, and the simulated player (`nori_player::sim`) as the reference - the engine
-//! must play exactly what the tested pipeline plays.
+//! The engine end to end on its own thread: songs served as WAV bytes by a fake HTTP client that counts
+//! every request, an output that records what a sound card would have played, and the simulated player
+//! (`nori_player::sim`) as the reference - the engine must play exactly what the tested pipeline plays.
+//!
+//! The engine runs on a clock the test moves (`common::Virtual`), and the sound card pulls on it: a test
+//! waits with [`Rig::wait_for`] and [`Rig::run`], never a real sleep, so what it sees does not depend on
+//! how busy the machine is, and a minute of music takes a fraction of a second.
+
+mod common;
 
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use common::{Stepper, Virtual};
 use nori_engine::{App, AudioOutput, Body, ByteSource, Config, Device, DeviceWatch, Engine, Event, Feed, Library, Located, OutputFacts, OutputFormat, OutputKind, Recent, Settings, Source, State, Store};
 use nori_player::automix::analysis::Analyzer;
 use nori_player::automix::synth::Rng;
@@ -22,16 +28,22 @@ use parking_lot::Mutex;
 const RATE: u32 = 44_100;
 
 /// Something like music, never the same twice for different seeds: a few partials and a little noise.
+/// Plain loops: the tests are built without optimisation, and minutes of it are made.
 fn music(secs: f64, seed: u64) -> Vec<i16> {
     let mut r = Rng(seed);
     let hz = [110.0, 331.0, 1250.0].map(|h| h * (1.0 + seed as f64 * 0.01));
-    (0..(secs * RATE as f64) as usize)
-        .flat_map(|i| {
-            let t = i as f64 / RATE as f64;
-            let v = hz.iter().enumerate().map(|(k, h)| (std::f64::consts::TAU * h * t).sin() * 0.2 / (k + 1) as f64).sum::<f64>();
-            [((v + 0.02 * r.next()) * 32767.0) as i16, ((v * 0.8 - 0.02 * r.next()) * 32767.0) as i16]
-        })
-        .collect()
+    let n = (secs * RATE as f64) as usize;
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        let t = i as f64 / RATE as f64;
+        let mut v = 0.0;
+        for (k, h) in hz.iter().enumerate() {
+            v += (std::f64::consts::TAU * h * t).sin() * 0.2 / (k + 1) as f64;
+        }
+        out.push(((v + 0.02 * r.next()) * 32767.0) as i16);
+        out.push(((v * 0.8 - 0.02 * r.next()) * 32767.0) as i16);
+    }
+    out
 }
 
 fn wav(samples: &[i16]) -> Vec<u8> {
@@ -49,7 +61,10 @@ fn wav(samples: &[i16]) -> Vec<u8> {
     w.extend_from_slice(&16u16.to_le_bytes());
     w.extend_from_slice(b"data");
     w.extend_from_slice(&data.to_le_bytes());
-    w.extend(samples.iter().flat_map(|v| v.to_le_bytes()));
+    w.resize(44 + data as usize, 0);
+    for (i, v) in samples.iter().enumerate() {
+        w[44 + 2 * i..46 + 2 * i].copy_from_slice(&v.to_le_bytes());
+    }
     w
 }
 
@@ -69,7 +84,10 @@ fn wav24(samples: &[i32]) -> Vec<u8> {
     w.extend_from_slice(&24u16.to_le_bytes());
     w.extend_from_slice(b"data");
     w.extend_from_slice(&data.to_le_bytes());
-    w.extend(samples.iter().flat_map(|v| v.to_le_bytes()[..3].to_vec()));
+    w.resize(44 + data as usize, 0);
+    for (i, v) in samples.iter().enumerate() {
+        w[44 + 3 * i..47 + 3 * i].copy_from_slice(&v.to_le_bytes()[..3]);
+    }
     w
 }
 
@@ -162,7 +180,9 @@ struct Extra {
     store: Option<Arc<Store>>,
     /// Paused this long, the output is let go.
     idle_release_ms: Option<i64>,
-    /// How much faster than real time the recorder plays: twenty times unless set.
+    /// How many seconds of music a second of [`Rig::wait_for`] lets play: twenty unless set. The recorder
+    /// once played on a real clock that many times faster than the music, and the limits the tests wait
+    /// with are in its seconds.
     pace: Option<f64>,
 }
 
@@ -190,25 +210,81 @@ impl Library for Songs {
     }
 }
 
-/// A sound card on a fast clock that keeps everything it plays. `underruns` counts the times it
-/// found too little to play: on a real device each would be a gap.
-struct Recorder {
-    pace: f64,
+/// The sound card's side the clock drives: what it pulls from, and everything it played. `underruns`
+/// counts the times it found too little to play: on a real device each would be a gap.
+struct Card {
+    feed: Option<Feed>,
+    /// Pulls start once a block is there.
+    started: bool,
+    playing: bool,
     /// The device plays float: what it pulls is kept in `heard_f` instead.
     float: bool,
+    due_ns: i64,
     heard: Arc<Mutex<Vec<i16>>>,
     heard_f: Arc<Mutex<Vec<f32>>>,
-    playing: Arc<AtomicBool>,
-    closed: Arc<AtomicBool>,
     underruns: Arc<AtomicU64>,
+    /// Set by a test: the device dies at its next pull and will not open again, and says why here.
+    die: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
+    block: Vec<i16>,
+    floats: Vec<f32>,
+}
+
+/// Frames the card pulls at a time.
+const BLOCK: usize = 128;
+
+impl common::Device for Card {
+    fn due_ns(&self) -> i64 {
+        self.due_ns
+    }
+
+    fn tick(&mut self, now_ns: i64) -> bool {
+        let rate = self.feed.as_ref().map_or(RATE, |f| f.format().rate);
+        self.due_ns = now_ns + (BLOCK as i64 * 1_000_000_000) / rate as i64;
+        let Some(feed) = self.feed.as_mut() else { return false };
+        if self.die.swap(false, Ordering::AcqRel) {
+            *self.failure.lock() = Some("the sound server died".into());
+            feed.wake_engine();
+            // It pulls no more.
+            self.feed = None;
+            return true;
+        }
+        if !self.playing || (!self.started && feed.available() < BLOCK) {
+            return false;
+        }
+        self.started = true;
+        // Too little to play a whole block: the recorder waits rather than recording silence, and counts
+        // it. On a clock that stands still while the engine works, it happens only where a phone's
+        // output would run dry.
+        if feed.available() < BLOCK && !feed.ending() {
+            self.underruns.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        let waits = feed.engine_waits();
+        let ch = feed.format().channels;
+        if self.float {
+            self.floats.resize(BLOCK * ch, 0.0);
+            let got = feed.pull(&mut self.floats);
+            let n = if feed.ending() { got } else { BLOCK };
+            self.heard_f.lock().extend_from_slice(&self.floats[..n * ch]);
+        } else {
+            self.block.resize(BLOCK * ch, 0);
+            let got = feed.pull_i16(&mut self.block);
+            let n = if feed.ending() { got } else { BLOCK };
+            self.heard.lock().extend_from_slice(&self.block[..n * ch]);
+        }
+        waits && !feed.engine_waits()
+    }
+}
+
+/// A sound card that keeps everything it plays, pulled by the test's clock ([`Card`]).
+struct Recorder {
+    card: Arc<Mutex<Card>>,
     /// Times the device was opened and let go.
     opened: Arc<AtomicU64>,
     shut: Arc<AtomicU64>,
     /// Where the engine hears which device the music goes to.
     watch: Arc<Mutex<Option<DeviceWatch>>>,
-    /// Set by a test: the device dies at its next pull and will not open again, and says why here.
-    die: Arc<AtomicBool>,
-    failure: Arc<Mutex<Option<String>>>,
     /// Times the music the ring held was dropped.
     flushes: Arc<AtomicU64>,
     /// The engine asked for the device to be kept shallow (the equalizer tuned).
@@ -225,54 +301,19 @@ impl AudioOutput for Recorder {
         Ok(want)
     }
 
-    fn start(&mut self, mut feed: Feed) -> Result<(), String> {
-        self.closed = Arc::default();
-        let (pace, heard, playing, closed, underruns) = (self.pace, self.heard.clone(), self.playing.clone(), self.closed.clone(), self.underruns.clone());
-        let (float, heard_f) = (self.float, self.heard_f.clone());
-        let (die, failure) = (self.die.clone(), self.failure.clone());
-        std::thread::spawn(move || {
-            let f = feed.format();
-            let mut block = vec![0i16; 512 * f.channels];
-            let mut floats = vec![0f32; 512 * f.channels];
-            let period = Duration::from_secs_f64(512.0 / f.rate as f64 / pace);
-            let mut started = false;
-            while !closed.load(Ordering::Acquire) {
-                std::thread::sleep(period);
-                if die.swap(false, Ordering::AcqRel) {
-                    *failure.lock() = Some("the sound server died".into());
-                    feed.wake_engine();
-                    return;
-                }
-                if !playing.load(Ordering::Acquire) || (!started && feed.available() < 512) {
-                    continue;
-                }
-                started = true;
-                // A test machine may be too busy to keep up with a clock this fast: the recorder then
-                // waits rather than recording silence, and counts it.
-                if feed.available() < 512 && !feed.ending() {
-                    underruns.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                if float {
-                    let got = feed.pull(&mut floats);
-                    let n = if feed.ending() { got } else { 512 };
-                    heard_f.lock().extend_from_slice(&floats[..n * f.channels]);
-                    continue;
-                }
-                let got = feed.pull_i16(&mut block);
-                let n = if feed.ending() { got } else { 512 };
-                heard.lock().extend_from_slice(&block[..n * f.channels]);
-            }
-        });
+    fn start(&mut self, feed: Feed) -> Result<(), String> {
+        let mut c = self.card.lock();
+        c.feed = Some(feed);
+        c.started = false;
         Ok(())
     }
 
     fn pause(&mut self) {
-        self.playing.store(false, Ordering::Release);
+        self.card.lock().playing = false;
     }
 
     fn resume(&mut self) {
-        self.playing.store(true, Ordering::Release);
+        self.card.lock().playing = true;
     }
 
     fn latency_us(&self) -> u64 {
@@ -280,11 +321,11 @@ impl AudioOutput for Recorder {
     }
 
     fn takes_float(&mut self) -> bool {
-        self.float
+        self.card.lock().float
     }
 
     fn failed(&mut self) -> Option<String> {
-        self.failure.lock().take()
+        self.card.lock().failure.lock().take()
     }
 
     fn flush(&mut self) {
@@ -297,12 +338,14 @@ impl AudioOutput for Recorder {
 
     fn close(&mut self) {
         self.shut.fetch_add(1, Ordering::Relaxed);
-        self.closed.store(true, Ordering::Release);
+        self.card.lock().feed = None;
     }
 }
 
 struct Rig {
     engine: Engine,
+    time: Stepper<Card>,
+    pace: f64,
     opened: Arc<AtomicU64>,
     shut: Arc<AtomicU64>,
     watch: Arc<Mutex<Option<DeviceWatch>>>,
@@ -341,30 +384,32 @@ impl Rig {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let heard_f = Arc::new(Mutex::new(Vec::new()));
         let underruns = Arc::new(AtomicU64::new(0));
-        let out = Recorder {
-            pace: pace.unwrap_or(20.0),
+        let die = Arc::new(AtomicBool::new(false));
+        let card = Arc::new(Mutex::new(Card {
+            feed: None,
+            started: false,
+            playing: false,
             float,
+            due_ns: 0,
             heard: heard.clone(),
             heard_f: heard_f.clone(),
-            playing: Arc::default(),
-            closed: Arc::default(),
             underruns: underruns.clone(),
-            opened: Arc::default(),
-            shut: Arc::default(),
-            watch: Arc::default(),
-            die: Arc::default(),
+            die: die.clone(),
             failure: Arc::default(),
-            flushes: Arc::default(),
-            shallow: Arc::default(),
-        };
-        let (opened, shut, watch, die, flushes, shallow) = (out.opened.clone(), out.shut.clone(), out.watch.clone(), out.die.clone(), out.flushes.clone(), out.shallow.clone());
+            block: Vec::new(),
+            floats: Vec::new(),
+        }));
+        let out = Recorder { card: card.clone(), opened: Arc::default(), shut: Arc::default(), watch: Arc::default(), flushes: Arc::default(), shallow: Arc::default() };
+        let (opened, shut, watch, flushes, shallow) = (out.opened.clone(), out.shut.clone(), out.watch.clone(), out.flushes.clone(), out.shallow.clone());
+        let clock = Virtual::default();
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         let library = Songs { server: server.clone(), lengths, store };
         let mut config = Config { memory_mb: 256, settings, ..Config::default() };
         config.idle_release_ms = idle_release_ms.unwrap_or(config.idle_release_ms);
-        let engine = Engine::start(library, app, queue, Box::new(out), config, move |e| seen.lock().push(e));
-        Rig { engine, opened, shut, watch, heard, heard_f, underruns, server, events, die, flushes, shallow }
+        let engine = Engine::start_on(library, app, queue, Box::new(out), None, config, clock.clone(), move |e| seen.lock().push(e));
+        let time = Stepper::new(clock, card);
+        Rig { engine, time, pace: pace.unwrap_or(20.0), opened, shut, watch, heard, heard_f, underruns, server, events, die, flushes, shallow }
     }
 
     /// Times the recorder found too little to play (a gap on a real device), for the failure messages.
@@ -372,15 +417,19 @@ impl Rig {
         self.underruns.load(Ordering::Relaxed)
     }
 
+    /// Runs the music on until `done`, for `secs` of the old recorder's time at most ([`Extra::pace`]).
     fn wait_for(&self, secs: u64, mut done: impl FnMut(&Rig) -> bool) -> bool {
-        let until = Instant::now() + Duration::from_secs(secs);
-        while Instant::now() < until {
-            if done(self) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        false
+        self.time.until(Duration::from_secs_f64(secs as f64 * self.pace), || done(self))
+    }
+
+    /// Runs the music on for `ms`, as heard.
+    fn run(&self, ms: u64) {
+        self.time.run(Duration::from_millis(ms));
+    }
+
+    /// The time on the engine's clock, ms.
+    fn now_ms(&self) -> i64 {
+        self.time.clock.now_ns() / 1_000_000
     }
 
     fn ended(&self) -> bool {
@@ -413,7 +462,7 @@ fn a_jump_or_a_seek_while_paused_stays_paused_and_fetches_nothing_until_play() {
     rig.engine.go_to(1, 0);
     rig.engine.seek(5_000);
     assert!(rig.wait_for(5, |r| { let s = r.engine.status(); s.index == Some(1) && s.position_ms == 5_000 }), "the screen is told the place at once: {:?}", rig.engine.status());
-    std::thread::sleep(Duration::from_millis(300));
+    rig.run(6_000);
     assert_eq!(rig.engine.status().state, State::Paused, "still paused");
     assert_eq!(rig.server.requests.lock().len(), asked, "nothing fetched for a place nobody listens to yet");
     let heard = rig.heard.lock().len();
@@ -464,7 +513,7 @@ fn a_song_slow_to_come_is_said_to_be_buffering_until_it_plays() {
 
 #[test]
 fn a_device_that_dies_stops_the_engine_and_play_opens_another() {
-    let a = music(20.0, 71);
+    let a = music(90.0, 71);
     let rig = Rig::new(&[("a", &a)], prefs_off(), Settings::default());
     rig.engine.play_at(0, 0);
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2), "music is heard");
@@ -496,7 +545,7 @@ fn two_songs_join_sample_for_sample_and_each_is_fetched_once() {
     requests.sort();
     assert_eq!(requests, vec![("a".to_string(), 0), ("b".to_string(), 0)], "one request per song, the whole song in one burst");
     let events = rig.events.lock().clone();
-    assert!(events.contains(&Event::Song { index: 1, id: "b".into() }), "{events:?}");
+    assert!(events.iter().any(|e| matches!(e, Event::Song { index: 1, id, .. } if id == "b")), "{events:?}");
 }
 
 #[test]
@@ -548,9 +597,9 @@ fn pausing_stops_the_music_and_playing_takes_it_up_where_it_was() {
     rig.engine.pause();
     assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
     assert!(!rig.events.lock().contains(&Event::Stopped), "a pause asked for is not one the engine made by itself");
-    std::thread::sleep(Duration::from_millis(100));
+    rig.run(2_000);
     let at = rig.heard.lock().len();
-    std::thread::sleep(Duration::from_millis(300));
+    rig.run(6_000);
     assert_eq!(rig.heard.lock().len(), at, "nothing plays while paused");
     // The place is where the ear stopped, though the engine slept through the seconds before.
     let heard_ms = (at / 2) as i64 * 1000 / RATE as i64;
@@ -571,7 +620,7 @@ fn a_pause_fades_out_and_play_fades_back_in() {
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 4));
     rig.engine.pause();
     assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
-    std::thread::sleep(Duration::from_millis(200));
+    rig.run(4_000);
     let at = rig.heard.lock().len();
     let heard = rig.heard.lock().clone();
     // Down to silence over the fade, not cut: the last samples before the pause are quiet, and there
@@ -897,7 +946,7 @@ fn a_fade_set_while_playing_is_the_next_pause_s() {
     rig.engine.set_settings(Settings { fade_ms: 400, ..Settings::default() });
     rig.engine.pause();
     assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
-    std::thread::sleep(Duration::from_millis(200));
+    rig.run(4_000);
     let heard = rig.heard.lock().clone();
     assert!(heard[heard.len() - 2].abs() < 100, "faded to silence: {}", heard[heard.len() - 2]);
     assert!(heard.iter().any(|&v| v > 2000 && v < 6000), "a ramp down, not a cut");
@@ -918,12 +967,18 @@ fn replay_gain_changed_while_playing_reaches_the_music_already_on_its_way() {
     // Up to one place the song as it is, from there at half its level: what the output still held was
     // turned down where it lay, not left to play out at the old level for the ten seconds it lasts.
     let k = heard.iter().zip(&a).position(|(h, s)| h != s).expect("the level changed");
-    // What the recorder pulled while the ring was being turned down may hold either level: the rescale
-    // walks forward from where the output reads, and a busy machine can pause it for a few blocks before it
-    // gets ahead. Nobody hears 100 ms at the old level; after that it must be the new one to the end.
-    let settle = RATE as usize * 2 / 10;
-    assert!(heard[k + settle..] == quiet[k + settle..], "at the new level from there to the end");
-    // The recorder runs twenty times faster than the music: a second of it is 50 ms of the test's time.
+    // At the new level from there to the end. The rest of the decoded buffer the output had taken only part
+    // of when the change came (where what the ring held ended) is offered again as the same memory, as an
+    // output like media3's insists, but scaled where it lies (`TransitionEngine::rescale`): none of it plays
+    // at the old level. At most a ramp from one level to the other is allowed, a few milliseconds long.
+    // The engine takes the change before the card pulls again: no sample pulled meanwhile holds either.
+    let off: Vec<usize> = (k..heard.len()).filter(|&i| heard[i] != quiet[i]).collect();
+    if let (Some(&first), Some(&last)) = (off.first(), off.last()) {
+        let secs = |i: usize| i as f64 / 2.0 / RATE as f64;
+        assert!(last - first < 2 * RATE as usize * 5 / 1000, "at the new level from there to the end: {:.4} s to {:.4} s is not", secs(first), secs(last));
+        let between = |i: usize| (heard[i] as i32 - quiet[i] as i32).signum() * (heard[i] as i32 - a[i] as i32).signum() <= 0;
+        assert!(off.iter().all(|&i| between(i) && heard[i] != a[i]), "and what is not is a ramp between the two, not the old level");
+    }
     assert!(k < asked + RATE as usize * 2 * 2, "heard within two seconds of the change, not ten: {} s after", (k as f64 - asked as f64) / 2.0 / RATE as f64);
 }
 
@@ -1042,8 +1097,8 @@ fn an_equalizer_switched_on_while_playing_is_heard() {
     assert!(rig.wait_for(5, |r| r.engine.status().chain), "{:?}", rig.engine.status());
     assert!(rig.wait_for(30, Rig::ended), "{:?}", rig.events.lock());
     let heard = rig.heard.lock().clone();
-    // Made again from where the ear was: to the millisecond, but for what the recorder, twenty times
-    // faster than the music, pulled between the clock's reading and the flush, at the dip's silence.
+    // Made again from where the ear was: to the millisecond, but for what the card pulled between the
+    // clock's reading and the flush, at the dip's silence.
     assert!(heard.len().abs_diff(a.len()) <= RATE as usize * 2 / 20, "{} samples of {}", heard.len(), a.len());
     // Changed two seconds in: as it is before, through the equalizer from there on.
     let end = RATE as usize * 2;
@@ -1075,14 +1130,14 @@ fn as_the_song(heard: &[i16], song: &[i16], from: usize) -> Option<(usize, isize
 #[test]
 fn an_equalizer_switched_off_while_playing_is_heard_at_once_where_the_ear_is() {
     let a = music(20.0, 45);
-    // A recorder at the music's own pace: what is heard when is what a phone would play then.
+    // Limits in the music's own seconds: what is heard when is what a phone would play then.
     let files = vec![("a".to_string(), wav(&a), 20_000)];
     let rig = Rig::build(files, sim::App::new(), quieter(-12.0), Extra { pace: Some(1.0), ..Extra::default() });
     rig.engine.play_at(0, 0);
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2), "it plays");
     let (asked, waits) = (rig.heard.lock().len(), rig.waits());
     rig.engine.set_settings(Settings::default());
-    std::thread::sleep(Duration::from_millis(1_000));
+    rig.run(1_000);
     let heard = rig.heard.lock().clone();
     let (k, shift) = as_the_song(&heard, &a, asked).expect("the song itself, untouched, after the change");
     let ms = |samples: usize| samples as f64 * 1000.0 / 2.0 / RATE as f64;
@@ -1107,13 +1162,13 @@ fn a_slider_dragged_while_playing_is_made_heard_once_per_moment() {
     assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
     let flushes = rig.flushes.load(Ordering::Relaxed);
     // Ten steps in a tenth of a second, as a finger drags the pre-amp.
-    let started = Instant::now();
+    let started = rig.now_ms();
     for k in 0..10 {
         rig.engine.set_settings(quieter(-4.0 - k as f64));
-        std::thread::sleep(Duration::from_millis(10));
+        rig.run(10);
     }
-    let took = started.elapsed().as_millis() as u64;
-    std::thread::sleep(Duration::from_millis(1_500));
+    let took = (rig.now_ms() - started) as u64;
+    rig.run(1_500);
     let made = rig.flushes.load(Ordering::Relaxed) - flushes;
     assert!(made >= 1 && made <= took / 150 + 2, "{made} times made again for {took} ms of changes");
     // What is heard now is the last step's, 13 dB down: the music's level hardly moves from one half
@@ -1154,9 +1209,349 @@ fn the_equalizer_screen_makes_the_output_shallow_at_once_and_deep_again_as_it_cl
     rig.engine.set_tuning(true);
     // Not at the next song: at once, the music made again behind a dip.
     assert!(rig.wait_for(2, |r| r.shallow.load(Ordering::Relaxed) && r.flushes.load(Ordering::Relaxed) > flushes), "shallow at once");
-    std::thread::sleep(Duration::from_millis(1_500));
+    rig.run(1_500);
     assert!(rig.waits() <= waits + 2, "a shallow ring kept up with: {} waits", rig.waits() - waits);
     rig.engine.set_tuning(false);
     assert!(rig.wait_for(2, |r| !r.shallow.load(Ordering::Relaxed)), "deep again as the screen closes");
     rig.engine.stop();
+}
+
+// ---- skips pressed in a hurry ----
+
+/// `n` songs of `secs` each, named a, b, c...
+fn many(n: usize, secs: f64, seed: u64) -> Vec<(String, Vec<i16>)> {
+    (0..n).map(|k| (((b'a' + k as u8) as char).to_string(), music(secs, seed + k as u64))).collect()
+}
+
+fn listed(songs: &[(String, Vec<i16>)]) -> Vec<(&str, &[i16])> {
+    songs.iter().map(|(id, s)| (id.as_str(), s.as_slice())).collect()
+}
+
+/// The songs playing from `from_ms` into the first, waited for in the music's own seconds.
+fn at_pace(songs: &[(&str, &[i16])], app: impl App + Send + 'static, from_ms: i64) -> Rig {
+    let files = songs.iter().map(|(id, s)| (id.to_string(), wav(s), (s.len() / 2) as i64 * 1000 / RATE as i64)).collect();
+    let rig = Rig::build(files, app, Settings::default(), Extra { pace: Some(1.0), ..Extra::default() });
+    rig.engine.play_at(0, from_ms);
+    assert!(rig.wait_for(10, |r| !r.heard.lock().is_empty()), "it plays");
+    rig
+}
+
+/// The phone's player (`RustPlayer`) as it follows the engine: the song it shows moves at once to the
+/// one a press asks for, and then with the engine's song events - taken on the main thread, which may be
+/// busy drawing the slide when they come, so only when [`Shown::take`] is called.
+#[derive(Default)]
+struct Shown {
+    current: usize,
+    expecting: Option<usize>,
+    sent: u64,
+    taken: usize,
+    /// Every change of the song shown, in order.
+    changes: Vec<usize>,
+}
+
+impl Shown {
+    fn press(&mut self, to: usize, jump: u64) {
+        if to != self.current {
+            self.expecting = Some(to);
+            self.current = to;
+            self.changes.push(to);
+        }
+        self.sent = jump;
+    }
+
+    fn take(&mut self, events: &[Event]) {
+        for e in &events[self.taken..] {
+            let Event::Song { index, jumps, .. } = e else { continue };
+            // Said before the engine made the last jump sent: from the place already left.
+            if *jumps < self.sent {
+                continue;
+            }
+            self.expecting = None;
+            if *index != self.current {
+                self.current = *index;
+                self.changes.push(*index);
+            }
+        }
+        self.taken = events.len();
+    }
+}
+
+/// Where the ear is in `song` at the end of what was heard, ms: `None` when it is not that song.
+fn heard_in(rig: &Rig, song: &[i16]) -> Option<i64> {
+    let heard = rig.heard.lock().clone();
+    let (_, shift) = as_the_song(&heard, song, heard.len().saturating_sub(RATE as usize))?;
+    Some(((heard.len() as isize + shift) / 2) as i64 * 1000 / RATE as i64)
+}
+
+#[test]
+fn next_pressed_quickly_moves_one_song_per_press_however_late_the_events_are_taken() {
+    let songs = many(6, 60.0, 400);
+    for gap in [0u64, 30, 130, 200] {
+        let rig = at_pace(&listed(&songs), sim::App::new(), 0);
+        assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
+        let mut shown = Shown::default();
+        shown.take(&rig.events.lock());
+        for k in 1..=3 {
+            // The page asks for the song after the one it shows, as media3's seekToNext does.
+            let to = shown.current + 1;
+            shown.press(to, rig.engine.go_to(to, 0));
+            rig.run(gap);
+            if gap >= 200 && k == 2 {
+                // Taken between presses too, once.
+                shown.take(&rig.events.lock());
+            }
+        }
+        assert!(rig.wait_for(5, |r| r.engine.status().index == Some(3)), "gap {gap}: the engine ends on the third song after: {:?}", rig.events.lock());
+        rig.run(500);
+        shown.take(&rig.events.lock());
+        assert_eq!(shown.changes, vec![1, 2, 3], "gap {gap}: one change per press, never back: {:?}", rig.events.lock());
+        let said: Vec<usize> = rig.events.lock().iter().filter_map(|e| if let Event::Song { index, .. } = e { Some(*index) } else { None }).collect();
+        assert!(said.windows(2).all(|w| w[0] < w[1]) && said.last() == Some(&3), "gap {gap}: the engine went forwards only: {said:?}");
+        let ms = heard_in(&rig, &songs[3].1).unwrap_or_else(|| panic!("gap {gap}: the ear is on d"));
+        assert!(ms < 3_000, "gap {gap}: d from its start, {ms} ms in");
+        assert!(heard_in(&rig, &songs[4].1).is_none(), "gap {gap}: never on to e");
+        rig.engine.stop();
+    }
+}
+
+#[test]
+fn the_engine_s_own_next_pressed_quickly_moves_one_song_per_press() {
+    let songs = many(6, 60.0, 410);
+    let rig = at_pace(&listed(&songs), sim::App::new(), 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2));
+    for _ in 0..3 {
+        rig.engine.next();
+        rig.run(40);
+    }
+    assert!(rig.wait_for(5, |r| r.engine.status().index == Some(3)), "{:?}", rig.events.lock());
+    rig.run(1_000);
+    assert_eq!(rig.engine.status().index, Some(3), "{:?}", rig.events.lock());
+    let ms = heard_in(&rig, &songs[3].1).expect("the ear is on d");
+    assert!(ms < 3_000, "d from its start, {ms} ms in");
+    rig.engine.stop();
+}
+
+/// Where the planner put the mix out of `a` into `b`, ms into `a`, once it has.
+fn planned(live: &Live) -> Option<i64> {
+    let log = live.0.lock().log.clone();
+    let line = log.iter().find(|l| l.starts_with("transition a -> b"))?;
+    line.split(" at ").nth(1)?.split(',').next()?.trim().parse().ok()
+}
+
+/// Next pressed `lead_ms` before the song playing was to end into the next by itself (at `end_ms`, or
+/// where the planner put its mix): the engine goes to the next song once, from its start, and nothing
+/// of the ending that was planned follows it - no second change of song, no mix into the one after.
+fn next_before_the_end(prefs: TransitionPrefs, measured_songs: bool, name: &str) {
+    let songs = many(3, 40.0, 420);
+    for lead in [500i64, 300, 100] {
+        let live = Live::new(prefs.clone());
+        if measured_songs {
+            let mut app = live.0.lock();
+            for (id, _) in &songs {
+                app.analyses.insert(id.clone(), measured(id, 120.0, 40_000));
+            }
+        }
+        let from = 22_000;
+        let rig = at_pace(&listed(&songs), live.clone(), from);
+        let end = if prefs.auto_mix || prefs.crossfade_s > 0 {
+            assert!(rig.wait_for(10, |_| planned(&live).is_some()), "{name}: a mix is planned: {:?}", live.0.lock().log);
+            planned(&live).expect("checked")
+        } else {
+            40_000
+        };
+        assert!(end > from + 1_000, "{name}: planned at {end}");
+        // The recorder hears everything as it plays: where the ear is, to the sample.
+        let ear = |r: &Rig| from + (r.heard.lock().len() / 2) as i64 * 1000 / RATE as i64;
+        assert!(rig.wait_for(30, |r| ear(r) >= end - lead), "{name}: reaches the press");
+        let mut shown = Shown::default();
+        shown.take(&rig.events.lock());
+        assert_eq!(rig.engine.status().index, Some(0), "{name} lead {lead}: still on a");
+        let jump = rig.engine.go_to(1, 0);
+        shown.press(1, jump);
+        // Long enough for a's planned ending, and a few seconds of b.
+        rig.run(lead as u64 + 3_000);
+        shown.take(&rig.events.lock());
+        let events = rig.events.lock().clone();
+        let after: Vec<usize> = events.iter().filter_map(|e| if let Event::Song { index, jumps, .. } = e { (*jumps >= jump).then_some(*index) } else { None }).collect();
+        assert!(after.is_empty() || after == [1], "{name} lead {lead}: at most b said after the press: {events:?}");
+        assert_eq!(shown.changes, vec![1], "{name} lead {lead}: one change of song: {events:?}");
+        assert!(!events.iter().any(|e| matches!(e, Event::Song { index: 2, .. })), "{name} lead {lead}: never on to c: {events:?}");
+        assert_eq!(rig.engine.status().index, Some(1), "{name} lead {lead}");
+        let ms = heard_in(&rig, &songs[1].1).unwrap_or_else(|| panic!("{name} lead {lead}: the ear is on b"));
+        assert!((2_000..6_000).contains(&ms), "{name} lead {lead}: b from its start, {ms} ms in");
+        rig.engine.stop();
+    }
+}
+
+#[test]
+fn next_pressed_just_before_a_gapless_end_changes_song_once() {
+    next_before_the_end(prefs_off(), false, "gapless");
+}
+
+#[test]
+fn next_pressed_just_before_a_crossfade_changes_song_once() {
+    next_before_the_end(crossfade(6), false, "crossfade");
+}
+
+#[test]
+fn next_pressed_just_before_an_automix_transition_changes_song_once() {
+    let prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, echo_out: false, ..prefs_off() };
+    next_before_the_end(prefs, true, "automix");
+}
+
+// ---- settings changed with the song's ending already made ----
+
+/// Plays `songs` until the engine, waking, finds the ear `secs` or more into the first one: by then the
+/// ring holds the ten seconds after. The change comes at that wake, with the ear where the status says.
+fn playing_until(songs: &[(&str, &[i16])], app: impl App + Send + 'static, settings: Settings, secs: f64) -> Rig {
+    let files = songs.iter().map(|(id, s)| (id.to_string(), wav(s), (s.len() / 2) as i64 * 1000 / RATE as i64)).collect();
+    let rig = Rig::build(files, app, settings, Extra { pace: Some(5.0), ..Extra::default() });
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(20, |r| r.engine.status().position_ms >= (secs * 1000.0) as i64), "{:?}", rig.engine.status());
+    rig
+}
+
+#[test]
+fn a_crossfade_switched_on_with_the_song_s_ending_already_made_still_mixes_it() {
+    let (a, b) = (music(30.0, 50), music(20.0, 51));
+    let live = Live::new(prefs_off());
+    // Twenty seconds in: the ring holds a's last ten seconds, gapless into b, and some of b.
+    let rig = playing_until(&[("a", &a), ("b", &b)], live.clone(), Settings::default(), 20.0);
+    live.0.lock().prefs = crossfade(6);
+    rig.engine.set_settings(Settings { crossfade_s: 6, ..Settings::default() });
+    rig.engine.replan();
+    assert!(rig.wait_for(60, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), live.0.lock().log);
+    let log = live.0.lock().log.clone();
+    let heard = rig.heard.lock().len();
+    let overlap = (a.len() + b.len()).saturating_sub(heard) as f64 / 2.0 / RATE as f64;
+    assert!((overlap - 6.0).abs() < 0.2, "six seconds of overlap, not {overlap:.2}: {log:?}");
+}
+
+#[test]
+fn a_crossfade_switched_off_with_the_mix_already_made_leaves_the_songs_to_join_gaplessly() {
+    let (a, b) = (music(30.0, 52), music(20.0, 53));
+    let live = Live::new(crossfade(6));
+    // Twenty seconds in: a's ending from 24 s is held for the mix, or mixed into the ring already.
+    let rig = playing_until(&[("a", &a), ("b", &b)], live.clone(), Settings { crossfade_s: 6, ..Settings::default() }, 20.0);
+    live.0.lock().prefs = prefs_off();
+    rig.engine.set_settings(Settings::default());
+    rig.engine.replan();
+    assert!(rig.wait_for(60, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), live.0.lock().log);
+    let log = live.0.lock().log.clone();
+    let heard = rig.heard.lock().clone();
+    // Made again from where the ear was, behind a dip: but for what the card pulled meanwhile, a whole
+    // and then b whole.
+    assert!(heard.len().abs_diff(a.len() + b.len()) <= RATE as usize * 2 / 10, "{:.2} s heard of {:.2}: {log:?}", heard.len() as f64 / 2.0 / RATE as f64, (a.len() + b.len()) as f64 / 2.0 / RATE as f64);
+    assert!(heard[heard.len() - b.len()..] == b[..], "b whole after a, not mixed into it: {log:?}");
+    assert!(log.iter().any(|l| l.contains("the ending of a is made again: gapless now")), "{log:?}");
+}
+
+#[test]
+fn automix_switched_on_near_the_end_of_a_song_mixes_out_of_it() {
+    let (a, b) = (music(40.0, 54), music(40.0, 55));
+    let live = Live::new(prefs_off());
+    // Twenty-six seconds in: the mix would start at 28 s, and the ring holds a to its end and b after.
+    let rig = playing_until(&[("a", &a), ("b", &b)], live.clone(), Settings::default(), 26.0);
+    {
+        let mut app = live.0.lock();
+        app.analyses.insert("a".into(), measured("a", 120.0, 40_000));
+        app.analyses.insert("b".into(), measured("b", 120.0, 40_000));
+        app.prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, echo_out: false, ..prefs_off() };
+    }
+    rig.engine.set_settings(Settings { auto_mix: true, ..Settings::default() });
+    rig.engine.replan();
+    assert!(rig.wait_for(60, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), live.0.lock().log);
+    let log = live.0.lock().log.clone();
+    assert!(log.iter().any(|l| l.contains("transition a -> b: BeatMatched")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
+    assert!(rig.heard.lock().len() < a.len() + b.len() - RATE as usize * 2 * 4, "the songs overlap: {log:?}");
+}
+
+#[test]
+fn a_seek_into_a_mix_further_from_the_end_than_the_player_reads_ahead_plays_on_into_it() {
+    let (a, b) = (music(40.0, 60), music(40.0, 61));
+    let live = Live::new(TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, echo_out: false, ..prefs_off() });
+    {
+        let mut app = live.0.lock();
+        app.analyses.insert("a".into(), measured("a", 120.0, 40_000));
+        app.analyses.insert("b".into(), measured("b", 120.0, 40_000));
+    }
+    let rig = playing(&[("a", &a), ("b", &b)], live.clone(), Settings { auto_mix: true, ..Settings::default() });
+    // The mix runs from 26.25 s to 38.25 s; the player reads b once a is ten seconds from its end. From
+    // 27 s everything is held for the mix, and nothing went to the output to say the time moves on: the
+    // player waited for a clock that never came, in silence.
+    rig.engine.seek(27_000);
+    assert!(rig.wait_for(30, Rig::ended), "{:?} {:?}", rig.engine.status(), live.0.lock().log);
+    let log = live.0.lock().log.clone();
+    assert!(log.iter().any(|l| l.contains("late hold")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("mixing: the next track arrived")), "{log:?}");
+}
+
+#[test]
+fn the_same_plan_asked_again_near_the_end_leaves_the_music_alone() {
+    let (a, b) = (music(30.0, 56), music(20.0, 57));
+    let live = Live::new(crossfade(6));
+    let rig = playing_until(&[("a", &a), ("b", &b)], live.clone(), Settings { crossfade_s: 6, ..Settings::default() }, 20.0);
+    let flushes = rig.flushes.load(Ordering::Relaxed);
+    // A song measured, the queue told again: the plan comes out the same, and nothing is made again.
+    rig.engine.replan();
+    rig.engine.replan();
+    assert!(rig.wait_for(60, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), live.0.lock().log);
+    assert_eq!(rig.flushes.load(Ordering::Relaxed), flushes, "{:?}", live.0.lock().log);
+    assert_eq!(rig.heard.lock().len(), a.len() + b.len() - RATE as usize * 2 * 6, "six seconds of overlap");
+}
+
+#[test]
+fn a_crossfade_switched_on_while_paused_near_the_end_mixes_when_the_music_comes_back() {
+    let (a, b) = (music(30.0, 58), music(20.0, 59));
+    let live = Live::new(prefs_off());
+    let rig = playing_until(&[("a", &a), ("b", &b)], live.clone(), Settings::default(), 16.0);
+    rig.engine.pause();
+    assert!(rig.wait_for(5, |r| r.engine.status().state == State::Paused));
+    live.0.lock().prefs = crossfade(6);
+    rig.engine.set_settings(Settings { crossfade_s: 6, ..Settings::default() });
+    rig.engine.replan();
+    rig.run(500);
+    rig.engine.play();
+    assert!(rig.wait_for(60, Rig::ended), "{:?} {:?} {:?}", rig.events.lock(), rig.engine.status(), live.0.lock().log);
+    let heard = rig.heard.lock().len();
+    let overlap = (a.len() + b.len()).saturating_sub(heard) as f64 / 2.0 / RATE as f64;
+    assert!((overlap - 6.0).abs() < 0.2, "six seconds of overlap, not {overlap:.2}: {:?}", live.0.lock().log);
+}
+
+/// What the watch hook was told, by every engine this test binary runs while it is on.
+static SEEN: Mutex<Vec<(std::thread::ThreadId, nori_engine::watch::Seen)>> = Mutex::new(Vec::new());
+static WATCHING: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn a_client_keeping_watch_is_told_what_each_wake_saw_and_nothing_while_it_does_not_want_it() {
+    nori_engine::watch::install(nori_engine::watch::Hook { wanted: || WATCHING.load(Ordering::Relaxed), seen: |s| SEEN.lock().push((std::thread::current().id(), *s)) });
+    let a = music(90.0, 71);
+    let songs: [(&str, &[i16]); 1] = [("a", &a)];
+    let rig = Rig::new(&songs, prefs_off(), Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2));
+    WATCHING.store(true, Ordering::Relaxed);
+    // The engine wakes as the device's buffer runs down, a burst at a time: a minute of music is several.
+    assert!(rig.wait_for(30, |r| r.heard.lock().len() > RATE as usize * 2 * 60));
+    WATCHING.store(false, Ordering::Relaxed);
+    let seen = SEEN.lock().clone();
+    // Other tests' engines may be told too while it is on, each on its own thread and its own clock: every engine's
+    // looks are in its own time, and one engine (this one) played song 0 on and said the music in its output.
+    let mut threads: Vec<std::thread::ThreadId> = seen.iter().map(|s| s.0).collect();
+    threads.dedup();
+    let by = |t: &std::thread::ThreadId| -> Vec<nori_engine::watch::Seen> {
+        seen.iter().filter(|s| s.0 == *t).map(|s| s.1).filter(|s| s.playing && s.index == Some(0) && !s.offloaded).collect()
+    };
+    assert!(threads.iter().all(|t| by(t).windows(2).all(|w| w[1].now_ms >= w[0].now_ms)), "in each engine's own time");
+    let moved = |m: &Vec<nori_engine::watch::Seen>| {
+        m.len() >= 2 && m.last().unwrap().position_ms > m.first().unwrap().position_ms && m.iter().any(|s| s.in_output_ms > 0)
+    };
+    assert!(threads.iter().any(|t| moved(&by(t))), "the ear moved on between wakes, with music waiting in the output: {seen:?}");
+    // Another test's engine may have asked `wanted` just before it went off and be telling now: a moment of real
+    // time lets those land before the count (not engine timing, so not the rig's clock).
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let told = SEEN.lock().len();
+    rig.run(3_000);
+    assert_eq!(SEEN.lock().len(), told, "not wanted, nothing is made or told");
 }

@@ -50,15 +50,25 @@ pub fn queue_song(id: String) -> Option<Song> {
     with(|s| s.songs.get(&id).map(|(song, _)| song.clone()))
 }
 
-/// The queue as the app lists it, in the player's order. A song the store does not know (an item a
-/// system controller added from outside) comes back with its id only. The store keeps these and what
-/// was registered in the last minute, and lets the rest go.
+/// `ids`, in that order, as the store knows them. A song the store does not know (an item a system
+/// controller added from outside) comes back with its id only. The store keeps these, the songs of the
+/// queue and what was registered in the last minute, and lets the rest go.
+///
+/// The queue is kept whatever `ids` holds: a caller asking for a few songs (the perf build's timeline asks
+/// for the one playing) once let every other queued song go a minute after it was queued, and the
+/// planner's window then knew none of them - no length, so AutoMix and crossfades planned nothing until
+/// the queue was loaded again.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn queue_songs(ids: Vec<String>) -> Vec<Song> {
-    let now = db::now_ms();
+    songs_at(ids, db::now_ms())
+}
+
+fn songs_at(ids: Vec<String>, now: i64) -> Vec<Song> {
+    // Read before the store is locked: the queue's lock is never taken inside the store's.
+    let queued: std::collections::HashSet<String> = crate::playlist::with(|p| p.ids().iter().cloned().collect());
     with(|s| {
         let listed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
-        s.songs.retain(|id, (_, at)| listed.contains(id.as_str()) || now - *at < KEEP_MS);
+        s.songs.retain(|id, (_, at)| listed.contains(id.as_str()) || queued.contains(id) || now - *at < KEEP_MS);
         ids.iter().map(|id| s.songs.get(id).map_or_else(|| Song::only_id(id.clone()), |(song, _)| song.clone())).collect()
     })
 }
@@ -170,5 +180,19 @@ mod tests {
         assert!(!analysable("ext-deezer-1"), "a provider's song");
         assert!(!analysable("pl-7"));
         assert!(!analysable("radio:3"));
+    }
+
+    #[test]
+    fn asking_for_one_song_long_after_the_queue_was_made_keeps_the_rest_of_the_queue() {
+        let _g = crate::playlist::tests::hold(&["keep1", "keep2", "keep3"], 0);
+        let song = |id: &str| Song { duration: 200, ..Song::only_id(id.to_string()) };
+        queue_register(vec![song("keep1"), song("keep2"), song("keep3"), song("gone")]);
+        // Two minutes on, the perf build's timeline asks for the song playing alone.
+        let later = db::now_ms() + 2 * KEEP_MS;
+        assert_eq!(songs_at(vec!["keep1".into()], later)[0].duration, 200);
+        for id in ["keep2", "keep3"] {
+            assert_eq!(queue_song(id.into()).map(|s| s.duration), Some(200), "{id} is still queued and still known");
+        }
+        assert!(queue_song("gone".into()).is_none(), "a song no longer queued is let go");
     }
 }

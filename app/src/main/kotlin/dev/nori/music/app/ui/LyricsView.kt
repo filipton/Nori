@@ -1,6 +1,5 @@
 package dev.nori.music.app.ui
 
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +37,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameMillis
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.ui.Modifier
@@ -128,23 +128,37 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
         // words included: they rise out of the loader instead of appearing in one frame. A new song goes
         // back through the loader, so the last song's lyrics never sit on screen under the new title.
         val found = (load as? Load.Ready)?.data?.takeIf { it.lyrics.lines.isNotEmpty() }
+        // The perf build's watch hears which song's lyrics went up; no other build has a recorder.
+        dev.nori.music.app.PerfHooks.recorder?.let { r -> LaunchedEffect(found) { if (found != null) loaded.songId?.let(r::lyricsShown) } }
         val phase: Any = found ?: if (load is Load.Loading) LyricsPhase.LOADING else LyricsPhase.NONE
-        androidx.compose.animation.AnimatedContent(
-            phase, Modifier.fillMaxSize().weight(1f),
-            transitionSpec = {
-                (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(380, delayMillis = 80)) +
-                    androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(420, delayMillis = 80)) { it / 40 }) togetherWith
-                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(200))
-            },
-            label = "lyrics",
-        ) { p ->
+        FrameCrossfade(phase, LYRICS_FADE, Modifier.fillMaxSize().weight(1f)) { p ->
             when (p) {
                 // The words on their way out (a new song's, or its loader, took over) stay as they were
                 // left: the playhead is the next song's now, and following it jumped them back to the
                 // top in one frame while they faded.
-                is dev.nori.music.data.FoundLyrics -> LyricsBody(vm, p, playing, following = p === phase)
+                is dev.nori.music.data.FoundLyrics -> {
+                    // The song these words are for: they came in only under it.
+                    val song = remember(p) { loaded.songId }
+                    LyricsBody(vm, p, song, playing, following = p === phase)
+                }
                 // In the middle, where "No lyrics" would be: it is waiting, not a line of words yet.
-                LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) { LoadingDots(dot = 9.dp) }
+                // The dots only come for a wait long enough to see: lyrics already kept arrive well
+                // inside it, and a song change then goes from one song's words straight to the next's
+                // instead of flashing the loader between them. They fade in, never appear.
+                LyricsPhase.LOADING -> Box(Modifier.fillMaxSize(), Alignment.Center) {
+                    // Counted in frames like the fades around it, so a slow frame cannot skip it.
+                    var seen by remember { mutableFloatStateOf(0f) }
+                    LaunchedEffect(Unit) {
+                        delay(LOADER_AFTER_MS)
+                        var last = withFrameNanos { it }
+                        while (seen < 1f) {
+                            val now = withFrameNanos { it }
+                            seen = if (AppMotion.reduce) 1f else (seen + ((now - last) / 1e6f).coerceIn(0f, FADE_MAX_STEP_MS) / LOADER_FADE_MS).coerceAtMost(1f)
+                            last = now
+                        }
+                    }
+                    LoadingDots(Modifier.graphicsLayer { alpha = fadeEase(seen) }, dot = 9.dp)
+                }
                 else -> Box(Modifier.fillMaxSize(), Alignment.Center) {
                     val look = LocalLook.current
                     LookText(noteText(dev.nori.music.ffi.words.Note.NO_LYRICS), { look.color(CoverLook.ON_VARIANT) }, style = androidx.compose.material3.LocalTextStyle.current)
@@ -156,10 +170,20 @@ fun LyricsView(vm: PlayerViewModel, actions: ActionsViewModel, playing: Boolean)
 
 private enum class LyricsPhase { LOADING, NONE }
 
+/** How long lyrics may take before the loader starts to show, and how long it then takes to fade in. */
+private const val LOADER_AFTER_MS = 350L
+private const val LOADER_FADE_MS = 300f
+
+/** Loader, words and "No lyrics" into each other: the words leaving fade where they stand, the new ones rise in. */
+private val LYRICS_FADE = FadeTimes(inMs = 380f, outMs = 200f, delayMs = 80f, riseMs = 420f)
+
+/** The header's title and thumbnail, from one song to the next, as the player page's title changes. */
+private val HEADER_FADE = FadeTimes(inMs = 220f, outMs = 160f)
+
 
 /** The words of one song, in time with it. */
 @Composable
-private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, playing: Boolean, following: Boolean) {
+private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyrics, song: String?, playing: Boolean, following: Boolean) {
     val lyrics = found.lyrics
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
@@ -193,7 +217,10 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
     val lively = !reduceMotion()
     LaunchedEffect(playing, live, sweep, lively, clock, following) {
         if (!following) return@LaunchedEffect
-        var step = clock.at(vm.positionMs, sweep, lively, force = true)
+        // Only this song's playhead: the player moves on a frame before the page does, and the next
+        // song's first second read here put these words back before their first line - scrolled to
+        // the top in one frame as they began to fade out.
+        var step = clock.at(vm.positionIn(song) ?: return@LaunchedEffect, sweep, lively, force = true)
         frame = LyricsClock.frame(step)
         shownMs = clock.shownMs()
         lastMs[0] = shownMs
@@ -204,7 +231,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
             // Display frames while the fill moves; asleep between words and after a line is sung, when
             // nothing would be drawn anyway.
             if (sweep && !LyricsClock.still(step)) repeat(wait) { withFrameMillis { } } else delay(wait.toLong())
-            step = clock.at(vm.positionMs, sweep, lively, force = false)
+            step = clock.at(vm.positionIn(song) ?: break, sweep, lively, force = false)
             if (LyricsClock.redraw(step)) {
                 frame = LyricsClock.frame(step)
                 shownMs = clock.shownMs()
@@ -333,13 +360,32 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                     // in first was the one-frame jump of a nearly sung line to fully lit.
                     val held = remember(lyrics) { FloatArray(2) }
                     val sungNow = sweep && i == active
+                    // A line left before its last word was done (the next one takes over half a change
+                    // early) fills the rest in over that change rather than staying part lit as it dims:
+                    // a line that has been sung is sung to its end, and never in one frame.
+                    val rest = remember(lyrics) { Array(2) { Animatable(-1f) } }
+                    LaunchedEffect(sungNow, lyrics) {
+                        if (sungNow) { rest.forEach { it.snapTo(-1f) }; return@LaunchedEffect }
+                        if (!sweep) return@LaunchedEffect
+                        coroutineScope {
+                            for ((k, full) in listOf(line.text.length.toFloat(), line.backing.length.toFloat()).withIndex()) {
+                                val from = held[k]
+                                if (from <= 0f || from >= full) continue
+                                launch {
+                                    rest[k].snapTo(from)
+                                    if (plain) rest[k].snapTo(full) else rest[k].animateTo(full, androidx.compose.animation.core.tween(glideMs, easing = LyricEase))
+                                    held[k] = full
+                                }
+                            }
+                        }
+                    }
                     when {
                         !lyrics.synced -> LookText(line.text, bright, style = style, textAlign = align)
                         else -> SungText(
                             line.text, if (sweep) line.words else emptyList(), style.copy(fontWeight = weight), bright, align, sweep && lively, level,
                             when {
                                 sungNow -> { { LyricsClock.sung(frame).also { held[0] = it } } }
-                                sweep -> { { held[0] } }
+                                sweep -> { { rest[0].value.takeIf { it >= 0f } ?: held[0] } }
                                 // Timed by the line only: the line lit is lit whole.
                                 else -> WHOLE
                             },
@@ -355,7 +401,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
                                 line.backing, if (sweep) line.backingWords else emptyList(), backingStyle, translated, align, sweep && lively, level,
                                 when {
                                     sungNow -> { { backingSung.also { held[1] = it } } }
-                                    sweep -> { { held[1] } }
+                                    sweep -> { { rest[1].value.takeIf { it >= 0f } ?: held[1] } }
                                     else -> WHOLE
                                 },
                                 moment, peek, Modifier.padding(top = 2.dp),
@@ -434,19 +480,25 @@ private fun LyricsHeader(vm: PlayerViewModel, actions: ActionsViewModel, song: d
                 // flight is the sheet's, out of the now playing bar, or the panel's, out of the sleeve.
                 .graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f },
         ) {
-            Cover(vm.cover(song?.coverArt, CoverSize.ROW), 64.dp, radius = 9.dp)
+            // Another album's cover cross-fades in: one already kept in memory was drawn at once, and one
+            // still to come left the old picture for an empty plate in one frame.
+            FrameCrossfade(song?.coverArt, HEADER_FADE) { art -> Cover(vm.cover(art, CoverSize.ROW), 64.dp, radius = 9.dp) }
         }
         androidx.compose.runtime.DisposableEffect(sheet) { onDispose { sheet.panelCover = androidx.compose.ui.geometry.Rect.Zero } }
-        Column(Modifier.weight(1f)) {
-            val look = LocalLook.current
-            LookText(
-                song?.title ?: "", { look.color(CoverLook.ON) }, Modifier.readable(), style = MaterialTheme.typography.titleMedium,
-                maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            )
-            LookText(
-                song?.artist ?: "", { look.color(CoverLook.ON_60) }, style = MaterialTheme.typography.bodySmall,
-                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            )
+        // The title and artist change with the song, cross-faded as the player page's are: swapped in
+        // one frame, the new title sat over the last song's words for the frames before they faded.
+        FrameCrossfade(song, HEADER_FADE, Modifier.weight(1f), key = { it?.id }) { s ->
+            Column(Modifier.fillMaxWidth()) {
+                val look = LocalLook.current
+                LookText(
+                    s?.title ?: "", { look.color(CoverLook.ON) }, Modifier.readable(), style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                LookText(
+                    s?.artist ?: "", { look.color(CoverLook.ON_60) }, style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
         }
         song?.let { s ->
             val starred = marks.effectiveStar(dev.nori.music.data.StarKind.SONG, s.id, s.starred)

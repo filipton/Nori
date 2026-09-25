@@ -21,8 +21,14 @@ import java.nio.ByteBuffer
 internal object RustDecoderJni {
     init { System.loadLibrary("norimusic") }
 
-    /** The codec number for [mime], or 0 when the platform's own decoder should take the stream. */
-    @JvmStatic external fun takes(mime: String, codecs: String?, channels: Int, chipTakesIt: Boolean): Int
+    /** The codec number for [mime] at [rate] Hz, or 0 when the platform's own decoder should take the stream. */
+    @JvmStatic external fun takes(mime: String, codecs: String?, channels: Int, rate: Int, chipTakesIt: Boolean): Int
+    /**
+     * An AAC stream that says AAC-LC at 24 kHz or less: HE-AAC whose SBR is signalled only inside the
+     * stream (a station's AAC+ over ADTS), in all likelihood. The platform's decoder plays it at its real
+     * rate; the audio chip would be set up for AAC-LC at half of it.
+     */
+    @JvmStatic external fun implicitSbr(mime: String, codecs: String?, rate: Int): Boolean
     /** [takes] for a stream split by the platform's MediaExtractor (measuring ahead), whose setup data differs for some codecs. */
     @JvmStatic external fun takesExtracted(mime: String, codecs: String?, channels: Int): Int
     /** [delayKnown]: the stream states its encoder delay (an MP3's LAME header), which media3 trims. */
@@ -176,14 +182,14 @@ class RustAudioRenderer(handler: Handler?, listener: AudioRendererEventListener?
     override fun supportsFormatInternal(format: Format): Int {
         val mime = format.sampleMimeType ?: return C.FORMAT_UNSUPPORTED_TYPE
         val chip = runCatching { sink.getFormatOffloadSupport(format).isFormatSupported }.getOrDefault(false)
-        if (RustDecoderJni.takes(mime, format.codecs, format.channelCount, chip) == 0) return C.FORMAT_UNSUPPORTED_SUBTYPE
+        if (RustDecoderJni.takes(mime, format.codecs, format.channelCount, format.sampleRate, chip) == 0) return C.FORMAT_UNSUPPORTED_SUBTYPE
         if (format.cryptoType != C.CRYPTO_TYPE_NONE) return C.FORMAT_UNSUPPORTED_DRM
         if (!sinkSupportsFormat(Util.getPcmFormat(encoding(), format.channelCount, format.sampleRate))) return C.FORMAT_UNSUPPORTED_SUBTYPE
         return C.FORMAT_HANDLED
     }
 
     override fun createDecoder(format: Format, cryptoConfig: CryptoConfig?): RustAudioDecoder {
-        val codec = RustDecoderJni.takes(format.sampleMimeType.orEmpty(), format.codecs, format.channelCount, false)
+        val codec = RustDecoderJni.takes(format.sampleMimeType.orEmpty(), format.codecs, format.channelCount, format.sampleRate, false)
         return RustAudioDecoder(format, codec, encoding() == C.ENCODING_PCM_FLOAT)
     }
 

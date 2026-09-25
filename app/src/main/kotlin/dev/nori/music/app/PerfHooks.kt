@@ -14,6 +14,9 @@ object PerfHooks {
 
         /** The Performance page: what was recorded, the report to share and the benchmarks. */
         @Composable fun Page()
+
+        /** The lyrics of song [songId] went up on the player's lyrics panel: for the invariant watch. */
+        fun lyricsShown(songId: String) {}
     }
 
     @Volatile var recorder: Recorder? = null

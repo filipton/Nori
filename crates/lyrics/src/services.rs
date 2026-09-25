@@ -237,6 +237,42 @@ fn alike(a: &str, b: &str) -> bool {
     !x.is_empty() && !y.is_empty() && (x.contains(&y) || y.contains(&x))
 }
 
+/// Whether every letter of `v` is Latin (or not a letter): two titles in the same script can be compared.
+fn latin(v: &str) -> bool {
+    v.chars().all(|c| !c.is_alphabetic() || c <= '\u{024F}')
+}
+
+/// A length written as a clock ("5:54.320", "3:05"), in seconds; 0 when it is not one.
+fn clock_seconds(v: &str) -> f64 {
+    let mut total = 0.0;
+    for part in v.trim().split(':') {
+        let Ok(n) = part.trim().parse::<f64>() else { return 0.0 };
+        total = total * 60.0 + n;
+    }
+    total
+}
+
+/// Whether the song an answer names, where it names one (`title`, `artist` and a length under the usual
+/// keys), is this one. A service that searches loosely on its own side answers with the nearest song it
+/// has, which is another song by the same artist as often as not: its title must be this one's. A title
+/// in another script than the song's (a Japanese title for a romanised one) is let through on the
+/// artist alone. An answer that names nothing passes.
+fn names_this(meta: &Value, song: &Song) -> bool {
+    let first = |keys: &[&str]| keys.iter().find_map(|k| text(meta, k));
+    let length = ["duration", "durationMs", "totalDuration", "length"].iter().map(|k| match meta.get(*k) {
+        Some(Value::String(v)) if v.contains(':') => clock_seconds(v),
+        _ => num(meta, k),
+    });
+    if length.into_iter().find(|d| *d > 0.0).is_some_and(|d| !same_length(d, song)) {
+        return false;
+    }
+    let title = clean(&song.title);
+    let title_fits = first(&["title", "song", "trackName", "track_name", "name"]).is_none_or(|t| alike(t, &title) || alike(t, &song.title));
+    let artist_fits = first(&["artist", "artistName", "artist_name"]).is_none_or(|a| alike(a, &song.artist));
+    let named = first(&["title", "song", "trackName", "track_name", "name"]).unwrap_or_default();
+    title_fits || (artist_fits && !(latin(named) && latin(&song.title)))
+}
+
 /// The `name` of every object in the array `k` (a song's artists).
 fn names(o: &Value, k: &str) -> Vec<String> {
     o.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.get("name")?.as_str().map(str::to_string)).collect()).unwrap_or_default()
@@ -339,7 +375,7 @@ async fn unison(a: &Ask<'_>, song: &Song) -> Asked<Lookup> {
     }
     let Some(d) = o.get("data").filter(|d| d.is_object()) else { return Ok(Lookup::Missing) };
     let Some(words) = text(d, "lyrics") else { return Ok(Lookup::Missing) };
-    if !truthy(&o, "success") || !same_length(num(d, "duration"), song) {
+    if !truthy(&o, "success") || !same_length(num(d, "duration"), song) || !names_this(d, song) {
         return Ok(Lookup::Missing);
     }
     Ok(found(if s(d, "format").eq_ignore_ascii_case("ttml") { formats::from_ttml(words) } else { lyrics::from_lrc(words) }))
@@ -587,7 +623,7 @@ async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
     let mut misses = 0;
     let first = *LYRICS_PLUS_HOST.lock();
     if let Some(host) = first {
-        match lyrics_plus_from(a, host, &query).await {
+        match lyrics_plus_from(a, host, &query, song).await {
             Lookup::Found(l) => return Lookup::Found(l),
             Lookup::Missing => misses += 1,
             Lookup::Failed => {}
@@ -595,7 +631,7 @@ async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
     }
     let query = query.as_str();
     let mut asking: FuturesUnordered<_> =
-        LYRICS_PLUS_HOSTS.into_iter().filter(|h| Some(*h) != first).map(|host| async move { (host, lyrics_plus_from(a, host, query).await) }).collect();
+        LYRICS_PLUS_HOSTS.into_iter().filter(|h| Some(*h) != first).map(|host| async move { (host, lyrics_plus_from(a, host, query, song).await) }).collect();
     while let Some((host, answer)) = asking.next().await {
         match answer {
             Lookup::Found(l) => {
@@ -614,10 +650,16 @@ async fn lyrics_plus(a: &Ask<'_>, song: &Song) -> Lookup {
     }
 }
 
-async fn lyrics_plus_from(a: &Ask<'_>, host: &str, query: &str) -> Lookup {
+/// One LyricsPlus server's answer. It says which song it found (`metadata`: title, artist,
+/// totalDuration), and one that is not this song is a miss: the servers search their catalogues loosely.
+async fn lyrics_plus_from(a: &Ask<'_>, host: &str, query: &str, song: &Song) -> Lookup {
     match a.get(&format!("{host}/v2/lyrics/get?{query}"), &[]).await {
         // A server that has gone answers with somebody's web page, not with JSON: that is not a miss.
         Ok(body) if !body.trim_start().starts_with('{') => Lookup::Failed,
+        Ok(body) if parse(&body).ok().and_then(|v| v.get("metadata").cloned()).is_some_and(|m| !names_this(&m, song)) => {
+            alog::info("LYRICS_PLUS answered with another song: a miss");
+            Lookup::Missing
+        }
         Ok(body) => found(answers::from_lyricsplus(&body)),
         Err(Fail::Status(404)) => Lookup::Missing,
         Err(_) => Lookup::Failed,
@@ -850,6 +892,30 @@ pub(crate) mod tests {
         assert!(same_length(0.0, &s) && same_length(f64::NAN, &s), "unknown passes");
         assert_eq!(base64(b"hello"), "aGVsbG8=");
         assert_eq!(bearer("Bearer  k "), "Bearer k");
+    }
+
+    #[test]
+    fn an_answer_naming_another_song_is_not_this_ones() {
+        let s = song();
+        assert!(names_this(&json!({"title": "Glass Harbour", "artist": "The Lanterns", "totalDuration": "3:59.320"}), &s));
+        assert!(names_this(&json!({}), &s), "an answer that names nothing passes");
+        assert!(!names_this(&json!({"title": "Whisky on the Table", "artist": "The Lanterns"}), &s), "the same artist's other song");
+        assert!(!names_this(&json!({"title": "Glass Harbour", "totalDuration": "5:54.320"}), &s), "another cut");
+        assert!(names_this(&json!({"title": "ガラスの港", "artist": "The Lanterns"}), &s), "a title in another script: the artist decides");
+        assert!(!names_this(&json!({"title": "ガラスの港", "artist": "Someone Else"}), &s));
+        assert_eq!(clock_seconds("5:54.320"), 354.32);
+    }
+
+    #[test]
+    fn lyrics_plus_with_another_songs_words_is_a_miss() {
+        let web = Web::default();
+        let body = include_str!("../testdata/lyricsplus.json").replace(r#""source":"Apple","#, r#""source":"Apple","title":"Whisky on the Table","artist":"The Lanterns","#);
+        web.answer("https://lyricsplus", 200, &body);
+        assert_eq!(asking(&web, LyricsService::LyricsPlus), Lookup::Missing);
+        let web = Web::default();
+        let body = include_str!("../testdata/lyricsplus.json").replace(r#""source":"Apple","#, r#""source":"Apple","title":"Glass Harbour","artist":"The Lanterns","totalDuration":"3:59.000","#);
+        web.answer("https://lyricsplus", 200, &body);
+        assert!(matches!(asking(&web, LyricsService::LyricsPlus), Lookup::Found(_)));
     }
 
     #[test]

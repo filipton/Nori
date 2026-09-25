@@ -103,7 +103,17 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
     for class in CLASSES {
         register(&mut env, class);
     }
+    watch();
     JNI_VERSION_1_6
+}
+
+/// The engine tells the perf build's invariant watch what each wake of its thread saw
+/// (nori_engine::watch, nori_perf::invariants): asked of an atomic per wake, and only while it is on.
+fn watch() {
+    nori_engine::watch::install(nori_engine::watch::Hook {
+        wanted: nori_perf::invariants::on,
+        seen: |s| nori_perf::invariants::engine_seen(s.now_ms, s.playing, s.offloaded, s.index, s.position_ms, s.in_output_ms),
+    });
 }
 
 /// This thread's JNIEnv, the thread attached to the JVM under its own name ("nori-track", "nori-load")

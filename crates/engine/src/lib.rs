@@ -7,6 +7,7 @@
 //! No JNI, no uniffi, no platform code: what plays is `nori_player::pipeline`, the same code the
 //! Android app's behaviour is tested against.
 
+pub mod clock;
 pub mod demux;
 mod engine;
 pub mod library;
@@ -17,6 +18,7 @@ pub mod pieces;
 pub mod source;
 pub mod store;
 pub mod wav;
+pub mod watch;
 
 #[cfg(feature = "core")]
 pub mod core;
@@ -24,6 +26,7 @@ pub mod core;
 #[cfg(test)]
 mod no_alloc;
 
+pub use clock::{Clock, Monotonic};
 pub use engine::{Config, Engine, Event, OutputFacts, Settings, State, Status};
 pub use offload::{Coded, Coding, OffloadOutput, OnCpu, Support};
 pub use library::{Library, Located, Source, Sources};

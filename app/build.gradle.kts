@@ -80,6 +80,11 @@ android {
     sourceSets {
         getByName("debug").kotlin.srcDir("src/bench/kotlin")
         getByName("perf").kotlin.srcDir("src/bench/kotlin")
+        // The self test's plain logic (no Android in it): built into the perf build, and tested on the JVM
+        // with the unit tests, which AGP runs for the debug build only.
+        getByName("perf").kotlin.srcDir("src/perf/logic")
+        getByName("test").kotlin.srcDir("src/perf/logic")
+        getByName("test").kotlin.srcDir("src/testPerf/kotlin")
     }
 
     compileOptions {
@@ -109,4 +114,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons)
+    // The perf build's self test: its plain logic is tested on the JVM (src/testPerf).
+    testImplementation("junit:junit:4.13.2")
 }

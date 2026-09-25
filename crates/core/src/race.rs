@@ -104,7 +104,7 @@ pub(crate) mod tests {
     fn a_hit_is_kept_in_the_response_cache_and_a_search_is_ranked_by_length() {
         let (c, fake) = setup();
         fake.answer(r#"{"statusCode":404,"message":"not found"}"#);
-        fake.answer(r#"[{"duration":1000,"syncedLyrics":"[00:01.00]far"},{"duration":1026,"plainLyrics":"close plain"},{"duration":1022,"syncedLyrics":"[00:02.00]close synced"}]"#);
+        fake.answer(r#"[{"duration":1000,"syncedLyrics":"[00:01.00]far"},{"duration":1026,"plainLyrics":"close plain"},{"duration":1022,"syncedLyrics":"[00:02.00]close synced\n[01:00.00]you gotta be crazy\n[02:00.00]you gotta have a real need\n[03:00.00]you gotta sleep on your toes"}]"#);
         let got = run(&c, &song(), true, false, &lrclib());
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].origin, got[0].lyrics.lines[0].text.as_str()), (LyricsOrigin::Lrclib, "close synced"));
