@@ -12,7 +12,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use jni::objects::{GlobalRef, JClass, JObjectArray, JStaticMethodID, JString, JValue};
+use jni::objects::{GlobalRef, JByteArray, JClass, JObjectArray, JStaticMethodID, JString, JValue};
+use jni::sys::{jboolean, jint, jlong};
 use jni::signature::{Primitive, ReturnType};
 use jni::{JNIEnv, JavaVM};
 use nori_engine::core::{key_format, Measurer, Shelf, Whole};
@@ -27,6 +28,9 @@ pub(crate) static CLASS: Class = Class {
         native!(c"update", c"()V", update),
         native!(c"arrived", c"()V", arrived),
         native!(c"stop", c"()V", stop),
+        native!(c"downloadOpen", c"(Ljava/lang/String;)J", download_open),
+        native!(c"downloadTake", c"(J[BI)V", download_take),
+        native!(c"downloadEnd", c"(JZ)V", download_end),
     ],
 };
 
@@ -162,3 +166,51 @@ extern "system" fn stop() {
         m.ask(Vec::new());
     }
 }
+
+// ---- a download measured as it comes ----
+
+/// What hears a download's bytes as media3 writes them (Kotlin's `MeasuringSink`), from the first: with
+/// AutoMix on, a song downloaded for offline listening is measured as it downloads (nori-engine's
+/// `measure_as_it_comes`, the same as a song fetched ahead), so no later mix needs a pass of its own.
+/// A handle, 0 when nothing is measured (AutoMix off, the song measured already, not a download's key).
+extern "system" fn download_open(env: JNIEnv, _: JClass, key: JString) -> jlong {
+    let Some(key) = crate::string(&env, &key) else { return 0 };
+    let Some(id) = key.strip_prefix("dl:") else { return 0 };
+    let hint = nori_core::queue::queue_song(id.to_string()).map(|s| s.suffix).filter(|s| !s.is_empty());
+    match nori_engine::core::measure_as_it_comes(id, hint.as_deref(), true) {
+        Some(t) => Box::into_raw(Box::new(t)) as jlong,
+        None => 0,
+    }
+}
+
+/// The next `len` bytes of the download, from Kotlin's buffer: a quarter megabyte at a time.
+extern "system" fn download_take(mut env: JNIEnv, _: JClass, h: jlong, bytes: JByteArray, len: jint) {
+    if h == 0 || len <= 0 {
+        return;
+    }
+    // SAFETY: a handle download_open made and download_end has not taken back.
+    let taker = unsafe { &mut *(h as *mut Box<dyn nori_engine::arriving::Taker>) };
+    let mut buf = std::mem::take(&mut *BUF.lock());
+    buf.resize(len as usize, 0);
+    // SAFETY: i8 and u8 have the same size and alignment.
+    let into = unsafe { std::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut i8, buf.len()) };
+    if env.get_byte_array_region(&bytes, 0, into).is_ok() {
+        taker.take(&buf);
+    } else {
+        cleared(&mut env);
+    }
+    *BUF.lock() = buf;
+}
+
+/// The download ended: `whole` when every byte came and was kept. The handle is gone after this.
+extern "system" fn download_end(_: JNIEnv, _: JClass, h: jlong, whole: jboolean) {
+    if h == 0 {
+        return;
+    }
+    // SAFETY: a handle download_open made, taken back once.
+    let taker = unsafe { Box::from_raw(h as *mut Box<dyn nori_engine::arriving::Taker>) };
+    taker.end(whole != 0);
+}
+
+/// The copy of a download's bytes handed over, kept between calls: nothing is allocated per piece.
+static BUF: Mutex<Vec<u8>> = Mutex::new(Vec::new());

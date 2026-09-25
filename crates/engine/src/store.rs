@@ -109,6 +109,8 @@ struct Held {
     limit: u64,
     /// Keys an entry is being written for now: one writer each, or the second truncates the first's file.
     writing: HashSet<String>,
+    /// Keys whose half-written entry the fetching ahead left for the player to go on with.
+    left: HashSet<String>,
 }
 
 /// The songs on disk. Shared by the engine's loaders, the downloader and whatever measures songs ahead.
@@ -117,9 +119,10 @@ pub struct Store {
     order: Box<dyn Order>,
     held: Mutex<Held>,
     /// The songs fetched ahead of their turn ([`Store::fetch_ahead`]).
-    pub(crate) ahead: crate::ahead::Ahead,
+    pub(crate) ahead: Arc<crate::ahead::Ahead>,
     /// Told whenever a streamed song has become whole in the cache ([`Store::on_whole`]).
     whole: Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    me: std::sync::Weak<Store>,
 }
 
 impl Store {
@@ -127,14 +130,33 @@ impl Store {
     pub fn open(dir: impl Into<PathBuf>, limit: u64, order: Box<dyn Order>) -> io::Result<Arc<Store>> {
         let dir = dir.into();
         fs::create_dir_all(dir.join(STREAM))?;
+        // What an earlier run left half written is nobody's to go on with now.
+        if let Ok(entries) = fs::read_dir(dir.join(STREAM)) {
+            for e in entries.flatten() {
+                if e.file_name().to_str().is_some_and(|n| n.ends_with(PART)) {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
         fs::create_dir_all(dir.join(DOWNLOADS))?;
-        Ok(Arc::new(Store { dir, order, held: Mutex::new(Held { bytes: None, limit, writing: HashSet::new() }), ahead: Default::default(), whole: Mutex::new(Vec::new()) }))
+        Ok(Arc::new_cyclic(|me| Store {
+            dir,
+            order,
+            held: Mutex::new(Held { bytes: None, limit, writing: HashSet::new(), left: HashSet::new() }),
+            ahead: crate::ahead::Ahead::new(),
+            whole: Mutex::new(Vec::new()),
+            me: me.clone(),
+        }))
     }
 
     /// `told` hears of every streamed song that becomes whole in the cache from now on, on the thread
     /// that wrote its last bytes: what measures songs ahead looks again then, never by polling.
     pub fn on_whole(&self, told: Box<dyn Fn() + Send + Sync>) {
         self.whole.lock().push(told);
+    }
+
+    fn me(&self) -> Option<Arc<Store>> {
+        self.me.upgrade()
     }
 
     fn stream_path(&self, key: &str) -> PathBuf {
@@ -180,17 +202,31 @@ impl Store {
     /// another writer has it (the player loading the song the precacher is fetching, or the other way
     /// round): the one there first keeps it.
     pub fn writer(self: &Arc<Self>, key: &str) -> Option<Writer> {
-        if !self.held.lock().writing.insert(key.to_string()) {
-            return None;
-        }
+        let resume = {
+            let mut h = self.held.lock();
+            if !h.writing.insert(key.to_string()) {
+                return None;
+            }
+            h.left.remove(key)
+        };
         let mut part = self.stream_path(key).into_os_string();
         part.push(PART);
         let part = PathBuf::from(part);
-        let Ok(file) = File::create(&part) else {
+        // Taken up where the fetching ahead left it for the player; anything else starts again.
+        let opened = if resume { fs::OpenOptions::new().append(true).open(&part).and_then(|f| Ok((f.metadata()?.len(), f))) } else { File::create(&part).map(|f| (0, f)) };
+        let Ok((at, file)) = opened.or_else(|_| File::create(&part).map(|f| (0, f))) else {
             self.held.lock().writing.remove(key);
             return None;
         };
-        Some(Writer { store: self.clone(), key: key.to_string(), part, file: Some(file), at: 0 })
+        Some(Writer { store: self.clone(), key: key.to_string(), part, file: Some(file), at })
+    }
+
+    /// The player's entry for `key`, as it loads the song: one the fetching ahead is writing is handed
+    /// over where it got to (see [`crate::ahead::Ahead::take_over`]), which may wait for a chunk of it,
+    /// so this is asked on the loader's own thread.
+    pub fn writer_for_player(self: &Arc<Self>, key: &str) -> Option<Writer> {
+        self.ahead.take_over(key);
+        self.writer(key)
     }
 
     /// Whether an entry for `key` is being written now.
@@ -201,8 +237,8 @@ impl Store {
     /// Fetches `songs` (address and cache key, in order) whole into the stream cache ahead of their
     /// turn, one after another through `bytes`, each in one go; see [`crate::ahead`]. Called again, the
     /// new list replaces the old one; an empty one stops the fetching.
-    pub fn fetch_ahead(self: &Arc<Self>, bytes: Arc<dyn crate::source::ByteSource>, songs: Vec<(String, String)>) {
-        self.ahead.ask(self, bytes, songs);
+    pub fn fetch_ahead(self: &Arc<Self>, bytes: Arc<dyn crate::source::ByteSource>, songs: Vec<crate::ahead::AheadSong>, takers: Option<crate::ahead::Takers>) {
+        self.ahead.ask(self.clone(), bytes, songs, takers);
     }
 
     /// Whether songs are being fetched ahead now: for a test to wait until they are.
@@ -342,6 +378,62 @@ impl Writer {
     /// Where it has got to.
     pub fn written(&self) -> u64 {
         self.at
+    }
+
+    /// What it holds so far: for a loader that goes on with an entry the fetching ahead began.
+    pub fn read_back(&mut self) -> io::Result<Vec<u8>> {
+        if let Some(f) = self.file.as_mut() {
+            f.flush()?;
+        }
+        let bytes = fs::read(&self.part)?;
+        if bytes.len() as u64 != self.at {
+            return Err(io::Error::other("the entry is not what it was"));
+        }
+        Ok(bytes)
+    }
+
+    /// Left half way for the player to go on with: the part stays, and the next writer takes it up.
+    pub fn leave(mut self) {
+        let Some(mut f) = self.file.take() else { return };
+        if f.flush().is_err() {
+            return;
+        }
+        self.store.held.lock().left.insert(self.key.clone());
+        self.part = PathBuf::new();
+    }
+}
+
+impl crate::ahead::Keeping for Store {
+    fn kept(&self, key: &str) -> bool {
+        self.peek(key).is_some()
+    }
+
+    fn busy(&self, key: &str) -> bool {
+        self.writing(key)
+    }
+
+    fn entry(&self, key: &str) -> Option<Box<dyn crate::ahead::Entry>> {
+        // The trait asks through a plain reference; the store is always held in an Arc.
+        let me = self.me()?;
+        me.writer(key).map(|w| Box::new(w) as Box<dyn crate::ahead::Entry>)
+    }
+}
+
+impl crate::ahead::Entry for Writer {
+    fn write(&mut self, from: u64, bytes: &[u8]) -> bool {
+        Writer::write(self, from, bytes)
+    }
+
+    fn written(&self) -> u64 {
+        self.at
+    }
+
+    fn finish(self: Box<Self>, len: u64) -> bool {
+        Writer::finish(*self, len)
+    }
+
+    fn leave(self: Box<Self>) {
+        Writer::leave(*self)
     }
 }
 

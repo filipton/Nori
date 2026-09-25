@@ -5,7 +5,9 @@
 //!   and MixRamp points), streamed: from a whole song decoded ahead (nori-engine's measurer) or from the PCM the
 //!   player already decodes (the transition engine's tap). The `track_analysis` table is nori-automix's.
 //! - `beats` (+ `neural` with the `neural-beats` feature): Beat This!, an optional neural beat tracker, run over the
-//!   first and last 30 s of a song; its grids replace the classical intro and outro grids where it is sure.
+//!   first and last 30 s of a song; its grids replace the classical intro and outro grids where it is sure. Its
+//!   network ships as a graph without weights; `weights` fills it from the authors' checkpoint, read by
+//!   `checkpoint` (a zip and a restricted unpickler).
 //! - `plan`: a pure function from two analyses and the user's settings to a `TransitionPlan`.
 //! - `mixer` and `stretch`: per-buffer building blocks that render a plan (gain curves, bass swap, filter
 //!   sweeps, vocal duck, echo; time-stretch of the incoming track).
@@ -13,6 +15,8 @@
 
 pub mod analysis;
 pub mod beats;
+#[cfg(any(test, feature = "neural-beats"))]
+pub mod checkpoint;
 pub mod loudness;
 pub mod mixer;
 #[cfg(feature = "neural-beats")]
@@ -22,6 +26,8 @@ pub mod resample;
 pub mod stretch;
 pub mod structure;
 pub mod tempo;
+#[cfg(feature = "neural-beats")]
+pub mod weights;
 
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;

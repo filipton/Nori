@@ -291,8 +291,7 @@ fun SettingsGroupScreen(vm: SettingsViewModel, id: String, highlight: String = "
 @Composable
 private fun TextSettingDialog(row: SettingRow.Text, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var text by remember(row.name) { mutableStateOf(row.value) }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
+    AlertCard(
         title = { Text(row.title) },
         text = {
             Column {
@@ -316,7 +315,7 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
     val p by vm.prefs.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ServerProfile?>(null) }
     var asking by remember { mutableStateOf<Pair<String, dev.nori.music.app.vm.ActionAsk>?>(null) }
-    editing?.let { e -> androidx.compose.ui.window.Dialog({ editing = null }, androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) { LoginScreen(vm, e) { editing = null } } }
+    NoriDialog(editing, { editing = null }, DialogStyle.Page) { e -> LoginScreen(vm, e) { editing = null } }
     val act: (String) -> Unit = { action ->
         when (action) {
             "equalizer" -> nav.equalizer()
@@ -336,9 +335,8 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
             }
         }
     }
-    asking?.let { (action, ask) ->
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { asking = null },
+    NoriDialog(asking, { asking = null }) { (action, ask) ->
+        AlertCard(
             title = { Text(ask.title) },
             text = { Text(ask.text) },
             confirmButton = { TextButton({ vm.act(action); asking = null }) { Text(ask.confirm) } },
@@ -363,7 +361,7 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
     // Once the core's order is the one shown, the drag is over.
     drag?.let { d -> if (!d.active && d.shown == order) androidx.compose.runtime.SideEffect { drag = null } }
     var typing by remember { mutableStateOf<SettingRow.Text?>(null) }
-    typing?.let { row -> TextSettingDialog(row, { typing = null }) { v -> vm.set(row.name, v); typing = null } }
+    NoriDialog(typing, { typing = null }) { row -> TextSettingDialog(row, { typing = null }) { v -> vm.set(row.name, v); typing = null } }
     Section(section.title) {
         // Each row under a key of its own, so a ranked row moved in the core's order is the same row, its
         // glide and lift carried with it: keyed inside the `when` instead, a moved row began again from

@@ -35,16 +35,13 @@ import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Radio
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -84,7 +81,8 @@ private fun Item(text: String, icon: ImageVector? = null, onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SongMenu(
-    song: Song,
+    /** The song the menu is for; null closes it (it slides away showing the last one). */
+    song: Song?,
     actions: ActionsViewModel,
     onDismiss: () -> Unit,
     /**
@@ -95,20 +93,22 @@ fun SongMenu(
     player: dev.nori.music.app.vm.PlayerViewModel? = null,
 ) {
     val nav = LocalNav.current
-    val downloads by actions.downloads.collectAsState()
-    var picking by remember { mutableStateOf(false) }
-    var details by remember { mutableStateOf(false) }
-    var sleeping by remember { mutableStateOf(false) }
-    // Declared above the branches below so that the rarely-used half of the menu is still open when
-    // one comes back from the playlist picker or the details dialog having second-guessed a tap.
-    var more by remember { mutableStateOf(false) }
-    if (sleeping && player != null) { SleepMenu(player) { sleeping = false; onDismiss() }; return }
-    if (details) { TrackInfo(song) { details = false; onDismiss() }; return }
-    if (picking) { PlaylistPicker(listOf(song), actions) { picking = false; onDismiss() }; return }
+    // Which of the menu's stages is up, fresh each time the menu opens. The sheet slides down as the
+    // sleep choices, the details or the playlist picker come up over it, and each of those leaves with
+    // the menu when it is done.
+    val open = song != null
+    var picking by remember(open) { mutableStateOf(false) }
+    var details by remember(open) { mutableStateOf(false) }
+    var sleeping by remember(open) { mutableStateOf(false) }
+    NoriSheet(player?.takeIf { open && sleeping }, onDismiss) { p -> SleepChoices(p, onDismiss) }
+    NoriDialog(song?.takeIf { details }, onDismiss) { s -> TrackInfo(s, onDismiss) }
+    NoriDialog(song?.takeIf { picking }, onDismiss) { s -> PlaylistPicker(listOf(s), actions, onDismiss) }
 
     // A sheet with a half-open stage swallows the first back gesture to collapse itself, which reads
     // as the menu refusing to close. There is only ever one stage here, so back always dismisses.
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    NoriSheet(song?.takeIf { !picking && !details && !sleeping }, onDismiss) { song ->
+        val downloads by actions.downloads.collectAsState()
+        var more by remember { mutableStateOf(false) }
         Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
             // The track leads the sheet, the way the row it came from looked.
             Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -184,19 +184,16 @@ fun SongMenu(
 }
 
 /** The sleep choices on their own sheet, so the song's menu is not buried under eleven of them. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SleepMenu(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () -> Unit) {
+private fun SleepChoices(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () -> Unit) {
     val state by player.state.collectAsState()
-    ModalBottomSheet(onDismissRequest = onDone, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
-            SectionTitle(say.sleepTimer)
-            val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
-            // The choices are the core's (`menus::sleep_choices`); "Off" is all zeros.
-            val choices = remember(running) { dev.nori.music.ffi.library.sleepChoices(running) }
-            val words = remember(choices) { choices.map(say::sleepChoice) }
-            choices.forEachIndexed { n, c -> Item(words[n]) { player.sleep(c.minutes.toInt(), c.endOfTrack, c.songs.toInt()); onDone() } }
-        }
+    Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
+        SectionTitle(say.sleepTimer)
+        val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
+        // The choices are the core's (`menus::sleep_choices`); "Off" is all zeros.
+        val choices = remember(running) { dev.nori.music.ffi.library.sleepChoices(running) }
+        val words = remember(choices) { choices.map(say::sleepChoice) }
+        choices.forEachIndexed { n, c -> Item(words[n]) { player.sleep(c.minutes.toInt(), c.endOfTrack, c.songs.toInt()); onDone() } }
     }
 }
 
@@ -205,8 +202,7 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
     var playlists by remember { mutableStateOf<List<Playlist>?>(null) }
     var name by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { playlists = actions.playlists() }
-    AlertDialog(
-        onDismissRequest = onDone,
+    AlertCard(
         title = { Text(say.addToPlaylist) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
@@ -224,8 +220,8 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
 fun TrackInfo(song: Song, onDone: () -> Unit) {
     // Which rows there are, in what order and how each reads is nori-core's (`fmt::track_info`).
     val rows = remember(song) { say.trackInfo(song) }
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text(say.details) },
+    AlertCard(
+        title = { Text(say.details) },
         text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { (label, value) -> Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(value, Modifier.padding(bottom = 8.dp)) } } },
         confirmButton = { TextButton(onDone) { Text(say.close) } },
     )
@@ -235,9 +231,13 @@ fun TrackInfo(song: Song, onDone: () -> Unit) {
 @Composable
 fun SelectionBar(actions: ActionsViewModel) {
     val selection by actions.selection.collectAsState()
-    if (selection.isEmpty()) return
+    // Above the early return, so the picker can leave after the selection it cleared is gone.
     var picking by remember { mutableStateOf(false) }
-    if (picking) PlaylistPicker(selection, actions) { picking = false; actions.clearSelection() }
+    NoriDialog(selection.takeIf { picking && it.isNotEmpty() }, { picking = false }) { songs ->
+        PlaylistPicker(songs, actions) { picking = false; actions.clearSelection() }
+    }
+    LaunchedEffect(selection.isEmpty()) { if (selection.isEmpty()) picking = false }
+    if (selection.isEmpty()) return
     androidx.compose.material3.Surface(tonalElevation = 6.dp) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
             Text(remember(selection.size) { say.selected(selection.size) }, Modifier.weight(1f).padding(start = 8.dp))

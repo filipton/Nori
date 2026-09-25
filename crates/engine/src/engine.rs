@@ -171,6 +171,9 @@ pub struct Status {
     pub switching: bool,
     /// The sound chain is in the samples' path, and what its limiter took off the last buffer, dB.
     pub chain: bool,
+    /// The ear is on music the CPU made, playing through the engine's own output: the only time `chain`
+    /// says anything. Not while offloaded, let go, paused, or waiting for a song's bytes.
+    pub on_cpu: bool,
     pub gain_reduction_db: f32,
     /// The songs go to the output's own decoder (audio offload).
     pub offloaded: bool,
@@ -319,6 +322,7 @@ impl Engine {
             releases: 0,
             switching: false,
             chain: false,
+            on_cpu: false,
             gain_reduction_db: 0.0,
             offloaded: false,
             offload_wanted: false,
@@ -1753,6 +1757,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.position_ms = ms;
             s.at = Instant::now();
             s.switching = false;
+            s.on_cpu = false;
             return;
         }
         if self.released.is_some() {
@@ -1760,12 +1765,14 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             let mut s = self.status.lock();
             s.releases = self.releases;
             s.offloaded = false;
+            s.on_cpu = false;
             return;
         }
         if self.offloading() {
             return self.report_offload(now);
         }
         if self.p.current().is_none() {
+            self.status.lock().on_cpu = false;
             return;
         }
         let track = &self.p.sink.track;
@@ -1807,6 +1814,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.releases = self.releases;
             s.switching = self.switch_at.is_some();
             s.chain = self.p.sink.chain_in();
+            s.on_cpu = self.state == State::Playing && !self.stalled && !s.switching;
             s.gain_reduction_db = self.p.sink.meter_db;
             s.offloaded = false;
             was
@@ -1866,6 +1874,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.releases = self.releases;
             s.switching = self.switch_at.is_some();
             s.chain = false;
+            s.on_cpu = false;
             s.gain_reduction_db = 0.0;
             s.offloaded = true;
             was

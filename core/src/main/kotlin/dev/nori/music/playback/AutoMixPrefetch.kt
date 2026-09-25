@@ -1,6 +1,9 @@
 package dev.nori.music.playback
 
+import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSink
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.ContentMetadata
 import dalvik.annotation.optimization.CriticalNative
@@ -15,6 +18,68 @@ internal object MeasureJni {
     /** A song has become whole in one of the caches. */
     @JvmStatic @CriticalNative external fun arrived()
     @JvmStatic @CriticalNative external fun stop()
+    /** A download measured as it comes: a handle, 0 when nothing measures it (AutoMix off, measured already). */
+    @JvmStatic external fun downloadOpen(key: String): Long
+    @JvmStatic external fun downloadTake(h: Long, bytes: ByteArray, len: Int)
+    @JvmStatic external fun downloadEnd(h: Long, whole: Boolean)
+}
+
+/**
+ * A download's bytes, as media3 fetches them from the network, handed to the core's measuring
+ * (crates/android/src/measure.rs `download_*`, over nori-engine's `measure_as_it_comes`): with AutoMix on, a
+ * song downloaded for offline listening is measured as it downloads, on the same bytes, and no later mix
+ * needs a pass of its own. A quarter megabyte crosses at a time. Only a download fetched from its first byte
+ * to its known end counts as measured; one taken up half way is measured from the disk once it is queued.
+ */
+@UnstableApi
+internal class MeasuringSink(private val autoMix: () -> Boolean) : DataSink {
+    private var h = 0L
+    private var length = C.LENGTH_UNSET.toLong()
+    private var written = 0L
+    private var buffer: ByteArray? = null
+    private var filled = 0
+
+    override fun open(dataSpec: DataSpec) {
+        close()
+        length = dataSpec.length
+        written = 0
+        filled = 0
+        h = if (dataSpec.position == 0L && autoMix()) MeasureJni.downloadOpen(dataSpec.key ?: "") else 0L
+        if (h != 0L && buffer == null) buffer = ByteArray(PIECE)
+    }
+
+    override fun write(bytes: ByteArray, offset: Int, count: Int) {
+        if (h == 0L) return
+        val buf = buffer ?: return
+        var at = offset
+        var left = count
+        while (left > 0) {
+            val n = minOf(left, buf.size - filled)
+            System.arraycopy(bytes, at, buf, filled, n)
+            filled += n
+            at += n
+            left -= n
+            if (filled == buf.size) flush()
+        }
+        written += count
+    }
+
+    private fun flush() {
+        val buf = buffer ?: return
+        if (filled > 0) MeasureJni.downloadTake(h, buf, filled)
+        filled = 0
+    }
+
+    override fun close() {
+        if (h == 0L) return
+        flush()
+        MeasureJni.downloadEnd(h, length > 0 && written == length)
+        h = 0L
+    }
+
+    private companion object {
+        const val PIECE = 256 * 1024
+    }
 }
 
 /** What the measurer asks of the platform, from its own thread: where a song's bytes are, and that one was measured. */
@@ -35,7 +100,7 @@ internal object MeasureBridge {
  * The measuring is the core's: nori-engine's measurer (crates/android/src/measure.rs)
  * decodes each song once, whole, on a thread of the lowest priority, reading its files straight. This
  * only says where a song's bytes are in media3's caches, and when one has become whole: the caches'
- * own callbacks say so as the precacher or the player writes the last of it, so the song after the one
+ * own callbacks say so as the fetching ahead or the player writes the last of it, so the song after the one
  * playing is measured as soon as it is on the device, and nothing is ever measured while its bytes are
  * still coming. Nothing here touches the network.
  */

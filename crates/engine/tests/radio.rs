@@ -120,7 +120,7 @@ impl Read for Live {
 }
 
 impl ByteSource for Station {
-    fn open(&self, _: &str, _: u64) -> Result<Body, String> {
+    fn open(&self, _: &str, _: u64) -> Result<Body, nori_engine::OpenError> {
         Err("a live stream is opened live".into())
     }
 

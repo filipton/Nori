@@ -86,7 +86,7 @@ const ANDROID_CREDITS: [(&str, &str, &str, &str, Option<&str>); 6] = [
 
 /// The typeface and the data the app fetches from third parties (the core asks AutoEQ and the lyrics
 /// services, so any app on it credits them).
-const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 16] = [
+const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 17] = [
     ("Inter", "The typeface", "Copyright (c) 2016 The Inter Project Authors (Rasmus Andersson)", "OFL-1.1", Some("OFL-1.1")),
     ("AutoEQ", "Headphone correction curves: the list kept on Wi-Fi, a curve fetched when it is chosen", "Copyright (c) 2018 Jaakko Pasanen", "MIT", Some("MIT")),
     ("LRCLIB", "Timed lyrics for songs your server has none for, asked only when switched on", "lrclib.net; lyrics belong to their authors and contributors", "Service", None),
@@ -115,6 +115,13 @@ const DATA_CREDITS: [(&str, &str, &str, &str, Option<&str>); 16] = [
     ("Genius", "Untimed lyrics, asked last and only when switched on", "genius.com; lyrics belong to their authors", "Service", None),
     ("iTunes Search API", "Finding a song's Apple Music id for PaxSenix, asked only when switched on", "Apple Inc.", "Service", None),
     ("Apple Music", "Moving album covers, asked only when switched on", "Apple Inc.; the artwork belongs to its artists and labels", "Service", None),
+    (
+        "Beat This!",
+        "The neural beat tracker behind \"Better beat detection\": its network comes with the app, its weights from the authors' server when switched on",
+        "Copyright (c) 2024 Institute of Computational Perception, JKU Linz, Austria (Foscarin, Schlüter and Widmer)",
+        "MIT",
+        Some("MIT"),
+    ),
 ];
 
 fn credits(list: &[(&str, &str, &str, &str, Option<&str>)]) -> Vec<Credit> {
@@ -157,5 +164,7 @@ mod tests {
         assert_eq!((a.len(), a[0].name.as_str(), a[4].what.as_str()), (6, "AndroidX Media3", "Every network request"));
         let d = data_credits();
         assert_eq!((d[0].licence.as_str(), d[2].name.as_str(), d[2].file.as_deref()), ("OFL-1.1", "LRCLIB", None), "a service has no licence text");
+        let beats = d.iter().find(|c| c.name == "Beat This!").expect("the beat model's authors");
+        assert_eq!((beats.licence.as_str(), beats.file.as_deref()), ("MIT", Some("MIT")));
     }
 }

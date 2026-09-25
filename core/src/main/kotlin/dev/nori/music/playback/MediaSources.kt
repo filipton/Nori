@@ -3,15 +3,20 @@ package dev.nori.music.playback
 import android.content.Context
 import dalvik.annotation.optimization.FastNative
 import android.net.Uri
+import androidx.media3.common.C
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheEvictor
 import androidx.media3.datasource.cache.CacheSpan
 import androidx.media3.datasource.cache.ContentMetadata
+import androidx.media3.datasource.cache.ContentMetadataMutations
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
@@ -23,6 +28,7 @@ import dev.nori.music.net.Http
 import dev.nori.music.settings.Settings
 import dev.nori.music.settings.Quality
 import java.io.File
+import java.io.IOException
 
 /** The stream cache's keys and their order of use, kept in the core (crates/transfers/src/stream_cache.rs). */
 internal object StreamCacheJni {
@@ -153,28 +159,24 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     val streamCached: CacheDataSource.Factory = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
 
-    /**
-     * What the precacher writes through: the same, except that a stretch of a song the player is writing
-     * right then is waited for rather than fetched past the cache. The player loads the next song itself
-     * as the one before is whole, and the precacher, finding it locked, downloaded the rest of it a
-     * second time without keeping any of it.
-     */
-    val precaching: CacheDataSource.Factory = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(network)
-        .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR or CacheDataSource.FLAG_BLOCK_ON_CACHE)
-
     private val cached: DataSource.Factory = CacheDataSource.Factory()
         .setCache(downloadCache)
         .setCacheWriteDataSinkFactory(null)
         .setUpstreamDataSourceFactory(streamCached)
 
-    /** The songs to fetch ahead now, each with its address and key (`Client::precache_targets`). */
-    fun precacheTargets(): List<dev.nori.music.ffi.net.Fetch> = client.precacheTargets(http.metered)
-
-    /** Where the precacher reads [song] from, already resolved by the core. */
-    fun spec(song: dev.nori.music.ffi.net.Fetch): DataSpec {
-        applyStreamLimit()
-        return DataSpec.Builder().setUri(Uri.parse(song.url)).setKey(song.key).build()
-    }
+    /**
+     * Whether someone holds the first stretch of [key] the stream cache is missing: the player, loading it.
+     * Asked once per song fetched ahead, without waiting: the fetching ahead leaves such a song to the player,
+     * whose reads would otherwise go past a locked cache to the network a second time.
+     */
+    fun beingWritten(key: String): Boolean = runCatching {
+        val length = ContentMetadata.getContentLength(streamCache.getContentMetadata(key))
+        val from = if (length > 0) streamCache.getCachedLength(key, 0, length).coerceAtLeast(0) else 0L
+        if (length > 0 && from >= length) return@runCatching false
+        val span = streamCache.startReadWriteNonBlocking(key, from, if (length > 0) length - from else androidx.media3.common.C.LENGTH_UNSET.toLong()) ?: return@runCatching true
+        if (!span.isCached) streamCache.releaseHoleSpan(span)
+        false
+    }.getOrDefault(false)
 
     /**
      * A song's bytes from [from] on, at [url] under the cache key [key] as the core resolved them (the Rust
@@ -184,7 +186,49 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     fun openResolved(url: String, key: String, from: Long): Pair<DataSource, Long> {
         applyStreamLimit()
         val source = cached.createDataSource()
-        return source to source.open(DataSpec.Builder().setUri(Uri.parse(url)).setKey(key).setPosition(from).build())
+        try {
+            return source.open(DataSpec.Builder().setUri(Uri.parse(url)).setKey(key).setPosition(from).build()).let { source to it }
+        } catch (e: IOException) {
+            runCatching { source.close() }
+            val said = (if (from > 0) pastEnd(e) else null) ?: throw e
+            // A 416 that does not say the length (a proxy drops Content-Range): the first byte asked for
+            // alone, whose ranged answer does. Past the end, the server holds the finished transcode and
+            // serves ranges.
+            val whole = if (said >= 0) said else wholeLength(url).takeIf { it in 1..from } ?: -1
+            forgetEstimate(key, from, whole)
+            throw PastEnd(whole)
+        }
+    }
+
+    /** [url]'s whole length as the server says it in a ranged answer for its first byte; -1 when it does not. */
+    private fun wholeLength(url: String): Long = runCatching {
+        val source = network.createDataSource()
+        try {
+            source.open(DataSpec.Builder().setUri(Uri.parse(url)).setPosition(0).setLength(1).build())
+            val range = source.responseHeaders.entries.firstOrNull { it.key.equals("Content-Range", ignoreCase = true) }?.value?.firstOrNull()
+            range?.substringAfterLast('/')?.trim()?.toLongOrNull() ?: -1L
+        } finally {
+            source.close()
+        }
+    }.getOrDefault(-1L)
+
+    /**
+     * The stream cache's length for [key] made the real one, [whole] (-1 not known), once a range from
+     * [from] on turned out to start past the end. A transcode's first answer promises an estimated
+     * length, the cache keeps it, and a song kept with it never counts as whole and sends readers past
+     * its real end again; an unknown real length is dropped rather than kept wrong.
+     */
+    private fun forgetEstimate(key: String, from: Long, whole: Long) = runCatching {
+        val had = ContentMetadata.getContentLength(streamCache.getContentMetadata(key))
+        if (had == C.LENGTH_UNSET.toLong() || had == whole) return@runCatching
+        val change = ContentMetadataMutations()
+        when {
+            whole >= 0 -> ContentMetadataMutations.setContentLength(change, whole)
+            had > from -> change.remove(ContentMetadata.KEY_CONTENT_LENGTH)
+            else -> return@runCatching
+        }
+        streamCache.applyContentMetadataMutations(key, change)
+        android.util.Log.i("nori", "stream cache: $key ends at ${if (whole >= 0) whole else "an unknown byte"}, not the $had first promised")
     }
 
     /**
@@ -243,7 +287,40 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
         streamEvictor.forget()
     }
 
+    /**
+     * A song asked for from past its end: the server's first answer promised an estimated length (a
+     * transcode) beyond the real one. [whole] is the real length when the server said it, -1 when not.
+     */
+    class PastEnd(val whole: Long) : IOException("past the end of the song")
+
     companion object {
+        /**
+         * Whether [e] says a range started past the resource's end: the whole length the server gave
+         * (`Content-Range: bytes * /N`), -1 when it gave none; null when [e] is some other failure (a
+         * network that dropped is asked again, never taken for an end).
+         */
+        fun pastEnd(e: Throwable): Long? {
+            var c: Throwable? = e
+            while (c != null) {
+                if (c is HttpDataSource.InvalidResponseCodeException) {
+                    if (c.responseCode != 416) return null
+                    val range = c.headerFields.entries.firstOrNull { it.key.equals("Content-Range", ignoreCase = true) }?.value?.firstOrNull()
+                    return range?.let(::unsatisfiedRange) ?: -1L
+                }
+                if (c is DataSourceException && c.reason == PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE) return -1L
+                c = c.cause
+            }
+            return null
+        }
+
+        /** The HTTP status the server answered [e] with, 0 when it did not answer (the network, a timeout). */
+        fun httpStatus(e: Throwable): Int =
+            generateSequence(e) { it.cause }.filterIsInstance<HttpDataSource.InvalidResponseCodeException>().firstOrNull()?.responseCode ?: 0
+
+        /** The whole length in an unsatisfiable range's `Content-Range` (`bytes * /1000`); null when it names none. */
+        fun unsatisfiedRange(v: String): Long? =
+            v.trim().removePrefix("bytes").trim().takeIf { it.startsWith("*/") }?.substring(2)?.trim()?.toLongOrNull()
+
         /**
          * How much may be missing at the end of a song for it to count as whole: tags after the audio. The
          * player stops reading an MP3 where its frames end, so the ID3v1 tag after them (128 bytes) is never

@@ -298,7 +298,8 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         if (PlaybackService.engine == null) return@Runnable
         val nori = Nori.get(app)
         dev.nori.music.ffi.perf.perfWatchSettings(
-            System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain, nori.outputs.usb.value,
+            System.currentTimeMillis(), PlaybackService.offloadWanted, dev.nori.music.playback.Equalizer.inChain,
+            PlaybackService.rustPlayer?.onCpu == true, nori.outputs.usb.value,
             playing, PlaybackService.track != null,
         )
     }

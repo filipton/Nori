@@ -27,7 +27,7 @@ use nori_core::{AlbumDetail, ArtistDetail, Core, PlaylistDetail, ServerConfig, S
 use nori_covers::loader::{Config as CoverConfig, Loader};
 use nori_covers::memory::Image;
 use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
-use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, State, Store};
+use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, OpenError, State, Store};
 use nori_http::Http;
 use nori_look::cover::CoverColours;
 use nori_output_cpal::{CpalOutput, Volume};
@@ -142,7 +142,7 @@ struct Audio {
 }
 
 impl ByteSource for Audio {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
         if self.offline {
             return Err("offline".into());
         }

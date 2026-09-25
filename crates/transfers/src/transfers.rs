@@ -1114,8 +1114,38 @@ mod tests {
         assert_eq!(row_facts(std::slice::from_ref(&slot), "other"), None);
     }
 
+    /// The tests that read the process's one tracker's notice take turns.
+    static NOTICE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// What tools/feature-e2e.sh used to read off a phone mid-batch: two songs running side by side give
+    /// the batch a speed (both songs' rates) and a time left (what is still to come at that speed).
+    #[test]
+    fn two_songs_running_give_the_batch_a_speed_and_a_time_left() {
+        let _turn = NOTICE.lock();
+        for id in ["sp-a", "sp-b"] {
+            with(|t| {
+                t.info.insert(id.into(), Info { estimate: 1_000_000, ..Info::default() });
+            });
+            followed(id, DOWNLOADING, 0);
+        }
+        let (a, b) = (open("sp-a", 0), open("sp-b", 0));
+        for k in 1..=4i64 {
+            note(a, 1_000_000, k * 100_000, k * 500);
+            note(b, 1_000_000, k * 50_000, k * 500);
+        }
+        notice(2, false, 2_000);
+        let (speed, eta) = speed_eta();
+        assert!((290_000..=310_000).contains(&speed), "200 kB/s and 100 kB/s together: {speed}");
+        // 600 kB and 800 kB still to come at 300 kB/s.
+        assert!((4..=5).contains(&eta), "{eta} s left");
+        for id in ["sp-a", "sp-b"] {
+            followed(id, COMPLETED, 3_000);
+        }
+    }
+
     #[test]
     fn a_rows_artist_and_the_notification_come_from_the_tracker() {
+        let _turn = NOTICE.lock();
         with(|t| {
             t.info.insert("rw-1".into(), Info { artist: "Nils".into(), ..Info::default() });
         });

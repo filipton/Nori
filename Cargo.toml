@@ -19,6 +19,18 @@ uniffi-bindgen-kotlin-jni = { git = "https://github.com/mozilla/uniffi-rs", rev 
 [profile.dev.package.signalsmith-stretch]
 opt-level = 3
 
+# `cargo test` only (debug builds and the APK are untouched): the sound chain, AutoMix and the decoders
+# make minutes of music per test, and unoptimised they were most of the suite's time. Debug assertions
+# and overflow checks stay on.
+[profile.test.package.nori-player]
+opt-level = 2
+
+[profile.test.package.nori-engine]
+opt-level = 2
+
+[profile.test.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

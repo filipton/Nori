@@ -15,6 +15,7 @@
 //! them ([`Loader::announced`]).
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::Thread;
 use std::time::Duration;
@@ -22,7 +23,13 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 use symphonia::core::io::MediaSource;
 
+use crate::arriving::Taker;
 use crate::store::Writer;
+
+/// The stream cache entry a loader writes into, made on the loader's own thread: making it may wait for
+/// the fetching ahead to hand over the song (`Store::writer_for_player`). An entry that holds bytes
+/// already is gone on with from there.
+pub type Keep = Box<dyn FnOnce() -> Option<Writer> + Send>;
 
 /// A response body being read: where in the resource it starts (the offset asked for, or nought when
 /// the server would not do ranges), the whole resource's length when known, and the bytes.
@@ -32,17 +39,82 @@ pub struct Body {
     pub reader: Box<dyn Read + Send>,
 }
 
+/// Why [`ByteSource::open`] gave no body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    /// There is nothing at `from` or after it: the resource ends there or before (an HTTP 416, or a
+    /// server that would not do ranges sending fewer than `from` bytes). `len` is its whole length when
+    /// the answer said (`Content-Range: bytes */N`). A transcoding server promises an estimated length
+    /// at first (Navidrome's `estimateContentLength`) and the real one ends short of it: this is how the
+    /// real end is learned, and it is not a failure.
+    PastEnd { len: Option<u64> },
+    /// The server answered with this error status: it was reached, and would not give the song. Asked
+    /// for again (a 503 passes), and a song that fails so is not the network's failure.
+    Status(u16),
+    /// The bytes could not be had now (no network, the server out of reach): asked for again.
+    Failed(String),
+}
+
+impl From<String> for OpenError {
+    fn from(why: String) -> OpenError {
+        OpenError::Failed(why)
+    }
+}
+
+impl From<&str> for OpenError {
+    fn from(why: &str) -> OpenError {
+        OpenError::Failed(why.to_string())
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::PastEnd { len: Some(l) } => write!(f, "past the end, which is at byte {l}"),
+            OpenError::PastEnd { len: None } => f.write_str("past the end"),
+            OpenError::Status(status) => write!(f, "HTTP {status}"),
+            OpenError::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 /// The client's HTTP client, for audio: a GET of `url` from byte `from` on (a `Range` request).
-/// Blocking is fine: it runs on the loader's own thread.
+/// Blocking is fine: it runs on the loader's own thread. A range that starts at or past the end of the
+/// resource is [`OpenError::PastEnd`], with the whole length when the server says it.
 pub trait ByteSource: Send + Sync {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String>;
+    fn open(&self, url: &str, from: u64) -> Result<Body, OpenError>;
+
+    /// [`ByteSource::open`] for the song kept under the cache key `key`: for a client whose HTTP stack
+    /// keeps what it reads under the key it is told (media3's cache on Android), as the fetching ahead
+    /// opens its songs.
+    fn open_keyed(&self, url: &str, _key: &str, from: u64) -> Result<Body, OpenError> {
+        self.open(url, from)
+    }
 
     /// A live stream from where it is now, asking for the station's announcements between its bytes
     /// (the `Icy-MetaData: 1` header): the body, and how many bytes of music come between two
     /// announcements (the answer's `icy-metaint`; none when the server sends none).
     fn open_live(&self, url: &str) -> Result<(Body, Option<usize>), String> {
-        self.open(url, 0).map(|b| (b, None))
+        self.open(url, 0).map(|b| (b, None)).map_err(|e| e.to_string())
     }
+}
+
+/// `source`'s body of `url` read from `from` on: a whole answer from a server that would not do ranges
+/// is read past what comes before. One that ends before `from` is [`OpenError::PastEnd`] with where it
+/// ended; one that breaks on the way is a failure.
+fn open_at(source: &dyn ByteSource, url: &str, from: u64) -> Result<Body, OpenError> {
+    let mut b = source.open(url, from)?;
+    if b.start < from {
+        let want = from - b.start;
+        match io::copy(&mut (&mut b.reader).take(want), &mut io::sink()) {
+            Ok(n) if n == want => {}
+            Ok(n) => return Err(OpenError::PastEnd { len: Some(b.start + n) }),
+            Err(e) => return Err(OpenError::Failed(e.to_string())),
+        }
+        b.len = b.len.filter(|&l| l >= from);
+        b.start = from;
+    }
+    Ok(b)
 }
 
 /// How much to keep loaded, as `nori_player::transport::load_control` gives it: fill up to `high`
@@ -99,6 +171,8 @@ struct State {
     /// Loaded to the end of the resource.
     done: bool,
     error: Option<String>,
+    /// The error status the server gave up with, when it answered at all.
+    answered: Option<u16>,
     /// Where the demuxer reads.
     reader_at: u64,
     /// The demuxer wants bytes from here, outside what is kept.
@@ -106,8 +180,10 @@ struct State {
     closed: bool,
     /// The engine is waiting for bytes, and is woken when they are there.
     waiter: Option<Thread>,
-    /// The demuxer is blocked in a read.
-    blocked: bool,
+    /// Readers blocked in a read, woken when bytes come. A count, not a flag: several readers may wait on
+    /// one song (the one the player needs, and one being opened for nothing that gives up as the engine
+    /// moves on), and the one that gives up must not leave the other unwoken.
+    blocked: u32,
     /// Times the network was opened: one per burst.
     bursts: u32,
     window: Option<Window>,
@@ -120,9 +196,37 @@ struct State {
     /// last one passed, until it is asked for.
     titles: std::collections::VecDeque<(u64, String)>,
     announced: Option<String>,
+    /// Times the length was found shorter than the server first said (an estimate), for a container
+    /// reader that looked for the end where the estimate put it to look again ([`Loader::shortened`]).
+    shortened: u32,
+    /// The song ends before this byte, not said where ([`State::not_at`]): a length promised at or past
+    /// it is the same estimate again, and not taken.
+    before: Option<u64>,
 }
 
 impl State {
+    /// The resource ends at `at`: the real end, when a promised length was an estimate beyond it.
+    fn ends_at(&mut self, at: u64) {
+        match self.len {
+            Some(l) if l <= at => {}
+            Some(_) => {
+                self.len = Some(at);
+                self.shortened += 1;
+            }
+            None => self.len = Some(at),
+        }
+    }
+
+    /// The resource ends somewhere before `at`, not said where: a length at or past it was an estimate,
+    /// and is no longer taken for one.
+    fn not_at(&mut self, at: u64) {
+        self.before = Some(self.before.map_or(at, |b| b.min(at)));
+        if self.len.is_some_and(|l| l >= at) {
+            self.len = None;
+            self.shortened += 1;
+        }
+    }
+
     /// The window for the song, as its length and bitrate size it, within the budget.
     fn window(&self, load: [i64; 5], duration_ms: Option<i64>) -> Window {
         let w = self.window.unwrap_or_else(|| Window::for_song(load, duration_ms, self.len));
@@ -170,16 +274,19 @@ impl Loader {
     /// Starts loading `url` through `source` on a thread of its own, sized by `load` and the song's
     /// tagged length, writing what it fetches into `keep` when given one.
     pub fn start(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Writer>) -> Arc<Loader> {
-        Loader::start_within(source, url, load, duration_ms, keep, None)
+        Loader::start_within(source, url, load, duration_ms, keep.map(|w| Box::new(move || Some(w)) as Keep), None, None)
     }
 
-    /// [`Loader::start`], holding no more than `budget` bytes from its first burst on (`Loader::limit`).
-    pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Writer>, budget: Option<u64>) -> Arc<Loader> {
+    /// [`Loader::start`], holding no more than `budget` bytes from its first burst on (`Loader::limit`),
+    /// its entry made as [`Keep`] says, and `taker` hearing the song's bytes as they come, from its first
+    /// (AutoMix's measuring, `crate::arriving`): told the song was whole only when every byte of it came
+    /// in order, and given up at a jump.
+    pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, budget: Option<u64>, taker: Option<Box<dyn Taker>>) -> Arc<Loader> {
         let loaded = Arc::new(Loaded { state: Mutex::new(State { budget, ..State::default() }), cv: Condvar::new() });
         let l = loaded.clone();
         std::thread::Builder::new()
             .name("nori-load".into())
-            .spawn(move || l.run(&*source, &url, load, duration_ms, keep))
+            .spawn(move || l.run(&*source, &url, load, duration_ms, keep, taker))
             .expect("a thread for loading");
         Arc::new(Loader(loaded))
     }
@@ -249,15 +356,33 @@ impl Loader {
             if s.window.is_some_and(|w| s.len.is_some_and(|len| len > w.high)) {
                 return false;
             }
-            s.blocked = true;
+            s.blocked += 1;
             l.cv.wait_for(&mut s, Duration::from_millis(200));
-            s.blocked = false;
+            s.blocked -= 1;
         }
+    }
+
+    /// Times the song's length was found shorter than the server first promised: a container reader
+    /// opened on the promised one reads the end again once this moves.
+    pub fn shortened(&self) -> u32 {
+        self.0.state.lock().shortened
+    }
+
+    /// The song's whole length in bytes, as far as it is known.
+    pub fn length(&self) -> Option<u64> {
+        self.0.state.lock().len
     }
 
     /// Why the connection gave up for good, once it has.
     pub fn error(&self) -> Option<String> {
         self.0.state.lock().error.clone()
+    }
+
+    /// The error status the server answered with when the connection gave up: it was reached, so the song
+    /// failed for its own reasons rather than the network's. None when it did not answer (or all is well).
+    pub fn answered(&self) -> Option<u16> {
+        let s = self.0.state.lock();
+        s.error.as_ref().and(s.answered)
     }
 
     /// Whether the next read can be answered at once; if not, `engine` is woken when it can.
@@ -271,7 +396,19 @@ impl Loader {
     }
 
     pub fn reader(self: &Arc<Self>) -> LoadedReader {
-        LoadedReader { loader: self.clone(), pos: 0 }
+        LoadedReader { loader: self.clone(), pos: 0, stop: None }
+    }
+
+    /// A reader that gives up, rather than waiting on, once `stop` is set: for a song being opened on a
+    /// thread of its own that nobody wants any more. Left waiting, it and the reader of the song
+    /// wanted instead would each move the fetch to where they read, over and over.
+    pub(crate) fn reader_until(self: &Arc<Self>, stop: Arc<AtomicBool>) -> LoadedReader {
+        LoadedReader { loader: self.clone(), pos: 0, stop: Some(stop) }
+    }
+
+    /// Wakes the readers waiting for bytes, to look whether they are still wanted.
+    pub(crate) fn nudge(&self) {
+        self.0.cv.notify_all();
     }
 }
 
@@ -283,10 +420,28 @@ impl Drop for Loader {
 }
 
 impl Loaded {
-    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>, mut keep: Option<Writer>) {
+    fn run(&self, source: &dyn ByteSource, url: &str, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, mut taker: Option<Box<dyn Taker>>) {
         let mut body: Option<Box<dyn Read + Send>> = None;
         let mut chunk = vec![0u8; CHUNK];
         let mut failures = 0;
+        let mut keep = keep.and_then(|k| k());
+        // An entry the fetching ahead began: what it holds is the song's start, read from the disk, and
+        // the network is asked only for the rest, at once, in the burst the fetch ahead was making.
+        let mut go_on = false;
+        if let Some(k) = keep.as_mut().filter(|k| k.written() > 0) {
+            match k.read_back() {
+                Ok(bytes) => {
+                    if let Some(t) = taker.as_mut() {
+                        t.take(&bytes);
+                    }
+                    let mut s = self.state.lock();
+                    s.data = bytes;
+                    go_on = true;
+                    self.wake(&mut s);
+                }
+                Err(_) => keep = None,
+            }
+        }
         loop {
             let from = {
                 let mut s = self.state.lock();
@@ -300,8 +455,10 @@ impl Loaded {
                         s.data.clear();
                         s.done = false;
                         s.error = None;
-                        // A jump past what was loaded leaves a gap the cache entry cannot have.
+                        // A jump past what was loaded leaves a gap the cache entry cannot have, nor
+                        // what hears the song from its start.
                         keep = None;
+                        taker = None;
                     }
                     let w = s.window(load, duration_ms);
                     if s.at_end() {
@@ -312,10 +469,14 @@ impl Loaded {
                         if let (Some(k), Some(len), None) = (keep.take(), s.len, &s.error) {
                             k.finish(len);
                         }
+                        if let Some(t) = taker.take() {
+                            // A restart gave it up: what it heard came in order from the first byte.
+                            t.end(s.error.is_none());
+                        }
                         self.wake(&mut s);
                     } else if body.is_some() && s.ahead() < w.high {
                         break;
-                    } else if body.is_none() && s.ahead() < w.low.max(1) {
+                    } else if body.is_none() && (go_on || s.ahead() < w.low.max(1)) {
                         break;
                     } else if body.is_some() {
                         // Up to the high mark: close the connection and leave the network alone until
@@ -335,15 +496,18 @@ impl Loaded {
                 s.end()
             };
             if body.is_none() {
-                match source.open(url, from) {
+                match open_at(source, url, from) {
                     Ok(b) => {
-                        let mut reader = b.reader;
-                        // A server that would not do ranges sends the whole thing: skip to where we are.
-                        if b.start < from {
-                            let _ = io::copy(&mut (&mut reader).take(from - b.start), &mut io::sink());
-                        }
+                        let reader = b.reader;
+                        go_on = false;
                         let mut s = self.state.lock();
-                        s.len = s.len.or(b.len);
+                        let promised = b.len.filter(|&l| s.before.is_none_or(|b| l < b));
+                        match (s.len, promised) {
+                            (None, l) => s.len = l,
+                            // A later answer that puts the end sooner: the first was an estimate.
+                            (Some(had), Some(l)) if l < had && l >= s.end() => s.ends_at(l),
+                            _ => {}
+                        }
                         s.window = Some(Window::for_song(load, duration_ms, s.len));
                         s.bursts += 1;
                         // The burst's bytes in one piece, made once: grown by doubling, a song's memory
@@ -355,11 +519,35 @@ impl Loaded {
                         }
                         body = Some(reader);
                     }
+                    // Asked for from a place the song does not reach: it ends there, or where the server
+                    // says it does. Not a failure: a transcoding server's first answer promises an
+                    // estimate, and a container reader that looks for the end where that put it lands
+                    // past the real one.
+                    Err(OpenError::PastEnd { len }) => {
+                        let mut s = self.state.lock();
+                        if s.end() == from && s.restart.is_none() {
+                            match len.filter(|&l| l <= from) {
+                                // Bytes held up to `from` are the song's, so with any here it ends right there.
+                                _ if !s.data.is_empty() => s.ends_at(from),
+                                Some(l) => s.ends_at(l),
+                                // Somewhere before `from`, and where is not said: the promised length is
+                                // wrong, and the real one is not known until the bytes run out.
+                                None => s.not_at(from),
+                            }
+                            // Nothing to fetch here: a reader at `from` reads the end.
+                            s.done = true;
+                            failures = 0;
+                            go_on = false;
+                        }
+                        self.wake(&mut s);
+                        continue;
+                    }
                     Err(e) => {
                         failures += 1;
                         if failures > RETRIES {
                             let mut s = self.state.lock();
-                            s.error = Some(e);
+                            s.answered = if let OpenError::Status(status) = e { Some(status) } else { None };
+                            s.error = Some(e.to_string());
                             s.done = true;
                             self.wake(&mut s);
                             continue;
@@ -373,11 +561,14 @@ impl Loaded {
             let mut s = self.state.lock();
             let mut took = 0;
             match got {
+                // The end, cleanly: where the song really ends, whatever length was promised. A body that
+                // breaks is an error instead, and is asked for again from where it broke.
                 Ok(0) => {
                     body = None;
-                    s.done = true;
-                    let end = s.end();
-                    s.len = Some(s.len.unwrap_or(end));
+                    if s.end() == from && s.restart.is_none() {
+                        s.done = true;
+                        s.ends_at(from);
+                    }
                 }
                 Ok(n) => {
                     failures = 0;
@@ -393,6 +584,11 @@ impl Loaded {
             // Written with the lock let go: the demuxer reads on meanwhile.
             if took > 0 && keep.as_mut().is_some_and(|k| !k.write(from, &chunk[..took])) {
                 keep = None;
+            }
+            if took > 0 {
+                if let Some(t) = taker.as_mut() {
+                    t.take(&chunk[..took]);
+                }
             }
         }
     }
@@ -469,7 +665,7 @@ impl Loaded {
 
     /// Bytes arrived: a blocked reader reads on, and a waiting engine is told once there is enough.
     fn wake(&self, s: &mut State) {
-        if s.blocked {
+        if s.blocked > 0 {
             self.cv.notify_all();
         }
         if s.ready() {
@@ -484,6 +680,8 @@ impl Loaded {
 pub struct LoadedReader {
     loader: Arc<Loader>,
     pos: u64,
+    /// Set once nobody wants what this reads ([`Loader::reader_until`]).
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Read for LoadedReader {
@@ -491,6 +689,9 @@ impl Read for LoadedReader {
         let l = &*self.loader.0;
         let mut s = l.state.lock();
         loop {
+            if self.stop.as_ref().is_some_and(|s| s.load(Ordering::Acquire)) {
+                return Err(io::Error::other("the song is no longer wanted"));
+            }
             let end = s.end();
             if self.pos >= s.base && self.pos < end {
                 let from = (self.pos - s.base) as usize;
@@ -510,6 +711,11 @@ impl Read for LoadedReader {
                 }
                 return Ok(0);
             }
+            // At or past the song's end: nothing to fetch there (a container reader looking for the end
+            // where an estimated length put it, once the real one is known).
+            if !s.live && s.len.is_some_and(|l| self.pos >= l) {
+                return Ok(0);
+            }
             if s.live && self.pos < s.base {
                 return Err(io::Error::other("a live stream cannot be read again from further back"));
             }
@@ -517,10 +723,10 @@ impl Read for LoadedReader {
                 s.restart = Some(self.pos);
             }
             s.reader_at = self.pos;
-            s.blocked = true;
+            s.blocked += 1;
             l.cv.notify_all();
             let timed_out = l.cv.wait_for(&mut s, READ_TIMEOUT).timed_out();
-            s.blocked = false;
+            s.blocked -= 1;
             if timed_out {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "the song's bytes did not come"));
             }
@@ -618,7 +824,7 @@ impl MediaSource for LoadedReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
     use std::time::Instant;
 
     /// A server that makes up `len` bytes (byte `i` is `i as u8`) and counts what it is asked for.
@@ -647,7 +853,7 @@ mod tests {
     }
 
     impl ByteSource for Counting {
-        fn open(&self, _: &str, from: u64) -> Result<Body, String> {
+        fn open(&self, _: &str, from: u64) -> Result<Body, OpenError> {
             self.opens.lock().push(from);
             Ok(Body { start: from, len: Some(self.len), reader: Box::new(Made { at: from, len: self.len, served: self.served.clone() }) })
         }
@@ -722,7 +928,7 @@ mod tests {
     #[test]
     fn a_song_fetched_ahead_holds_its_budget_and_the_rest_once_it_plays() {
         let s = server(600_000);
-        let l = Loader::start_within(s.clone(), "song".into(), LOAD, Some(6_000), None, Some(200_000));
+        let l = Loader::start_within(s.clone(), "song".into(), LOAD, Some(6_000), None, Some(200_000), None);
         let ahead = settled(&s);
         assert!(ahead <= 200_000 + CHUNK as u64, "no more than its budget while it waits: {ahead}");
         assert!(l.held() >= 100_000, "but its start is at hand: {}", l.held());
@@ -753,5 +959,209 @@ mod tests {
         let got = read(&mut r, 1000);
         assert!(got.iter().enumerate().all(|(i, &b)| b == (4_000_000 + i) as u8));
         assert_eq!(*s.opens.lock(), vec![0, 4_000_000], "not the megabytes in between");
+    }
+
+    /// A transcoding server: every answer promises `promised` bytes (an estimate), `real` come, and a
+    /// range from `real` on is answered 416, with the real length when `says` (`Content-Range: */N`).
+    /// The first body breaks with an error after `cut` bytes, once, as a dropped network would.
+    struct Estimating {
+        real: u64,
+        promised: u64,
+        says: bool,
+        cut: Mutex<Option<u64>>,
+        /// The body ends with an error rather than cleanly, as OkHttp reads a body shorter than its
+        /// Content-Length.
+        breaks_at_end: bool,
+        opens: Mutex<Vec<u64>>,
+        served: Arc<AtomicU64>,
+    }
+
+    struct Cut {
+        made: Made,
+        cut: Option<u64>,
+        breaks_at_end: bool,
+    }
+
+    impl Read for Cut {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let stop = self.cut.unwrap_or(self.made.len);
+            if self.made.at >= stop && (self.cut.is_some() || self.breaks_at_end) {
+                return Err(io::Error::new(io::ErrorKind::ConnectionReset, "reset"));
+            }
+            let n = buf.len().min((stop - self.made.at) as usize);
+            self.made.read(&mut buf[..n])
+        }
+    }
+
+    impl ByteSource for Estimating {
+        fn open(&self, _: &str, from: u64) -> Result<Body, OpenError> {
+            self.opens.lock().push(from);
+            if from >= self.real {
+                return Err(OpenError::PastEnd { len: self.says.then_some(self.real) });
+            }
+            let made = Made { at: from, len: self.real, served: self.served.clone() };
+            let reader = Cut { made, cut: self.cut.lock().take(), breaks_at_end: self.breaks_at_end };
+            Ok(Body { start: from, len: Some(self.promised), reader: Box::new(reader) })
+        }
+    }
+
+    fn estimating(real: u64, promised: u64, says: bool) -> Estimating {
+        Estimating { real, promised, says, cut: Mutex::new(None), breaks_at_end: false, opens: Mutex::new(Vec::new()), served: Arc::new(AtomicU64::new(0)) }
+    }
+
+    #[test]
+    fn a_clean_end_short_of_the_promised_length_is_the_song_s_end() {
+        let s = Arc::new(estimating(300_000, 320_000, true));
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000), None);
+        let mut r = l.reader();
+        let all = read(&mut r, 300_000);
+        assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8));
+        assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0, "the end");
+        assert_eq!(l.length(), Some(300_000), "the real length, not the estimate");
+        assert_eq!(l.shortened(), 1);
+        assert_eq!(r.seek(SeekFrom::End(0)).unwrap(), 300_000);
+        assert!(l.complete() && l.error().is_none());
+        assert_eq!(*s.opens.lock(), vec![0], "nothing asked for past the end");
+    }
+
+    #[test]
+    fn a_read_past_the_real_end_learns_it_and_is_the_end_not_a_failure() {
+        for says in [true, false] {
+            let s = Arc::new(estimating(3_000_000, 3_200_000, says));
+            let l = Loader::start(s.clone(), "song".into(), LOAD, Some(30_000), None);
+            let mut r = l.reader();
+            read(&mut r, 1000);
+            // Where an Ogg reader looks for the last page: one page's most before the promised end.
+            let probe = 3_200_000 - 65_307;
+            r.seek(SeekFrom::Start(probe)).unwrap();
+            assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0, "nothing there: the end (says {says})");
+            assert!(l.error().is_none(), "not a failure: {:?}", l.error());
+            assert_eq!(l.length(), says.then_some(3_000_000), "the real length, or none known (says {says})");
+            assert_eq!(l.shortened(), 1);
+            assert_eq!(s.opens.lock().iter().filter(|&&o| o == probe).count(), 1, "asked once: {:?}", s.opens.lock());
+            // And what is there is still read.
+            r.seek(SeekFrom::Start(2_999_000)).unwrap();
+            let tail = read(&mut r, 1000);
+            assert!(tail.iter().enumerate().all(|(i, &b)| b == (2_999_000 + i) as u8));
+            assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0);
+            assert_eq!(l.length(), Some(3_000_000), "the end found where the bytes stop (says {says})");
+        }
+    }
+
+    #[test]
+    fn a_body_that_breaks_at_the_real_end_learns_it_from_the_answer_past_it() {
+        let mut e = estimating(300_000, 320_000, false);
+        e.breaks_at_end = true;
+        let s = Arc::new(e);
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000), None);
+        let mut r = l.reader();
+        read(&mut r, 300_000);
+        assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0);
+        assert_eq!(l.length(), Some(300_000));
+        assert!(l.error().is_none());
+        assert_eq!(*s.opens.lock(), vec![0, 300_000], "asked again where it broke, and told that is the end");
+    }
+
+    #[test]
+    fn a_network_that_drops_mid_song_is_asked_again_not_taken_for_the_end() {
+        let e = estimating(600_000, 640_000, true);
+        *e.cut.lock() = Some(150_000);
+        let s = Arc::new(e);
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(6_000), None);
+        let mut r = l.reader();
+        let all = read(&mut r, 600_000);
+        assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8), "every byte, in order");
+        assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0);
+        assert_eq!(s.opens.lock()[..2], [0, 150_000], "asked again from where it broke");
+        assert_eq!(l.length(), Some(600_000), "ended where the bytes did, not where the network dropped");
+        assert!(l.error().is_none());
+    }
+
+    /// Songs being opened for nothing (a mix made again, a song measured ahead and let go) wait on the same
+    /// song's bytes as the one the player needs, and give up as the engine moves on: the one still wanted
+    /// is woken when the bytes come all the same, rather than sleeping out its timeout while they sit
+    /// there (a phone's music stopped at the end of a song, the next one never heard).
+    #[test]
+    fn readers_that_give_up_leave_the_one_still_waiting_to_be_woken_by_the_bytes() {
+        /// Slow to answer at all, so every reader is waiting when the others give up.
+        struct Late(Arc<Counting>);
+        impl ByteSource for Late {
+            fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
+                std::thread::sleep(Duration::from_millis(400));
+                self.0.open(url, from)
+            }
+        }
+        for _ in 0..3 {
+            let l = Loader::start(Arc::new(Late(server(2_000_000))), "song".into(), LOAD, Some(20_000), None);
+            let mut wanted = l.reader();
+            let t = Instant::now();
+            let player = std::thread::spawn(move || {
+                let mut b = [0u8; 16];
+                wanted.read(&mut b).map(|n| (n, t.elapsed()))
+            });
+            let stop = Arc::new(AtomicBool::new(false));
+            let others: Vec<_> = (0..8)
+                .map(|_| {
+                    let mut r = l.reader_until(stop.clone());
+                    std::thread::spawn(move || r.read(&mut [0u8; 16]).is_err())
+                })
+                .collect();
+            std::thread::sleep(Duration::from_millis(100));
+            stop.store(true, Ordering::Release);
+            l.nudge();
+            assert!(others.into_iter().all(|o| o.join().unwrap()), "the readers nobody wants give up");
+            let (n, took) = player.join().unwrap().expect("the bytes");
+            assert_eq!(n, 16);
+            assert!(took < Duration::from_secs(3), "read as the bytes came, not after the timeout: {took:?}");
+        }
+    }
+
+    #[test]
+    fn a_reader_nobody_wants_any_more_stops_waiting_and_moves_the_fetch_no_more() {
+        /// Slow to answer from anywhere but the start.
+        struct Slow(Arc<Counting>);
+        impl ByteSource for Slow {
+            fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
+                if from > 0 {
+                    std::thread::sleep(Duration::from_millis(1500));
+                }
+                self.0.open(url, from)
+            }
+        }
+        let s = server(5_000_000);
+        let l = Loader::start(Arc::new(Slow(s.clone())), "song".into(), LOAD, Some(50_000), None);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut r = l.reader_until(stop.clone());
+        read(&mut r, 1000);
+        r.seek(SeekFrom::Start(4_000_000)).unwrap();
+        let (l2, stop2) = (l.clone(), stop.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            stop2.store(true, Ordering::Release);
+            l2.nudge();
+        });
+        let t = Instant::now();
+        assert!(r.read(&mut [0u8; 16]).is_err(), "given up");
+        assert!(t.elapsed() < Duration::from_millis(1000), "at once, not once the bytes came: {:?}", t.elapsed());
+        assert!(r.read(&mut [0u8; 16]).is_err(), "and for good");
+    }
+
+    #[test]
+    fn a_server_without_ranges_that_ends_before_the_place_asked_for_is_the_end() {
+        struct Whole(u64, Mutex<Vec<u64>>);
+        impl ByteSource for Whole {
+            fn open(&self, _: &str, from: u64) -> Result<Body, OpenError> {
+                self.1.lock().push(from);
+                Ok(Body { start: 0, len: Some(self.0 + 50_000), reader: Box::new(Made { at: 0, len: self.0, served: Arc::default() }) })
+            }
+        }
+        let s = Arc::new(Whole(2_000_000, Mutex::new(Vec::new())));
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(20_000), None);
+        let mut r = l.reader();
+        read(&mut r, 1000);
+        r.seek(SeekFrom::Start(2_020_000)).unwrap();
+        assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0);
+        assert_eq!(l.length(), Some(2_000_000), "where the whole answer ended");
+        assert!(l.error().is_none());
     }
 }

@@ -416,6 +416,30 @@ pub(crate) mod tests {
         assert!(c.core.cache_get("getStarred2".into()).unwrap().is_some(), "nothing changed, nothing is stale");
     }
 
+    /// What tools/feature-e2e.sh used to check against a real server: a heart, a new playlist and "now
+    /// playing" leave as the Subsonic calls the server agrees with.
+    #[test]
+    fn a_heart_a_new_playlist_and_now_playing_are_asked_as_subsonic_says() {
+        let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
+        c.core.cache_put("getStarred2".into(), b"x".to_vec()).unwrap();
+        c.core.cache_put("getPlaylist&id=9".into(), b"x".to_vec()).unwrap();
+        for _ in 0..4 {
+            fake.answer(OK);
+        }
+        block(c.write(Write::Star { kind: Starrable::Song, id: "s1".into(), on: true })).unwrap();
+        assert_eq!(c.core.cache_get("getStarred2".into()).unwrap(), None, "the favourites are read again");
+        block(c.write(Write::Star { kind: Starrable::Song, id: "s1".into(), on: false })).unwrap();
+        block(c.write(Write::CreatePlaylist { name: "nori check".into(), song_ids: vec!["s1".into(), "s2".into()] })).unwrap();
+        assert_eq!(c.core.cache_get("getPlaylist&id=9".into()).unwrap(), None, "the playlists are read again");
+        block(c.read_now(crate::cache_policy::Read::NowPlaying { id: "s1".into() })).unwrap();
+        let asked = fake.asked();
+        assert!(asked[0].contains("/rest/star?") && asked[0].ends_with("&id=s1"), "{}", asked[0]);
+        assert!(asked[1].contains("/rest/unstar?") && asked[1].ends_with("&id=s1"), "{}", asked[1]);
+        assert!(asked[2].contains("/rest/createPlaylist?") && asked[2].contains("&name=nori") && asked[2].ends_with("&songId=s1&songId=s2"), "{}", asked[2]);
+        assert!(asked[3].contains("/rest/scrobble?") && asked[3].ends_with("&id=s1&submission=false"), "{}", asked[3]);
+        assert!(c.core.pending_list().unwrap().is_empty(), "all of it answered, nothing waits");
+    }
+
     #[test]
     fn login_falls_back_to_the_other_address_and_to_legacy_auth() {
         let (c, fake) = client(NetProfile::default());

@@ -44,7 +44,6 @@ import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -265,13 +264,14 @@ fun DownloadsScreen(actions: ActionsViewModel) {
     val unfinished = s?.let { it.active.size + it.queued.size + it.failed.size } ?: 0
     // Whether stopping everything asks first, and what it says, are the core's (`words_stop_all`).
     val stop = remember(unfinished) { StopAll(unfinished > 1, say.stopAllTitle, say.stopAllText(unfinished)) }
-    if (confirm) AlertDialog(
-        onDismissRequest = { confirm = false },
-        title = { Text(stop.title) },
-        text = { Text(stop.text) },
-        confirmButton = { TextButton({ actions.cancelAllDownloads(); confirm = false }) { Text(say.stopAll) } },
-        dismissButton = { TextButton({ confirm = false }) { Text(say.cancel) } },
-    )
+    NoriDialog(confirm, { confirm = false }) {
+        AlertCard(
+            title = { Text(stop.title) },
+            text = { Text(stop.text) },
+            confirmButton = { TextButton({ actions.cancelAllDownloads(); confirm = false }) { Text(say.stopAll) } },
+            dismissButton = { TextButton({ confirm = false }) { Text(say.cancel) } },
+        )
+    }
     Column {
         Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = Space.gutter - 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }

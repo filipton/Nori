@@ -255,6 +255,18 @@ pub fn settings_judged(now: i64, playing: bool, output_open: bool, engine_since:
     playing && output_open && engine_since.is_none_or(|t| now - t > SETTLE_MS)
 }
 
+/// The settings' pairs the engine is held to now: whether it wants offload, always; whether the sound
+/// chain is in the samples' path (it must be with the equalizer on) only while the ear is on music the CPU
+/// made through the engine's own output (`on_cpu`): offloaded, let go, or waiting for a song's bytes, the
+/// chain is in no path, and the engine does not say where it is.
+pub fn settings_pairs(eq_enabled: bool, want_offload: bool, offload_wanted: bool, chain_in: bool, on_cpu: bool) -> Vec<(&'static str, bool, bool)> {
+    let mut pairs = vec![("offload wanted", want_offload, offload_wanted)];
+    if eq_enabled && on_cpu {
+        pairs.push(("sound chain in the path", true, chain_in));
+    }
+    pairs
+}
+
 /// A setting a second after it changed, against what the engine shows: each pair that disagrees.
 pub fn settings_held(expected: &[(&str, bool, bool)]) -> Option<Break> {
     let off: Vec<String> = expected.iter().filter(|(_, want, got)| want != got).map(|(what, want, got)| format!("{what}: {got}, expected {want}")).collect();
@@ -448,9 +460,10 @@ pub fn perf_watch_queue(wall_ms: i64, missing: Vec<String>, total: u32) {
 /// A second after the settings changed: what the engine shows (whether it asks for offload, whether the
 /// sound chain is in the samples' path) against what the settings say it should, over the output the
 /// platform sees (`usb`: something USB attached, where offload never goes). Judged only as
-/// [`settings_judged`] says: `playing` through an output that is open (`output_open`).
+/// [`settings_judged`] says: `playing` through an output that is open (`output_open`); the chain only while
+/// the engine says the ear is on music the CPU made (`on_cpu`, see [`settings_pairs`]).
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, usb: bool, playing: bool, output_open: bool) {
+pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, on_cpu: bool, usb: bool, playing: bool, output_open: bool) {
     if !on() {
         return;
     }
@@ -460,12 +473,8 @@ pub fn perf_watch_settings(wall_ms: i64, offload_wanted: bool, chain_in: bool, u
     }
     let Some(s) = nori_settings::settings_store::current() else { return };
     let want_offload = s.offload && !usb && crate::perf_log::offload_blocked().is_none();
-    let mut pairs = vec![("offload wanted", want_offload, offload_wanted)];
     // With the equalizer on, the chain is in the samples' path; off, it may stay in, flat.
-    if s.eq_enabled {
-        pairs.push(("sound chain in the path", true, chain_in));
-    }
-    said(wall_ms, settings_held(&pairs));
+    said(wall_ms, settings_held(&settings_pairs(s.eq_enabled, want_offload, offload_wanted, chain_in, on_cpu)));
 }
 
 /// The player service started or ended at `wall_ms` (the perf timeline's engine note).
@@ -650,6 +659,17 @@ mod tests {
         let b = settings_held(&[("offload wanted", false, true), ("sound chain in the path", true, true)]).unwrap();
         assert_eq!(b.kind, "setting");
         assert_eq!(b.detail, "a second after the settings changed the engine still shows offload wanted: true, expected false");
+    }
+
+    #[test]
+    fn the_chain_is_held_to_the_equalizer_only_while_the_cpu_plays_through_the_engine_s_output() {
+        // As the phone had it: the equalizer on, the first song's bytes still coming and the output not open
+        // yet (or the chip playing, or the output let go): the chain is in no path, and that is no break.
+        assert_eq!(settings_held(&settings_pairs(true, false, false, false, false)), None);
+        let b = settings_held(&settings_pairs(true, false, false, false, true)).unwrap();
+        assert_eq!(b.detail, "a second after the settings changed the engine still shows sound chain in the path: false, expected true");
+        assert_eq!(settings_held(&settings_pairs(false, false, false, false, true)), None, "off, the chain may stay in, flat, or not");
+        assert!(settings_held(&settings_pairs(true, false, true, false, false)).is_some(), "offload is held to the settings whatever plays");
     }
 
     #[test]

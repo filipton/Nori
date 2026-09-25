@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -266,14 +265,16 @@ private fun Playlists(actions: ActionsViewModel, vm: PlaylistsViewModel = viewMo
             actions.importM3u(dev.nori.music.ffi.library.m3uPlaylistName(uri.lastPathSegment), text)
         }
     }
-    if (creating) AlertDialog(
-        onDismissRequest = { creating = false }, title = { Text(say.newPlaylist) },
-        text = { FormField(name, { name = it }, label = { Text(say.name) }, singleLine = true) },
-        confirmButton = { TextButton({ vm.create(name.trim()); name = ""; creating = false }, enabled = name.isNotBlank()) { Text(say.create) } },
-    )
+    NoriDialog(creating, { creating = false }) {
+        AlertCard(
+            title = { Text(say.newPlaylist) },
+            text = { FormField(name, { name = it }, label = { Text(say.name) }, singleLine = true) },
+            confirmButton = { TextButton({ vm.create(name.trim()); creating = false }, enabled = name.isNotBlank()) { Text(say.create) } },
+        )
+    }
     LoadBox(load) { playlists ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item { ActionRow(say.newPlaylist, Icons.Filled.Add, { creating = true }) }
+            item { ActionRow(say.newPlaylist, Icons.Filled.Add, { name = ""; creating = true }) }
             item { ActionRow(say.importPlaylistFile, Icons.Filled.FileDownload, { pickM3u.launch(arrayOf("*/*")) }) }
             if (playlists.isEmpty()) item { EmptyNote(Note.NO_PLAYLISTS) }
             items(playlists, key = { it.id }) { p ->
@@ -338,14 +339,16 @@ private fun Radio(vm: RadioViewModel = viewModel()) {
     var adding by remember { mutableStateOf(false) }
     var name by remember { mutableStateOf("") }
     var url by remember { mutableStateOf("") }
-    if (adding) AlertDialog(
-        onDismissRequest = { adding = false }, title = { Text(say.newStation) },
-        text = { Column { FormField(name, { name = it }, label = { Text(say.name) }, singleLine = true); Spacer(Modifier.height(10.dp)); FormField(url, { url = it }, label = { Text(say.streamUrl) }, singleLine = true) } },
-        confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); name = ""; url = ""; adding = false }, enabled = dev.nori.music.ffi.library.radioCanAdd(name, url)) { Text(say.add) } },
-    )
+    NoriDialog(adding, { adding = false }) {
+        AlertCard(
+            title = { Text(say.newStation) },
+            text = { Column { FormField(name, { name = it }, label = { Text(say.name) }, singleLine = true); Spacer(Modifier.height(10.dp)); FormField(url, { url = it }, label = { Text(say.streamUrl) }, singleLine = true) } },
+            confirmButton = { TextButton({ vm.add(name.trim(), url.trim()); adding = false }, enabled = dev.nori.music.ffi.library.radioCanAdd(name, url)) { Text(say.add) } },
+        )
+    }
     LoadBox(load) { stations ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item { ActionRow(say.newStation, Icons.Filled.Add, { adding = true }) }
+            item { ActionRow(say.newStation, Icons.Filled.Add, { name = ""; url = ""; adding = true }) }
             if (stations.isEmpty()) item { EmptyNote(Note.NO_STATIONS) }
             items(stations, key = { it.id }) { s ->
                 NavRow(

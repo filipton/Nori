@@ -76,8 +76,7 @@
     <string name="settings_echo_out">Echo out clashes</string>
     <string name="settings_echo_out_detail">Overlapping vocals end in an echo instead.</string>
     <string name="settings_better_beats">Better beat detection</string>
-    <string name="settings_better_beats_off">Listens to the start and end of each song so mixes land on the beat. A one-time download of about %1$d MB.</string>
-    <string name="settings_better_beats_shipped">Listens to the start and end of each song so mixes land on the beat.</string>
+    <string name="settings_better_beats_off">Listens to the start and end of each song so mixes land on the beat. A one-time download of about %1$d MB, from the model\'s authors.</string>
     <string name="settings_better_beats_absent">Downloaded (about %1$d MB) the next time AutoMix measures a song.</string>
     <string name="settings_better_beats_waiting">Waiting for Wi-Fi to download it (about %1$d MB).</string>
     <string name="settings_better_beats_downloading">Downloading (about %1$d MB)…</string>

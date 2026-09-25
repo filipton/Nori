@@ -73,7 +73,7 @@ crates/library/ Rust, platform-free: the music library as the app shows it (pack
 crates/automix/ Rust, platform-free: AutoMix over the app's database (package nori-automix): the analysis
                 store and the streaming analyser (store.rs), the transition planner the audio path asks
                 (planner.rs), the transition engine's host (host.rs), measuring ahead (ahead.rs) and where the
-                optional beat model's file is (beat_model.rs).
+                optional beat model's weights are and their pins (beat_model.rs).
                 Depends on nori-model, nori-db and nori-player.
 crates/settings/ Rust, platform-free: the settings (package nori-settings): codec, defaults and rules
                 (settings.rs), the live copy kept in the app's database (settings_store.rs), the model a
@@ -127,8 +127,11 @@ crates/engine/  Rust, platform-free: the whole player for a platform without one
                 plays the core's queue with its planner, settings, stream addresses and error run, and
                 runs downloads and AutoMix's measuring ahead from the core's bookkeeping; with the
                 `neural-beats` feature the measurer also runs Beat This! (tract) over the ends of the songs
-                coming up, a feature the debug and perf builds carry with the model as an APK asset
-                and a release build leaves out unless asked (`-PrustFeatures=neural-beats`).
+                coming up, a feature the debug and perf builds carry and a release build leaves out unless
+                asked (`-PrustFeatures=neural-beats`). The core carries only the model's graph
+                (crates/player/models, from tools/beat-this/export.py); the weights come from the authors'
+                own checkpoint, fetched and converted once on the device (nori-player automix/checkpoint.rs
+                and weights.rs, nori-core beat_download.rs). Nobody ships or hosts a copy of them.
                 tests/engine.rs checks it against sim.rs sample for sample; tests/core.rs over the core,
                 tests/mp4.rs against ffmpeg. No JNI, no uniffi.
 crates/output-cpal/ Rust, desktop: the AudioOutput over cpal (PipeWire/ALSA, CoreAudio, WASAPI).
@@ -192,7 +195,9 @@ core/           Android library, no UI: net/, data/ (Library = the repository; C
                 downloads/, settings/, Nori.kt (object graph)
 app/            the UI only: vm/ (ViewModels: the screens' state, asked of the core and held for Compose)
                 and ui/ (Compose, draws state)
-tools/          dev-server.sh: a local Navidrome with generated music for testing
+tools/          dev-server.sh: a local Navidrome with generated music for testing (lying-proxy.py in front
+                of it for the e2e checks); smoke.sh, audio-e2e.sh, feature-e2e.sh: the device checks
+                (docs/testing.md)
 ```
 
 Anything that decides how music plays or sounds - what is mixed, converted, skipped, how loud,
@@ -270,6 +275,19 @@ tools/twins.sh                                      # the Kotlin originals of th
 
 Run `cargo test` and a build before committing.
 
+**Testing a change** (docs/testing.md has the tiers, the local server and what is checked where):
+- Every agent: `cargo test -j4 --workspace` (never `-j` above 4: the machine runs out of memory), then, if
+  the change reaches Android, on its emulator turn `tools/smoke.sh` (about two minutes) plus
+  `tools/audio-e2e.sh --only <sections>` / `tools/feature-e2e.sh --only <sections>` for the areas it
+  touched (`--list` names them). `NORI_E2E_SERVER=local` runs them against tools/dev-server.sh.
+- The full suites (`tools/audio-e2e.sh`, `tools/feature-e2e.sh` with no `--only`) run once per batch, by
+  the coordinator, before a perf APK build.
+- Behaviour Rust owns is tested in Rust, on the virtual clock where time matters; a device check is only
+  for Android glue (AudioTrack, MediaCodec, media3, the media session and notification, audio focus,
+  routing, JNI, the service, a force stop). A new behaviour check goes into `cargo test`; a new device
+  check needs a line in docs/testing.md saying why it cannot be Rust. No fixed sleeps in the device
+  scripts where `wait_for` / `wait_until` (tools/e2e-lib.sh) can await a condition.
+
 The engine's tests (crates/engine/tests/engine.rs, paths.rs) run it on a clock the test moves
 (`tests/common`, `Engine::start_on`): time only moves while the engine sleeps, and the test's sound card
 pulls on that time. Wait with the rig's `wait_for`/`wait` (until a condition, within a limit) and `run` (a
@@ -321,9 +339,11 @@ were measured on and are not bumped; the README badge reads the latest GitHub re
 `tools/app.sh` drives a **debug** build over adb without touching the screen - `open <route>`,
 `play "search:…"`, `do download album:<id>`, `do "dac <name>@44100/16"` (a USB DAC that is not there,
 so the bit-perfect and offload rules can be checked on an emulator), `set limiter true`, `state`
-(one JSON line of route, playback, DSP, download and DAC state). `tools/audio-e2e.sh` and `tools/feature-e2e.sh` are built on it and
-check playback and the rest of the app against a real server. When adding a feature, add its check
-there: a screenshot proves a screen renders, not that the feature works.
+(one JSON line of route, playback, DSP, download and DAC state). `tools/smoke.sh`, `tools/audio-e2e.sh` and
+`tools/feature-e2e.sh` are built on it (through `tools/e2e-lib.sh`) and check the Android side of playback
+and the rest of the app against a real server or the local one. When adding a feature, test its logic in
+Rust and add a device check for its Android glue: a screenshot proves a screen renders, not that the
+feature works.
 
 ## Performance rules
 

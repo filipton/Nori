@@ -7,7 +7,8 @@
 //! No JNI, no uniffi, no platform code: what plays is `nori_player::pipeline`, the same code the
 //! Android app's behaviour is tested against.
 
-mod ahead;
+pub mod ahead;
+pub mod arriving;
 pub mod clock;
 pub mod demux;
 mod engine;
@@ -34,7 +35,7 @@ pub use offload::{Coded, Coding, OffloadOutput, OnCpu, Support};
 pub use library::{Library, Located, Source, Sources};
 pub use nori_player::pipeline::{App, Queue, Sound};
 pub use output::{AudioOutput, Device, DeviceWatch, Feed, OutputFormat, OutputKind, ShallowDepth};
-pub use source::{Body, ByteSource, Loader, Window};
+pub use source::{Body, ByteSource, Loader, OpenError, Window};
 pub use store::{Order, Recent, Store};
 pub use wav::WavOutput;
 

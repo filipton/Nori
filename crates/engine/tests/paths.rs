@@ -100,12 +100,17 @@ struct Server {
     files: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
     /// Songs the network will not bring.
     down: Mutex<Vec<String>>,
+    /// Songs the server answers with an error status instead.
+    refused: Mutex<Vec<(String, u16)>>,
 }
 
 impl ByteSource for Server {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
         if self.down.lock().iter().any(|d| d == url) {
             return Err("the network is gone".into());
+        }
+        if let Some((_, status)) = self.refused.lock().iter().find(|(u, _)| u == url) {
+            return Err(nori_engine::OpenError::Status(*status));
         }
         let f = self.files.lock().iter().find(|(u, _)| u == url).map(|(_, f)| f.clone()).ok_or("404")?;
         let len = f.len() as u64;
@@ -1178,7 +1183,7 @@ impl Read for Live {
 }
 
 impl ByteSource for Station {
-    fn open(&self, _: &str, _: u64) -> Result<Body, String> {
+    fn open(&self, _: &str, _: u64) -> Result<Body, nori_engine::OpenError> {
         Err("a live stream is opened live".into())
     }
 
@@ -1294,6 +1299,24 @@ fn a_song_the_network_will_not_bring_is_handed_to_the_offline_bridge() {
     rig.engine.queue_changed();
     rig.engine.play_at(2, 0);
     assert!(rig.wait(5, |r| r.engine.status().state == State::Playing));
+    rig.engine.stop();
+}
+
+/// A server that answers with an error status was reached: the song fails for its own reasons, and is
+/// skipped rather than handed to the offline bridge as the network's failure.
+#[test]
+fn a_song_the_server_refuses_is_not_the_network_s_failure() {
+    let a = ramp(44_100, 16, 3);
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &wav(44_100, 16, &a)), ("c", &wav(44_100, 16, &a))]);
+    server.refused.lock().push(("b".into(), 404));
+    let songs = vec![("a".into(), "wav".into(), 1_000), ("b".into(), "wav".into(), 1_000), ("c".into(), "wav".into(), 1_000)];
+    let rig = Rig::new(server, songs, Bridging(app()), None, Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait(30, |r| r.heard_song("c")), "c after b is skipped: {:?}", rig.events.lock());
+    let events = rig.events.lock().clone();
+    assert!(!events.contains(&Event::Bridge), "not the bridge's: {events:?}");
+    assert!(events.iter().any(|e| matches!(e, Event::Error { id, message } if id == "b" && message.contains("404"))), "b failed with the server's answer: {events:?}");
     rig.engine.stop();
 }
 
@@ -2236,7 +2259,7 @@ impl Read for Trickle {
 }
 
 impl ByteSource for Unsized {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
         let f = self.files.iter().find(|(u, _)| u == url).map(|(_, f)| f.clone()).ok_or("404")?;
         Ok(Body { start: from, len: None, reader: Box::new(Trickle { file: f, at: from as usize, hold: self.hold, gate: self.gate.clone() }) })
     }
@@ -2431,7 +2454,7 @@ fn a_seek_on_a_phone_s_chip_says_no_loop() {
     assert!(rig.time.until(Duration::from_secs(10), || fake.0.lock().flushes >= 1 && fake.0.lock().head >= 44_100));
     rig.run(500);
     let s = rig.engine.status();
-    assert!(s.offloaded && s.index == Some(0) && (13_000..14_000).contains(&s.position_ms), "{s:?}");
+    assert!(s.offloaded && !s.on_cpu && s.index == Some(0) && (13_000..14_000).contains(&s.position_ms), "{s:?}");
     let events = rig.events.lock().clone();
     assert!(!events.iter().any(|e| matches!(e, Event::Looped { .. })), "{events:?}");
     rig.engine.stop();

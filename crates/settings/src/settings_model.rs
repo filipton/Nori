@@ -291,8 +291,6 @@ pub enum BeatModel {
     Downloading,
     Ready,
     Failed { why: nori_automix::beat_model::BeatFailure },
-    /// It comes with the app: nothing is downloaded, and it is there as soon as the switch is on.
-    Shipped,
 }
 
 /// What a settings screen needs besides the settings' own values, worked out by the core's rules.
@@ -335,9 +333,6 @@ pub fn untouched(hi_res: bool, dac_bit_perfect: bool) -> bool {
 fn beat_model_now() -> BeatModel {
     if !beats::AVAILABLE {
         return BeatModel::Unavailable;
-    }
-    if beat_model::bundled().is_some() {
-        return BeatModel::Shipped;
     }
     match beat_model::state() {
         beat_model::State::Absent => BeatModel::Absent,

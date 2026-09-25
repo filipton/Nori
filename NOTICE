@@ -6,11 +6,13 @@ Font (app/src/main/res/font/inter.ttf)
   Inter — Copyright (c) 2016 The Inter Project Authors, SIL Open Font License 1.1
   (full text: app/src/main/assets/licences/OFL-1.1.txt)
 
-Beat model (an asset of the Android app, tools/beat-this/beat-this-small0-v1.onnx)
-  Beat This! (small0 checkpoint, exported to ONNX by tools/beat-this/export.py) — Copyright (c) 2024
-    Institute of Computational Perception, JKU Linz, Austria, MIT (code and weights; full text:
-    app/src/main/assets/licences/MIT.txt). Read only with "Better beat detection" on; a client that does
-    not ship it downloads it when the switch goes on.
+Beat model network (built into the Rust core with `neural-beats`, crates/player/models/beat-this-small0.graph.onnx)
+  Beat This! (Foscarin, Schlüter and Widmer, ISMIR 2024; https://github.com/CPJKU/beat_this) — Copyright (c)
+    2024 Institute of Computational Perception, JKU Linz, Austria, MIT (code and weights; full text:
+    app/src/main/assets/licences/MIT.txt). The small0 model's graph, exported by tools/beat-this/export.py
+    from the authors' code, with no weights in it. The weights are not bundled or hosted by Nori: with
+    "Better beat detection" on, the core fetches the authors' small0 checkpoint from their server
+    (cloud.cp.jku.at), checks it and converts it on the device.
 
 Linked into the Rust core (crates/core)
   SQLite — dedicated to the public domain
@@ -48,6 +50,8 @@ Android libraries
 
 Fetched only when asked for, not bundled
   AutoEQ headphone curves — Copyright (c) 2018 Jaakko Pasanen, MIT
+  Beat This! small0 weights (the checkpoint) — Copyright (c) 2024 Institute of Computational Perception,
+    JKU Linz, Austria, MIT; from the authors' server, only with "Better beat detection" on
   LRCLIB lyrics — lrclib.net; lyrics belong to their authors
   Unison lyrics — Lyrics from Unison (https://unison.boidu.dev), ODbL-1.0; lyrics belong to their authors
   NetEase Cloud Music lyrics — music.163.com; lyrics belong to their authors

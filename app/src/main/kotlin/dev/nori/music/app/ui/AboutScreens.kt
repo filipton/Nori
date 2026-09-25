@@ -94,7 +94,7 @@ internal fun LicencesContent(section: @Composable (String, @Composable ColumnSco
             credits.forEach { c -> InfoRow(c.name, c.what, end = c.licence) { open = c } }
         }
     }
-    open?.let { c -> LicenceText(c) { open = null } }
+    NoriDialog(open, { open = null }) { c -> LicenceText(c) { open = null } }
 }
 
 @Composable
@@ -103,8 +103,7 @@ private fun LicenceText(c: Credit, dismiss: () -> Unit) {
     val text = androidx.compose.runtime.remember(c) {
         c.file?.let { f -> runCatching { context.assets.open("licences/$f.txt").bufferedReader().use { it.readText() }.trim() }.getOrNull() }
     }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = dismiss,
+    AlertCard(
         confirmButton = { androidx.compose.material3.TextButton(dismiss) { Text(say.close) } },
         title = { Text(c.name) },
         text = {

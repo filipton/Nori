@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The platform's theme, with every dialog window on the app's clock rather than the window
+         animation scale: no window animation and no dim of its own. The dialogs draw their own scrim
+         and move their content (ui/Overlays.kt), so they animate even with the system's animations off. -->
+    <style name="Theme.Nori" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:dialogTheme">@style/Theme.Nori.Dialog</item>
+    </style>
+
+    <style name="Theme.Nori.Dialog" parent="@android:style/Theme.Material.Dialog">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
+</resources>

@@ -1,32 +1,22 @@
 #!/usr/bin/env bash
-# The rest of the app against a real server: lyrics, offline playback, favourites, playlists,
-# scrobbling and AutoMix. Every check is made against the server's own API where the server is the
-# one that has to agree, not against what the app believes.
-#   tools/feature-e2e.sh            (credentials from ~/.music.pass: url, blank, user, password)
-set -uo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"; app="$here/app.sh"
-URL=$(sed -n 1p ~/.music.pass); USER=$(sed -n 3p ~/.music.pass); PASS=$(sed -n 4p ~/.music.pass)
-pass=0; fail=0
-check() { local name="$1"; shift; if "$@"; then echo "  PASS  $name"; pass=$((pass+1)); else echo "  FAIL  $name"; fail=$((fail+1)); fi; }
-field() { "$app" state | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
-# Subsonic wants token auth: t=md5(password+salt).
-api() { local m="$1"; shift; local s=nori$RANDOM; local t
-  t=$(printf '%s%s' "$PASS" "$s" | md5sum | cut -d' ' -f1)
-  curl -s "$URL/rest/$m?u=$USER&t=$t&s=$s&v=1.16.1&c=nori&f=json$*"
-}
-# The network back on, and the server reachable from the phone again: the emulator's Wi-Fi takes anywhere
-# from two seconds to twenty to come back, and a check made before it has is testing the Wi-Fi, not the app.
-online() {
-  adb shell svc wifi enable; adb shell svc data enable
-  local host; host=$(printf '%s' "$URL" | sed -E 's#https?://##; s#[/:].*##')
-  for _ in $(seq 30); do adb shell "ping -c 1 -W 1 $host" >/dev/null 2>&1 && break; sleep 1; done
-  sleep 2
-}
+# The rest of the app where only a device can say: the screens' buttons and what they start, the
+# notification's commands, downloads through media3 and its notifications, playing offline and the
+# offline bridge as the network really goes, the mock DAC's track, and a device's sound on connect. The
+# decisions behind them (stars, playlists, scrobbling, lyrics choice, mixes, what plays when the queue
+# runs out, the DAC's modes, AutoEQ) are the core's and tested by cargo test against fake servers;
+# docs/testing.md lists what moved where. Checks that the server has to agree with ask the server's API.
+#   tools/feature-e2e.sh [--only <section>,...] [--list]     NORI_E2E_SERVER=local for tools/dev-server.sh
+#   (the real server's credentials come from ~/.music.pass: url, blank, user, password)
+source "$(dirname "$0")/e2e-lib.sh"
+SECTIONS="lyrics motion notification album-page bridge download-notification downloads foryou dac device-sound"
+OPT_IN="lyrics-services"
+list_sections
 json() { python3 -c "import sys,json;d=json.load(sys.stdin)['subsonic-response'];print(eval('d$1',{'d':d}))" 2>/dev/null; }
 # What the screen itself reports, read out of the accessibility tree rather than guessed at from a
 # screenshot: a label to assert on, and a node to press where the UI says the button is.
 ui() { adb shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; adb shell cat /sdcard/ui.xml 2>/dev/null; }
 pill() { ui | grep -oE 'text="(Play|Pause)"' | head -1 | cut -d'"' -f2; }
+pill_is() { [ "$(pill)" = "$1" ]; }
 tapnode() { # $1 = text|content-desc, $2 = that value
   local c; c=$(ui | python3 -c "
 import sys,re
@@ -38,311 +28,237 @@ for m in re.finditer(r'<node[^>]*>', sys.stdin.read()):
   [ -n "$c" ] || return 1
   adb shell input tap $c
 }
-
-echo "== features end to end against $URL"
-"$app" wake >/dev/null; adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null
-
-echo "-- lyrics"
-"$app" set thirdPartyLookups true >/dev/null
-"$app" play "search:creep" >/dev/null; sleep 8
-"$app" do lyrics >/dev/null; sleep 8
-lines=$(field lyricLines); source=$(field lyricsSource); synced=$(field lyricsSynced)
-echo "     $lines lines from $source (synced=$synced, wordTimed=$(field lyricsWordTimed))"
-check "lyrics arrive for a well-known song" test "${lines:-0}" -gt 0
-# Word timing claimed (the sweep) only for synced lyrics whose lines carry words; unsynced lyrics never
-# claim it. Lyrics that are synced line by line only pass too: then nothing is claimed.
-check "sweeping only claimed for real word timing" bash -c '"'"$app"'" state | python3 -c "
-import sys,json;d=json.load(sys.stdin)
-sys.exit(0 if not d.get(\"lyricsWordTimed\",False) or (d.get(\"lyricsSynced\",False) and d.get(\"lyricsWordLines\",0)>0) else 1)"'
-# Each lyrics service on its own, for the same song. Reported rather than checked: a service may
-# simply not have it, and when the server has timed lyrics of its own no service is asked at all (the
-# source then reads SERVER). A service that times words shows wordTimed=True; one that answers with
-# source SERVER and 0 lines while the server has none is worth a look in logcat (tag nori), where a
-# failing service logs "<NAME> lyrics failed: <why>". The two PaxSenix routes that need a key are
-# skipped (SERVER) unless one is set in Settings -> Lyrics. A service's answer is kept in the response
-# cache and a failure is not asked again for half an hour, so a second run reads what the first found:
-# clear the app's data to ask them all again.
-"$app" set lyricsOnline true >/dev/null
-answered=0
-services="binilyrics better_lyrics paxsenix lyrics_plus portato paxsenix_musixmatch simpmusic unison netease kugou lrclib paxsenix_spotify youtube_captions megalobiz youtube_music genius"
-for s in $services; do
-  "$app" set lyricsSources "$s" >/dev/null
-  "$app" do lyrics >/dev/null; sleep 12
-  src=$(field lyricsSource)
-  echo "     $s: $(field lyricLines) lines from $src (synced=$(field lyricsSynced), wordTimed=$(field lyricsWordTimed))"
-  [ "$src" != "SERVER" ] && answered=$((answered+1))
-done
-echo "     $answered of $(echo $services | wc -w) services answered"
-# As they come out of the box: only the open ones, LRCLIB and Unison; the rest are off until switched on.
-"$app" set lyricsSources default >/dev/null
-"$app" do lyrics >/dev/null; sleep 20
-echo "     out of the box: $(field lyricLines) lines from $(field lyricsSource) (wordTimed=$(field lyricsWordTimed))"
-# With looking things up off, which is the default, no service is asked: the server's own words or none.
-"$app" set thirdPartyLookups false >/dev/null
-"$app" do lyrics >/dev/null; sleep 6
-check "lookups off: only the server's lyrics" test "$(field lyricsSource)" = SERVER
-
-echo "-- moving covers"
-# Off, which is the default, opening the player builds nothing: no video player and no lookup.
-"$app" set motionArtwork false >/dev/null; "$app" open player >/dev/null; sleep 4
-check "switched off, the open player makes no video player" test "$(field motionPlayers)" = 0
-# On, over any network. Whether an album has one is Apple's to say, and a test server's generated
-# music has none, so a video found is reported here rather than required.
-"$app" set motionArtwork true >/dev/null; "$app" set motionArtworkWifiOnly false >/dev/null; sleep 8
-echo "     video for this album: '$(field motionVideo)', players: $(field motionPlayers)"
-"$app" open home >/dev/null; sleep 3
-check "put away, the video player is let go" test "$(field motionPlayers)" = 0
-"$app" set motionArtwork false >/dev/null; "$app" set motionArtworkWifiOnly true >/dev/null
-"$app" set thirdPartyLookups true >/dev/null
-
-echo "-- favourites, and does the server agree"
-# Long enough to still be playing when the offline check looks, twenty lines further down. A random
-# song can be a thirteen-second interlude, and then the track has legitimately finished by the time
-# that check samples it - which reads as "a downloaded song does not play offline" and is not that.
-pick=$(api getRandomSongs "&size=30" | python3 -c "
-import sys,json
-songs=[s for s in json.load(sys.stdin)['subsonic-response']['randomSongs']['song'] if not s['id'].startswith('ext-') and s.get('suffix')!='Remote']
-s=next((s for s in songs if s.get('duration',0) >= 90), songs[0])
-print(s['id'], s.get('duration',0), s['title'], sep='|')")
-id=${pick%%|*}; rest=${pick#*|}; secs=${rest%%|*}; title=${rest#*|}
-echo "     using: $title (${secs}s)"
-"$app" do "star song:$id" >/dev/null; sleep 5
-starred=$(api getStarred2 | python3 -c "
+starred_on_server() { api getStarred2 | python3 -c "
 import sys,json
 d=json.load(sys.stdin)['subsonic-response'].get('starred2',{})
-print(any(s['id']=='$id' for s in d.get('song',[])))")
-check "starring reaches the server" test "$starred" = "True"
-"$app" do "star song:$id" >/dev/null; sleep 4   # put it back
+print(any(s['id']=='$1' for s in d.get('song',[])))"; }
 
-echo "-- scrobbling"
-before=$(api getSong "&id=$id" | python3 -c "import sys,json;print(json.load(sys.stdin)['subsonic-response']['song'].get('playCount',0))")
-"$app" play "song:$id" >/dev/null; sleep 12
-np=$(api getNowPlaying | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['subsonic-response'].get('nowPlaying',{})
-print(any(e.get('id')=='$id' for e in d.get('entry',[])))")
-check "the server is told what is playing" test "$np" = "True"
+whole_run_log
+echo "== features end to end against $([ "$NORI_E2E_SERVER" = local ] && echo "the local server" || echo "the real server")"
+local_server_up
+adb shell am force-stop "$pkg" >/dev/null 2>&1
+app_up >/dev/null || { echo "the app did not come up"; exit 1; }
+remember_settings offload autoMix eq
+id=$(long_song)
 
-echo "-- the notification's heart and shuffle"
-# "notification <x>" sends the same session command the notification's button sends; "notification"
-# in the state is what the session last published to its controllers (the notification is one of them).
-buttons=$(field notification); echo "     buttons: $buttons"
-check "the notification has a heart and a shuffle button" bash -c '[[ "'"$buttons"'" == *heart* && "'"$buttons"'" == *shuffle* ]]'
-was=$(field starred)
-"$app" do "notification favourite" >/dev/null; sleep 5
-now=$(field starred); buttons=$(field notification)
-check "the notification's heart stars the song in the app ($was -> $now)" test "$now" != "$was"
-check "the notification's heart redraws ($buttons)" bash -c '[[ "'"$now"'" == True && "'"$buttons"'" == *heart_filled* ]] || [[ "'"$now"'" == False && "'"$buttons"'" != *heart_filled* ]]'
-starred=$(api getStarred2 | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['subsonic-response'].get('starred2',{})
-print(any(s['id']=='$id' for s in d.get('song',[])))")
-check "the notification's star reaches the server" test "$starred" = "$now"
-"$app" do "notification favourite" >/dev/null; sleep 4   # put it back
-check "and the second tap puts it back" test "$(field starred)" = "$was"
-shuffle=$(field notification); shuffle=${shuffle##* }
-"$app" do "notification shuffle" >/dev/null; sleep 2
-after=$(field notification); after=${after##* }
-check "the notification's shuffle toggles ($shuffle -> $after)" bash -c '[ "'"$shuffle"'" = shuffle_on -a "'"$after"'" = shuffle_off ] || [ "'"$shuffle"'" = shuffle_off -a "'"$after"'" = shuffle_on ]'
-"$app" do "notification shuffle" >/dev/null; sleep 2   # put it back
+if want lyrics; then section lyrics
+  # Which answer wins, word timing, the lookups switch and every service's format are the lyrics crate's
+  # (crates/lyrics tests, over recorded answers). Here: that an answer comes back through the platform.
+  if [ "$NORI_E2E_SERVER" = local ]; then
+    echo "  NOTE  the local server's generated songs have no lyrics anywhere; run against the real server"
+  else
+    "$app" set thirdPartyLookups true >/dev/null
+    "$app" play "$LYRICS_SONG" >/dev/null; sounds 20
+    "$app" do lyrics >/dev/null
+    check "lyrics arrive for a well-known song" wait_for lyricLines ">0" 30
+    echo "     $(field lyricLines) lines from $(field lyricsSource)"
+  fi
+fi
 
-echo "-- the album page answers for its own queue"
-# The hero's pills answer for the queue the page started: Play becomes Pause while that queue sounds,
-# and a second press on Shuffle switches shuffle off where it stands instead of drawing the same songs
-# into a new queue. Picked: an album whose songs all run past a minute, so no track ends on its own in
-# the middle and resets the position these checks compare - and all the server's own: octo-fiesta mixes
-# a provider's songs into an album, and a shuffle that drew one asked the server to download it.
-"$app" wake >/dev/null
-aid=""
-# Not the album of the song playing now: its pill rightly reads Pause before anything is tapped.
-playing_title=$(field title)
-for a in $(api getAlbumList2 "&type=recent&size=25" | python3 -c "
+if want lyrics-services; then section "each lyrics service (a report, not a check)"
+  # Each service asked on its own for the same song: whether the services still answer is theirs to
+  # say, not the app's. A service's answer and a failure are kept in the response cache, so a second run
+  # reads what the first found: clear the app's data to ask them all again.
+  "$app" set lyricsOnline true >/dev/null
+  "$app" play "$LYRICS_SONG" >/dev/null; sounds 20
+  answered=0
+  services="binilyrics better_lyrics paxsenix lyrics_plus portato paxsenix_musixmatch simpmusic unison netease kugou lrclib paxsenix_spotify youtube_captions megalobiz youtube_music genius"
+  for s in $services; do
+    "$app" set lyricsSources "$s" >/dev/null
+    "$app" do lyrics >/dev/null; wait_for lyricsSource "!SERVER" 12 2>/dev/null
+    src=$(field lyricsSource)
+    echo "     $s: $(field lyricLines) lines from $src (synced=$(field lyricsSynced), wordTimed=$(field lyricsWordTimed))"
+    [ "$src" != "SERVER" ] && answered=$((answered+1))
+  done
+  echo "     $answered of $(echo $services | wc -w) services answered"
+  "$app" set lyricsSources default >/dev/null
+fi
+
+if want motion; then section "moving covers"
+  # Off, which is the default, opening the player builds nothing: no video player and no lookup.
+  "$app" set motionArtwork false >/dev/null; "$app" open player >/dev/null
+  wait_for route player 5 >/dev/null
+  check "switched off, the open player makes no video player" test "$(field motionPlayers)" = 0
+  # On, over any network. Whether an album has one is Apple's to say, and a test server's generated
+  # music has none, so a video found is reported here rather than required.
+  "$app" set motionArtwork true >/dev/null; "$app" set motionArtworkWifiOnly false >/dev/null
+  wait_for motionPlayers ">0" 8 2>/dev/null
+  echo "     video for this album: '$(field motionVideo)', players: $(field motionPlayers)"
+  "$app" open home >/dev/null
+  check "put away, the video player is let go" wait_for motionPlayers 0 5
+  "$app" set motionArtwork false >/dev/null; "$app" set motionArtworkWifiOnly true >/dev/null
+  "$app" set thirdPartyLookups true >/dev/null
+fi
+
+if want notification; then section "the notification's heart and shuffle"
+  # "notification <x>" sends the same session command the notification's button sends; "notification"
+  # in the state is what the session last published to its controllers (the notification is one of them).
+  # That the star reaches the server as Subsonic asks is client.rs a_heart_a_new_playlist_...
+  "$app" play "song:$id" >/dev/null; sounds 20
+  buttons=$(field notification); echo "     buttons: $buttons"
+  check "the notification has a heart and a shuffle button" bash -c '[[ "'"$buttons"'" == *heart* && "'"$buttons"'" == *shuffle* ]]'
+  was=$(field starred); flip=$([ "$was" = True ] && echo False || echo True)
+  "$app" do "notification favourite" >/dev/null
+  check "the notification's heart stars the song in the app ($was -> $flip)" wait_for starred "$flip" 10
+  buttons=$(field notification)
+  check "the notification's heart redraws ($buttons)" bash -c '[[ "'"$flip"'" == True && "'"$buttons"'" == *heart_filled* ]] || [[ "'"$flip"'" == False && "'"$buttons"'" != *heart_filled* ]]'
+  "$app" do "notification favourite" >/dev/null; wait_for starred "$was" 10 >/dev/null   # put it back
+  shuffle=$(field notification); shuffle=${shuffle##* }
+  "$app" do "notification shuffle" >/dev/null
+  flipped=$([ "$shuffle" = shuffle_on ] && echo shuffle_off || echo shuffle_on)
+  shuffled() { local n; n=$(field notification); [ "${n##* }" = "$1" ]; }
+  check "the notification's shuffle toggles ($shuffle -> $flipped)" wait_until 5 shuffled "$flipped"
+  "$app" do "notification shuffle" >/dev/null; wait_until 5 shuffled "$shuffle"   # put it back
+fi
+
+if want album-page; then section "the album page answers for its own queue"
+  # The hero's pills answer for the queue the page started: Play becomes Pause while that queue sounds,
+  # and a second press on Shuffle switches shuffle off where it stands. What each press means is
+  # pages.rs the_big_buttons_answer_for_the_pages_own_queue; here the taps on the real screen. Picked: an
+  # album whose songs all run past a minute, all the server's own, and not the one playing now.
+  "$app" wake >/dev/null
+  aid=""; playing_title=$(field title)
+  if [ "$NORI_E2E_SERVER" = local ]; then
+    aid=$(mix_album)
+  else
+    for a in $(api getAlbumList2 "&type=recent&size=25" | python3 -c "
 import sys,json
 for x in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
     if not x['id'].startswith('ext-') and x.get('songCount',0) >= 2: print(x['id'])"); do
-  api getAlbum "&id=$a" | python3 -c "
-import sys,json
-t='''$playing_title'''
-sys.exit(0 if any(x.get('title')==t for x in json.load(sys.stdin)['subsonic-response']['album']['song']) else 1)" && continue
-  d=$(api getAlbum "&id=$a" | python3 -c "
+      d=$(api getAlbum "&id=$a" | python3 -c "
 import sys,json
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
-print(0 if any(x['id'].startswith('ext-') or x.get('suffix')=='Remote' for x in s) else min(x.get('duration',0) for x in s))" 2>/dev/null)
-  [ "${d:-0}" -ge 60 ] && { aid=$a; break; }
-done
-if [ -z "$aid" ]; then
-  echo "     (no album of songs a minute or more long; nothing to tap at)"
-else
-  "$app" open "album/$aid" >/dev/null; sleep 3
-  check "the pill reads Play before the album is played" test "$(pill)" = "Play"
-  "$app" play "album:$aid" >/dev/null; sleep 8
-  check "the pill reads Pause while this album is what sounds" test "$(pill)" = "Pause"
-  was=$(field shuffle)
-  tapnode content-desc Shuffle; sleep 4
-  check "shuffle starts this page's queue and lights ($was -> $(field shuffle))" test "$(field shuffle)" = "True"
-  check "and the pill stays Pause over the queue it started" test "$(pill)" = "Pause"
-  title=$(field title); pos=$(field positionMs)
-  tapnode content-desc Shuffle; sleep 3
-  left=$(field shuffle); now=$(field title); nowpos=$(field positionMs)
-  check "a second press turns shuffle off on this queue ($was -> $left)" test "$left" = "False"
-  check "without drawing a new queue (still $now)" test "$now" = "$title"
-  check "and without restarting it ($pos -> $nowpos ms)" test "$nowpos" -ge "$pos"
-  tapnode text Pause; sleep 2
-  check "the pill pauses playback" test "$(field playing)" = "False"
-  check "and reads Play again" test "$(pill)" = "Play"
-  pos=$(field positionMs)
-  tapnode text Play; sleep 4
-  check "Play picks the queue up where it stopped ($pos -> $(field positionMs) ms)" test "$(field positionMs)" -gt "$pos"
+t='''$playing_title'''
+print(0 if any(x.get('title')==t or x['id'].startswith('ext-') or x.get('suffix')=='Remote' for x in s) else min(x.get('duration',0) for x in s))" 2>/dev/null)
+      [ "${d:-0}" -ge 60 ] && { aid=$a; break; }
+    done
+  fi
+  if [ -z "$aid" ]; then
+    echo "     (no album of songs a minute or more long; nothing to tap at)"
+  else
+    "$app" do pause >/dev/null
+    "$app" open "album/$aid" >/dev/null
+    check "the pill reads Play before the album is played" wait_until 8 pill_is Play
+    "$app" play "album:$aid" >/dev/null; sounds 20
+    check "the pill reads Pause while this album is what sounds" wait_until 8 pill_is Pause
+    was=$(field shuffle)
+    tapnode content-desc Shuffle
+    check "shuffle starts this page's queue and lights ($was -> True)" wait_for shuffle True 8
+    check "and the pill stays Pause over the queue it started" wait_until 5 pill_is Pause
+    tapnode content-desc Shuffle
+    check "a second press turns shuffle off on this queue" wait_for shuffle False 8
+    tapnode text Pause
+    check "the pill pauses playback" wait_for playing False 8
+    check "and reads Play again" wait_until 5 pill_is Play
+    pos=$(field positionMs)
+    tapnode text Play
+    check "Play picks the queue up where it stopped (from $pos ms)" wait_for positionMs ">$((pos + 500))" 10
+  fi
 fi
 
-echo "-- offline playback of a download"
-"$app" do "download song:$id" >/dev/null; sleep 14
-adb shell svc wifi disable; adb shell svc data disable; sleep 3
-adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 4
-# From the device's own list: looking the song up by id would need the network and prove nothing.
-"$app" play "downloaded:0" >/dev/null; sleep 12
-# Our own track: other apps' tracks are listed too, and the first of them can be a stopped one.
-pid=$(adb shell pidof dev.nori.music | tr -d '\r')
-state=$(adb shell dumpsys audio | grep -oE "type:android.media.AudioTrack u/pid:[0-9]+/$pid state:[a-z]+" | grep -oE "state:[a-z]+" | tail -1)
-check "a downloaded song plays with the network off ($state)" test "$state" = "state:started"
-online
-
-echo "-- the offline bridge"
-# A long library album, started while online and paused at once. Offline, a skip past what was fetched
-# ahead cannot play; with the bridge on, downloads play instead, and the album comes back with the network.
-"$app" set bridgeOffline true >/dev/null
-# Nothing of the album may already be on the phone: a song in the stream cache plays offline, rightly,
-# and then there is nothing to bridge. The other checks play some records over and over.
-"$app" set clearStreamCache true >/dev/null
-# ...and none of it downloaded: a downloaded song plays offline, rightly, and the download checks below
-# keep fetching whole albums. What the phone holds is read out of the app's own database.
-dl=$(mktemp -d)
-for f in nori.db nori.db-wal nori.db-shm; do adb exec-out run-as dev.nori.music cat files/$f > "$dl/$f" 2>/dev/null; done
-python3 -c "
+if want bridge; then section "the offline bridge"
+  # A long library album, started while online and paused at once. Offline, a skip past what was fetched
+  # ahead cannot play; with the bridge on, downloads play instead, and the album comes back with the
+  # network. Which song is parked and where the album comes back is the core's (bridge.rs, and
+  # a_bridge_is_started_and_undone_over_the_core_queue); here the network really going and coming.
+  # Something has to be downloaded to stand in: the smoke's download, or this one.
+  if [ "$(field downloaded)" = 0 ]; then
+    "$app" do "download song:$id" >/dev/null; wait_for downloaded ">0" 60 >/dev/null
+  fi
+  "$app" set bridgeOffline true >/dev/null
+  # Nothing of the album may already be on the phone: a song in the stream cache or downloaded plays
+  # offline, rightly, and then there is nothing to bridge. What the phone holds is read from its database.
+  "$app" set clearStreamCache true >/dev/null
+  dl=$(mktemp -d)
+  for f in nori.db nori.db-wal nori.db-shm; do adb exec-out run-as "$pkg" cat files/$f > "$dl/$f" 2>/dev/null; done
+  python3 -c "
 import sqlite3
 c=sqlite3.connect('$dl/nori.db')
 print('\n'.join(r[0] for r in c.execute('select id from downloads')))" > "$dl/held" 2>/dev/null
-bid=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
+  if [ "$NORI_E2E_SERVER" = local ]; then candidates=$(mix_album); else
+    candidates=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
-    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 10: print(a['id'])" | while read -r a; do
-  api getAlbum "&id=$a" | python3 -c "
+    if not a['id'].startswith('ext-') and a.get('songCount',0) >= 10: print(a['id'])"); fi
+  bid=$(for a in $candidates; do api getAlbum "&id=$a" | python3 -c "
 import sys,json
 held=set(open('$dl/held').read().split())
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
 own=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
-print('$a' if own and not any(x['id'] in held for x in s) else '')"; done | grep . | head -1)
-rm -rf "$dl"
-if [ -n "$bid" ]; then
-  "$app" play "album:$bid" >/dev/null; sleep 4; "$app" do pause >/dev/null; sleep 1
-  adb shell svc wifi disable; adb shell svc data disable; sleep 3
-  for _ in 1 2 3 4 5 6; do "$app" do next >/dev/null; sleep 1; done
-  sleep 12
-  # The song that could not play is wherever the failure caught up with the skips.
-  parked=$(field parkedId)
-  echo "     now: $(field title) (bridging=$(field bridging)), parked: $parked"
-  check "downloads stand in while the server is out of reach" test "$(field bridging)" = "True"
-  check "and they play" test "$(field playing)" = "True"
-  online; sleep 10
-  echo "     back: $(field title) (bridging=$(field bridging))"
-  check "the album comes back with the network" test "$(field bridging)" = "False"
-  check "at the song that could not play" test -n "$parked" -a "$(field songId)" = "$parked"
-  "$app" do pause >/dev/null
-else
-  echo "     (no library album of ten songs found)"
+print('$a' if own and len(s)>=10 and not any(x['id'] in held for x in s) else '')"; done | grep . | head -1)
+  rm -rf "$dl"
+  if [ -n "$bid" ]; then
+    "$app" play "album:$bid" >/dev/null; wait_for playing True 20 >/dev/null; "$app" do pause >/dev/null
+    offline
+    for _ in 1 2 3 4 5 6; do "$app" do next >/dev/null; done
+    check "downloads stand in while the server is out of reach" wait_for bridging True 30
+    check "and they play" sounds 20
+    online
+    check "the album comes back with the network" wait_for bridging False 30
+    "$app" do pause >/dev/null
+  else
+    echo "     (no library album of ten songs with nothing of it downloaded)"
+  fi
+  "$app" set bridgeOffline false >/dev/null
 fi
-"$app" set bridgeOffline false >/dev/null
 
-echo "-- the download queue"
-# The notification's tap is this intent; the app is already running, so it arrives as a new intent.
-"$app" open home >/dev/null; sleep 2
-adb shell am start -a dev.nori.music.OPEN_DOWNLOADS -n dev.nori.music/dev.nori.music.app.MainActivity >/dev/null 2>&1; sleep 3
-check "tapping the download notification opens the queue" test "$(field route)" = "downloads"
+if want download-notification; then section "the download queue from its notification"
+  # The notification's tap is this intent; the app is already running, so it arrives as a new intent.
+  "$app" open home >/dev/null
+  adb shell am start -a dev.nori.music.OPEN_DOWNLOADS -n "$pkg/dev.nori.music.app.MainActivity" >/dev/null 2>&1
+  check "tapping the download notification opens the queue" wait_for route downloads 8
+fi
 
-echo "-- downloads run side by side and survive a force stop"
-# A library album of at least six songs, none of them provider tracks (streaming one of those makes
-# octo-fiesta fetch it), with nothing of it downloaded yet.
-# Albums with any song downloaded already are left out: every run downloads one, so a random pick
-# of albums this suite has fetched before would report nothing to do.
-held=$(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select distinct json_extract(json,'\$.albumId') from items where kind=2 and id in (select id from downloads)\"" 2>/dev/null | tr -d '\r')
-aid=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
+if want downloads; then section "downloads run side by side through media3 and survive a force stop"
+  # How the batch is counted, its speed and time left are transfers.rs; here media3 running them.
+  # A library album of at least six songs with nothing of it downloaded yet (every run downloads one).
+  held=$(adb shell "run-as $pkg sqlite3 files/nori.db \"select distinct json_extract(json,'\$.albumId') from items where kind=2 and id in (select id from downloads)\"" 2>/dev/null | tr -d '\r')
+  if [ "$NORI_E2E_SERVER" = local ]; then
+    # The generated albums: a few hundred to take from before any is used twice. Never the Long Album,
+    # which the bridge needs with nothing of it downloaded.
+    aids=$(api getAlbumList2 "&type=alphabeticalByName&size=500" | python3 -c "
+import sys,json
+for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
+    if a.get('songCount',0) >= 3: print(a['id'])" | grep -vxF -e "${held:-none}" -e "$(mix_album)" | head -12 | tr '\n' ' ')
+  else
+    aids=$(api getAlbumList2 "&type=random&size=100" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['subsonic-response']['albumList2'].get('album',[]):
     if not a['id'].startswith('ext-') and a.get('songCount',0) >= 6: print(a['id'])" | grep -vxF -e "${held:-none}" | while read -r a; do
-  api getAlbum "&id=$a" | python3 -c "
+      api getAlbum "&id=$a" | python3 -c "
 import sys,json
 s=json.load(sys.stdin)['subsonic-response']['album']['song']
-ok=all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s)
-print('$a' if ok else '')"; done | grep . | head -12 | tr '\n' ' ')
-if [ -n "$aid" ]; then
-  before=$(field downloaded)
-  # An album this suite has already downloaded has nothing left to fetch and would report nothing
-  # downloading at all, so ask each candidate in turn until one has work to do.
-  active=0
-  for a in $aid; do
-    aid=$a
-    "$app" do "download album:$aid" >/dev/null; sleep 3
-    active=$(field dlActive)
-    [ "${active:-0}" -ge 2 ] && break
-  done
-  echo "     $active downloading at once, parallel setting $(adb shell "run-as ${NORI_PKG:-dev.nori.music} sqlite3 files/nori.db \"select json_extract(value,'\$.i') from settings where key='parallelDownloads'\"" 2>/dev/null | tr -d '\r')"
-  check "several songs download at once ($active)" test "${active:-0}" -ge 2
-  # The download notification carries speed and ETA, under its own id: it used to share the
-  # playback notification's id (1001) and replace the now-playing notification while downloading.
-  notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "dev.nori.music|[0-9]*" | sort -u | tr '\n' ' ')
-  echo "     notifications: $notifs"
-  check "the download notification posts under its own id" bash -c "[[ '$notifs' == *'|2001'* ]]"
-  speed=0; eta=-1
-  for _ in $(seq 10); do
-    speed=$(field dlSpeed); eta=$(field dlEta); [ "${speed:-0}" -gt 0 ] && break; sleep 2
-  done
-  echo "     $speed B/s, ETA ${eta}s"
-  check "the batch reports a download speed ($speed B/s)" test "${speed:-0}" -gt 0
-  check "the batch reports an ETA (${eta}s)" test "${eta:--1}" -gt 0
-  adb shell am force-stop dev.nori.music >/dev/null 2>&1; "$app" launch >/dev/null; sleep 5
-  left=$(field downloading); active=$(field dlActive)
-  check "after a force stop the queue picks up again ($left left, $active downloading)" bash -c "[ '${left:-1}' = 0 ] || [ '${active:-0}' -gt 0 ]"
-  for _ in $(seq 60); do [ "$(field downloading)" = 0 ] && break; sleep 3; done
-  check "the interrupted album finishes ($(field downloaded) downloaded, was $before)" test "$(field downloading)" = 0
-else
-  echo "     no library-only album of six songs found; skipped"
+print('$a' if all(not x['id'].startswith('ext-') and x.get('suffix')!='Remote' for x in s) else '')"; done | grep . | head -12 | tr '\n' ' ')
+  fi
+  if [ -n "$aids" ]; then
+    before=$(field downloaded)
+    # An album already downloaded has nothing left to fetch, so ask each candidate until one has work.
+    active=0
+    for a in $aids; do
+      "$app" do "download album:$a" >/dev/null
+      wait_for dlActive ">1" 5 2>/dev/null && { active=$WAITED; break; }
+    done
+    check "several songs download at once ($active)" test "${active:-0}" -ge 2
+    # Under its own id: it used to share the playback notification's (1001) and replace it. 2001 while
+    # songs are coming, 2002 once they are done (the local server can finish before this looks).
+    notifs=$(adb shell dumpsys notification --noredact 2>/dev/null | grep -o "$pkg|[0-9]*" | sort -u | tr '\n' ' ')
+    check "the download notification posts under its own id ($notifs)" bash -c "[[ '$notifs' == *'|2001'* || '$notifs' == *'|2002'* ]]"
+    adb shell am force-stop "$pkg" >/dev/null 2>&1; app_up >/dev/null
+    resumed() { local v; v=$(fields downloading dlActive | tr '\n' ' '); set -- $v; [ "${1:-1}" = 0 ] || [ "${2:-0}" -gt 0 ]; }
+    check "after a force stop the queue picks up again" wait_until 15 resumed
+    check "the interrupted album finishes (was $before downloaded)" wait_for downloading 0 180
+  else
+    echo "     no library-only album with work left found; skipped"
+  fi
 fi
-echo "-- playlists, and does the server agree"
-name="nori check $RANDOM"
-"$app" do "newplaylist $name|search:creep" >/dev/null; sleep 6
-pid=$(api getPlaylists | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['subsonic-response'].get('playlists',{})
-print(next((p['id'] for p in d.get('playlist',[]) if p['name']=='$name'), ''))")
-check "a new playlist reaches the server" test -n "$pid"
-songs=$(api getPlaylist "&id=$pid" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['subsonic-response'].get('playlist',{})
-print(len(d.get('entry',[])))" 2>/dev/null)
-check "the song went into it ($songs)" test "${songs:-0}" -ge 1
-# Tidy up: a test must not leave anything behind on someone's library.
-[ -n "$pid" ] && api deletePlaylist "&id=$pid" >/dev/null
-gone=$(api getPlaylists | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['subsonic-response'].get('playlists',{})
-print(all(p['name']!='$name' for p in d.get('playlist',[])))")
-check "the check cleans up after itself" test "$gone" = "True"
 
-echo "-- editing the queue"
-"$app" play "search:creep" >/dev/null; sleep 6
-before=$(field queue)
-"$app" do "enqueue search:no surprises" >/dev/null; sleep 4
-after=$(field queue)
-check "adding to the queue grows it ($before -> $after)" test "${after:-0}" -gt "${before:-0}"
-"$app" do "playnext search:let down" >/dev/null; sleep 4
-check "play next grows it too ($after -> $(field queue))" test "$(field queue)" -gt "${after:-0}"
-
-echo "-- for you: favourites and mixes open as pages"
-# What a mix page shows, read from the screen: "<count>|<title>@<x>,<y>|..." for the song count in its
-# caption and every fully visible row title (rows sit below the Play pill and above the mini player).
-page() {
-  adb shell uiautomator dump /sdcard/nori-ui.xml >/dev/null 2>&1
-  adb shell cat /sdcard/nori-ui.xml | python3 -c "
+if want foryou; then section "for you: favourites and mixes open as pages"
+  # What a mix page shows, read from the screen: "<count>|<title>@<x>,<y>|..." for the song count in its
+  # caption and every fully visible row title (rows sit below the Play pill and above the mini player).
+  # Which songs a mix holds, and that it stays the same when opened again, is mixes.rs.
+  page() {
+    adb shell uiautomator dump /sdcard/nori-ui.xml >/dev/null 2>&1
+    adb shell cat /sdcard/nori-ui.xml | python3 -c "
 import sys,re
 nodes=[(t,d,*map(int,b)) for t,d,b in ((m.group(1),m.group(2),re.findall(r'\d+',m.group(3))) for m in re.finditer(r'text=\"([^\"]*)\"[^>]*content-desc=\"([^\"]*)\"[^>]*bounds=\"([^\"]*)\"',sys.stdin.read()))]
 count=next((int(m.group(1)) for t,*_ in nodes for m in [re.match(r'(\d+) songs? ',t)] if m),0)
@@ -351,158 +267,77 @@ play=next((y2 for t,d,x1,y1,x2,y2 in nodes if t=='Play'),0)
 rows=[n for n in nodes if n[0] and n[3]>=play and n[5]<=bar and 150<n[2]<260]
 titles=[n for i,n in enumerate(rows) if i%2==0]
 print('|'.join([str(count)]+['%s@%d,%d'%(t,(x1+x2)//2,(y1+y2)//2) for t,d,x1,y1,x2,y2 in titles]))"
-}
-starred_count() { api getStarred2 | python3 -c "
+  }
+  count_is() { [ "$(page | cut -d'|' -f1)" = "$1" ]; }
+  starred_count() { api getStarred2 | python3 -c "
 import sys,json
 d=json.load(sys.stdin)['subsonic-response'].get('starred2',{})
 print(sum(1 for s in d.get('song',[]) if not s.get('isExternal') and not s['id'].startswith(('ext-','pl-'))))"; }
-"$app" open mix/favourites >/dev/null; sleep 4
-check "the favourites tile opens its page" test "$(field route)" = "mix/{id}"
-favs=$(page | cut -d'|' -f1); server=$(starred_count)
-check "it lists the songs the server has starred ($favs, server $server)" test "${favs:-x}" = "$server"
-"$app" do "star song:$id" >/dev/null; sleep 5
-check "starring a song adds it while the page is open" test "$(page | cut -d'|' -f1)" = "$((server + 1))"
-"$app" do "star song:$id" >/dev/null; sleep 5   # put it back
-check "and unstarring takes it away again" test "$(page | cut -d'|' -f1)" = "$server"
-"$app" open mix/discover >/dev/null; sleep 4
-first=$(page)
-"$app" open home >/dev/null; sleep 2; "$app" open mix/discover >/dev/null; sleep 4
-check "a mix stays the same when it is opened again" test "$first" = "$(page)"
-# What you see is what plays: a tap on the third row starts the whole mix at that row.
-n=$(echo "$first" | cut -d'|' -f1); third=$(echo "$first" | cut -d'|' -f4)
-if [ -n "$third" ]; then
-  xy=${third##*@}; adb shell input tap "${xy%,*}" "${xy#*,}"; sleep 6
-  check "tapping a row plays that song (${third%@*})" test "$(field title)" = "${third%@*}"
-  check "with the rest of the mix around it ($(field index) of $(field queue), page $n)" \
-    test "$(field index)" = "2" -a "$(field queue)" = "$n"
-  "$app" do pause >/dev/null
-else
-  check "the mix has songs to play" false
+  "$app" open mix/favourites >/dev/null
+  check "the favourites tile opens its page" wait_for route "mix/{id}" 8
+  server=$(starred_count)
+  check "it lists the songs the server has starred (server $server)" wait_until 8 count_is "$server"
+  "$app" do "star song:$id" >/dev/null
+  check "starring a song adds it while the page is open" wait_until 10 count_is "$((server + 1))"
+  "$app" do "star song:$id" >/dev/null   # put it back
+  check "and unstarring takes it away again" wait_until 10 count_is "$server"
+  "$app" open mix/discover >/dev/null
+  wait_until 8 bash -c "'$app' state | grep -q 'mix/{id}'"
+  first=""; for _ in $(seq 10); do first=$(page); [ -n "$(echo "$first" | cut -d'|' -f4)" ] && break; sleep 0.5; done
+  # What you see is what plays: a tap on the third row starts the whole mix at that row.
+  n=$(echo "$first" | cut -d'|' -f1); third=$(echo "$first" | cut -d'|' -f4)
+  if [ -n "$third" ]; then
+    xy=${third##*@}; adb shell input tap "${xy%,*}" "${xy#*,}"
+    check "tapping a row plays that song (${third%@*})" wait_for title "${third%@*}" 10
+    check "with the rest of the mix around it ($(field index) of $(field queue), page $n)" \
+      test "$(field index)" = "2" -a "$(field queue)" = "$n"
+    "$app" do pause >/dev/null
+  else
+    check "the mix has songs to play" false
+  fi
 fi
 
-echo "-- automix over a real album"
-"$app" set autoMix true >/dev/null
-# Consecutive tracks of one album are meant to stay gapless, so that setting has to be off for a
-# transition to be planned at all - otherwise this checks the wrong thing and calls the feature broken.
-"$app" set crossfadeKeepAlbums false >/dev/null
-# From nothing measured, so the measuring ahead is this run's work and not an earlier one's.
-"$app" set clearAnalyses true >/dev/null
-# Read from a running capture, not `adb logcat -d`: every app.sh call clears the log to read its own
-# answer back, and the songs coming up are measured within a few seconds of play - long gone by the time
-# the seek below has been sent. Only the song after the boundary was left to see, measured some seconds
-# after it (the precache delay), which fell outside the wait unless the album was slow to
-# arrive: the check passed or failed on timing, not on what the app did.
-automix_log=$(mktemp)
-adb logcat -c
-adb logcat -v time -s nori:I > "$automix_log" 2>/dev/null &
-automix_watch=$!
-sleep 0.5
-"$app" play "album:6Lt5zppPoP7FGBYqInxzZB" >/dev/null; sleep 10
-# Jump to just before the end so the next track starts decoding and a transition has to be planned.
-dur=$(field durationMs); "$app" do "seek $(( ${dur:-240000} - 14000 ))" >/dev/null; sleep 18
-kill "$automix_watch" 2>/dev/null; wait "$automix_watch" 2>/dev/null
-planned=$(grep -cE "transition .* -> " "$automix_log")
-analysed=$(grep -c "analysed" "$automix_log")
-ahead=$(grep -c "analysed .* ahead" "$automix_log")
-check "a transition is planned at a track boundary ($planned)" test "${planned:-0}" -ge 1
-# The tracks are measured before they are played, so the first meeting of two songs is a real mix
-# rather than a fade; the measurement only runs on audio already on the device, so this is a report
-# rather than a check - an empty cache legitimately has nothing to measure yet.
-# Only a song on the device can be measured: when every unmeasured one is still to be fetched (an earlier
-# section cleared the stream cache), there is nothing to measure yet, and that is said rather than failed.
-away=$(grep -oE "measuring ahead: [0-9]+ of [0-9]+ unmeasured, [0-9]+ not on" "$automix_log" | tail -1 | awk '{print $3, $7}')
-if [ "${ahead:-0}" -eq 0 ] && [ -n "$away" ] && [ "${away% *}" = "${away#* }" ] && [ "${away% *}" -gt 0 ]; then
-  echo "  NOTE  the tracks coming up are not on the device yet (${away% *} unmeasured, all still to fetch)"
-else
-  check "the tracks coming up are measured before they are played ($ahead)" test "${ahead:-0}" -ge 1
+if want dac; then section "a USB DAC, faked"
+  # A DAC cannot be plugged into an emulator, so the app is pointed at a mock one (ActionsViewModel,
+  # "dac"). Which mode a DAC gets and why one cannot be fed is dac.rs; here what the platform does: offload
+  # stands down when the device appears, and the track is opened in the DAC's own format.
+  "$app" set autoMix false >/dev/null; "$app" set crossfadeSec 0 >/dev/null
+  "$app" set crossfeedDb 0 >/dev/null; "$app" set offload true >/dev/null; "$app" set eq false >/dev/null
+  "$app" do "dac off" >/dev/null
+  "$app" play "$PLAIN" >/dev/null; sounds 20
+  check "offload is asked for on the phone's own output" wait_for offloadWanted True 10
+  "$app" do "dac Mock DAC@44100/16,96000/24" >/dev/null
+  check "offload stands down when a USB device appears" wait_for offloadWanted False 10
+  check "the DAC is seen" wait_for dac "Mock DAC" 5
+  check "audio keeps flowing to the DAC" bursts_continue
+  "$app" set bitPerfect true >/dev/null; "$app" play "$PLAIN" >/dev/null; sounds 20
+  check "bit-perfect engages on a mode the sink can write" wait_for bitPerfect True 10
+  check "and says what the track was opened with" test -n "$(field dacTrack)"
+  "$app" do "dac off" >/dev/null; "$app" set bitPerfect false >/dev/null
 fi
-echo "     (analysis events seen: $analysed)"
-rm -f "$automix_log"
-"$app" set crossfadeKeepAlbums true >/dev/null
 
-echo "-- what plays when the queue runs out"
-# One song on its own, so the queue really does run out; the album basis is the one that has to queue a
-# whole record rather than a handful of songs.
-"$app" set autoFill true >/dev/null
-"$app" set autoFillBasis SIMILAR >/dev/null
-"$app" set autoFillKind SONGS >/dev/null
-"$app" play "search:creep" >/dev/null; sleep 10
-grew=$(field queue)
-check "the queue is carried on past its last song ($grew)" test "${grew:-0}" -gt 1
-"$app" set autoFillKind ALBUMS >/dev/null
-"$app" play "search:creep" >/dev/null; sleep 16
-album=$(field queue)
-check "a whole album is queued when albums are chosen ($album)" test "${album:-0}" -gt 2
-"$app" set autoFillKind SONGS >/dev/null
-
-echo "-- a USB DAC, faked"
-# A DAC cannot be plugged into an emulator, so the app is pointed at a mock one (ActionsViewModel, "dac").
-# What is checked is the part that was wrong on real hardware: offload has no path to a USB device, so a
-# track handed to the audio chip plays nothing, and the bit-perfect mode has to match what the sink
-# actually writes rather than what the decoder was handed.
-"$app" set autoMix false >/dev/null; "$app" set crossfadeSec 0 >/dev/null
-"$app" set crossfeedDb 0 >/dev/null; "$app" set offload true >/dev/null; "$app" set eq false >/dev/null
-"$app" do "dac off" >/dev/null
-"$app" play "search:creep" >/dev/null; sleep 8
-check "offload is asked for on the phone's own output" test "$(field offloadWanted)" = "True"
-"$app" do "dac Mock DAC@44100/16,96000/24" >/dev/null; sleep 5
-check "offload stands down when a USB device appears" test "$(field offloadWanted)" = "False"
-check "the DAC is seen" test "$(field dac)" = "Mock DAC"
-bytes=$(field sinkBytes); sleep 12
-check "audio keeps flowing to the DAC ($bytes -> $(field sinkBytes))" test "$(field sinkBytes)" -gt "${bytes:-0}"
-"$app" set bitPerfect true >/dev/null; "$app" play "search:creep" >/dev/null; sleep 8
-check "bit-perfect engages on a mode the sink can write" test "$(field bitPerfect)" = "True"
-check "and says what the track was opened with" test -n "$(field dacTrack)"
-"$app" do "dac Picky DAC@44100/24" >/dev/null; sleep 5
-check "a DAC this app cannot feed says why" test -n "$(field dacBlocked)"
-check "and is not claimed to be bit-perfect" test "$(field bitPerfect)" = "False"
-"$app" do "dac off" >/dev/null; "$app" set bitPerfect false >/dev/null
-
-echo "-- a sound per output device"
-# The service switches the sound when the output changes, with no screen involved. A fake DAC stands in
-# for the device; "eq" in the state is the equalizer switch, which each device's sound sets.
-dev="USB: Nori Check DAC"; hp="USB: Sennheiser HD 600"
-clean() {
-  "$app" do "dac off" >/dev/null; sleep 2; "$app" set autoEqAuto false >/dev/null
-  for p in "nori check" "Flat" "Sennheiser HD 600"; do "$app" set deleteProfile "$p" >/dev/null; done
-  "$app" set forgetDevice "$dev" >/dev/null; "$app" set forgetDevice "$hp" >/dev/null
-}
-clean   # a run that stopped half-way must not decide this one
-"$app" set autoEqAuto false >/dev/null; "$app" do "dac off" >/dev/null; "$app" set eq false >/dev/null
-"$app" play "search:creep" >/dev/null; sleep 6
-"$app" set eq true >/dev/null; "$app" set saveProfile "nori check" >/dev/null; sleep 2; "$app" set eq false >/dev/null
-"$app" set deviceSound "$dev=profile:nori check" >/dev/null; sleep 2
-"$app" do "dac Nori Check DAC@44100/16" >/dev/null; sleep 3
-check "a device with a profile gets it on connect" test "$(field output)/$(field eq)" = "$dev/True"
-"$app" do "dac off" >/dev/null; sleep 3
-check "and the sound from before comes back without it" test "$(field eq)" = "False"
-"$app" set eq true >/dev/null; "$app" set deviceSound "$dev=flat" >/dev/null; sleep 2
-"$app" do "dac Nori Check DAC@44100/16" >/dev/null; sleep 3
-check "a device set to flat turns the equalizer off" test "$(field eq)" = "False"
-"$app" do "dac off" >/dev/null; sleep 3
-check "and it is on again on the speaker" test "$(field eq)" = "True"
-"$app" set eq false >/dev/null
-# AutoEQ: the index is one download from github.com; without it there is nothing to match against.
-"$app" set autoEqIndex 1 >/dev/null; sleep 12
-adb logcat -c; "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 4
-if adb logcat -d -s nori:I | grep -q "device sound: $hp -> nothing chosen"; then
-  check "asking first leaves the sound alone" test "$(field eq)" = "False"
-  "$app" set eqNotice apply >/dev/null; sleep 4
-  check "saying yes applies the headphones' curve" test "$(field eq)" = "True"
-  "$app" do "dac off" >/dev/null; sleep 3
-  "$app" set deviceSound "$hp=auto" >/dev/null; "$app" set deleteProfile "Sennheiser HD 600" >/dev/null; sleep 2
-  "$app" set autoEqAuto true >/dev/null; "$app" set eq false >/dev/null
-  "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 5
-  check "with automatic AutoEQ on, the curve is applied without asking" test "$(field eq)" = "True"
-  "$app" set eqNotice undo >/dev/null; sleep 3
-  check "undo puts the sound back" test "$(field eq)" = "False"
-  "$app" do "dac off" >/dev/null; sleep 2; "$app" do "dac Sennheiser HD 600@44100/16" >/dev/null; sleep 4
-  check "and that device is not switched again" test "$(field eq)" = "False"
-else
-  echo "     (AutoEQ index not available, curve checks skipped)"
+if want device-sound; then section "a sound per output device"
+  # The service switches the sound when the output changes, with no screen involved. A fake DAC stands in
+  # for the device; "eq" in the state is the equalizer switch, which each device's sound sets. What a
+  # device gets (flat, a profile, AutoEQ offered, applied or undone) is profiles.rs and device.rs; here the
+  # platform's output events reaching it, both ways.
+  dev="USB: Nori Check DAC"
+  clean() {
+    "$app" do "dac off" >/dev/null; "$app" set autoEqAuto false >/dev/null
+    "$app" set deleteProfile "nori check" >/dev/null; "$app" set forgetDevice "$dev" >/dev/null
+  }
+  clean   # a run that stopped half-way must not decide this one
+  "$app" set eq false >/dev/null
+  "$app" play "$PLAIN" >/dev/null; sounds 20
+  "$app" set eq true >/dev/null; "$app" set saveProfile "nori check" >/dev/null; "$app" set eq false >/dev/null
+  "$app" set deviceSound "$dev=profile:nori check" >/dev/null
+  "$app" do "dac Nori Check DAC@44100/16" >/dev/null
+  on_dev() { [ "$(fields output eq | tr '\n' '/')" = "$dev/True/" ]; }
+  check "a device with a profile gets it on connect" wait_until 10 on_dev
+  "$app" do "dac off" >/dev/null
+  check "and the sound from before comes back without it" wait_for eq False 10
+  clean   # nothing of the check stays in the device list or the profiles
 fi
-# Tidy up: nothing of the check stays in the device list or the profiles.
-clean
 
-echo "== $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+restore_settings
+finish

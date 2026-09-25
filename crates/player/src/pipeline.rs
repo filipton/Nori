@@ -1438,7 +1438,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         // measured of it AutoMix had nothing to mix it by.
         let next = self.next_of(cur).map(|n| self.id_at(n));
         let other_next = next != self.upcoming;
-        if other_next {
+        // Asked again after any edit, the same next song or not: the songs after it, fetched ahead, may
+        // be others now. A platform asked for the song it is fetching already goes on with it.
+        if other_next || edited {
             self.upcoming = next;
             if let Some(id) = &self.upcoming {
                 self.tracks.upcoming(id);

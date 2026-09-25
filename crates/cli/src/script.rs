@@ -24,7 +24,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
-use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, State, Store, WavOutput};
+use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, OpenError, State, Store, WavOutput};
 use nori_http::Http;
 use nori_output_cpal::CpalOutput;
 use nori_core::client::{Client, NetProfile};
@@ -156,7 +156,7 @@ struct Audio {
 }
 
 impl ByteSource for Audio {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
         if self.offline {
             return Err("offline".into());
         }

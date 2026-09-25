@@ -34,3 +34,8 @@ image = { version = "0.25", default-features = false }
 libc = "0.2"
 # Text cut to the columns it has (already in the tree through ratatui). MIT or Apache-2.0.
 unicode-width = "0.2"
+
+[dev-dependencies]
+nori-testdir = { path = "../testdir" }
+# tests/beat_model.rs loads the model it made.
+nori-player = { path = "../player" }

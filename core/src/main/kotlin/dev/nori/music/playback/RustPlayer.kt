@@ -58,6 +58,7 @@ internal object RustPlayerJni {
     @JvmStatic @CriticalNative external fun positionMs(h: Long): Long
     @JvmStatic @CriticalNative external fun mixing(h: Long): Boolean
     @JvmStatic @CriticalNative external fun chainIn(h: Long): Boolean
+    @JvmStatic @CriticalNative external fun onCpu(h: Long): Boolean
     @JvmStatic @CriticalNative external fun gainReductionDb(h: Long): Float
     @JvmStatic @CriticalNative external fun bytesWritten(h: Long): Long
     /** The next event, `kind shl 32 or index` (kind: state 0, song 1, error 2, output 3); -1 when there are no more. */
@@ -103,6 +104,13 @@ internal object RustBridge {
     @JvmStatic fun open(url: String, key: String, from: Long): RustBody? = player?.open(url, key, from)
     @JvmStatic fun openLive(url: String): RustBody? = player?.openLive(url)
     /**
+     * For the songs fetched ahead (nori-engine's one fetcher, through [open]): whether all of [key] is in the
+     * stream cache, and whether the player is writing it now. Asked once per song; with no player, as there
+     * and busy, so nothing is fetched.
+     */
+    @JvmStatic fun kept(key: String): Boolean = player?.kept(key) ?: true
+    @JvmStatic fun busy(key: String): Boolean = player?.busy(key) ?: true
+    /**
      * Whether the audio chip decodes [encoding] where the music goes now, as the platform answers media3:
      * the call made in the high byte (3 `getDirectPlaybackSupport`, 2 `getPlaybackOffloadSupport`, 1
      * `isOffloadedPlaybackSupported`) and its answer in the low one; -1 when it could not be asked. The
@@ -117,10 +125,21 @@ internal object RustBridge {
 /**
  * A song's bytes from [from] on, read by the Rust player's loader a buffer at a time. [length] is -1 when
  * unknown; [icy] is a station's stream's bytes of music between two announcements, 0 when it sends none.
+ * [past]: asked for from past the song's end, so there are no bytes, and [length] is the whole song's
+ * when the server said it (-1 when not): the Rust side takes it as the song's real end
+ * (crates/engine/src/source.rs `OpenError::PastEnd`). [status]: the server answered with this error
+ * status instead of bytes; it was reached, so the song's failure is not the network's (`OpenError::Status`).
  */
-class RustBody internal constructor(private val source: DataSource, @JvmField val length: Long, @JvmField val icy: Int = 0, private val done: () -> Unit) {
-    /** As large as the loader's reads (crates/engine/src/source.rs CHUNK). */
-    @JvmField val buffer = ByteArray(256 * 1024)
+class RustBody internal constructor(
+    private val source: DataSource?,
+    @JvmField val length: Long,
+    @JvmField val icy: Int = 0,
+    @JvmField val past: Boolean = false,
+    @JvmField val status: Int = 0,
+    private val done: () -> Unit,
+) {
+    /** As large as the loader's reads (crates/engine/src/source.rs CHUNK); none for an answer without bytes. */
+    @JvmField val buffer = ByteArray(if (source == null) 0 else 256 * 1024)
     private var broke = false
 
     /**
@@ -131,6 +150,7 @@ class RustBody internal constructor(private val source: DataSource, @JvmField va
      */
     fun read(max: Int): Int {
         if (broke) return -2
+        val source = source ?: return -1
         val want = minOf(max, buffer.size)
         var got = 0
         try {
@@ -148,7 +168,7 @@ class RustBody internal constructor(private val source: DataSource, @JvmField va
     }
 
     fun close() {
-        runCatching { source.close() }
+        runCatching { source?.close() }
         done()
     }
 }
@@ -251,6 +271,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     val mixing: Boolean get() = RustPlayerJni.mixing(h)
     /** The sound chain is in the samples' path, and what its limiter takes off, dB: see [Equalizer.inChain]. */
     val chainIn: Boolean get() = RustPlayerJni.chainIn(h)
+    /** The ear is on music the CPU made, through the engine's own output: where [chainIn] says anything. */
+    val onCpu: Boolean get() = RustPlayerJni.onCpu(h)
     val gainReductionDb: Float get() = RustPlayerJni.gainReductionDb(h)
     val bytesWritten: Long get() = RustPlayerJni.bytesWritten(h)
     /** The songs go to the audio chip now, and whether the settings and the output let them. */
@@ -373,7 +395,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
 
     override fun handlePrepare(): ListenableFuture<*> {
         prepared = true
-        if (h != 0L) error = null
+        if (h != 0L) clearError()
         if (audible() && focus()) start()
         follow()
         return done()
@@ -389,6 +411,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     }
 
     override fun handleRelease(): ListenableFuture<*> {
+        unwatchNetwork()
         unfocus()
         follow(released = true)
         if (RustBridge.player === this) RustBridge.player = null
@@ -543,7 +566,52 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             state == ENGINE_IDLE -> {
                 error = PlaybackException("the audio output would not open", null, PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED)
             }
+            // Music again: whatever stopped it before is over.
+            state == ENGINE_PLAYING -> clearError()
         }
+    }
+
+    /**
+     * Watches for the network while the error shown is that the server could not be reached, and only
+     * then: the network coming back clears it, so the page does not keep saying so over a player that
+     * can play again. Registered with the error, let go with it.
+     */
+    private var networkWatch: android.net.ConnectivityManager.NetworkCallback? = null
+
+    private fun clearError() {
+        error = null
+        unwatchNetwork()
+    }
+
+    private fun watchNetwork() {
+        if (networkWatch != null) return
+        val connectivity = context.getSystemService(android.net.ConnectivityManager::class.java)
+        // The network the failure happened on is told at once as the callback registers; only another
+        // one, or this one after it was lost, is the network coming back.
+        val failedOn = runCatching { connectivity.activeNetwork }.getOrNull()
+        val cb = object : android.net.ConnectivityManager.NetworkCallback() {
+            @Volatile private var lost = failedOn == null
+            override fun onLost(network: android.net.Network) {
+                lost = true
+            }
+            override fun onAvailable(network: android.net.Network) {
+                if (!lost && network == failedOn) return
+                main.post {
+                    if (error?.errorCode != PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED) return@post
+                    android.util.Log.i("nori", "rust player: the network is back, the failure it left goes")
+                    clearError()
+                    invalidateState()
+                }
+            }
+        }
+        runCatching { connectivity.registerDefaultNetworkCallback(cb) }
+            .onSuccess { networkWatch = cb }
+    }
+
+    private fun unwatchNetwork() {
+        val cb = networkWatch ?: return
+        networkWatch = null
+        runCatching { context.getSystemService(android.net.ConnectivityManager::class.java).unregisterNetworkCallback(cb) }
     }
 
     /**
@@ -563,6 +631,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
                 dev.nori.music.ffi.model.PlaybackError.OTHER -> PlaybackException.ERROR_CODE_DECODING_FAILED
             }
             error = PlaybackException(lastError ?: "a song would not play", null, code)
+            if (kind == dev.nori.music.ffi.model.PlaybackError.NETWORK) watchNetwork()
         }
         if (!playWhenReady) return
         playWhenReady = false
@@ -778,13 +847,22 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     internal fun open(url: String, key: String, from: Long): RustBody? {
         val (source, length) = try {
             nori.sources.openResolved(url, key, from)
+        } catch (e: MediaSources.PastEnd) {
+            // Not a failure: the song ends before [from] (a transcode's estimated length was longer).
+            android.util.Log.i("nori", "rust player: $key from byte $from: past its end (${if (e.whole >= 0) "at ${e.whole}" else "unknown"})")
+            return RustBody(null, e.whole, past = true) {}
         } catch (e: Exception) {
             android.util.Log.w("nori", "rust player: $key would not open: $e")
-            return null
+            // The server answered, with an error: said as such, since it was reached.
+            val status = MediaSources.httpStatus(e)
+            return if (status > 0) RustBody(null, -1, status = status) {} else null
         }
         loaded(+1)
         return RustBody(source, if (length == C.LENGTH_UNSET.toLong()) -1 else length) { loaded(-1) }
     }
+
+    internal fun kept(key: String): Boolean = runCatching { MediaSources.isWhole(nori.sources.streamCache, key) }.getOrDefault(true)
+    internal fun busy(key: String): Boolean = nori.sources.beingWritten(key)
 
     /** A song's bytes started or stopped coming, on a loader thread: several load at once, so both ends are read under the one lock. */
     private fun loaded(by: Int) {
@@ -806,6 +884,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
 
     private companion object {
         const val ENGINE_IDLE = 0
+        const val ENGINE_PLAYING = 1
         const val ENGINE_ENDED = 3
         const val EVENT_STATE = 0
         const val EVENT_SONG = 1

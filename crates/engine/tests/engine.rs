@@ -126,7 +126,7 @@ impl std::io::Read for Broken {
 }
 
 impl ByteSource for Server {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
         self.requests.lock().push((url.to_string(), from));
         let slow = self.slow.lock().iter().find(|(u, _)| u == url).map(|s| s.1);
         if let Some(d) = slow {
@@ -1178,6 +1178,47 @@ fn as_the_song(heard: &[i16], song: &[i16], from: usize) -> Option<(usize, isize
     Some((k, shift))
 }
 
+/// What tools/audio-e2e.sh used to check on a phone for every processing switch: the music goes on
+/// while the limiter and mono are switched on and off under it, and each is heard. At its -1 dB
+/// default the limiter leaves music with headroom alone (the phone's check read its gain reduction).
+#[test]
+fn the_limiter_and_mono_switched_while_playing_keep_the_music_going_and_are_heard() {
+    let a = music(60.0, 46);
+    let files = vec![("a".to_string(), wav(&a), 60_000)];
+    let rig = Rig::build(files, sim::App::new(), Settings::default(), Extra { pace: Some(1.0), ..Extra::default() });
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2), "it plays");
+    let waits = rig.waits();
+    let sound = |limiter: bool, mono: bool| Settings { sound: nori_engine::Sound { limiter, mono, ..Default::default() }, ..Settings::default() };
+    // The last second heard: whether its channels are one, and how loud it is.
+    let last = |r: &Rig| {
+        let h = r.heard.lock();
+        let s = &h[h.len() - RATE as usize * 2..];
+        let same = s.chunks(2).all(|f| f[0] == f[1]);
+        (same, s.iter().map(|&v| (v as f64).powi(2)).sum::<f64>().sqrt())
+    };
+    let (split, level) = last(&rig);
+    assert!(!split, "the song's two channels differ");
+
+    for (limiter, mono) in [(true, false), (true, true), (false, true), (false, false)] {
+        let before = rig.heard.lock().len();
+        rig.engine.set_settings(sound(limiter, mono));
+        // Once in, the chain stays in, flat, so switching everything off is heard at once too.
+        assert!(rig.wait_for(2, |r| r.engine.status().chain), "limiter {limiter}, mono {mono}: {:?}", rig.engine.status());
+        rig.run(2_000);
+        assert!(rig.heard.lock().len() >= before + RATE as usize * 2 * 19 / 10, "limiter {limiter}, mono {mono}: the music goes on");
+        let (same, loud) = last(&rig);
+        assert_eq!(same, mono, "limiter {limiter}, mono {mono}: the channels are one only in mono");
+        if limiter {
+            let gr = rig.engine.status().gain_reduction_db;
+            assert!(gr < 6.0, "the limiter only catches peaks: {gr} dB");
+            assert!(loud > level * 0.5, "and leaves the music its level: {loud} against {level}");
+        }
+    }
+    assert!(rig.waits() <= waits + 8, "no gap past the switches' dips: {} waits", rig.waits() - waits);
+    rig.engine.stop();
+}
+
 #[test]
 fn an_equalizer_switched_off_while_playing_is_heard_at_once_where_the_ear_is() {
     let a = music(20.0, 45);
@@ -1850,6 +1891,39 @@ fn a_song_played_next_after_the_player_read_on_gaplessly_into_the_old_next_one_i
     assert!((heard - 120.0).abs() < 0.2, "every song whole, one after the other: {heard:.2} s");
 }
 
+/// The phone's stuck song end (smoke's AutoMix check, on a fresh cache): AutoMix on with nothing measured
+/// (an equal-power fade), a seek to fifteen seconds before the end, and songs slow to start coming. The
+/// songs coming up are opened to be measured and let go while still opening, as mixes made again and
+/// songs measured ahead are; the reader the player needs of the same song must still be woken by its
+/// bytes, and the next song is heard out of the fade and plays on, rather than the music sitting at the
+/// end of the first while its reader sleeps out its timeout.
+#[test]
+fn a_seek_near_the_end_goes_on_through_the_fade_while_songs_opened_for_nothing_give_up() {
+    // Which reader wakes last decides it: a few rounds.
+    for _ in 0..4 {
+        seek_near_the_end_through_the_fade();
+    }
+}
+
+fn seek_near_the_end_through_the_fade() {
+    let songs: Vec<Vec<i16>> = (0..3).map(|k| music(40.0, 90 + k)).collect();
+    let files: Vec<(String, Vec<u8>, i64)> = ["a", "b", "c"].iter().zip(&songs).map(|(id, s)| (id.to_string(), wav(s), 40_000)).collect();
+    let mut app = sim::App::new();
+    app.prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, keep_albums: false, echo_out: false, ..prefs_off() };
+    let extra = Extra::default();
+    for id in ["a", "b", "c"] {
+        extra.server.slow.lock().push((id.into(), Duration::from_millis(300)));
+    }
+    let rig = Rig::build(files, app, Settings { auto_mix: true, ..Settings::default() }, extra);
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2), "a plays: {:?} {:?}", rig.engine.status(), rig.events.lock());
+    rig.engine.go_to(0, 25_000);
+    let heard_b = |r: &Rig| r.events.lock().iter().any(|e| matches!(e, Event::Song { id, .. } if id == "b"));
+    assert!(rig.wait_for(10, heard_b), "b is heard out of the fade: {:?} {:?}", rig.engine.status(), rig.events.lock());
+    assert!(rig.wait_for(10, |r| r.engine.status().index == Some(1) && r.engine.status().position_ms > 5_000), "b plays on: {:?}", rig.engine.status());
+    assert!(!rig.events.lock().iter().any(|e| matches!(e, Event::Error { .. })), "nothing failed: {:?}", rig.events.lock());
+}
+
 #[test]
 fn a_seek_into_a_mix_further_from_the_end_than_the_player_reads_ahead_plays_on_into_it() {
     let (a, b) = (music(40.0, 60), music(40.0, 61));
@@ -1937,4 +2011,37 @@ fn a_client_keeping_watch_is_told_what_each_wake_saw_and_nothing_while_it_does_n
     let told = SEEN.lock().len();
     rig.run(3_000);
     assert_eq!(SEEN.lock().len(), told, "not wanted, nothing is made or told");
+}
+
+/// As the perf build's settings watch had it (a phone, the equalizer on): whatever else is changed while the
+/// CPU plays - AutoMix and its limits, high quality output on and off again, the equalizer's bands - the sound
+/// chain is in the samples' path a second later, and says so.
+#[test]
+fn with_the_equalizer_on_the_chain_stays_in_the_path_whatever_else_the_settings_change() {
+    let a = music(60.0, 71);
+    let files = vec![("a".to_string(), wav(&a), 60_000)];
+    let rig = Rig::build(files, sim::App::new(), loud_eq(), Extra { float: true, ..Extra::default() });
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard_f.lock().len() > RATE as usize * 2 * 2));
+    assert!(rig.engine.status().chain && rig.engine.status().on_cpu, "{:?}", rig.engine.status());
+    let steps = [
+        Settings { auto_mix: true, ..loud_eq() },
+        Settings { auto_mix: true, crossfade_s: 6, ..loud_eq() },
+        Settings { auto_mix: true, hi_res: true, ..loud_eq() },
+        Settings { auto_mix: true, ..loud_eq() },
+        Settings { auto_mix: true, offload: true, ..loud_eq() },
+        Settings { auto_mix: false, ..loud_eq() },
+    ];
+    for (k, s) in steps.into_iter().enumerate() {
+        let untouched = s.hi_res;
+        rig.engine.set_settings(s);
+        rig.run(1_000);
+        let st = rig.engine.status();
+        assert!(st.state == State::Playing && st.index == Some(0) && st.on_cpu, "{k}: {st:?}");
+        // High quality output stands the chain aside (nothing may touch the samples); otherwise it is in.
+        if !untouched {
+            assert!(st.chain, "{k}: a second after the change the chain is in the path: {st:?}");
+        }
+    }
+    rig.engine.stop();
 }

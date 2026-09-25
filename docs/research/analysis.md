@@ -20,10 +20,11 @@ given; **[inferred]** = my reasoning or estimate, not confirmed.
   state-of-the-art beat tracker whose code *and* weights are MIT; madmom's models are CC BY-NC-SA and Demucs's
   weights are for scientific use only. On GTZAN it scores 88.8 % beat F1 and 79.4 % downbeat F1 (the full model
   89.1 % and 78.3 %), where classical trackers of the kind Nori uses score 55-66 %. **[verified]** The switch is
-  off by default; on, it runs a 5.1 MB model through tract (pure Rust, no second native runtime) over the first and
-  last 30 s of the song playing and the next one, in nori-engine's measurer. The Android debug and perf builds
-  carry the feature and ship the model inside the APK; a release build leaves it out unless asked, and another
-  client downloads the model (section 5). Its grid replaces the classical one at an end when it is confident and its bar is settled
+  off by default; on, it runs the small model (4.2 MB of fp16 weights) through tract (pure Rust, no second native
+  runtime) over the first and last 30 s of the song playing and the next one, in nori-engine's measurer. The
+  Android debug and perf builds carry the feature and the model's graph; a release build leaves it out unless
+  asked (section 5). The weights are made on the device from the authors' own checkpoint, fetched from their
+  server when the switch goes on (7.1). Its grid replaces the classical one at an end when it is confident and its bar is settled
   (section 7). On the synthetic set the mix windows that are right and trusted go from 24 to 27 of 32 and none is
   trusted and wrong. **[measured]**
 - **The small model, not the full one, and not quantised to int8.** Over the same windows its beats agree with the
@@ -300,13 +301,13 @@ for every ABI, and the model sees the same PCM the analyser sees. It is 2 to 3 t
 **[measured]**; on ARM, where tract has hand-written NEON kernels, it may differ **[inferred]**. If device timing
 says tract is too slow, onnxruntime through `ort` is the fallback.
 
-**The size is the price.** Built in, every install carries the library's 15.5 MB, and Android stores native
-libraries uncompressed in the APK, so the arm64 APK grows by that much, and by the 5.1 MB model (stored, not
-deflated, so it is read in place) where the model ships with the app. Measured on the NDK build of September 2026
-(`./gradlew :app:assemblePerf -PrustTargets=arm64-v8a`, sizes read from the APK): `libnorimusic.so` 9,835,128 bytes
-without the feature and 25,324,664 with it (4.7 and 10.9 MB gzipped), the APK 14,048,503 and 34,607,884 bytes.
-**[measured]** So the debug and perf builds have the feature and the model, for testing, and a release build
-leaves both out unless asked (`core/build.gradle.kts`: `-PrustFeatures=neural-beats` puts them in, an empty
+**The size is the price.** Built in, every install carries the library's 15.7 MB more, and Android stores native
+libraries uncompressed in the APK, so the arm64 APK grows by that much; the weights are not in it (7.1). Measured on
+the NDK build of September 2026 (`./gradlew :app:assemblePerf -PrustTargets=arm64-v8a`, sizes read from the APK):
+`libnorimusic.so` 9,615,584 bytes without the feature and 25,314,080 with it (the graph's 186 kB and the checkpoint
+reader included), the APK 14,150,663 and 29,849,159 bytes. While the weights were bundled, the same build was
+34,705,148 bytes (the library 25,099,776 and the 5,069,707-byte model stored beside it). **[measured]** So the
+debug and perf builds have the feature, for testing, and a release build leaves it out unless asked (`core/build.gradle.kts`: `-PrustFeatures=neural-beats` puts them in, an empty
 `-PrustFeatures=` takes them out of any build). The setting is only shown by a build that has it: without it nothing of tract is compiled or linked. In a build with it, nothing else is paid while the
 switch is off: the code is mapped, not run, and the model is never loaded; the dynamic linker does relocate 0.5 MB
 more of read-only data when the library opens. Keeping tract in a second library loaded only when the switch is on
@@ -361,21 +362,23 @@ What was built follows these rules:
      own metre (`intro_beats_per_bar`, `outro_beats_per_bar`). No new analysis version: stored rows read as not yet
      heard by the model.
    - nori-engine (`Measurer`, feature `neural-beats`): the ends of the song playing and the next, the model loaded
-     for the measuring thread's life. nori-core (`beat_download.rs`): the download, through the platform's
-     transport, a pinned URL, Wi-Fi unless mobile data is allowed, SHA-256 checked, kept beside the app's database,
-     tried again at the next song when it failed. nori-automix (`beat_model.rs`): where the file is, deleted when
-     the switch goes off, and the words under the setting. nori-settings: the two switches and their rows, shown
-     only in a build with the model. No Kotlin besides the two fields its copy of the settings carries.
-   - The Android debug and perf builds have `neural-beats` and ship the model as an asset
-     (`tools/beat-this/beat-this-small0-v1.onnx`, copied in by `core/build.gradle.kts` after checking it against
-     the pin in `beat_model.rs`, stored uncompressed): Kotlin tells the core where its bytes are in the APK
-     (`beat_model_bundled`: the APK's path, the offset, the length) and the measurer reads them from there,
-     checks the SHA-256 and hands them to tract; nothing is downloaded or extracted. A release build leaves the
-     feature out unless asked (section 5). `cargo build -p nori-cli --features neural-beats` for the desktop,
-     which downloads the model instead.
-   - The model file is built by `tools/beat-this/export.py` from the MIT checkpoint and code (7.1): SHA-256
-     `847b51aaef519a60a47c815fa58440782de73bff7000210396673b0353e2cc8c`, 5,069,707 bytes. It is not hosted
-     anywhere yet; `beat_model::URL` is the one place that says where a client that does not ship it fetches it.
+     for the measuring thread's life. nori-core (`beat_download.rs`): the authors' checkpoint fetched through the
+     platform's transport from their server, Wi-Fi unless mobile data is allowed, its SHA-256 checked, converted
+     into the weights file and that checked against its own pin, kept beside the app's database, tried again at
+     the next song when it failed. nori-player (`automix/checkpoint.rs`, `automix/weights.rs`): the checkpoint's
+     zip and pickle read by a restricted unpickler (values, `OrderedDict`, tensor storages and
+     `_rebuild_tensor_v2`; any other opcode or global is refused), and the graph's recipes followed. nori-automix
+     (`beat_model.rs`): the pins and where the file is, deleted when the switch goes off. nori-settings: the two
+     switches and their rows, shown only in a build with the model. No Kotlin besides the two fields its copy of
+     the settings carries.
+   - The Android debug and perf builds have `neural-beats`; a release build leaves it out unless asked (section
+     5). `cargo build -p nori-cli --features neural-beats` for the desktop. Every client takes the same path, and
+     no one ships or hosts a copy of the weights.
+   - The graph is made by `tools/beat-this/export.py` from the MIT code and checkpoint (7.1):
+     `crates/player/models/beat-this-small0.graph.onnx`, 186,116 bytes, every initializer external data with the
+     recipe that makes it from the state_dict. The weights file made from the checkpoint is 4,229,216 bytes,
+     SHA-256 `e9349da04b9da4ad41c5e416c71a9471af3a416249e7addef0101b3d569df5a7`, the same from the Rust
+     conversion and from export.py's numpy copy of it.
    - Measured: on the synthetic set, mix windows right and trusted 24 to 27 of 32, trusted with the bar on the
      wrong beat 2 to 0, refused 6 to 5, trusted and wrong still none. On the five real clips the windows come out as before (1 right,
      1 trusted and wrong at the end of *Vibe Ace* where the reference itself turns irregular, 8 refused). Expected
@@ -434,9 +437,25 @@ builds (±10 %). **[measured]**
   the script had to change: rotary-embedding-torch is pinned to the version beat_this's `requirements.txt` names
   (0.9.1 traces another graph, 1.2 MB bigger), and the PyTorch reference is taken from a freshly loaded model
   (tracing leaves its sizes in the rotary embedding's cache, and the traced model then answers with logits off by
-  up to 7, which made the check fail although the file is right). The measurer test (`NORI_BEAT_THIS=<file> cargo
-  test --release -p nori-engine --features neural-beats --test core`) passes with it, from a file and from inside
-  a package as the APK holds it. **[measured]**
+  up to 7, which made the check fail although the file is right). **[measured]**
+- **Weights from the authors, not from us (September 2026).** That file was shipped inside the debug and perf APKs,
+  and the address the core would have downloaded it from was never filled (a release asset that answered 404). Now
+  no copy of the weights is shipped or hosted: export.py splits the same export into the graph and a recipe per
+  weight (copy, transpose, a Conv2d with its BatchNorm2d folded in, the bias that fold leaves; fp16 where the file
+  had it; `--full` still writes the whole file, the same 847b51aa... bytes, run again to check), and the core makes
+  the weights on the device from the checkpoint it fetches from the authors' server. PyTorch's fold uses a square
+  root that is not correctly rounded for 8 of the stem's 32 channels, so the conversion (IEEE float32 step for
+  step, the same bytes on every platform and in export.py's numpy) differs from the shipped file in 130 of
+  2,099,736 values, each by one unit in the last place. Run over the same windows in tract
+  (`NORI_BEAT_THIS_CKPT=small0.ckpt NORI_BEAT_THIS=<the shipped file> cargo test --release -p nori-player --features
+  neural-beats official_weights`): on export.py's kind of spectrogram-like input the largest logit difference is
+  4.5e-6, on a synthetic drum loop through the app's front end 3.6e-5, no frame on the other side of zero, and the
+  same 63 beats and 29 downbeats. The whole path on the Ryzen: the checkpoint (8,451,101 bytes) fetched in 0.44 s,
+  converted in 37-42 ms, peak RSS 31 MB above the process's before it (the checkpoint, its tensors and the weights
+  at once), and the model assembled and loaded in 0.23 s, 65 MB peak for the process. The measurer test
+  (`NORI_BEAT_THIS_CKPT=small0.ckpt cargo test --release -p nori-engine --features neural-beats --test core`)
+  serves the checkpoint at the authors' address and passes; `NORI_BEAT_THIS_NET=1 cargo test --release -p nori-cli
+  --features neural-beats --test beat_model` fetches it from their server. **[measured]**
 - **Checked again with the exported file (September 2026, a Ryzen 5 3600, one thread).** The full model's
   reference is final0 exported the same way (fp32, attention fused). The synthetic set has 18 songs now (36 mix
   windows); the real songs are the ten of Radiohead's *Kid A* (FLAC), with the full model's own beats and

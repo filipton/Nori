@@ -22,7 +22,6 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -64,7 +63,7 @@ import dev.nori.music.settings.Prefs
 private fun Header(title: String, subtitle: String, coverUrl: String?, actions: @Composable () -> Unit = {}) {
     val nav = LocalNav.current
     var fullscreen by remember { mutableStateOf(false) }
-    if (fullscreen && coverUrl != null) androidx.compose.ui.window.Dialog({ fullscreen = false }) { Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }) }
+    NoriDialog(coverUrl?.takeIf { fullscreen }, { fullscreen = false }, scrim = 0.8f) { url -> Cover(url, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }) }
     Column {
         Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
@@ -321,8 +320,8 @@ fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = vi
     val playing = playingId()
     val uri = LocalUriHandler.current
     var leaving by remember { mutableStateOf<String?>(null) }
-    leaving?.let { url ->
-        AlertDialog({ leaving = null }, title = { Text(say.openInBrowser) }, text = { Text(url) },
+    NoriDialog(leaving, { leaving = null }) { url ->
+        AlertCard(title = { Text(say.openInBrowser) }, text = { Text(url) },
             confirmButton = { TextButton({ runCatching { uri.openUri(url) }; leaving = null }) { Text(say.open) } }, dismissButton = { TextButton({ leaving = null }) { Text(say.cancel) } })
     }
     val hint = nav.artistHint(id)

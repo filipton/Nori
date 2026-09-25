@@ -97,12 +97,6 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
-
-    // The beat model (core/build.gradle.kts) is stored, not deflated: the core reads it straight out of the APK
-    // at its offset, with nothing extracted or inflated.
-    androidResources {
-        noCompress += "onnx"
-    }
 }
 
 composeCompiler {

@@ -2200,7 +2200,7 @@ mod tests {
     struct Wavs(Vec<(String, Arc<Vec<u8>>)>);
 
     impl nori_engine::ByteSource for Wavs {
-        fn open(&self, url: &str, from: u64) -> Result<nori_engine::Body, String> {
+        fn open(&self, url: &str, from: u64) -> Result<nori_engine::Body, nori_engine::OpenError> {
             let f = self.0.iter().find(|(id, _)| id == url).ok_or("no such song")?.1.clone();
             let len = f.len() as u64;
             Ok(nori_engine::Body { start: from, len: Some(len), reader: Box::new(std::io::Cursor::new(f[from as usize..].to_vec())) })

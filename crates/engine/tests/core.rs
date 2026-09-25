@@ -59,7 +59,7 @@ impl std::io::Read for Breaks {
 }
 
 impl ByteSource for Audio {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
         let first = !self.requests.lock().iter().any(|(u, _)| u == url);
         self.requests.lock().push((url.to_string(), from));
         let mut c = Cursor::new(bytes_of(url));
@@ -268,7 +268,7 @@ fn downloads_the_disk_and_measuring_ahead_over_the_core() {
 struct Plain(Mutex<Vec<String>>);
 
 impl ByteSource for Plain {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
         self.0.lock().push(url.to_string());
         let mut c = Cursor::new(bytes_of(url));
         c.set_position(from);
@@ -329,39 +329,59 @@ fn metered_and_ahead(client: &Arc<Client>, store: &Arc<Store>, dir: &std::path::
     nori_engine::core::network_metered(client, false);
 }
 
-/// The measurer with the real model, put where the app keeps it: the songs measured before it are decoded once
-/// more, and each end is read and marked. Needs the model: `NORI_BEAT_THIS=<model.onnx> cargo test -p nori-engine
-/// --features neural-beats`; without it there is nothing to run.
+/// The authors' checkpoint, served where they publish it; anything else is not found.
 #[cfg(feature = "neural-beats")]
-fn listens_with_a_real_model(core: &Core, dir: &std::path::Path, measurer: &Arc<Measurer>, settle: &dyn Fn(&Measurer)) {
+struct Authors(Vec<u8>, Mutex<Vec<String>>);
+
+#[cfg(feature = "neural-beats")]
+#[async_trait::async_trait]
+impl Transport for Authors {
+    async fn get(&self, url: String, _timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+        let found = url == nori_core::automix::beat_model::CHECKPOINT_URL;
+        self.1.lock().push(url);
+        Ok(if found { TransportResponse { status: 200, body: self.0.clone() } } else { TransportResponse { status: 404, body: b"<html>not found</html>".to_vec() } })
+    }
+
+    async fn send(&self, _request: Exchange) -> Result<TransportResponse, TransportError> {
+        Ok(TransportResponse { status: 500, body: Vec::new() })
+    }
+
+    fn address_changed(&self) {}
+}
+
+/// The measurer with the real model, made as every client makes it: the checkpoint fetched from the authors'
+/// address, checked, converted and kept where the app keeps it; then the songs measured before it are decoded once
+/// more, and each end is read and marked. Needs the checkpoint (no network here):
+/// `NORI_BEAT_THIS_CKPT=<small0.ckpt> cargo test --release -p nori-engine --features neural-beats --test core`;
+/// without it there is nothing to run.
+#[cfg(feature = "neural-beats")]
+fn listens_with_a_real_model(core: &Arc<Core>, dir: &std::path::Path, measurer: &Arc<Measurer>, settle: &dyn Fn(&Measurer)) {
+    use nori_core::automix::beat_model::{self, State};
     use nori_core::automix::beats::GRID_CHECKED;
-    let Some(model) = std::env::var("NORI_BEAT_THIS").ok().filter(|p| std::path::Path::new(p).is_file()) else {
-        eprintln!("no model in NORI_BEAT_THIS: skipped");
+    let Some(ckpt) = std::env::var("NORI_BEAT_THIS_CKPT").ok().filter(|p| std::path::Path::new(p).is_file()) else {
+        eprintln!("no checkpoint in NORI_BEAT_THIS_CKPT: skipped");
         return;
     };
-    std::fs::create_dir_all(dir.join("models")).unwrap();
-    std::fs::copy(&model, dir.join("models").join(nori_core::automix::beat_model::FILE_NAME)).unwrap();
-    nori_core::automix::beat_model::set_home(&dir.join("nori.db").to_string_lossy());
+    let authors = Arc::new(Authors(std::fs::read(ckpt).unwrap(), Mutex::new(Vec::new())));
+    let _client = Client::new(core.clone(), authors.clone());
     measurer.ask(Vec::new());
     measurer.ask(nori_core::rules::queue_measure());
     settle(measurer.as_ref());
+    assert_eq!(*authors.1.lock(), [beat_model::CHECKPOINT_URL], "fetched once, from the authors");
+    assert_eq!(beat_model::state(), State::Ready);
+    let kept = dir.join("models").join(beat_model::FILE_NAME);
+    assert_eq!(beat_model::ready(), Some(kept.clone()));
+    assert_eq!(std::fs::read_dir(dir.join("models")).unwrap().count(), 1, "the weights file only: no checkpoint left");
+    assert!(nori_core::beat_download::read(&kept).is_ok());
     for id in ["m-3", "m-4"] {
         let a = core.analysis_get(id.into()).unwrap().unwrap();
         assert!(a.intro_grid_source >= GRID_CHECKED && a.outro_grid_source >= GRID_CHECKED, "{id}: both ends read");
     }
     assert!(core.analysis_neural_missing(vec!["m-3".into(), "m-4".into()]).unwrap().is_empty());
 
-    // Shipped inside the app's package, as the Android app does: read in place, checked, loaded, and nothing
-    // fetched; a stretch that is not the pinned model is refused.
-    use nori_core::automix::beat_model::{self, Source};
-    let bytes = std::fs::read(&model).unwrap();
-    let package = dir.join("base.apk");
-    std::fs::write(&package, [&b"zip entries"[..], &bytes, &b"central directory"[..]].concat()).unwrap();
-    let shipped = Source { path: package, offset: 11, len: bytes.len() as u64 };
-    beat_model::set_bundled(Some(shipped.clone()));
-    assert_eq!(nori_core::beat_download::ensure(), Some(shipped.clone()));
-    let read = nori_core::beat_download::read(&shipped).unwrap();
-    assert!(nori_player::automix::neural::BeatThis::from_bytes(&read).is_ok());
-    assert!(nori_core::beat_download::read(&Source { offset: 10, ..shipped }).is_err());
-    beat_model::set_bundled(None);
+    // A file changed on the disk is refused, not misread.
+    let mut bytes = std::fs::read(&kept).unwrap();
+    bytes[1000] ^= 1;
+    std::fs::write(&kept, &bytes).unwrap();
+    assert!(nori_core::beat_download::read(&kept).is_err());
 }

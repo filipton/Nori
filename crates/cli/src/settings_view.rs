@@ -489,7 +489,7 @@ fn sound(b: &Build) -> Vec<Section> {
         mixing.push(b.toggle_if("autoMixEchoOut", "  Echo out", "Cut clashing vocals with an echo", live));
         if s.beat_model != BeatModel::Unavailable {
             let state = match &s.beat_model {
-                BeatModel::Ready | BeatModel::Shipped => "model ready".to_string(),
+                BeatModel::Ready => "model ready".to_string(),
                 BeatModel::Downloading => "downloading".to_string(),
                 BeatModel::WaitingForWifi => "waiting for Wi-Fi".to_string(),
                 BeatModel::Failed { why } => format!("download failed: {}", crate::text::beat_failure(*why)),

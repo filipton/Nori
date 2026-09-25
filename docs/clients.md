@@ -28,7 +28,7 @@ platform opens and re-exports every crate below it by its module name (`nori_cor
 | **The whole player** for a platform without one: loading in bursts, demuxing, decoding, the sound chain, transitions, gapless, seeks, fades, the queue walked, events for a screen | `nori-engine` (over `nori-player::pipeline`); with its `core` feature it plays the core's queue, planner and settings |
 | A desktop sound card; HTTP on the desktop; the Linux desktop's media controls | `nori-output-cpal`; `nori-http` (the core's `Transport` and the engine's `ByteSource`); `nori-mpris` |
 | The stream cache and downloads on disk, for a client without a platform player; measuring the songs ahead for AutoMix on every client (a `Shelf` says where a whole song's files are: Android's is media3's caches) | `nori-engine::store` (`Store`), `nori-engine::core` (`CoreOrder`, `Downloader`, `Measurer`, `Shelf`) |
-| "Better beat detection": Beat This! over the ends of the songs coming up, its model's file, shipped with the app or downloaded (a build with the `neural-beats` feature; the Android debug and perf builds have it) | `nori-engine::core::Measurer`; `nori-player::automix::beats`, `neural`; `nori-core::beat_download`; `nori-automix::beat_model` |
+| "Better beat detection": Beat This! over the ends of the songs coming up, its graph built in and its weights made from the authors' checkpoint, fetched once (a build with the `neural-beats` feature; the Android debug and perf builds have it) | `nori-engine::core::Measurer`; `nori-player::automix::beats`, `neural`, `checkpoint`, `weights`; `nori-core::beat_download`; `nori-automix::beat_model` |
 | Output devices: naming, ranking, per-device sound profiles, AutoEQ curves, bit-perfect decisions | `nori-player::outputs`, `device`, `dac`; `nori-devices`: `outputs`, `profiles`, `autoeq` |
 | Downloads and stream cache bookkeeping: what is stored, what to fetch next, what to evict | `nori-transfers`: `transfers`, `stream_cache`; `nori-core::cache_policy` (the server's answers kept) |
 | Scrobbling decisions; lyrics: the server's, and sixteen lyrics services asked through the `Transport` (requests, matching, every format they answer in, credits stripped, each answer scored, asking them in waves, remembering the answers and the choice in the app's database, the lyrics cache's size and clearing), the current line, backing vocals and duet sides, and when the page redraws | `nori-queue::scrobble`; `nori-lyrics`: `lyrics`, `formats`, `json`, `html`, `lrclib`, `services`, `credits`, `trust`, `race`, `look`; `nori-core::race` (`Client::lyrics_lookup`); `nori-settings::lyrics_sources`; `nori-look::lyrics` |
@@ -218,11 +218,18 @@ The engine also plays what the Android player plays around the sound chain, each
   server). It applies to the next song fetched: the song playing and the one already on its way keep the
   address they were fetched from. Android's `EnginePlayer` tells it from its network callback; a desktop
   client that never does streams the unmetered quality. `CoreLibrary::metered` forces the metered quality.
-- **Fetching ahead**: with a store, as each song starts the engine fetches the next one and the core's
-  `Client::precache_targets` names the ones after it (how many for this network - none on a metered one
-  by default - never a provider's song or a download), which `Store::fetch_ahead` fetches whole into the
-  stream cache one after another, each in one go, and then leaves the network alone until the next song
-  starts. A song the queue no longer wants is left half way; one the player is writing is left to it.
+- **Fetching ahead**: as each song starts (and at a queue edit) the engine fetches the next one and the
+  core's `Client::precache_targets` names the ones after it (how many for this network - none on a metered
+  one by default - never a provider's song or a download), which nori-engine's one fetcher of the songs
+  coming up (`ahead.rs`) fetches whole onto the disk one after another, each in one go, and then leaves the
+  network alone until the next song starts: `Store::fetch_ahead` into the engine's own store, or
+  `Ahead::ask` over a client's cache (`Keeping`; Android's is media3's stream cache). A song the queue no
+  longer wants is left where it got to; one the player is writing is left to it, and one the player comes
+  for while it is fetched is handed over where it got to (`Ahead::take_over`): each song crosses the
+  network once. With AutoMix on, each is measured as it comes (`arriving.rs`, `core::measure_as_it_comes`),
+  on the same bytes and in the same burst, never read back from the disk to be decoded again; so is the
+  next song as the engine's loader fetches it (as long as the decoder keeps up; else it is measured from
+  the disk) and a download (`Downloader`; Android's `MeasuringSink`).
 
 Not in the engine yet: AutoEQ curves offered for a new device (the core's `DeviceArrival` names one;
 the core fetches its curve, `Client::autoeq_curve`, and keeps the list, `Client::autoeq_update`, but
@@ -243,7 +250,7 @@ run at the track's volume and a flush empties the track, since seconds of music 
 open is the engine's to hear of (`AudioOutput::failed`). A song's address and cache key are the core's
 (`stream::resolve_now`, over the network state Kotlin tells it, `network_metered`), and its bytes come
 through media3's data sources on the app's OkHttp client (`RustBridge.open`), so the profile's TLS,
-certificates and headers apply and the downloads, the stream cache and the precacher's copies play from
+certificates and headers apply and the downloads, the stream cache and the songs fetched ahead play from
 the disk; the queue is the core's (`CoreQueue`, `CoreApp`), and `EnginePlayer` (`RustPlayer.kt`) is a
 media3 player over it for the session, the notification, Android Auto and the widget. Offload there is an
 AudioTrack opened for it by Kotlin (`RustBridge.openOffload`, the support asked of `AudioManager`, Android
@@ -251,8 +258,8 @@ AudioTrack opened for it by Kotlin (`RustBridge.openOffload`, the support asked 
 `RustPlayerJni.offloadEvent`; bit-perfect output opens 16-bit, 24-bit packed or float tracks pinned to the
 DAC as `BitPerfect.kt` says; a radio station's address comes from its queue item (`RustPlayerJni.radio`)
 and its stream through `RustBridge.openLive`; the offline bridge is `OfflineBridge.kt`. Around the
-player the service runs the precacher
-(`Precacher.kt`, a few seconds into each song, through the same stream cache), AutoMix's measuring ahead,
+player the engine fetches the songs after the next into the same stream cache (nori-engine's `Ahead`
+through `RustBridge.open`, asking `RustBridge.kept` and `busy`), and the service runs AutoMix's measuring ahead,
 each output's sound and the AutoEQ offer for a new device (`Outputs`, `DeviceSound`), the sleep timer,
 scrobbling, the notification, Android Auto's tree and resuming after a reboot (`onPlaybackResumption`).
 Audio focus, pausing when headphones are pulled out and the CPU wake lock are `EnginePlayer`'s own; a stop after a run of songs that would not play is its player error, in the core's words
@@ -265,15 +272,15 @@ What a client around the engine still does itself, Android's as the example:
   for the session) routes every edit through the core first and applies the `QueueEdit` it answers
   (the `Controls` forwarding player in `PlaybackService.kt`, over `EnginePlayer`).
 
-Every client schedules the background work - the precacher and downloads - on the platform's threads or
-jobs, when the core says to (`Precacher.kt`, `downloads/`). AutoMix's measuring ahead is nori-engine's
+Every client schedules downloads on the platform's threads or jobs, when the core says to (`downloads/`);
+the songs fetched ahead are nori-engine's (`ahead.rs`). AutoMix's measuring ahead is nori-engine's
 `Measurer` (crates/android/src/measure.rs): `AutoMixPrefetch.kt` only says
 where a song's files are in media3's caches, and when one has become whole (the caches' own callbacks),
-so a song is decoded once, as soon as it is all on the device, and never while its bytes are coming.
-The optional beat model runs in the same measurer: a client builds with the `neural-beats` feature, and either
-ships the model and says where its bytes are once at start (`beat_model_bundled(path, offset, length)`; Android
-passes its APK and the stored asset's place in it, `Nori.kt`), or does nothing more and the core fetches it
-through its transport from `beat_model::URL`.
+so a song not measured as it came is decoded once, as soon as it is all on the device.
+The optional beat model runs in the same measurer: a client builds with the `neural-beats` feature and does
+nothing more. The core carries the model's graph; with the switch on it fetches the authors' checkpoint through
+the client's transport from `beat_model::CHECKPOINT_URL`, checks it, converts it into the weights file and keeps
+that beside the database, the same on every client (`nori-core::beat_download`).
 
 ### 3. The operating system around the player
 - Media controls and "now playing": the Android media session and notification, MPRIS on Linux
@@ -470,8 +477,8 @@ The client notices the moment (a platform event, a key, a callback) and carries 
 answers; the rule itself is never written again in a client. Android and nori-cli both call these:
 - **A song arrives** (not a repeat-one loop): `rules::song_arrived` answers `SongSteps` in one call - save
   the queue after `save_after_ms`, fetch songs for its end (`fill`: `Client::autofill`, then
-  `autofill_arrived`), the offline bridge's `BridgeStep`, fetch ahead after `precache_after_ms` (a client
-  on nori-engine with a store has the engine do it, `CoreLibrary::ahead`), and `pause_at_end` for the
+  `autofill_arrived`), the offline bridge's `BridgeStep`, measure what is on the device after `precache_after_ms`
+  (the fetching ahead itself is the engine's, as the song starts: `Library::ahead`), and `pause_at_end` for the
   sleep timer's last song. It counts the sleep timer and the refill itself, so it is asked once per song.
   Android: `PlaybackService`'s `arrived`; nori-cli: `Session::arrived`.
 - **The queue kept and handed over**: `rules::queue_keep(QueueMoment)` says, for a song, an edit, a pause

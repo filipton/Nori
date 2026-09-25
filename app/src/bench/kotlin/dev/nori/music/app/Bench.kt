@@ -36,6 +36,15 @@ object Bench {
         // a new string each time, and the per-second cache the seek bar reads.
         run(out, "kotlin duration string", 50_000) { i -> sink += dev.nori.music.text.Fmt.clock((i % 7000).toLong(), false).length }
         run(out, "kotlin duration cached", 50_000) { i -> sink += dev.nori.music.text.Fmt.duration((i % 7000).toLong()).length }
+        // The words a list row or a shelf asks for, by the core's kind (Say): read once per locale, so asking
+        // allocates nothing.
+        val say = dev.nori.music.app.ui.Say.current
+        val swipes = arrayOf(dev.nori.music.ffi.library.RowSwipeAct.Queue, dev.nori.music.ffi.library.RowSwipeAct.PlayNext, dev.nori.music.ffi.library.RowSwipeAct.Download)
+        val rows = dev.nori.music.settings.HomeRow.entries.toTypedArray()
+        val kinds = dev.nori.music.settings.BandKind.entries.toTypedArray()
+        run(out, "say rowSwipe", 200_000) { i -> sink += say.rowSwipe(swipes[i % 3]).length }
+        run(out, "say homeRow", 200_000) { i -> sink += say.homeRow(rows[i % rows.size]).length }
+        run(out, "say bandKind", 200_000) { i -> sink += say.bandKind(kinds[i % kinds.size]).length }
         return out.append("sink $sink").toString()
     }
 

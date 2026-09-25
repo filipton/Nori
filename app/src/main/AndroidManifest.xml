@@ -5,7 +5,7 @@
         android:label="Nori"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:theme="@style/Theme.Nori"
         android:usesCleartextTraffic="true"
         android:networkSecurityConfig="@xml/network_security_config"
         android:enableOnBackInvokedCallback="true">

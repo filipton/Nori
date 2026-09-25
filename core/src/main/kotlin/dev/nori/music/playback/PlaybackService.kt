@@ -106,9 +106,7 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var scrobbler: Scrobbler
     @Suppress("DEPRECATION")
     private val wifiLock by lazy { applicationContext.getSystemService(WifiManager::class.java).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "nori:loading").apply { setReferenceCounted(false) } }
-    private lateinit var precacher: Precacher
     private lateinit var analyser: AutoMixPrefetch
-    private val precache = Runnable { precacheAhead(); analyseAhead() }
     private val measure = Runnable { analyseAhead() }
     /** How long each chore waits (crates/queue/src/rules.rs playback_timings), read once. */
     private val timings by lazy { dev.nori.music.ffi.queue.playbackTimings() }
@@ -161,7 +159,6 @@ class PlaybackService : MediaLibraryService() {
         player = EnginePlayer(this, nori).also { rustPlayer = it }
         engine = "rust"
         observer?.engine(engine)
-        precacher = Precacher(nori.sources)
         // A song that has become whole on the device is measured then, whoever fetched it (see AutoMixPrefetch).
         analyser = AutoMixPrefetch(nori.sources) { player.replan() }
         // Nothing is watched until a bridge starts (see OfflineBridge). The player says itself when the
@@ -237,11 +234,9 @@ class PlaybackService : MediaLibraryService() {
         observer?.engine(null)
         keepQueue(dev.nori.music.ffi.queue.QueueMoment.CLOSING)
         getSystemService(AlarmManager::class.java).cancel(sleepAlarm)
-        main.removeCallbacks(precache)
         main.removeCallbacks(measure)
         main.removeCallbacks(idleRelease)
         runCatching { connectivity.unregisterNetworkCallback(network) }
-        precacher.release()
         analyser.release()
         offlineBridge?.abandon()
         offlineBridge = null
@@ -275,9 +270,11 @@ class PlaybackService : MediaLibraryService() {
             if (steps.fill) fetchFill()
             offlineBridge?.onSong(steps.bridge)
             announce()
-            // A few seconds in, the current track has been fetched and the radio is still up: fetch ahead now.
-            main.removeCallbacks(precache)
-            main.postDelayed(precache, steps.precacheAfterMs)
+            // The songs after the next are fetched ahead by the engine as the song starts, in the same wake of
+            // the network as the next one (nori-engine's one fetcher, measuring them as they come); a few
+            // seconds in, whatever is whole on the device and not measured yet is measured from there.
+            main.removeCallbacks(measure)
+            main.postDelayed(measure, steps.precacheAfterMs)
             if (steps.pauseAtEnd) pauseAtEnd(true)
         }
 
@@ -302,11 +299,10 @@ class PlaybackService : MediaLibraryService() {
                 keepQueue(dev.nori.music.ffi.queue.QueueMoment.EDITED)
                 // The queue was edited: what comes next may not be what it was. A song queued to play next
                 // is fetched and measured now, while there is time to plan its mix, not when its turn comes:
-                // without it AutoMix had nothing to mix it by. Once per burst of edits, and the precacher
-                // carries on untouched when the songs to fetch are the ones it is fetching already.
+                // without it AutoMix had nothing to mix it by. The engine fetches it (and the songs after it)
+                // as it hears of the edit; this measures what is on the device, once per burst of edits.
                 main.removeCallbacks(measure)
-                main.removeCallbacks(precache)
-                main.postDelayed(precache, timings.measureAfterEditMs)
+                main.postDelayed(measure, timings.measureAfterEditMs)
             }
         }
 
@@ -498,14 +494,6 @@ class PlaybackService : MediaLibraryService() {
         for (k in e.remove.indices step 2) player.removeMediaItems(e.remove[k].toInt(), e.remove[k + 1].toInt())
         if (e.songs.isNotEmpty()) player.addMediaItems(e.at.toInt(), held(e.songs))
         if (e.seek >= 0) { player.seekTo(e.seek, C.TIME_UNSET); player.prepare(); player.play() }
-    }
-
-    private fun precacheAhead() {
-        // Which songs coming up are fetched early (how many for this network, whether a mix needs the
-        // next one early, none the downloads have), and from where, is the core's in one call.
-        val songs = nori.sources.precacheTargets()
-        if (songs.isEmpty()) return precacher.cancel()
-        precacher.update(songs)
     }
 
     /**

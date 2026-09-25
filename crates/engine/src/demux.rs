@@ -16,6 +16,7 @@
 //! output takes them, and each packet with the frames of music it stands for.
 
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::Thread;
 
@@ -43,6 +44,10 @@ use crate::source::Loader;
 const OPUS_PRE_ROLL: i64 = 3840;
 /// Frames read ahead of a seek into an MP4, for the decoder to warm up on: two AAC frames.
 const AAC_WARM_UP: i64 = 2048;
+/// Times a song is opened again after its length was found shorter than promised (`Demuxed::start`):
+/// once for the real length, or for none known when the server did not say it, and once more should the
+/// bytes then run out before the reader is open.
+const REOPENS: usize = 3;
 
 /// Samples as a WAV file stores them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -657,8 +662,23 @@ impl Stream {
 /// (delay and padding cut), handing each buffer over as float samples with the rate and channels: for
 /// measuring a song ahead of time. `each` answers whether to go on. False when it was not read to its
 /// end, or was stopped.
-pub(crate) fn decode_whole(source: Box<dyn MediaSource>, hint: Option<&str>, mut each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
-    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, true, false, true)?;
+pub(crate) fn decode_whole(source: Box<dyn MediaSource>, hint: Option<&str>, each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
+    decode_from_start(source, hint, true, each)
+}
+
+/// [`decode_whole`] over bytes still coming, read in order as they arrive (`crate::arriving`): nothing is
+/// looked for at the end of the song (an MP4's gapless numbers), so an MP4 is not decoded so.
+pub(crate) fn decode_as_it_comes(source: Box<dyn MediaSource>, hint: Option<&str>, each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
+    decode_from_start(source, hint, false, each)
+}
+
+/// Whether a song in this container can be decoded as it comes: an MP4 may keep what it is at its end.
+pub(crate) fn decodes_as_it_comes(hint: Option<&str>) -> bool {
+    !hint.is_some_and(mp4_like)
+}
+
+fn decode_from_start(source: Box<dyn MediaSource>, hint: Option<&str>, whole: bool, mut each: impl FnMut(u32, usize, &[f32]) -> bool) -> Result<bool, String> {
+    let mut s = Stream::open(source, hint, 0, None, Encoding::Float, whole, false, true)?;
     let mut floats: Vec<f32> = Vec::new();
     while s.fill() {
         if s.buffer().is_empty() {
@@ -784,6 +804,19 @@ enum State {
 #[derive(Default)]
 struct Opening {
     done: Mutex<(Option<Result<Stream, String>>, Option<Thread>)>,
+    /// Nobody wants it any more (the engine moved on while it opened): its reads give up.
+    abandoned: Arc<AtomicBool>,
+}
+
+impl Drop for Demuxed {
+    fn drop(&mut self) {
+        // Still opening: the thread opening it stops reading, rather than keep moving the song's fetch
+        // to where it reads while another reader of the same bytes moves it back.
+        if let (State::Opening(o), Some((l, _))) = (&self.state, &self.loader) {
+            o.abandoned.store(true, Ordering::Release);
+            l.nudge();
+        }
+    }
 }
 
 impl Demuxed {
@@ -861,7 +894,22 @@ impl Demuxed {
             // An MP4's gapless numbers may sit at its very end: it is read once all of it is here (a
             // song that fits one burst, as most do), rather than fetched from the end and again.
             let whole = hint.as_deref().is_some_and(mp4_like) && l.wait_whole();
-            let opened = Stream::open(Box::new(l.reader()), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
+            let mut seen = l.shortened();
+            let reader = || Box::new(l.reader_until(o.abandoned.clone()));
+            let mut opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
+            // The server's first answer promised an estimated length (a transcode), and the container
+            // reader looked for the song's end (an Ogg stream's last page, for its length) where that
+            // put it, past the real one: it failed, or took the song for one of unknown length and so
+            // one that cannot be seeked. The real end is known now, or that the promise was wrong: opened
+            // again on what is known.
+            for _ in 0..REOPENS {
+                let now = l.shortened();
+                if now == seen || o.abandoned.load(Ordering::Acquire) {
+                    break;
+                }
+                seen = now;
+                opened = Stream::open(reader(), hint.as_deref(), from_ms, duration_ms, encoding, whole, packets, false);
+            }
             let mut done = o.done.lock();
             done.0 = Some(opened);
             if let Some(t) = done.1.take() {
@@ -885,10 +933,15 @@ impl Demuxed {
     /// Why the song failed: the connection's own failure when there was one, which says more than
     /// what the container reader made of the bytes running out.
     fn failure(&self, why: String) -> (PlaybackError, String) {
-        match self.loader.as_ref().and_then(|(l, _)| l.error()) {
-            Some(e) => (PlaybackError::Network, e),
-            None => (PlaybackError::Other, why),
-        }
+        self.loader_failure().unwrap_or((PlaybackError::Other, why))
+    }
+
+    /// The connection's failure, once it gave up: the network's when the server could not be reached; a
+    /// server that answered with an error status was reached, and the song failed for its own reasons.
+    fn loader_failure(&self) -> Option<(PlaybackError, String)> {
+        let (l, _) = self.loader.as_ref()?;
+        let e = l.error()?;
+        Some((if l.answered().is_some() { PlaybackError::Other } else { PlaybackError::Network }, e))
     }
 }
 
@@ -927,7 +980,7 @@ impl Reading for Demuxed {
         match &self.state {
             State::Failed(kind, why) => Some((*kind, why.clone())),
             // Read to an early end because the bytes stopped coming.
-            State::Open(s) if s.ended => self.loader.as_ref().and_then(|(l, _)| l.error()).map(|e| (PlaybackError::Network, e)),
+            State::Open(s) if s.ended => self.loader_failure(),
             _ => None,
         }
     }

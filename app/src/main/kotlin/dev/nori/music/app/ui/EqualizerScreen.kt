@@ -19,7 +19,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -104,8 +103,8 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     LaunchedEffect(want) { if (want != sent[0]) { sent[0] = want; vm.setTuning(want) } }
     DisposableEffect(Unit) { onDispose { if (sent[0]) { sent[0] = false; vm.setTuning(false) } } }
 
-    if (importing) ImportDialog(vm) { importing = false }
-    p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
+    NoriDialog(importing, { importing = false }) { ImportDialog(vm) { importing = false } }
+    NoriDialog(p.eqBands.getOrNull(editing), { editing = -1 }) { band -> BandDialog(band, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
@@ -188,12 +187,14 @@ fun EqualizerScreen(vm: SettingsViewModel) {
         val profiles by vm.profiles.collectAsStateWithLifecycle()
         var naming by remember { mutableStateOf(false) }
         var newName by remember { mutableStateOf("") }
-        if (naming) AlertDialog(
-            onDismissRequest = { naming = false }, title = { Text(say.saveTheseSettings) },
-            text = { OutlinedTextField(newName, { newName = it }, singleLine = true, label = { Text(say.name) }) },
-            confirmButton = { TextButton({ vm.saveProfile(newName); newName = ""; naming = false }, enabled = newName.isNotBlank()) { Text(say.save) } },
-            dismissButton = { TextButton({ naming = false }) { Text(say.cancel) } },
-        )
+        NoriDialog(naming, { naming = false }) {
+            AlertCard(
+                title = { Text(say.saveTheseSettings) },
+                text = { OutlinedTextField(newName, { newName = it }, singleLine = true, label = { Text(say.name) }) },
+                confirmButton = { TextButton({ vm.saveProfile(newName); naming = false }, enabled = newName.isNotBlank()) { Text(say.save) } },
+                dismissButton = { TextButton({ naming = false }) { Text(say.cancel) } },
+            )
+        }
         val rows by vm.deviceRows.collectAsStateWithLifecycle()
         AnimatedRows(profiles, { it.name }) { profile ->
             val used = remember(rows, profile) { say.profileUse(rows.filter { it.output in profile.outputs }.map { it.name }) }
@@ -203,7 +204,7 @@ fun EqualizerScreen(vm: SettingsViewModel) {
                 action = { IconButton({ vm.deleteProfile(profile.name) }) { Icon(Icons.Outlined.Delete, remember(profile.name) { say.deleteNamed(profile.name) }, tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
             )
         }
-        ActionRow(say.saveAsProfile, Icons.Filled.Add, { naming = true }, divider = false)
+        ActionRow(say.saveAsProfile, Icons.Filled.Add, { newName = ""; naming = true }, divider = false)
 
         SectionTitle(say.crossfeed)
         Text(remember(p.crossfeedDb) { say.crossfeed(p.crossfeedDb) }, Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -231,8 +232,8 @@ private fun LimiterReduction() {
 private fun ImportDialog(vm: SettingsViewModel, onDone: () -> Unit) {
     var text by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text(say.importPreset) },
+    AlertCard(
+        title = { Text(say.importPreset) },
         text = {
             Column {
                 Text(say.importPresetHint, style = MaterialTheme.typography.bodySmall)
@@ -250,8 +251,8 @@ private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Uni
     // Asked again only when what they say changes, not on every recomposition a drag makes.
     val title = remember(band.freq) { say.hzTitle(band.freq) }
     val shape = remember(band.kind.slope, band.q) { say.shape(band.kind.slope, band.q) }
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text(title) },
+    AlertCard(
+        title = { Text(title) },
         text = {
             Column {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {

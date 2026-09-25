@@ -12,8 +12,8 @@
 //!
 //! Memory: the model's attention compares every frame with every other, for 32 frequency rows at once. Spelled out
 //! as the ONNX exporter writes it (MatMul, Softmax, MatMul), tract holds each of those score matrices whole, 288 MB
-//! apiece at 30 s, and a window peaked at 700 MB. The file the app downloads has each attention as one ONNX
-//! `Attention` node instead (tools/beat-this/export.py), which tract runs as flash attention, a block at a time:
+//! apiece at 30 s, and a window peaked at 700 MB. The app's graph has each attention as one ONNX `Attention` node
+//! instead (tools/beat-this/export.py; weights.rs fills it), which tract runs as flash attention, a block at a time:
 //! the same logits (within 1e-5) with about 100 MB held. Shorter chunks would also have cut the memory, but cost
 //! the model its context: its beats agreed less with the full model's (docs/research/analysis.md, section 7).
 //! Flash attention is kept on the calling thread (`TRACT_FLASH_SDPA_ST`), so the model never spreads over a pool.
@@ -201,9 +201,15 @@ impl BeatThis {
         Self::prepare(tract_onnx::onnx().model_for_path(path)?, chunk)
     }
 
-    /// From the file's bytes, as the app holds them (read out of its package, or a download).
+    /// From a whole ONNX file's bytes (the export with its weights in it; the evaluation reads such files).
     pub fn from_bytes(bytes: &[u8]) -> TractResult<Self> {
         Self::prepare(tract_onnx::onnx().model_for_read(&mut std::io::Cursor::new(bytes))?, CHUNK)
+    }
+
+    /// The app's own graph filled with the weights file made from the authors' checkpoint (`weights::convert`).
+    pub fn from_weights(weights: &[u8]) -> TractResult<Self> {
+        let proto = super::weights::assemble(weights).map_err(|e| tract_onnx::prelude::TractError::msg(e))?;
+        Self::prepare(tract_onnx::onnx().model_for_proto_model(&proto)?, CHUNK)
     }
 
     fn prepare(model: InferenceModel, chunk: usize) -> TractResult<Self> {

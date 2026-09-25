@@ -27,9 +27,11 @@ use nori_core::transfers;
 use nori_core::Core;
 use parking_lot::Mutex;
 
+use crate::ahead::{AheadSong, Takers};
+use crate::arriving::{Heard, Listening, Taker};
 use crate::engine::Settings;
 use crate::library::{Library, Located, Source};
-use crate::source::ByteSource;
+use crate::source::{ByteSource, OpenError};
 use crate::store::{Order, Store};
 
 /// The core's queue (`nori_core::playlist`). Edit it through the core's `playlist_*` calls, then tell
@@ -297,12 +299,27 @@ impl Library for CoreLibrary {
     }
 
     /// The songs the core names to fetch ahead, whole into the stream cache, but `next`, which the
-    /// engine is fetching itself; nothing without a store.
+    /// engine is fetching itself; nothing without a store. Measured as they come when AutoMix is on.
     fn ahead(&mut self, next: &str) {
         let Some(store) = &self.store else { return };
-        let songs = self.client.precache_targets(self.metered()).into_iter().filter(|f| f.id != next).map(|f| (f.url, f.key)).collect();
-        store.fetch_ahead(self.bytes.clone(), songs);
+        store.fetch_ahead(self.bytes.clone(), ahead_songs(self.client.precache_targets(self.metered()), next), Some(measuring_ahead()));
     }
+
+    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Box<dyn Taker>> {
+        measure_as_it_comes(id, hint, false)
+    }
+}
+
+/// The songs to fetch ahead of `fetch` (the core's `precache_targets`, or `nori_core::stream::precache_now`),
+/// less `next`, which the engine's loader fetches itself.
+pub fn ahead_songs(fetch: Vec<nori_core::stream::Fetch>, next: &str) -> Vec<AheadSong> {
+    fetch.into_iter().filter(|f| f.id != next).map(|f| AheadSong { id: f.id, url: f.url, key: f.key }).collect()
+}
+
+/// What hears each song fetched ahead: AutoMix's measuring, when it is on and the song is not measured
+/// ([`measure_as_it_comes`]). The fetching ahead may wait for it.
+pub fn measuring_ahead() -> Takers {
+    Arc::new(|song: &AheadSong| measure_as_it_comes(&song.id, key_format(&song.key).or_else(|| nori_core::queue::queue_song(song.id.clone()).map(|s| s.suffix)).as_deref(), true))
 }
 
 /// What the transition planner and the seek bar know of `id`, from the core's queue: for a client
@@ -443,10 +460,19 @@ impl Downloader {
         let part = self.store.download_part(id);
         let mut chunk = vec![0u8; DOWNLOAD_CHUNK];
         let mut tries = 0;
+        // With AutoMix on, measured as it downloads, from its first byte: later mixes need no pass of their
+        // own. One taken up half way by an earlier run is measured when it is queued.
+        let hint = nori_core::queue::queue_song(id.to_string()).map(|s| s.suffix).filter(|s| !s.is_empty());
+        let mut taker = if std::fs::metadata(&part).map_or(0, |m| m.len()) == 0 { measure_as_it_comes(id, hint.as_deref(), true) } else { None };
         loop {
             let have = std::fs::metadata(&part).map_or(0, |m| m.len());
             let body = match self.bytes.open(&url, have) {
                 Ok(b) => b,
+                // Nothing past what is on the disk: it is all there, short of a length the server
+                // promised (an estimate, for a transcode).
+                Err(OpenError::PastEnd { len }) if have > 0 && len.is_none_or(|l| l == have) => {
+                    return std::fs::rename(&part, self.store.download_path(id)).is_ok();
+                }
                 Err(_) => {
                     tries += 1;
                     if tries >= DOWNLOAD_TRIES {
@@ -458,6 +484,10 @@ impl Downloader {
             };
             // A server that would not do ranges sends it all again: the file starts again too.
             let (mut at, append) = if body.start == have { (have, true) } else { (0, false) };
+            if !append && have > 0 {
+                // Heard up to where it broke, and now from the start again: what was heard is dropped.
+                taker = None;
+            }
             let file = std::fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).open(&part);
             let Ok(mut file) = file else { return false };
             let mut reader = body.reader;
@@ -468,6 +498,9 @@ impl Downloader {
                         if file.write_all(&chunk[..n]).is_err() {
                             return false;
                         }
+                        if let Some(t) = taker.as_mut() {
+                            t.take(&chunk[..n]);
+                        }
                         at += n as u64;
                         transfers::note(slot, body.len.unwrap_or(0) as i64, at as i64, nori_core::db::now_ms());
                     }
@@ -476,7 +509,11 @@ impl Downloader {
             };
             if !broke && body.len.is_none_or(|l| at == l) && file.flush().is_ok() {
                 drop(file);
-                return std::fs::rename(&part, self.store.download_path(id)).is_ok();
+                let kept = std::fs::rename(&part, self.store.download_path(id)).is_ok();
+                if let Some(t) = taker.take() {
+                    t.end(kept);
+                }
+                return kept;
             }
             tries += 1;
             if tries >= DOWNLOAD_TRIES {
@@ -645,7 +682,22 @@ impl Measurer {
     /// Measures the songs `shelf` says are whole, storing into `core()` as it is at each look; `told`
     /// hears of each song stored (to plan the transitions again), on the measuring thread.
     pub fn on_shelf(core: impl Fn() -> Option<Arc<Core>> + Send + Sync + 'static, shelf: Box<dyn Shelf>, told: Option<Box<dyn Fn() + Send + Sync>>) -> Arc<Measurer> {
-        Arc::new(Measurer { core: Box::new(core), shelf, plan: Mutex::new(Schedule::default()), asked: AtomicU64::new(0), measured: AtomicBool::new(false), told, decoded: AtomicU64::new(0) })
+        let m = Arc::new(Measurer { core: Box::new(core), shelf, plan: Mutex::new(Schedule::default()), asked: AtomicU64::new(0), measured: AtomicBool::new(false), told, decoded: AtomicU64::new(0) });
+        let mut all = MEASURERS.lock();
+        all.retain(|w| w.strong_count() > 0);
+        all.push(Arc::downgrade(&m));
+        m
+    }
+
+    /// A song was measured as it came, elsewhere: what was planned without it is planned again.
+    fn stored_elsewhere(&self) {
+        self.measured.store(true, Ordering::Release);
+        if let Some(t) = &self.plan.lock().engine {
+            t.unpark();
+        }
+        if let Some(told) = &self.told {
+            told();
+        }
     }
 
     /// Measures `ids` (the songs coming up) from now on; `engine` is woken when something was stored.
@@ -706,6 +758,11 @@ impl Measurer {
             let todo: Vec<&String> = ids.iter().filter(|id| missing.contains(id) || near.contains(id)).collect();
             let mut waiting = 0;
             for id in todo {
+                // Being measured as it comes: that decode is the one, and its end is news for this.
+                if ARRIVING.lock().contains(id) {
+                    waiting += 1;
+                    continue;
+                }
                 let Some(pieces) = self.shelf.whole(id).and_then(|w| Some((crate::pieces::Pieces::open(&w.files).ok()?, w.hint))) else {
                     waiting += 1;
                     continue;
@@ -717,13 +774,19 @@ impl Measurer {
                     continue;
                 }
                 let listen = asked_to_listen && model.ready();
-                if !missing.contains(id) && !listen {
+                // Asked again: the songs before it took a while, and it may have been measured as it came.
+                let classical = missing.contains(id) && !core.analysis_missing(vec![id.clone()]).unwrap_or_default().is_empty();
+                if !classical && !listen {
                     continue;
                 }
                 // Left half way: not tried, and looked at again with the next news.
                 self.decoded.fetch_add(1, Ordering::Relaxed);
-                let job = Job { classical: missing.contains(id), model: if listen { model.get() } else { None } };
+                let cpu = crate::arriving::thread_cpu_ms();
+                let job = Job { classical, model: if listen { model.get() } else { None } };
                 let Some(stored) = self.measure(&core, id, pieces, hint.as_deref(), job) else { continue };
+                if let (Some(a), Some(b)) = (cpu, crate::arriving::thread_cpu_ms()) {
+                    nori_core::alog::info(&format!("measuring {id} ahead from the disk took {} ms of CPU", b.saturating_sub(a)));
+                }
                 self.plan.lock().tried(id, bytes, listen);
                 if stored {
                     self.measured.store(true, Ordering::Release);
@@ -798,6 +861,116 @@ impl Measurer {
             None => format!("analysed {id} ahead: not stored: not the whole song, or too short"),
         });
         a.is_some()
+    }
+}
+
+// ---- measured as it comes ----
+
+/// The songs being measured as they come now: the measurer leaves them to that decode.
+static ARRIVING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Every measurer, told when a song measured as it came was stored (or was not, and may be looked at).
+static MEASURERS: Mutex<Vec<std::sync::Weak<Measurer>>> = Mutex::new(Vec::new());
+/// Songs measured as they came and stored, in this process.
+static CAME: AtomicU64 = AtomicU64::new(0);
+
+/// How many songs were measured as they came and stored, in this process: for the perf report and tests.
+pub fn measured_as_they_came() -> u64 {
+    CAME.load(Ordering::Relaxed)
+}
+
+/// Whether a song is being measured as it comes now: for a test to wait until none is.
+pub fn measuring_as_they_come() -> bool {
+    !ARRIVING.lock().is_empty()
+}
+
+/// What hears `id`'s bytes as they are fetched, from its first, to measure it for AutoMix on those same
+/// bytes in the same burst (`crate::arriving`): when AutoMix is on, the song can be measured at all and is
+/// not measured yet, its container can be read as it comes (`hint`: not an MP4, which may keep what it is at
+/// its end), and it is not being measured as it comes already. `wait`: the fetch may wait for the decoder
+/// (fetching ahead, a download); a loader the player may be reading from must not.
+pub fn measure_as_it_comes(id: &str, hint: Option<&str>, wait: bool) -> Option<Box<dyn Taker>> {
+    if !nori_core::rules::prefs(|p| p.auto_mix) || !nori_core::queue::analysable(id) || !crate::demux::decodes_as_it_comes(hint) {
+        return None;
+    }
+    let core = nori_core::active()?;
+    if core.analysis_missing(vec![id.to_string()]).ok()?.is_empty() {
+        return None;
+    }
+    {
+        let mut a = ARRIVING.lock();
+        if a.iter().any(|i| i == id) {
+            return None;
+        }
+        a.push(id.to_string());
+    }
+    let expected_ms = nori_core::queue::queue_song(id.to_string()).map_or(0, |s| s.duration as i64 * 1000);
+    let heard = Measuring { id: id.to_string(), core, expected_ms, stream: None, cpu_from: None };
+    match Listening::start(hint.map(str::to_string), wait, Box::new(heard)) {
+        Some(l) => Some(Box::new(l)),
+        None => {
+            ARRIVING.lock().retain(|i| i != id);
+            None
+        }
+    }
+}
+
+/// A song's samples, as they are decoded from the bytes coming, into the streaming analyser; stored once the
+/// whole song was heard.
+struct Measuring {
+    id: String,
+    core: Arc<Core>,
+    expected_ms: i64,
+    stream: Option<nori_core::automix::store::AnalysisStream>,
+    /// The decoding thread's CPU time when it began, for the log.
+    cpu_from: Option<u64>,
+}
+
+impl Heard for Measuring {
+    fn samples(&mut self, rate: u32, channels: usize, samples: &[f32]) {
+        if self.stream.is_none() {
+            self.cpu_from = crate::arriving::thread_cpu_ms();
+        }
+        let expected = self.expected_ms.max(0) as u64;
+        self.stream.get_or_insert_with(|| nori_core::automix::store::AnalysisStream::new(rate, channels, expected)).feed_f32(samples);
+    }
+
+    fn done(self: Box<Self>, whole: bool) {
+        let Measuring { id, core, expected_ms, stream, cpu_from } = *self;
+        let stored = match stream {
+            Some(stream) if whole => {
+                let handle = stream.into_handle();
+                let a = core.analysis_finish_whole(id.clone(), handle, expected_ms).ok().flatten();
+                // SAFETY: the handle was made just above and is handed to nobody else.
+                unsafe { nori_core::automix::store::AnalysisStream::free_handle(handle) };
+                let cpu = match (cpu_from, crate::arriving::thread_cpu_ms()) {
+                    (Some(a), Some(b)) => format!(", {} ms of CPU", b.saturating_sub(a)),
+                    _ => String::new(),
+                };
+                nori_core::alog::info(&match &a {
+                    Some(t) => format!("analysed {id} as it came: {:.2} bpm (conf {:.2}, stab {:.2}){cpu}", t.bpm, t.bpm_confidence, t.stability),
+                    None => format!("analysed {id} as it came: not stored: not the whole song, or too short"),
+                });
+                a.is_some()
+            }
+            Some(_) => {
+                nori_core::alog::info(&format!("measuring {id} as it came: its bytes did not all come, dropped"));
+                false
+            }
+            None => false,
+        };
+        if stored {
+            CAME.fetch_add(1, Ordering::Relaxed);
+        }
+        ARRIVING.lock().retain(|i| *i != id);
+        let measurers: Vec<Arc<Measurer>> = MEASURERS.lock().iter().filter_map(|w| w.upgrade()).collect();
+        for m in measurers {
+            if stored {
+                m.stored_elsewhere();
+            } else {
+                // Not measured here: the measurer may find it whole on the disk.
+                m.arrived();
+            }
+        }
     }
 }
 
@@ -904,9 +1077,9 @@ struct BeatModel(nori_player::automix::neural::BeatThis);
 #[cfg(feature = "neural-beats")]
 impl BeatModel {
     fn load() -> Option<BeatModel> {
-        let source = nori_core::beat_download::ensure()?;
+        let file = nori_core::beat_download::ensure()?;
         let t0 = std::time::Instant::now();
-        let loaded = nori_core::beat_download::read(&source).and_then(|bytes| nori_player::automix::neural::BeatThis::from_bytes(&bytes).map_err(|e| e.to_string()));
+        let loaded = nori_core::beat_download::read(&file).and_then(|bytes| nori_player::automix::neural::BeatThis::from_weights(&bytes).map_err(|e| e.to_string()));
         match loaded {
             Ok(m) => {
                 nori_core::alog::info(&format!("beat model loaded in {} ms", t0.elapsed().as_millis()));
@@ -941,12 +1114,7 @@ impl BeatModel {
 
 /// The measuring thread yields to everything else: the lowest priority the system has.
 fn lower_priority() {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    // SAFETY: a plain system call about the calling thread (on Linux, `0` with PRIO_PROCESS is the
-    // thread itself).
-    unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 19);
-    }
+    crate::arriving::lower_priority();
 }
 
 /// The sound and the controls as the core's settings ask for them.

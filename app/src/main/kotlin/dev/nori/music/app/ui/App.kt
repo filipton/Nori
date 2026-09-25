@@ -393,7 +393,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             }
             SheetBack(sheet)
             }
-            menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer }) }
+            SongMenu(menuSong, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer })
         }
         }
     }

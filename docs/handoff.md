@@ -71,20 +71,21 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 - **"Better beat detection", an opt-in neural beat tracker for AutoMix, all in the core.** Settings, Playback,
   under AutoMix; off by default, and only in a build with the `neural-beats` cargo feature (nori-engine's, which
   pulls in tract through nori-core and nori-player). On, the measurer (nori-engine `Measurer`, lowest priority,
-  songs whole on the disk only) fetches Beat This!'s small model once through the core's transport
-  (`crates/core/src/beat_download.rs`: pinned URL, Wi-Fi unless allowed, SHA-256 checked, kept beside the
-  database, deleted when switched off; `crates/automix/src/beat_model.rs` holds where it is and what the setting
-  says), keeps the first and last 35 s of the song playing and the next one as it decodes them
+  songs whole on the disk only) makes Beat This!'s small model once: the core carries only its graph
+  (`crates/player/models/beat-this-small0.graph.onnx`, 186 kB, no weights), and fetches the authors' own
+  checkpoint through the client's transport (`crates/core/src/beat_download.rs`: their URL, Wi-Fi unless
+  allowed, SHA-256 checked), reads it with a restricted unpickler (`automix/checkpoint.rs`), converts it into the
+  weights file the graph reads (`automix/weights.rs`, 4.2 MB, its own SHA-256 pinned), keeps that beside the
+  database and deletes it when switched off (`crates/automix/src/beat_model.rs` holds the pins and where it
+  is). On the desktop the whole of it took 0.48 s (0.44 s of it the download) and 31 MB at the peak. It then keeps the first and last 35 s of the song playing and the next one as it decodes them
   (`automix::beats::Ends`, mono at about 22 kHz, 3.4 MB each), and reads each end once; the grid replaces the
   classical one at an end when it is sure (`automix/beats.rs`). The model is loaded when a look needs it and let
   go when the measuring thread ends. Synthetic mix windows right and trusted 24 to 27 of 32, none wrong (the
-  branch's measurement; see the research). The debug and perf builds carry the feature and ship the model in
-  the APK (`tools/beat-this/beat-this-small0-v1.onnx`, stored uncompressed and read in place: Kotlin passes the
-  APK's path, offset and length to `beat_model_bundled`, and nothing is downloaded); a release build leaves both
-  out unless `-PrustFeatures=neural-beats`: they make the arm64 APK 20.6 MB bigger (library 9.8 to 25.3 MB, model
-  5.1 MB), and the row is not shown without them. The model was exported from the authors' checkpoint (research
-  7.1: 5,069,707 bytes, SHA-256 in `beat_model.rs`); it is not hosted anywhere, so a client that does not ship it
-  (the desktop) cannot download it until `beat_model::URL` points at a real copy. On *Kid A* it changes no mix
+  branch's measurement; see the research). The debug and perf builds carry the feature, a release build leaves it
+  out unless `-PrustFeatures=neural-beats` (it makes the arm64 perf APK 15.7 MB bigger: the library 9.6 to 25.3 MB, the graph 0.19 MB of it; the APK was 34.7 MB with the bundled weights, 29.8 MB now), and the row is not shown
+  without it. No copy of the weights is shipped or hosted (the old bundled export and its dead download URL are
+  gone): the weights made on the device give the old export's logits within 4e-5 and the same beats (research
+  7.1, `automix::weights` test). On *Kid A* it changes no mix
   window as shipped (research 7.1). Open: the branch's charging backlog (`BeatBacklog`, a JobScheduler job over downloaded
   songs) was not carried over, so only songs about to play are read; and nothing was timed on a phone: 6.7 s of one
   desktop core per new song, expect 25-35 s of a phone's big core. Research and numbers: `docs/research/analysis.md`, sections 5 to 7.
@@ -196,7 +197,7 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   transition has both halves' tempo, beats and cues the first time those two songs meet - until now
   the tap only finished a track as it ended, which is one boundary too late. It never fetches
   anything: a track is measured only once its bytes are on the device (downloaded, or brought in by
-  the precacher), and the whole thing is off unless AutoMix is on.
+  the fetching ahead, which measures a song as it comes), and the whole thing is off unless AutoMix is on.
 - **The mix no longer allocates as it starts.** The tail buffer, the mixer, the time stretcher and
   the chunk pool are built when the plan is made, at the start of the outgoing track, instead of
   between two buffers on the audio thread at the moment the mix begins (`TransitionSink.prepare`).

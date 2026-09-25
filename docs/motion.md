@@ -161,10 +161,12 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - Should: as is.
 - Status: **leave**
 
-### 12. Song menu — `SongMenu.kt` `ModalBottomSheet`, the "More" row
+### 12. Song menu — `SongMenu.kt` `NoriSheet`, the "More" row
 
-- Now: Material's sheet spring; "More" expands in place (`expandVertically`), its chevron turns.
-- Should: as is unless the owner says otherwise; the sheet's own motion is the platform's.
+- Now: Material's sheet spring; "More" expands in place (`expandVertically`), its chevron turns. A
+  menu item that closes the menu slides the sheet down (it used to vanish), and the sleep choices,
+  details and playlist picker come up as the sheet goes down (item 22).
+- Should: as is unless the owner says otherwise.
 - Status: **leave**
 
 ### 13. Lyrics — `LyricsView.kt` (line change, scroll)
@@ -313,6 +315,27 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - Check: AutoMix on, the player open, `tools/app.sh do "seek <ms>"` to 25 s before the end, record
   through the switch: the old record stays whole until the switch, then slides out as the new one
   slides in, once.
+- Status: **done**
+
+### 22. Dialogs, sheets and menus — `Overlays.kt` `NoriDialog`, `NoriSheet`, `AlertCard`; `res/values/themes.xml`
+
+- Was: every dialog appeared and vanished on one frame with Android's window animation scale at 0,
+  "Animate anyway" or not. A Compose Dialog is a window, and the window's enter/exit animation and its
+  dim run on the window clock; and `if (open) AlertDialog(...)` drops the window the frame `open`
+  turns false, so there was never an exit to play. Sheets closed from a menu item vanished the same way.
+- Now: the app theme's `dialogTheme` gives every dialog window no animation and no dim. `NoriDialog`
+  opens its own full-screen window, draws the scrim and moves the card on AppMotion (in: 240 ms, fade
+  and 0.92 → 1 scale on the `Settle` ease; out: 170 ms; a page-style dialog rises 1/24 of the height
+  instead of scaling; reduced motion: a 120 ms fade), keeps the last value on screen while it leaves
+  and only then drops the window. `NoriSheet` does the same for Material's bottom sheet (`hide()` before
+  it leaves). `AlertCard` is Material's alert card drawn in place (Material 1.4 keeps its own behind its
+  window). A leaving dialog takes no taps. Closed, each is one remembered state and an early return.
+  Dropdown menus are Material's own popup with its own transition, which already runs on AppMotion.
+- Rule: no screen puts up `AlertDialog`, `ModalBottomSheet` or a raw `Dialog`; `OverlaysTest` fails
+  the build's tests if one does.
+- Check: all three scales at 0 (`adb shell settings put global animator_duration_scale 0`, and
+  `window_animation_scale`, `transition_animation_scale`), record opening and closing: no frame where a
+  dialog, scrim or sheet is fully there after nothing, or gone after fully there.
 - Status: **done**
 
 ## Decisions and traps

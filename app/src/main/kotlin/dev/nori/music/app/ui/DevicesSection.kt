@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,7 +54,7 @@ fun DevicesSection(vm: SettingsViewModel) {
     val rows by vm.deviceRows.collectAsStateWithLifecycle()
     val p by vm.prefs.collectAsStateWithLifecycle()
     var picking by remember { mutableStateOf<String?>(null) }
-    rows.firstOrNull { it.output == picking }?.let { d -> DeviceSheet(vm, d) { picking = null } }
+    NoriSheet(rows.firstOrNull { it.output == picking }, { picking = null }, skipPartiallyExpanded = false) { d -> DeviceSheet(vm, d) { picking = null } }
 
     SectionTitle(say.devices)
     AnimatedRows(rows, { it.output }) { d -> DeviceItem(d) { vm.clearAssignError(); picking = d.output } }
@@ -143,7 +142,7 @@ internal fun <T> AnimatedRows(items: List<T>, key: (T) -> String, content: @Comp
     }
 }
 
-/** What one device gets: nothing chosen, flat, left alone, a saved profile, or a curve from AutoEQ. */
+/** What one device gets: nothing chosen, flat, left alone, a saved profile, or a curve from AutoEQ. The inside of a [NoriSheet]. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit) {
@@ -164,62 +163,60 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
     val pick = { c: DeviceSound.Choice -> vm.assignDevice(d.output, c, onDone) }
     val ms = motion()
 
-    ModalBottomSheet(onDismissRequest = onDone) {
-        LazyColumn(Modifier.navigationBarsPadding()) {
-            item("head") {
-                Column(Modifier.padding(bottom = 4.dp)) {
-                    LargeTitle(d.name)
-                    Text(
-                        intro,
-                        Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+    LazyColumn(Modifier.navigationBarsPadding()) {
+        item("head") {
+            Column(Modifier.padding(bottom = 4.dp)) {
+                LargeTitle(d.name)
+                Text(
+                    intro,
+                    Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        item("auto") {
+            Option(
+                say.automatic,
+                automatic,
+                d.choice == DeviceSound.Choice.Automatic,
+            ) { pick(DeviceSound.Choice.Automatic) }
+        }
+        item("flat") { Option(say.flat, say.flatDetail, d.choice == DeviceSound.Choice.Flat) { pick(DeviceSound.Choice.Flat) } }
+        item("quiet") { Option(say.leaveAsIs, say.leaveAsIsDetail, d.choice == DeviceSound.Choice.Quiet) { pick(DeviceSound.Choice.Quiet) } }
+        items(sheet.profiles, key = { "p:$it" }) { name ->
+            Option(name, say.savedProfile, d.choice == DeviceSound.Choice.Profile(name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(name)) }
+        }
+        item("curves") { SectionHeader(say.autoeqCurves) }
+        if (eq.count == 0) item("download") {
+            Column(Modifier.padding(horizontal = Space.gutter)) {
+                Text(
+                    say.autoeqDownloadHint,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(Modifier.padding(vertical = 10.dp).heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PillButton(say.downloadTheList, null, vm::downloadAutoEqIndex, prominent = true, enabled = !eq.busy)
+                    AnimatedVisibility(eq.busy, enter = fadeIn(tween(ms)), exit = fadeOut(tween(ms))) { LoadingDots(Modifier.padding(start = 14.dp)) }
                 }
             }
-            item("auto") {
-                Option(
-                    say.automatic,
-                    automatic,
-                    d.choice == DeviceSound.Choice.Automatic,
-                ) { pick(DeviceSound.Choice.Automatic) }
-            }
-            item("flat") { Option(say.flat, say.flatDetail, d.choice == DeviceSound.Choice.Flat) { pick(DeviceSound.Choice.Flat) } }
-            item("quiet") { Option(say.leaveAsIs, say.leaveAsIsDetail, d.choice == DeviceSound.Choice.Quiet) { pick(DeviceSound.Choice.Quiet) } }
-            items(sheet.profiles, key = { "p:$it" }) { name ->
-                Option(name, say.savedProfile, d.choice == DeviceSound.Choice.Profile(name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(name)) }
-            }
-            item("curves") { SectionHeader(say.autoeqCurves) }
-            if (eq.count == 0) item("download") {
-                Column(Modifier.padding(horizontal = Space.gutter)) {
-                    Text(
-                        say.autoeqDownloadHint,
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(Modifier.padding(vertical = 10.dp).heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
-                        PillButton(say.downloadTheList, null, vm::downloadAutoEqIndex, prominent = true, enabled = !eq.busy)
-                        AnimatedVisibility(eq.busy, enter = fadeIn(tween(ms)), exit = fadeOut(tween(ms))) { LoadingDots(Modifier.padding(start = 14.dp)) }
-                    }
+        } else item("search") {
+            SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, eq.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
+        }
+        items(curves, key = { "c:" + it.entry.path }) { e ->
+            Option(e.entry.name, e.short, false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e.entry)) }
+        }
+        item("status") {
+            Column {
+                AnimatedVisibility(busy == d.output, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
+                    Box(Modifier.fillMaxWidth().padding(12.dp), Alignment.Center) { LoadingDots() }
                 }
-            } else item("search") {
-                SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, eq.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
-            }
-            items(curves, key = { "c:" + it.entry.path }) { e ->
-                Option(e.entry.name, e.short, false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e.entry)) }
-            }
-            item("status") {
-                Column {
-                    AnimatedVisibility(busy == d.output, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
-                        Box(Modifier.fillMaxWidth().padding(12.dp), Alignment.Center) { LoadingDots() }
-                    }
-                    AnimatedVisibility(error != null || eq.error != null, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
-                        Text(error ?: eq.error.orEmpty(), Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    }
+                AnimatedVisibility(error != null || eq.error != null, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
+                    Text(error ?: eq.error.orEmpty(), Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (sheet.canForget) item("forget") {
-                Column(Modifier.padding(top = 12.dp)) {
-                    Hairline()
-                    ActionRow(say.forgetDevice, Icons.Outlined.Delete, { vm.forgetDevice(d.output); onDone() }, divider = false)
-                }
+        }
+        if (sheet.canForget) item("forget") {
+            Column(Modifier.padding(top = 12.dp)) {
+                Hairline()
+                ActionRow(say.forgetDevice, Icons.Outlined.Delete, { vm.forgetDevice(d.output); onDone() }, divider = false)
             }
         }
     }

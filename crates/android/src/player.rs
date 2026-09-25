@@ -8,8 +8,11 @@
 //! - a song's bytes (`open`, then `read` per 256 KB, each filled whole), at the URL and under the cache
 //!   key the core resolves (`nori_core::stream::resolve_now`, over the network state Kotlin tells the
 //!   core): through media3's data sources on the app's one OkHttp client, so the TLS settings, client
-//!   certificates and headers of the profile apply, and a song downloaded, cached or fetched ahead by the
-//!   precacher plays from the disk;
+//!   certificates and headers of the profile apply, and a song downloaded, cached or fetched ahead plays
+//!   from the disk;
+//! - the songs after the next, fetched ahead into media3's stream cache by nori-engine's one fetcher of the
+//!   songs coming up (`nori_engine::ahead`, [`AHEAD`]) through the same doors: whether a song is whole in
+//!   the cache already (`kept`) and whether the player is writing it (`busy`) are asked of Kotlin;
 //! - a wake for the events (`signal`): one call per batch of engine events, however many there are,
 //!   and Kotlin takes them from here on its own thread;
 //! - audio offload (Android 10 and later): whether the phone's audio chip decodes a song's compression
@@ -33,8 +36,10 @@ use jni::objects::{GlobalRef, JByteArray, JClass, JFieldID, JMethodID, JStaticMe
 use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jboolean, jfloat, jint, jlong, jstring};
 use jni::{JNIEnv, JavaVM};
-use nori_engine::core::{is_radio, key_format, settings, CoreApp, CoreQueue};
-use nori_engine::{Body, ByteSource, Coded, Coding, Config, Device, Engine, Event, Library, Located, OffloadOutput, OutputFacts, OutputFormat, Source, State, Support};
+use nori_engine::ahead::{Ahead, Entry, Keeping};
+use nori_engine::arriving::Taker;
+use nori_engine::core::{ahead_songs, is_radio, key_format, measure_as_it_comes, measuring_ahead, settings, CoreApp, CoreQueue};
+use nori_engine::{Body, ByteSource, Coded, Coding, Config, Device, Engine, Event, Library, Located, OffloadOutput, OpenError, OutputFacts, OutputFormat, Source, State, Support};
 use nori_player::transitions::WindowSong;
 use parking_lot::Mutex;
 
@@ -60,6 +65,7 @@ pub(crate) static CLASS: Class = Class {
         native!(c"positionMs", c"(J)J", position_ms),
         native!(c"mixing", c"(J)Z", mixing),
         native!(c"chainIn", c"(J)Z", chain_in),
+        native!(c"onCpu", c"(J)Z", on_cpu),
         native!(c"gainReductionDb", c"(J)F", gain_reduction_db),
         native!(c"bytesWritten", c"(J)J", bytes_written),
         native!(c"event", c"(J)J", event),
@@ -82,6 +88,8 @@ struct Java {
     open_track: JStaticMethodID,
     open: JStaticMethodID,
     open_live: JStaticMethodID,
+    kept: JStaticMethodID,
+    busy: JStaticMethodID,
     signal: JStaticMethodID,
     offload_support: JStaticMethodID,
     open_offload: JStaticMethodID,
@@ -90,6 +98,8 @@ struct Java {
     body_buffer: JFieldID,
     body_length: JFieldID,
     body_icy: JFieldID,
+    body_past: JFieldID,
+    body_status: JFieldID,
     position: JMethodID,
     track: TrackMethods,
     /// AudioTrack's offload calls, which Android 10 added: none before it.
@@ -159,6 +169,8 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
         open_track: env.get_static_method_id(&bridge, "openTrack", "(IIII)Landroid/media/AudioTrack;")?,
         open: env.get_static_method_id(&bridge, "open", "(Ljava/lang/String;Ljava/lang/String;J)Ldev/nori/music/playback/RustBody;")?,
         open_live: env.get_static_method_id(&bridge, "openLive", "(Ljava/lang/String;)Ldev/nori/music/playback/RustBody;")?,
+        kept: env.get_static_method_id(&bridge, "kept", "(Ljava/lang/String;)Z")?,
+        busy: env.get_static_method_id(&bridge, "busy", "(Ljava/lang/String;)Z")?,
         signal: env.get_static_method_id(&bridge, "signal", "()Z")?,
         offload_support: env.get_static_method_id(&bridge, "offloadSupport", "(III)I")?,
         open_offload: env.get_static_method_id(&bridge, "openOffload", "(IIII)Landroid/media/AudioTrack;")?,
@@ -168,6 +180,8 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
         body_buffer: env.get_field_id(&body, "buffer", "[B")?,
         body_length: env.get_field_id(&body, "length", "J")?,
         body_icy: env.get_field_id(&body, "icy", "I")?,
+        body_past: env.get_field_id(&body, "past", "Z")?,
+        body_status: env.get_field_id(&body, "status", "I")?,
         position: env.get_method_id(&buffer, "position", "(I)Ljava/nio/Buffer;")?,
         offload,
         track: TrackMethods {
@@ -894,32 +908,18 @@ impl Opener for JavaOpener {
 // ---- the songs' bytes ----
 
 /// A song's bytes through Kotlin's data sources, under the cache key the core resolved with its URL.
+/// The player's own: a song the fetching ahead is on is handed over first ([`Ahead::take_over`]), so
+/// that its bytes cross the network once.
 struct JavaBytes {
     key: String,
 }
 
 impl ByteSource for JavaBytes {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
-        let (java, mut env) = env().ok_or("no JVM")?;
-        let body = env.with_local_frame(6, |env| -> jni::errors::Result<Option<(GlobalRef, i64)>> {
-            let (url, key) = (env.new_string(url)?, env.new_string(&self.key)?);
-            // SAFETY: RustBridge.open(String, String, long), looked up with this signature.
-            let args = [JValue::Object(&url).as_jni(), JValue::Object(&key).as_jni(), JValue::Long(from as i64).as_jni()];
-            let body = unsafe { env.call_static_method_unchecked(bridge(java), java.open, ReturnType::Object, &args) }?.l()?;
-            if body.is_null() {
-                return Ok(None);
-            }
-            let length = env.get_field_unchecked(&body, java.body_length, ReturnType::Primitive(Primitive::Long))?.j()?;
-            Ok(Some((env.new_global_ref(&body)?, length)))
-        });
-        cleared(&mut env);
-        match body {
-            Ok(Some((body, length))) => {
-                log(&format!("{} from byte {from}: {} bytes come", self.key, if length >= 0 { length.to_string() } else { "unknown".into() }));
-                Ok(Body { start: from, len: (length >= 0).then(|| from + length as u64), reader: Box::new(JavaBody { body, open: true }) })
-            }
-            _ => Err("the song's bytes would not come".into()),
+    fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
+        if !self.key.is_empty() {
+            AHEAD.take_over(&self.key);
         }
+        open_java(url, &self.key, from)
     }
 
     /// A radio station's stream through `RustBridge.openLive`, uncached, asking for its announcements:
@@ -944,6 +944,115 @@ impl ByteSource for JavaBytes {
             }
             _ => Err("the station's stream would not come".into()),
         }
+    }
+}
+
+/// A song's bytes from `from` on through `RustBridge.open`: a download, then media3's stream cache, then
+/// the network, whatever is read written into the stream cache under `key`.
+fn open_java(url: &str, key: &str, from: u64) -> Result<Body, OpenError> {
+    let (java, mut env) = env().ok_or("no JVM")?;
+    let body = env.with_local_frame(6, |env| -> jni::errors::Result<Option<Result<(GlobalRef, i64), OpenError>>> {
+        let (url, key) = (env.new_string(url)?, env.new_string(key)?);
+        // SAFETY: RustBridge.open(String, String, long), looked up with this signature.
+        let args = [JValue::Object(&url).as_jni(), JValue::Object(&key).as_jni(), JValue::Long(from as i64).as_jni()];
+        let body = unsafe { env.call_static_method_unchecked(bridge(java), java.open, ReturnType::Object, &args) }?.l()?;
+        if body.is_null() {
+            return Ok(None);
+        }
+        let length = env.get_field_unchecked(&body, java.body_length, ReturnType::Primitive(Primitive::Long))?.j()?;
+        // A range from past the song's end: no body, and `length` is the whole song's when the server said.
+        if env.get_field_unchecked(&body, java.body_past, ReturnType::Primitive(Primitive::Boolean))?.z()? {
+            return Ok(Some(Err(OpenError::PastEnd { len: (length >= 0).then_some(length as u64) })));
+        }
+        // The server answered with an error status: no body, and it was reached.
+        let status = env.get_field_unchecked(&body, java.body_status, ReturnType::Primitive(Primitive::Int))?.i()?;
+        if status > 0 {
+            return Ok(Some(Err(OpenError::Status(status.min(u16::MAX as i32) as u16))));
+        }
+        Ok(Some(Ok((env.new_global_ref(&body)?, length))))
+    });
+    cleared(&mut env);
+    match body {
+        Ok(Some(Err(e))) => {
+            log(&format!("{key} from byte {from}: {e}"));
+            Err(e)
+        }
+        Ok(Some(Ok((body, length)))) => {
+            log(&format!("{key} from byte {from}: {} bytes come", if length >= 0 { length.to_string() } else { "unknown".into() }));
+            Ok(Body { start: from, len: (length >= 0).then(|| from + length as u64), reader: Box::new(JavaBody { body, open: true }) })
+        }
+        _ => Err("the song's bytes would not come".into()),
+    }
+}
+
+// ---- the songs after the next, fetched ahead ----
+
+/// The one fetcher of the songs after the next (nori-engine's), into media3's stream cache.
+static AHEAD: std::sync::LazyLock<Arc<Ahead>> = std::sync::LazyLock::new(Ahead::new);
+
+/// The fetching ahead's own door: through `RustBridge.open` as the player's, under the key it is told.
+struct AheadBytes;
+
+impl ByteSource for AheadBytes {
+    fn open(&self, _url: &str, _from: u64) -> Result<Body, OpenError> {
+        Err("asked without its cache key".into())
+    }
+
+    fn open_keyed(&self, url: &str, key: &str, from: u64) -> Result<Body, OpenError> {
+        open_java(url, key, from)
+    }
+}
+
+/// media3's stream cache, which keeps what is read through [`AheadBytes`] by itself: whether a song is
+/// whole there, or being written by the player, is asked of Kotlin, once per song.
+struct Media3Cache;
+
+impl Media3Cache {
+    fn ask(key: &str, method: fn(&Java) -> JStaticMethodID) -> Option<bool> {
+        let (java, mut env) = env()?;
+        let answer = env.with_local_frame(2, |env| -> jni::errors::Result<bool> {
+            let key = env.new_string(key)?;
+            // SAFETY: RustBridge.kept(String) / busy(String): boolean, looked up with this signature.
+            unsafe { env.call_static_method_unchecked(bridge(java), method(java), ReturnType::Primitive(Primitive::Boolean), &[JValue::Object(&key).as_jni()]) }?.z()
+        });
+        cleared(&mut env);
+        answer.ok()
+    }
+}
+
+impl Keeping for Media3Cache {
+    fn kept(&self, key: &str) -> bool {
+        // Not known: taken as there, so nothing is fetched on a guess.
+        Media3Cache::ask(key, |j| j.kept).unwrap_or(true)
+    }
+
+    fn busy(&self, key: &str) -> bool {
+        Media3Cache::ask(key, |j| j.busy).unwrap_or(true)
+    }
+
+    fn entry(&self, _key: &str) -> Option<Box<dyn Entry>> {
+        Some(Box::new(Counted(0)))
+    }
+}
+
+/// An entry media3 writes itself as the bytes are read: only counted here.
+struct Counted(u64);
+
+impl Entry for Counted {
+    fn write(&mut self, from: u64, bytes: &[u8]) -> bool {
+        if from != self.0 {
+            return false;
+        }
+        self.0 += bytes.len() as u64;
+        true
+    }
+
+    fn written(&self) -> u64 {
+        self.0
+    }
+
+    fn finish(self: Box<Self>, len: u64) -> bool {
+        self.0 == len
     }
 }
 
@@ -1028,6 +1137,16 @@ impl Library for AndroidLibrary {
 
     fn fetch_ahead(&self, id: &str) -> bool {
         nori_engine::core::fetch_ahead(id)
+    }
+
+    /// The songs the core names to fetch ahead (`precache_targets` for the network last told), but `next`,
+    /// which the engine's loader fetches: into media3's stream cache, measured as they come with AutoMix on.
+    fn ahead(&mut self, next: &str) {
+        AHEAD.ask(Arc::new(Media3Cache), Arc::new(AheadBytes), ahead_songs(nori_core::stream::precache_now(), next), Some(measuring_ahead()));
+    }
+
+    fn taker(&self, id: &str, hint: Option<&str>) -> Option<Box<dyn Taker>> {
+        measure_as_it_comes(id, hint, false)
     }
 }
 
@@ -1193,6 +1312,8 @@ extern "system" fn destroy(_: JNIEnv, _: JClass, h: jlong) {
         players.iter().position(|(k, _)| *k == h).map(|i| players.remove(i).1)
     };
     if let Some(p) = gone {
+        // Nothing is fetched ahead for a player that is gone: a song on its way is left where it got to.
+        AHEAD.ask(Arc::new(Media3Cache), Arc::new(AheadBytes), Vec::new(), None);
         // A thread that will not start hands the player back, and it is let go here after all.
         let _ = std::thread::Builder::new().name("nori-release".into()).spawn(move || drop(p));
     }
@@ -1294,6 +1415,11 @@ extern "system" fn mixing(h: jlong) -> jboolean {
 /// Whether the sound chain is in the samples' path.
 extern "system" fn chain_in(h: jlong) -> jboolean {
     player(h).is_some_and(|p| p.engine.status_with(|s| s.chain)) as jboolean
+}
+
+/// Whether the ear is on music the CPU made, through the engine's own output (`Status::on_cpu`).
+extern "system" fn on_cpu(h: jlong) -> jboolean {
+    player(h).is_some_and(|p| p.engine.status_with(|s| s.on_cpu)) as jboolean
 }
 
 /// The limiter's meter: what it took off the last buffer through the chain, dB.

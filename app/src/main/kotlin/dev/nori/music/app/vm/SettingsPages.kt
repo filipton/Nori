@@ -398,9 +398,7 @@ private class PageBuilder(val res: Resources, val p: Prefs, val f: SettingsFacts
             if (model !is BeatModel.Unavailable) {
                 val mb = s.beatModelMb.toInt()
                 val better = p.autoMixBetterBeats
-                val detail = if (model == BeatModel.Shipped) {
-                    str(if (better) R.string.settings_better_beats_ready else R.string.settings_better_beats_shipped)
-                } else if (!better) str(R.string.settings_better_beats_off, mb) else when (model) {
+                val detail = if (!better) str(R.string.settings_better_beats_off, mb) else when (model) {
                     is BeatModel.Failed -> str(R.string.settings_better_beats_failed, str(when (model.why) {
                         dev.nori.music.ffi.automix.BeatFailure.NETWORK -> R.string.settings_better_beats_network
                         dev.nori.music.ffi.automix.BeatFailure.WRONG_FILE -> R.string.settings_better_beats_wrong_file
@@ -412,7 +410,7 @@ private class PageBuilder(val res: Resources, val p: Prefs, val f: SettingsFacts
                     else -> str(R.string.settings_better_beats_absent, mb)
                 }
                 between += toggle("autoMixBetterBeats", R.string.settings_better_beats, detail, live)
-                if (better && model != BeatModel.Ready && model != BeatModel.Shipped) {
+                if (better && model != BeatModel.Ready) {
                     between += toggle("autoMixBeatsMobileData", R.string.settings_beats_mobile_data, R.string.settings_beats_mobile_data_detail, live)
                 }
             }

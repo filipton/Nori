@@ -6,7 +6,7 @@ use std::io::Read;
 use std::sync::Arc;
 use std::time::Duration;
 
-use nori_engine::{Body, ByteSource};
+use nori_engine::{Body, ByteSource, OpenError};
 use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
 use ureq::Agent;
 
@@ -26,6 +26,15 @@ impl Http {
             .timeout_recv_response(Some(Duration::from_secs(30)))
             .build();
         Arc::new(Http { agent: config.into() })
+    }
+
+    /// `url`'s whole length, as a ranged answer for its first byte says it; None when the answer is not ranged.
+    fn whole_length(&self, url: &str) -> Option<u64> {
+        let r = self.agent.get(url).header("Range", "bytes=0-0").call().ok()?;
+        if r.status().as_u16() != 206 {
+            return None;
+        }
+        r.headers().get("content-range")?.to_str().ok().and_then(content_range)?.1
     }
 }
 
@@ -53,6 +62,11 @@ fn content_range(v: &str) -> Option<(u64, Option<u64>)> {
     let (range, total) = v.strip_prefix("bytes ")?.split_once('/')?;
     let start = range.split_once('-')?.0.trim().parse().ok()?;
     Some((start, total.trim().parse().ok()))
+}
+
+/// The whole length a range that could not be served names: `bytes */1000`.
+fn unsatisfied_range(v: &str) -> Option<u64> {
+    v.strip_prefix("bytes ")?.trim().strip_prefix("*/")?.trim().parse().ok()
 }
 
 #[async_trait::async_trait]
@@ -104,17 +118,23 @@ impl Transport for Http {
 }
 
 impl ByteSource for Http {
-    fn open(&self, url: &str, from: u64) -> Result<Body, String> {
+    fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
         let mut req = self.agent.get(url);
         if from > 0 {
             req = req.header("Range", format!("bytes={from}-"));
         }
         let r = req.call().map_err(|e| e.to_string())?;
         let status = r.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(format!("HTTP {status}"));
-        }
         let header = |name: &str| r.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+        // A range from past the end (a length promised as an estimate): the answer says the real one.
+        if status == 416 && from > 0 {
+            // Without the length (a proxy drops Content-Range): the first byte alone, whose ranged answer says it.
+            let len = header("content-range").as_deref().and_then(unsatisfied_range).or_else(|| self.whole_length(url)).filter(|&l| l <= from);
+            return Err(OpenError::PastEnd { len });
+        }
+        if !(200..300).contains(&status) {
+            return Err(OpenError::Status(status));
+        }
         // A ranged answer says where it starts and how long the whole is; a plain one is the whole.
         let (start, len) = match header("content-range").as_deref().and_then(content_range) {
             Some(r) if status == 206 => r,
@@ -147,5 +167,12 @@ mod tests {
         assert_eq!(content_range("bytes 100-199/1000"), Some((100, Some(1000))));
         assert_eq!(content_range("bytes 5-9/*"), Some((5, None)));
         assert_eq!(content_range("items 1-2/3"), None);
+    }
+
+    #[test]
+    fn a_range_past_the_end_says_how_long_the_whole_is() {
+        assert_eq!(unsatisfied_range("bytes */6406842"), Some(6_406_842));
+        assert_eq!(unsatisfied_range("bytes */*"), None);
+        assert_eq!(unsatisfied_range("bytes 0-9/10"), None);
     }
 }

@@ -15,6 +15,12 @@ pub fn resolve_now(id: &str) -> Option<StreamTarget> {
     Some(client.resolve(id.to_string(), kept, !kept && metered()))
 }
 
+/// What is fetched ahead now ([`Client::precache_targets`]) through the client the app streams through, on
+/// the network the platform last said it is on; none before a client exists.
+pub fn precache_now() -> Vec<Fetch> {
+    crate::client::active_client().map(|c| c.precache_targets(metered())).unwrap_or_default()
+}
+
 impl Client {
     /// [`Self::precache_targets`] over `ids`, `held` saying whether each is downloaded or queued for it.
     fn fetches(&self, ids: Vec<String>, metered: bool, wifi: &StreamQuality, mobile: &StreamQuality, held: impl Fn(&str) -> i32) -> Vec<Fetch> {

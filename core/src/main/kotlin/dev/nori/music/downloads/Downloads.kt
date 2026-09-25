@@ -118,7 +118,11 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         // them to a pool instead caps the downloads that actually move at the pool's size, whatever
         // maxParallelDownloads says - a pool of two was why "5 at once" moved two songs and left three
         // rings standing at nought.
-        val upstream = CacheDataSource.Factory().setCache(sources.downloadCache).setUpstreamDataSourceFactory(sources.network)
+        // What comes from the network is measured for AutoMix as it downloads, when AutoMix is on (MeasuringSink).
+        val measured = androidx.media3.datasource.DataSource.Factory {
+            androidx.media3.datasource.TeeDataSource(sources.network.createDataSource(), dev.nori.music.playback.MeasuringSink { settings.value.autoMix })
+        }
+        val upstream = CacheDataSource.Factory().setCache(sources.downloadCache).setUpstreamDataSourceFactory(measured)
         DownloadManager(context, DefaultDownloadIndex(sources.database), TrackedDownloaders(DefaultDownloaderFactory(upstream, Runnable::run))).apply {
             // The queue runs in the order songs were asked for, this many at a time; a failure or a
             // cancel frees its slot for the next in line. DownloadWorker keeps it in step with the setting.
