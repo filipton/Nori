@@ -219,7 +219,7 @@ fun SongsScreen(actions: ActionsViewModel, decade: Int?, vm: SongsViewModel = vi
             items(SongSort.entries) { s -> Chip(say.songSort(s.name), sort == s) { vm.setSort(s) } }
         }
         if (songs.isEmpty()) EmptyNote(Note.NO_INDEX)
-        LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }) }
+        LazyColumn(state = list, contentPadding = PaddingValues(bottom = LocalChromeInset.current)) { songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, from = LIBRARY_SONGS) }
     }
 }
 
@@ -361,6 +361,12 @@ private fun Radio(vm: RadioViewModel = viewModel()) {
     }
 }
 
+/** What a queue played from the library's list of songs carries. */
+private val LIBRARY_SONGS = dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.SONGS, "")
+
+/** What a queue played from the downloaded songs carries. */
+internal val DOWNLOADED_SONGS = dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.DOWNLOADS, "")
+
 @Composable
 private fun Downloads(actions: ActionsViewModel) {
     val d by actions.downloads.collectAsState()
@@ -384,6 +390,6 @@ private fun Downloads(actions: ActionsViewModel) {
         // Until the songs are read there is nothing to say, not "nothing downloaded" for a frame.
         val songs = done
         if (songs?.isEmpty() == true) item { EmptyNote(Note.NOTHING_DOWNLOADED) }
-        songRows(songs.orEmpty(), actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+        songRows(songs.orEmpty(), actions, null, d.doneIds, emptySet(), menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, from = DOWNLOADED_SONGS)
     }
 }

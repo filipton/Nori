@@ -656,6 +656,32 @@ fn pausing_stops_the_music_and_playing_takes_it_up_where_it_was() {
     assert!(heard == a, "every sample once, in order");
 }
 
+/// The engine sleeps between bursts, and its status is the place it read at its last wake: a look reads
+/// the output again at once, so a screen coming back after the app was hidden starts from where the ear is
+/// rather than from a reading seconds old (the seek bar asks for one whenever its reading is a second old).
+#[test]
+fn a_look_says_the_place_again_between_two_bursts() {
+    let a = vec![8000i16; RATE as usize * 2 * 90];
+    let rig = Rig::new(&[("a", &a)], prefs_off(), Settings::default());
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 5));
+    let heard_ms = |r: &Rig| (r.heard.lock().len() / 2) as i64 * 1000 / RATE as i64;
+    // Somewhere between two wakes, the status a second or more behind the ear.
+    let mut behind = 0;
+    for _ in 0..400 {
+        rig.run(50);
+        behind = heard_ms(&rig) - rig.engine.status().position_ms;
+        if behind >= 1_000 {
+            break;
+        }
+    }
+    assert!(behind >= 1_000, "the engine sleeps between bursts: {behind} ms behind at most");
+    rig.engine.look();
+    // At once: within 20 ms of the clock, not at the next burst.
+    assert!(rig.time.until(Duration::from_millis(20), || (heard_ms(&rig) - rig.engine.status().position_ms).abs() < 100), "the ear at {} ms, the status {:?}", heard_ms(&rig), rig.engine.status());
+    assert_eq!(rig.engine.status().state, State::Playing, "and nothing else changed");
+}
+
 #[test]
 fn a_pause_fades_out_and_play_fades_back_in() {
     let a = vec![8000i16; RATE as usize * 2 * 20];

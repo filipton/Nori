@@ -467,6 +467,8 @@ fun LazyListScope.songRows(
     appear: Boolean = false,
     /** The page's arrival ([rememberArrival]), read in each row's draw phase: the rows on screen rise in as one block. */
     arrival: State<Float>? = null,
+    /** The page [songs] are the list of: a tap that plays them from the row starts that page's queue. */
+    from: dev.nori.music.ffi.model.PageOrigin? = null,
 ) {
     val (onRight, onLeft) = actions.swipes
     val count = rows?.size ?: songs.size
@@ -488,7 +490,7 @@ fun LazyListScope.songRows(
         }
         SongRow(
             s, if (numbered) null else remember(s) { cover(s) },
-            onClick = { actions.tap(songs, at) }, onMenu = { menu(s) },
+            onClick = { actions.tap(songs, at, from) }, onMenu = { menu(s) },
             modifier = if (arrival != null) modifier.arriving(arrival) else modifier,
             number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
             selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },

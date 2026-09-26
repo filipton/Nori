@@ -1064,19 +1064,38 @@ impl Model {
     }
 }
 
+/// The beat model's memory while it is loaded: what the Rust heap grew by as it loaded (its weights and
+/// tract's plan; 1 where the heap is not counted), nought while it is not. For the perf report.
+static MODEL_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Bytes the beat model holds now; nought while it is not loaded.
+pub fn beat_model_bytes() -> u64 {
+    MODEL_BYTES.load(Ordering::Relaxed)
+}
+
 /// Beat This! through tract, in a build with the `neural-beats` feature.
 #[cfg(feature = "neural-beats")]
 struct BeatModel(nori_player::automix::neural::BeatThis);
+
+#[cfg(feature = "neural-beats")]
+impl Drop for BeatModel {
+    fn drop(&mut self) {
+        MODEL_BYTES.store(0, Ordering::Relaxed);
+    }
+}
 
 #[cfg(feature = "neural-beats")]
 impl BeatModel {
     fn load() -> Option<BeatModel> {
         let file = nori_core::beat_download::ensure()?;
         let t0 = std::time::Instant::now();
+        let before = nori_core::heap::live_bytes();
         let loaded = nori_core::beat_download::read(&file).and_then(|bytes| nori_player::automix::neural::BeatThis::from_weights(&bytes).map_err(|e| e.to_string()));
         match loaded {
             Ok(m) => {
-                nori_core::alog::info(&format!("beat model loaded in {} ms", t0.elapsed().as_millis()));
+                let bytes = before.zip(nori_core::heap::live_bytes()).map_or(1, |(a, b)| (b - a).max(1) as u64);
+                MODEL_BYTES.store(bytes, Ordering::Relaxed);
+                nori_core::alog::info(&format!("beat model loaded in {} ms, {} KB", t0.elapsed().as_millis(), bytes / 1024));
                 Some(BeatModel(m))
             }
             Err(e) => {

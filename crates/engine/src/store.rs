@@ -381,6 +381,17 @@ impl Writer {
         self.store.finished(&self.key, &part, len)
     }
 
+    /// [`Writer::finish`], and the entry opened to be read: for a loader that lets its copy of the song
+    /// go and reads it from the disk from then on. None when it was not kept, or is gone already (a cache
+    /// smaller than the song).
+    pub fn finish_open(self, len: u64) -> Option<File> {
+        let (store, key) = (self.store.clone(), self.key.clone());
+        if !self.finish(len) {
+            return None;
+        }
+        File::open(store.stream_path(&key)).ok().filter(|f| f.metadata().is_ok_and(|m| m.len() == len))
+    }
+
     /// Where it has got to.
     pub fn written(&self) -> u64 {
         self.at

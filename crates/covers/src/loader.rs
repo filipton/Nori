@@ -553,7 +553,10 @@ impl<P: Paint> Inner<P> {
                 }
                 Err(Error::Panicked(said(&*p)))
             });
-            let waiters = self.jobs.lock().flights.remove(&key).map(|f| f.waiters).unwrap_or_default();
+            // A fetch nobody waited for has ended its flight already; the one filed under the same key
+            // since is a new request's, not this one's to answer.
+            let ended = !warm && matches!(result, Err(Error::Closed));
+            let waiters = if ended { Vec::new() } else { self.jobs.lock().flights.remove(&key).map(|f| f.waiters).unwrap_or_default() };
             for (_, done) in waiters {
                 let r = result.clone();
                 // Nor does a client's call back that panics: it loses its own cover, not the thread.
@@ -572,8 +575,17 @@ impl<P: Paint> Inner<P> {
 
     fn fetch(&self, key: &Sized, url: &str, w: &mut Worker) -> Result<P::Picture, Error> {
         self.bytes(key.key, url, &mut w.bytes, &w.waker)?;
-        if self.jobs.lock().flights.get(key).is_none_or(|f| f.waiters.is_empty()) {
-            return Err(Error::Closed);
+        {
+            let mut jobs = self.jobs.lock();
+            if jobs.flights.get(key).is_none_or(|f| f.waiters.is_empty()) {
+                // Nobody wants it decoded any more, and the flight ends here, under the same lock as the
+                // look: a view that asks for this cover from now on starts a flight of its own, answered
+                // from the disk. Ended by the worker after the lock was let go, a view that joined in
+                // between (the player skipping away from a song and straight back) was answered with
+                // nothing, and drew the placeholder for good.
+                jobs.flights.remove(key);
+                return Err(Error::Closed);
+            }
         }
         match self.paint.paint(&mut w.decoder, &w.bytes, key.width, key.height) {
             Ok(picture) => {

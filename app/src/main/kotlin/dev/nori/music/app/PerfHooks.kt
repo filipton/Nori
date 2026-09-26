@@ -17,6 +17,12 @@ object PerfHooks {
 
         /** The lyrics of song [songId] went up on the player's lyrics panel: for the invariant watch. */
         fun lyricsShown(songId: String) {}
+
+        /**
+         * A cover at [url] did not load, with [status] (CoverPixels' codes); [again]: it is asked again in a
+         * moment. For the log: a sleeve left on its placeholder says why.
+         */
+        fun coverFailed(url: String, status: Int, again: Boolean) {}
     }
 
     @Volatile var recorder: Recorder? = null

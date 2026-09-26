@@ -2,12 +2,15 @@
 //! [`ByteSource`] (audio, a ranged GET read as it comes) over one ureq agent with rustls, so API calls,
 //! covers and audio share one connection pool and the radio wakes once for all of them.
 
+use std::cell::RefCell;
 use std::io::Read;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use nori_engine::{Body, ByteSource, OpenError};
+use nori_engine::{Body, ByteSource, Cancel, OpenError};
 use nori_core::transport::{Exchange, FailureKind, Transport, TransportError, TransportResponse, USER_AGENT};
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{Buffers, Connector, ConnectionDetails, DefaultConnector, NextTimeout};
 use ureq::Agent;
 
 /// The largest API answer taken; a whole library page is far below it.
@@ -25,7 +28,8 @@ impl Http {
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_recv_response(Some(Duration::from_secs(30)))
             .build();
-        Arc::new(Http { agent: config.into() })
+        let agent = Agent::with_parts(config, DefaultConnector::new().chain(Callable), DefaultResolver::default());
+        Arc::new(Http { agent })
     }
 
     /// `url`'s whole length, as a ranged answer for its first byte says it; None when the answer is not ranged.
@@ -117,8 +121,118 @@ impl Transport for Http {
     fn address_changed(&self) {}
 }
 
+// ---- a song's request, called off ----
+
+thread_local! {
+    /// The request this thread waits on for the engine, while it does: its waits for bytes look at it.
+    static CALLED: RefCell<Option<Cancel>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with `cancel` as this thread's request.
+fn as_request<R>(cancel: &Cancel, f: impl FnOnce() -> R) -> R {
+    let before = CALLED.with(|c| c.replace(Some(cancel.clone())));
+    let r = f();
+    CALLED.with(|c| *c.borrow_mut() = before);
+    r
+}
+
+/// How often a wait for a song's bytes looks whether the engine has called its request off. ureq has no
+/// way to cancel a call from another thread; its socket waits are cut into pieces this long instead, only
+/// for the engine's requests and only while they wait.
+const LOOK_EVERY: Duration = Duration::from_millis(250);
+
+/// The last link of the connector chain: every connection's waits for input, on a thread that waits for
+/// one of the engine's requests, end as soon as the engine calls that request off.
+#[derive(Debug)]
+struct Callable;
+
+impl Connector<Box<dyn ureq::unversioned::transport::Transport>> for Callable {
+    type Out = Called;
+
+    fn connect(&self, _: &ConnectionDetails, chained: Option<Box<dyn ureq::unversioned::transport::Transport>>) -> Result<Option<Called>, ureq::Error> {
+        Ok(chained.map(Called))
+    }
+}
+
+#[derive(Debug)]
+struct Called(Box<dyn ureq::unversioned::transport::Transport>);
+
+impl ureq::unversioned::transport::Transport for Called {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.0.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        self.0.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let Some(cancel) = CALLED.with(|c| c.borrow().clone()) else { return self.0.await_input(timeout) };
+        let until = (!timeout.after.is_not_happening()).then(|| Instant::now() + *timeout.after);
+        loop {
+            if cancel.cancelled() {
+                return Err(ureq::Error::Io(std::io::Error::new(std::io::ErrorKind::Interrupted, "called off")));
+            }
+            let left = until.map(|u| u.saturating_duration_since(Instant::now()));
+            let step = left.map_or(LOOK_EVERY, |l| l.min(LOOK_EVERY));
+            let piece = NextTimeout { after: ureq::unversioned::transport::time::Duration::Exact(step), reason: timeout.reason };
+            match self.0.await_input(piece) {
+                Err(ureq::Error::Timeout(_)) if left.is_none_or(|l| l > step) => continue,
+                other => return other,
+            }
+        }
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.0.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.0.is_tls()
+    }
+}
+
+/// A song's body, read as the engine's request: a read waiting for bytes ends when it is called off.
+struct Watched {
+    inner: Box<dyn Read + Send>,
+    cancel: Cancel,
+}
+
+impl Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let (inner, cancel) = (&mut self.inner, &self.cancel);
+        as_request(cancel, || inner.read(buf))
+    }
+}
+
 impl ByteSource for Http {
     fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
+        self.open_cancellable(url, None, from, &Cancel::new())
+    }
+
+    fn open_cancellable(&self, url: &str, _key: Option<&str>, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+        let mut b = as_request(cancel, || self.open_now(url, from))?;
+        b.reader = Box::new(Watched { inner: b.reader, cancel: cancel.clone() });
+        Ok(b)
+    }
+
+    /// A station's stream, with its announcements asked for (`Icy-MetaData: 1`); the answer says how
+    /// many bytes of music come between two (`icy-metaint`).
+    fn open_live(&self, url: &str) -> Result<(Body, Option<usize>), String> {
+        let r = self.agent.get(url).header("Icy-MetaData", "1").call().map_err(|e| e.to_string())?;
+        let status = r.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {status}"));
+        }
+        let every = r.headers().get("icy-metaint").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
+        let reader: Box<dyn Read + Send> = Box::new(r.into_body().into_reader());
+        Ok((Body { start: 0, len: None, reader }, every))
+    }
+}
+
+impl Http {
+    /// `url` from byte `from` on, on this thread's request.
+    fn open_now(&self, url: &str, from: u64) -> Result<Body, OpenError> {
         let mut req = self.agent.get(url);
         if from > 0 {
             req = req.header("Range", format!("bytes={from}-"));
@@ -142,19 +256,6 @@ impl ByteSource for Http {
         };
         let reader: Box<dyn Read + Send> = Box::new(r.into_body().into_reader());
         Ok(Body { start, len, reader })
-    }
-
-    /// A station's stream, with its announcements asked for (`Icy-MetaData: 1`); the answer says how
-    /// many bytes of music come between two (`icy-metaint`).
-    fn open_live(&self, url: &str) -> Result<(Body, Option<usize>), String> {
-        let r = self.agent.get(url).header("Icy-MetaData", "1").call().map_err(|e| e.to_string())?;
-        let status = r.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(format!("HTTP {status}"));
-        }
-        let every = r.headers().get("icy-metaint").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse().ok());
-        let reader: Box<dyn Read + Send> = Box::new(r.into_body().into_reader());
-        Ok((Body { start: 0, len: None, reader }, every))
     }
 }
 

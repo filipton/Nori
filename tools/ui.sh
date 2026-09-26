@@ -3,6 +3,7 @@
 #   tools/ui.sh tap "Text or content-desc"      taps the first node with exactly that label
 #   tools/ui.sh tapn "Label" 2                  the n-th match (1-based)
 #   tools/ui.sh has "Label"                     exit 0 when on screen
+#   tools/ui.sh where "Label"                   "x y" of its centre, for tapping it again without a dump
 #   tools/ui.sh texts                           everything readable on screen
 # uiautomator occasionally returns "null root node" right after an activity change; try again.
 dump() {
@@ -40,6 +41,7 @@ case "$1" in
   kb) kb "$@" ;;
   tap|tapn) read -r x y < <(dump | centre "$2" "${3:-1}"); [ -n "${x:-}" ] && adb shell input tap "$x" "$y" || { echo "not on screen: $2" >&2; exit 1; } ;;
   has) [ -n "$(dump | centre "$2" 1)" ] ;;
+  where) p=$(dump | centre "$2" "${3:-1}"); [ -n "$p" ] && echo "$p" || { echo "not on screen: $2" >&2; exit 1; } ;;
   texts) dump | grep -oE '(text|content-desc)="[^"]+"' | sed -E 's/^[a-z-]+="//; s/"$//' ;;
-  *) echo "usage: ui.sh tap|tapn|has|texts|kb" >&2; exit 2 ;;
+  *) echo "usage: ui.sh tap|tapn|has|where|texts|kb" >&2; exit 2 ;;
 esac

@@ -26,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40", features = ["bundled", "functions"] }
 parking_lot = "0.12"
+# A refill's album reads side by side rather than one after another.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The local year (this year's albums) from the C library's time zone.
 libc = "0.2"
 # How music is played - the sound chain and AutoMix - lives in the shared player crate.

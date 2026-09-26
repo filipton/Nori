@@ -61,6 +61,13 @@ const UNREADABLE: jint = 2;
 const UNKNOWN: jint = 3;
 /// A picture the decoder refused: broken, or larger than any cover.
 const BROKEN: jint = 4;
+/// Nobody waited for the cover any more when its file came (or the loader closed): not a failure of
+/// the cover, and asking again gets it.
+const CLOSED: jint = 5;
+/// The request did not come back: this plus the transport's `FailureKind`, in its order.
+const NETWORK: jint = 100;
+/// The server answered with an error: this plus the HTTP status.
+const HTTP: jint = 1000;
 
 /// The Java side, looked up once, when the first loader is opened.
 struct Java {
@@ -315,7 +322,9 @@ fn code(e: &nori_covers::Error) -> jint {
         nori_covers::Error::Decode(DecodeError::Unknown) => UNKNOWN,
         nori_covers::Error::Decode(DecodeError::Target) => BAD_BITMAP,
         nori_covers::Error::Decode(_) | nori_covers::Error::Panicked(_) => BROKEN,
-        _ => UNREADABLE,
+        nori_covers::Error::Closed => CLOSED,
+        nori_covers::Error::Transport { kind, .. } => NETWORK + *kind as jint,
+        nori_covers::Error::Status(s) => HTTP + jint::from(*s),
     }
 }
 
@@ -590,7 +599,9 @@ mod tests {
     fn a_failure_is_told_to_kotlin_as_what_stopped_it() {
         assert_eq!(code(&nori_covers::Error::Decode(DecodeError::Unknown)), UNKNOWN);
         assert_eq!(code(&nori_covers::Error::Decode(DecodeError::Corrupt("x".into()))), BROKEN);
-        assert_eq!(code(&nori_covers::Error::Status(404)), UNREADABLE);
-        assert_eq!(code(&nori_covers::Error::Closed), UNREADABLE);
+        assert_eq!(code(&nori_covers::Error::Status(404)), 1404);
+        assert_eq!(code(&nori_covers::Error::Closed), CLOSED);
+        let timeout = nori_covers::Error::Transport { kind: nori_core::transport::FailureKind::Timeout, detail: None };
+        assert_eq!(code(&timeout), NETWORK + 4, "FailureKind's own order, which Kotlin reads its name from");
     }
 }

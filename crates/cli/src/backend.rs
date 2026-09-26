@@ -23,7 +23,7 @@ use nori_core::search::{SearchSession, SearchView};
 use nori_core::settings::{SavedServer, SettingChange, StoredPrefs};
 use crate::settings_view::{Facts, Storage};
 use nori_core::settings_store::{self, APPLY_AUDIO, APPLY_GAIN, PLAYER, REPLAN, SOUND};
-use nori_core::{AlbumDetail, ArtistDetail, Core, PlaylistDetail, ServerConfig, Song};
+use nori_core::{AlbumDetail, ArtistDetail, Core, OriginKind, PageOrigin, PlaylistDetail, ServerConfig, Song};
 use nori_covers::loader::{Config as CoverConfig, Loader};
 use nori_covers::memory::Image;
 use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
@@ -455,7 +455,8 @@ impl Session {
             return;
         }
         let index = q.index as usize;
-        playlist::playlist_set(q.songs.iter().map(|s| s.id.clone()).collect(), index as i32, false);
+        // With the page it came from, so the page still answers for it.
+        playlist::playlist_set(q.songs.iter().map(|s| s.id.clone()).collect(), index as i32, false, q.origin);
         self.engine.queue_changed();
         self.engine.go_to(index, q.position_ms as i64);
     }
@@ -528,8 +529,8 @@ impl Session {
 
     /// Plays `songs` from `start` (-1 with `shuffle`: wherever shuffle starts). A provider's song
     /// (octo-fiesta's `ext-`) goes in only when it is the one picked: the server downloads whatever is
-    /// asked for.
-    pub fn play(&self, songs: Vec<Song>, start: usize, shuffle: bool) {
+    /// asked for. `from` is the page they are the songs of (see nori-queue `playlist_set`).
+    pub fn play(&self, songs: Vec<Song>, start: usize, shuffle: bool, from: Option<PageOrigin>) {
         let picked = songs.get(start).map(|s| s.id.clone());
         let songs: Vec<Song> = songs.into_iter().filter(|s| !is_provider(s) || Some(&s.id) == picked.as_ref()).collect();
         if songs.is_empty() {
@@ -538,7 +539,7 @@ impl Session {
         let start = picked.and_then(|id| songs.iter().position(|s| s.id == id)).unwrap_or(0);
         nori_core::queue::queue_register(songs.clone());
         let at = if shuffle { -1 } else { start as i32 };
-        let change = playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), at, shuffle);
+        let change = playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), at, shuffle, from);
         self.edited();
         self.engine.play_at(change.at.max(0) as usize, 0);
     }
@@ -547,8 +548,9 @@ impl Session {
     pub fn play_later(&self, what: Fetch, shuffle: bool) {
         let (client, tx) = (self.client.clone(), self.tx.clone());
         let me = self.handle();
+        let origin = what.origin();
         spawn("nori-play", move || match fetch_songs(&client, what) {
-            Ok(songs) if !songs.is_empty() => me.play(songs, 0, shuffle),
+            Ok(songs) if !songs.is_empty() => me.play(songs, 0, shuffle, Some(origin)),
             Ok(_) => {
                 let _ = tx.send(Msg::Note { text: "Nothing to play".into(), error: false });
             }
@@ -948,13 +950,13 @@ impl Handle {
         }
     }
 
-    fn play(&self, songs: Vec<Song>, start: usize, shuffle: bool) {
+    fn play(&self, songs: Vec<Song>, start: usize, shuffle: bool, from: Option<PageOrigin>) {
         let songs: Vec<Song> = songs.into_iter().filter(|s| !is_provider(s)).collect();
         if songs.is_empty() {
             return;
         }
         nori_core::queue::queue_register(songs.clone());
-        let change = playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), if shuffle { -1 } else { start as i32 }, shuffle);
+        let change = playlist::playlist_set(songs.iter().map(|s| s.id.clone()).collect(), if shuffle { -1 } else { start as i32 }, shuffle, from);
         self.edited();
         self.engine.play_at(change.at.max(0) as usize, 0);
     }
@@ -986,6 +988,17 @@ pub enum Fetch {
     Album(String),
     Playlist(String),
     Artist(String),
+}
+
+impl Fetch {
+    /// The page these songs are the whole of: played, they are that page's queue.
+    pub fn origin(&self) -> PageOrigin {
+        match self {
+            Fetch::Album(id) => PageOrigin::new(OriginKind::Album, id.as_str()),
+            Fetch::Playlist(id) => PageOrigin::new(OriginKind::Playlist, id.as_str()),
+            Fetch::Artist(id) => PageOrigin::new(OriginKind::Artist, id.as_str()),
+        }
+    }
 }
 
 fn fetch_songs(client: &Arc<Client>, what: Fetch) -> Result<Vec<Song>, String> {

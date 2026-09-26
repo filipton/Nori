@@ -15,7 +15,8 @@ pub(crate) static HEARD: Class = Class {
 pub(crate) static PLAYHEAD: Class = Class {
     name: c"dev/nori/music/playback/PlayheadJni",
     methods: &[
-        native!(c"position", c"(JJZIIJI)J", position),
+        native!(c"position", c"(JJZIIJIJ)J", position),
+        native!(c"drifted", c"(JJ)Z", drifted),
         native!(c"runOn", c"(JJZ)J", run_on),
         native!(c"jumped", c"(J)V", jumped),
         native!(c"durationMs", c"(JJJ)J", duration_ms),
@@ -45,11 +46,26 @@ extern "system" fn at(h: jlong, now_ms: jlong, playing: jboolean, on: jint, next
     c.lock().at(now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms).pack()
 }
 
-/// [`at`] for the seek bar itself, whose page shows queue index `shown` (-1: nothing).
+/// [`at`] for the seek bar itself, whose page shows queue index `shown` (-1: nothing): `position_ms` is the
+/// player's word (a controller's), `engine_ms` the engine's own place in song `on` (-1: none). In the perf
+/// build the place shown, and the controller's word, are held to the engine's
+/// (`nori_perf::invariants::perf_watch_place`).
 #[allow(clippy::too_many_arguments)]
-extern "system" fn position(h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong, shown: jint) -> jlong {
+extern "system" fn position(h: jlong, now_ms: jlong, playing: jboolean, on: jint, next: jint, position_ms: jlong, shown: jint, engine_ms: jlong) -> jlong {
     let Some(c) = clock(h) else { return position_ms.max(0) };
-    c.lock().position(now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms, usize::try_from(shown).ok()).pack()
+    let at = c.lock().position(now_ms, playing != 0, usize::try_from(on).ok(), usize::try_from(next).ok(), position_ms, usize::try_from(shown).ok(), engine_ms);
+    if nori_perf::invariants::on() {
+        // Only the page on the player's own song: one a song behind holds its place a moment by design.
+        let same = on >= 0 && on == shown && at.index.is_none();
+        nori_perf::invariants::place_seen(now_ms, playing != 0 && same, at.ms, engine_ms, position_ms);
+    }
+    at.pack()
+}
+
+/// Whether a controller's place (`word_ms`) has drifted from the engine's own (`engine_ms`, -1: none), so
+/// that the session is to say its place again (`nori_player::heard::drifted`).
+extern "system" fn drifted(word_ms: jlong, engine_ms: jlong) -> jboolean {
+    nori_player::heard::drifted(word_ms, engine_ms) as jboolean
 }
 
 /// The listener asked for a place: the bar shows the next reading as it is, even a moment back.

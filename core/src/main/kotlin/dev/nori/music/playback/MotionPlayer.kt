@@ -114,14 +114,6 @@ class MotionPlayer(
         player?.pause()
     }
 
-    /**
-     * Lets the decoder go but keeps the video and its place, and the frame on the surface: for a long
-     * pause, where a paused decoder still costs wakeups. [play] carries on from the same frame.
-     */
-    fun rest() {
-        player?.let { it.pause(); it.stop() }
-    }
-
     /** Lets the ExoPlayer and its decoder go. The next [play] builds a new one. */
     fun release() {
         val p = player ?: return

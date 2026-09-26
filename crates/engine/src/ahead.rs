@@ -26,7 +26,7 @@ use std::sync::Arc;
 use parking_lot::{Condvar, Mutex};
 
 use crate::arriving::Listening;
-use crate::source::{ByteSource, OpenError};
+use crate::source::{open_watched, ByteSource, Cancel, OpenError};
 
 /// How much is read at a time: the loader's own chunk.
 const CHUNK: usize = 256 * 1024;
@@ -89,8 +89,10 @@ struct Plan {
     failed: HashSet<String>,
     /// Keys the player has taken over: its own from now on.
     taken: HashSet<String>,
-    /// The key being fetched now.
+    /// The key being fetched now, and its request: called off the moment it is no longer wanted here,
+    /// rather than at its next chunk, which a server that stopped answering never sends.
     current: Option<String>,
+    request: Cancel,
     running: bool,
 }
 
@@ -103,7 +105,7 @@ enum Fetched {
     Left,
 }
 
-type Job = (AheadSong, Arc<dyn Keeping>, Arc<dyn ByteSource>, Option<Takers>);
+type Job = (AheadSong, Arc<dyn Keeping>, Arc<dyn ByteSource>, Option<Takers>, Cancel);
 
 impl Ahead {
     pub fn new() -> Arc<Ahead> {
@@ -126,6 +128,9 @@ impl Ahead {
             plan.taken.clear();
         }
         self.asked.fetch_add(1, Ordering::AcqRel);
+        if plan.current.as_ref().is_some_and(|k| !plan.songs.iter().any(|s| &s.key == k)) {
+            plan.request.call_off(false);
+        }
         if plan.songs.is_empty() {
             return;
         }
@@ -163,6 +168,8 @@ impl Ahead {
         }
         if plan.current.as_deref() == Some(key) {
             self.asked.fetch_add(1, Ordering::AcqRel);
+            // Waiting on a server that does not answer, it would never let go.
+            plan.request.call_off(false);
         }
         while plan.current.as_deref() == Some(key) {
             self.cv.wait(&mut plan);
@@ -183,7 +190,8 @@ impl Ahead {
         match (found, keeping, bytes) {
             (Some(song), Some(k), Some(b)) if plan.songs.contains(&song) && !plan.taken.contains(&song.key) => {
                 plan.current = Some(song.key.clone());
-                Some((song, k, b, takers))
+                plan.request = Cancel::new();
+                Some((song, k, b, takers, plan.request.clone()))
             }
             // The list changed meanwhile: looked at again.
             (Some(_), Some(_), Some(_)) => {
@@ -210,8 +218,8 @@ impl Ahead {
     }
 
     fn run(&self) {
-        while let Some((song, keeping, bytes, takers)) = self.next() {
-            let fetched = self.fetch(&*keeping, &*bytes, &song, takers.as_ref());
+        while let Some((song, keeping, bytes, takers, request)) = self.next() {
+            let fetched = self.fetch(&*keeping, &*bytes, &song, takers.as_ref(), &request);
             let mut plan = self.plan.lock();
             plan.current = None;
             // Left half way because it is no longer wanted, it is not asked for any more either.
@@ -225,7 +233,7 @@ impl Ahead {
     /// `song` fetched whole into `keeping`, `takers` hearing it as it comes. A body that breaks is asked
     /// for again from where it broke, once: a transcode's first answer promises an estimated length, and
     /// the body breaks where the real one ends, which the answer past it says ([`OpenError::PastEnd`]).
-    fn fetch(&self, keeping: &dyn Keeping, bytes: &dyn ByteSource, song: &AheadSong, takers: Option<&Takers>) -> Fetched {
+    fn fetch(&self, keeping: &dyn Keeping, bytes: &dyn ByteSource, song: &AheadSong, takers: Option<&Takers>, request: &Cancel) -> Fetched {
         let Some(mut entry) = keeping.entry(&song.key) else { return Fetched::Failed };
         let start = entry.written();
         // Heard from its first byte only: a song taken up half way is measured once it is whole.
@@ -235,12 +243,17 @@ impl Ahead {
         let mut promised = None;
         for again in [false, true] {
             let from = entry.written();
-            let body = match bytes.open_keyed(&song.url, &song.key, from) {
+            let body = match open_watched(bytes, &song.url, Some(&song.key), from, request) {
                 Ok(b) if b.start == from => b,
                 // Nothing past what the entry holds: all of the song is there.
                 Err(OpenError::PastEnd { len }) if from > 0 && len.is_none_or(|l| l == from) => {
                     promised = None;
                     break;
+                }
+                // Called off while it waited for the answer: no longer wanted here, or the player's now.
+                Err(_) if request.cancelled() && !request.timed_out() => {
+                    entry.leave();
+                    return Fetched::Left;
                 }
                 _ => return Fetched::Failed,
             };
@@ -270,6 +283,11 @@ impl Ahead {
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    // Called off while it waited for bytes: left where it got to, as above.
+                    Err(_) if request.cancelled() && !request.timed_out() => {
+                        entry.leave();
+                        return Fetched::Left;
+                    }
                     Err(_) => break true,
                 }
             };

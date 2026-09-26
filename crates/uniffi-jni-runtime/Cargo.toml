@@ -1,20 +1,19 @@
-# uniffi's JNI runtime for Kotlin (uniffi-rs, uniffi-bindgen-kotlin-jni/runtime, at the revision the workspace
-# pins), with two changes for Android, both marked NORI in the source: a class the core looks up from a thread
-# it started itself is found through the app's class loader (loader.rs), and a thread the runtime attached to
-# the JVM is detached again when it ends (attach.rs). The generated scaffolding names this crate, so the
-# package keeps upstream's name.
+# uniffi's JNI runtime for Kotlin (uniffi-rs, uniffi-bindgen-kotlin-jni/runtime) as a pinned git dependency, at
+# the revision the workspace pins, with two changes for Android, both marked NORI in the source: a class the core
+# looks up from a thread it started itself is found through the app's class loader (loader.rs, caching.rs), and a
+# thread the runtime attached to the JVM is detached again when it ends (attach.rs). Only the modules the changes
+# live in are here (caching.rs is upstream's with three lines changed); everything else is upstream's, re-exported.
+# When the revision moves, take caching.rs and attach.rs's upstream parts again and keep both changes.
 [package]
-name = "uniffi-bindgen-kotlin-jni-runtime"
+name = "nori-uniffi-jni-runtime"
 version = "0.31.1"
 edition = "2021"
 license = "MPL-2.0"
 publish = false
 
 [dependencies]
-anyhow = "1"
 jni-sys = "0.4.1"
-simd_cesu8 = "1.1.1"
-uniffi = { workspace = true }
+uniffi-bindgen-kotlin-jni-runtime = { workspace = true }
 
 # uniffi reads no interface out of this crate.
 [package.metadata.uniffi]

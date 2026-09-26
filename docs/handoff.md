@@ -129,6 +129,16 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   it reads the position, moves the bar towards it at a steady rate (a short exponential approach), and
   only teleports when the gap is a whole song. A song change and an outside seek glide; a finger holds
   the bar exactly where it is and seeks once, on release.
+- **The seek bar reads the engine, not the controller.** A MediaController's place is the session's
+  last word run on at one times and held at the song's length, and with the session's periodic updates
+  off nothing puts it right until a play, a pause or a seek: a word taken off as the phone was unlocked
+  kept the S22's bar at the end of a song with 14 s left. `PlayerConnection.heard` now goes by the
+  engine's own place (`EnginePlayer.shownMs`: the last reading run on for 2 s at most, the engine asked
+  to look again when it is a second old, `nori_player::heard::screen_place`), asks the engine to look as
+  the app comes back (`catchUp`), and has the session say its place again when a controller drifts more
+  than 2 s from it (`drifted`, `EnginePlayer.reanchor`). The controller's place stands for half a
+  second after a seek and on another song than the engine's. The perf build's "place" invariant says
+  when the bar or a controller is more than 2 s from the engine for over a second.
 - **One soft bottom, the sleeve's.** Every record - flat, lifted, sliding or flying in from the now
   playing bar or the lyrics thumbnail - used to carry its own blurred bottom, which travelled and
   changed size with it, and two records side by side met at a seam between two blurs. Now the records

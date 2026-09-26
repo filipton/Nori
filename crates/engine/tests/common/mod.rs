@@ -60,8 +60,13 @@ impl Default for Virtual {
     /// A new clock at nought. The loader's tries again after a dropped connection wait seconds of real
     /// time, which this clock cannot see (it would move on, or not, by how the threads fall): on it they
     /// take a few milliseconds instead, and so none of the test's time.
+    /// A request's stall is real time too, which a server paced on this clock can take far more of than
+    /// a phone ever waits: it is not timed on it. And the engines of a binary's tests, side by side, do
+    /// not crowd each other's requests out, as the one engine of an app would its own.
     fn default() -> Virtual {
         nori_engine::source::set_retry_wait_ms(2);
+        nori_engine::source::set_stall_ms(600_000);
+        nori_engine::source::set_crowding(false);
         Virtual(Arc::default())
     }
 }
@@ -149,6 +154,27 @@ impl Virtual {
             self.0.cv.wait_for(&mut s, Duration::from_millis(1));
         }
         s.time_waiters -= 1;
+    }
+
+    /// Blocks a server's thread, in real time, while `on` holds (a request that hangs), for `limit` at
+    /// most: whether it still held then. Meanwhile an engine waiting for bytes lets the time move after
+    /// [`TIME_WAIT`], as it does for a server waiting on the clock: a request that never answers must not
+    /// hold the test's time up.
+    pub fn hang_while(&self, mut on: impl FnMut() -> bool, limit: Duration) -> bool {
+        let started = Instant::now();
+        let mut s = self.0.s.lock();
+        s.time_waiters += 1;
+        let held = loop {
+            if !on() {
+                break false;
+            }
+            if started.elapsed() >= limit {
+                break true;
+            }
+            self.0.cv.wait_for(&mut s, Duration::from_millis(1));
+        };
+        s.time_waiters -= 1;
+        held
     }
 
     /// The engine's thread, once it has slept on this clock: to tell its doings from other tests' engines.

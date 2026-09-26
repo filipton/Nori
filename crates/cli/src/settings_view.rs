@@ -929,7 +929,9 @@ mod tests {
 
     #[test]
     fn the_lyrics_sources_are_one_list_that_moves_and_switches() {
-        let prefs = StoredPrefs { lyrics_online: true, third_party_lookups: true, ..StoredPrefs::default() };
+        // Every service is on out of the box; one is switched off here so there is an off row to press.
+        let d = StoredPrefs::default();
+        let prefs = StoredPrefs { lyrics_online: true, third_party_lookups: true, lyrics_on: d.lyrics_on.iter().filter(|n| *n != "GENIUS").cloned().collect(), ..d };
         let mut v = SettingsView::default();
         v.group.at = GROUPS.iter().position(|g| g.id == "lyrics").unwrap();
         v.pane = 1;

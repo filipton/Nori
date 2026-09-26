@@ -38,7 +38,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
 pub use nori_db::{self as db, background};
-pub use nori_model::{alog, lines, model, CoreError};
+pub use nori_model::{alog, heap, lines, model, CoreError};
 pub use nori_automix::beat_model;
 pub use nori_devices::{autoeq, outputs};
 pub use nori_library::{menus, pages, rows, stars};
@@ -385,7 +385,7 @@ impl Core {
     // ---- play queue, survives process death ----
 
     pub fn save_queue(&self, queue: PlayQueue) -> Result<()> {
-        let json = serde_json::json!({ "songs": queue.songs, "index": queue.index, "position": queue.position_ms });
+        let json = serde_json::json!({ "songs": queue.songs, "index": queue.index, "position": queue.position_ms, "origin": queue.origin });
         Ok(db::kv_put(&self.db.lock(), "queue", &json.to_string())?)
     }
 
@@ -396,13 +396,16 @@ impl Core {
             songs: Vec<Song>,
             index: u32,
             position: u64,
+            /// Read on its own, so an origin this version does not know loses only itself, not the queue.
+            origin: serde_json::Value,
         }
         let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
         // A saved queue that points past its end plays its last song.
         let index = q.index.min(q.songs.len().saturating_sub(1) as u32);
         // Kept for the queue it is about to become, so the platform does not hand the songs straight back.
         crate::queue::queue_register(q.songs.clone());
-        Ok(PlayQueue { songs: q.songs, index, position_ms: q.position })
+        let origin = serde_json::from_value::<Option<crate::PageOrigin>>(q.origin).ok().flatten();
+        Ok(PlayQueue { songs: q.songs, index, position_ms: q.position, origin })
     }
 
     // ---- writes made while offline (stars, ratings, playlist edits, scrobbles), replayed in order ----
@@ -643,7 +646,7 @@ impl Core {
         let q = parse(&body)?.play_queue.unwrap_or_default();
         let current = q.current.map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
         let index = current.and_then(|c| q.entry.iter().position(|s| s.id == c)).unwrap_or(0) as u32;
-        Ok(PlayQueue { songs: q.entry, index, position_ms: q.position })
+        Ok(PlayQueue { songs: q.entry, index, position_ms: q.position, origin: None })
     }
 
     pub fn cache_get(&self, key: String) -> Result<Option<Vec<u8>>> {

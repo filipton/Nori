@@ -25,6 +25,8 @@ use nori_settings::settings_store;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+use crate::memory::{memory_line, PerfMemory};
+
 /// How long a stretch is kept after it ended.
 pub const KEEP_MS: i64 = 14 * 24 * 3600 * 1000;
 
@@ -105,6 +107,9 @@ pub struct PerfStretch {
     /// None in rows from before it was counted.
     #[serde(rename = "om", default, skip_serializing_if = "Option::is_none")]
     pub offloaded_ms: Option<i64>,
+    /// Where the memory was as the stretch ended; none in rows from before it was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem: Option<PerfMemory>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -217,6 +222,8 @@ pub struct PerfCounters {
     /// Bytes the app has received and sent over the network since boot, where the platform counts them.
     pub rx_bytes: Option<i64>,
     pub tx_bytes: Option<i64>,
+    /// Where the memory is, where the platform reads it.
+    pub memory: Option<PerfMemory>,
 }
 
 /// What the frames drawn over a stretch came to, counted by the platform as they were drawn.
@@ -440,6 +447,7 @@ pub fn perf_stretch(
         ev,
         evx,
         offloaded_ms: Some(off_ms.clamp(0, ms)),
+        mem: b.memory,
     })
 }
 
@@ -728,7 +736,7 @@ fn output_line(o: &PerfOutput) -> String {
 
 /// The lines that say why a stretch cost what it did, under its figures: the threads, the output.
 fn why_lines(s: &PerfStretch) -> Vec<String> {
-    threads_line(s).into_iter().chain(s.out.as_ref().map(output_line)).collect()
+    threads_line(s).into_iter().chain(s.out.as_ref().map(output_line)).chain(s.mem.as_ref().map(memory_line)).collect()
 }
 
 /// One stretch's figures on one line.
@@ -1551,6 +1559,7 @@ mod tests {
             ev: Vec::new(),
             evx: 0,
             offloaded_ms: None,
+            mem: None,
         }
     }
 
@@ -1573,6 +1582,7 @@ mod tests {
             temp_deci: 300 + (elapsed_ms / 60_000) as i32,
             rx_bytes: Some(elapsed_ms * 100),
             tx_bytes: Some(elapsed_ms),
+            memory: None,
         }
     }
 
@@ -1815,6 +1825,20 @@ mod tests {
         assert_eq!(lines.len(), 3, "the figures, then the threads and the output under them: {lines:?}");
         assert_eq!(lines[1], "threads by wakeups: nori-track 24.0/s 12 ms");
         assert!(lines[2].starts_with("output: rust, 44100 Hz"));
+    }
+
+    #[test]
+    fn a_stretch_says_where_its_memory_was_as_it_ended() {
+        let a = counters(0, &[]);
+        let mut b = counters(60_000, &[]);
+        b.memory = Some(PerfMemory { java_kb: 20 * 1024, native_kb: 80 * 1024, covers: 3, ..Default::default() });
+        let s = perf_stretch("off-playing".into(), "engine rust".into(), a, b, PerfFrames { frames: 0, janky: 0, worst_ns: 0 }, false, None, true).unwrap();
+        assert_eq!(s.mem.as_ref().map(|m| m.native_kb), Some(80 * 1024), "the end reading's");
+        let lines: Vec<String> = page(vec![s.clone()], None).stretches[0].detail.lines().map(String::from).collect();
+        assert!(lines.last().unwrap().starts_with("memory: PSS 100 MB = Java 20, native 80,"), "{lines:?}");
+        // Kept and read back, as rows are.
+        let back: PerfStretch = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.mem, s.mem);
     }
 
     #[test]

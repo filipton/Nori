@@ -39,7 +39,7 @@ use jni::{JNIEnv, JavaVM};
 use nori_engine::ahead::{Ahead, Entry, Keeping};
 use nori_engine::arriving::Listening;
 use nori_engine::core::{ahead_songs, is_radio, key_format, measure_as_it_comes, measuring_ahead, settings, CoreApp, CoreQueue};
-use nori_engine::{Body, ByteSource, Coded, Coding, Config, Device, Engine, Event, Library, Located, OffloadOutput, OpenError, OutputFacts, OutputFormat, Source, State, Support};
+use nori_engine::{Body, ByteSource, Cancel, Coded, Coding, Config, Device, Engine, Event, Library, Located, OffloadOutput, OpenError, OutputFacts, OutputFormat, Source, State, Support};
 use nori_player::transitions::WindowSong;
 use parking_lot::Mutex;
 
@@ -62,6 +62,8 @@ pub(crate) static CLASS: Class = Class {
         native!(c"setTuning", c"(JZ)V", set_tuning),
         native!(c"applySettings", c"(J)V", apply_settings),
         native!(c"positionMs", c"(J)J", position_ms),
+        native!(c"shownMs", c"(JI)J", shown_ms),
+        native!(c"look", c"(J)V", look),
         native!(c"mixing", c"(J)Z", mixing),
         native!(c"chainIn", c"(J)Z", chain_in),
         native!(c"onCpu", c"(J)Z", on_cpu),
@@ -86,6 +88,7 @@ struct Java {
     bridge: GlobalRef,
     open_track: JStaticMethodID,
     open: JStaticMethodID,
+    cancel: JStaticMethodID,
     open_live: JStaticMethodID,
     kept: JStaticMethodID,
     busy: JStaticMethodID,
@@ -166,7 +169,8 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
     Ok(Java {
         vm: env.get_java_vm()?,
         open_track: env.get_static_method_id(&bridge, "openTrack", "(IIII)Landroid/media/AudioTrack;")?,
-        open: env.get_static_method_id(&bridge, "open", "(Ljava/lang/String;Ljava/lang/String;J)Ldev/nori/music/playback/RustBody;")?,
+        open: env.get_static_method_id(&bridge, "open", "(Ljava/lang/String;Ljava/lang/String;JJ)Ldev/nori/music/playback/RustBody;")?,
+        cancel: env.get_static_method_id(&bridge, "cancel", "(J)V")?,
         open_live: env.get_static_method_id(&bridge, "openLive", "(Ljava/lang/String;)Ldev/nori/music/playback/RustBody;")?,
         kept: env.get_static_method_id(&bridge, "kept", "(Ljava/lang/String;)Z")?,
         busy: env.get_static_method_id(&bridge, "busy", "(Ljava/lang/String;)Z")?,
@@ -907,10 +911,14 @@ struct JavaBytes {
 
 impl ByteSource for JavaBytes {
     fn open(&self, url: &str, from: u64) -> Result<Body, OpenError> {
+        self.open_cancellable(url, None, from, &Cancel::new())
+    }
+
+    fn open_cancellable(&self, url: &str, _key: Option<&str>, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
         if !self.key.is_empty() {
             AHEAD.take_over(&self.key);
         }
-        open_java(url, &self.key, from)
+        open_java(url, &self.key, from, cancel)
     }
 
     /// A radio station's stream through `RustBridge.openLive`, uncached, asking for its announcements:
@@ -938,14 +946,27 @@ impl ByteSource for JavaBytes {
     }
 }
 
+/// Numbers for the requests made through `RustBridge.open`, by which `RustBridge.cancel` calls one off.
+static TICKETS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+
 /// A song's bytes from `from` on through `RustBridge.open`: a download, then media3's stream cache, then
-/// the network, whatever is read written into the stream cache under `key`.
-fn open_java(url: &str, key: &str, from: u64) -> Result<Body, OpenError> {
+/// the network, whatever is read written into the stream cache under `key`. The request goes by a ticket
+/// of its own: `cancel` calls it off through `RustBridge.cancel` (the OkHttp call cancelled, a wait for the
+/// cache entry's lock interrupted), which fails the open or the body's read at once.
+fn open_java(url: &str, key: &str, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+    let ticket = TICKETS.fetch_add(1, Ordering::Relaxed);
+    cancel.on_cancel(move || {
+        if let Some((java, mut env)) = env() {
+            // SAFETY: RustBridge.cancel(long), looked up with this signature.
+            let _ = unsafe { env.call_static_method_unchecked(bridge(java), java.cancel, ReturnType::Primitive(Primitive::Void), &[JValue::Long(ticket).as_jni()]) };
+            cleared(&mut env);
+        }
+    });
     let (java, mut env) = env().ok_or("no JVM")?;
     let body = env.with_local_frame(6, |env| -> jni::errors::Result<Option<Result<(GlobalRef, i64), OpenError>>> {
         let (url, key) = (env.new_string(url)?, env.new_string(key)?);
-        // SAFETY: RustBridge.open(String, String, long), looked up with this signature.
-        let args = [JValue::Object(&url).as_jni(), JValue::Object(&key).as_jni(), JValue::Long(from as i64).as_jni()];
+        // SAFETY: RustBridge.open(String, String, long, long), looked up with this signature.
+        let args = [JValue::Object(&url).as_jni(), JValue::Object(&key).as_jni(), JValue::Long(from as i64).as_jni(), JValue::Long(ticket).as_jni()];
         let body = unsafe { env.call_static_method_unchecked(bridge(java), java.open, ReturnType::Object, &args) }?.l()?;
         if body.is_null() {
             return Ok(None);
@@ -990,7 +1011,14 @@ impl ByteSource for AheadBytes {
     }
 
     fn open_keyed(&self, url: &str, key: &str, from: u64) -> Result<Body, OpenError> {
-        open_java(url, key, from)
+        open_java(url, key, from, &Cancel::new())
+    }
+
+    fn open_cancellable(&self, url: &str, key: Option<&str>, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+        match key {
+            Some(key) => open_java(url, key, from, cancel),
+            None => Err("asked without its cache key".into()),
+        }
     }
 }
 
@@ -1243,6 +1271,8 @@ struct Player {
     /// place. media3 reads the position the moment a seek returns, and a controller runs its seek bar
     /// on from that reading, so the place before the jump would stay on screen.
     jumped: Mutex<Option<(i64, Instant)>>,
+    /// When the engine was last asked to look ([`look_now`]), monotonic ms.
+    looked_ms: AtomicI64,
 }
 
 /// The players alive, by the handle Kotlin holds. A handle is a number, never a pointer: a door called
@@ -1290,7 +1320,7 @@ extern "system" fn create(mut env: JNIEnv, _: JClass, sdk: jint, float: jboolean
     let app = CoreApp::new().bridging();
     let engine = Engine::start(library, app, CoreQueue, Box::new(output), offloaded, config, move |e| tell.push(e));
     let h = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    PLAYERS.lock().push((h, Arc::new(Player { engine, shared, events, offload, stations, jumped: Mutex::new(None) })));
+    PLAYERS.lock().push((h, Arc::new(Player { engine, shared, events, offload, stations, jumped: Mutex::new(None), looked_ms: AtomicI64::new(i64::MIN / 2) })));
     h
 }
 
@@ -1390,6 +1420,41 @@ extern "system" fn position_ms(h: jlong) -> jlong {
     let jumped = *p.jumped.lock();
     let jump = jumped.map(|(ms, when)| (ms, when.elapsed().as_millis() as i64));
     nori_player::transport::shown_place(jump, jumped.is_none_or(|(_, when)| at >= when), switching, now)
+}
+
+/// [`position_ms`] for the seek bar on screen, in queue index `index` (-1 when the engine's song is another,
+/// the page not having followed yet): the engine's last reading run on for at most
+/// `nori_player::heard::RUN_ON_MS`, and the engine asked to read its output again when that reading is a
+/// second old (`Status::screen_now`) - once a second at most, whether or not it answers.
+extern "system" fn shown_ms(h: jlong, index: jint) -> jlong {
+    let Some(p) = player(h) else { return -1 };
+    let (song, at, switching, (now, stale)) = p.engine.status_with(|s| (s.index, s.at, s.switching, s.screen_now()));
+    if song.is_none_or(|i| i as jint != index) {
+        return -1;
+    }
+    if stale {
+        look_now(&p);
+    }
+    let jumped = *p.jumped.lock();
+    let jump = jumped.map(|(ms, when)| (ms, when.elapsed().as_millis() as i64));
+    nori_player::transport::shown_place(jump, jumped.is_none_or(|(_, when)| at >= when), switching, now)
+}
+
+/// The engine reads its output once, now: the screen is coming back.
+extern "system" fn look(h: jlong) {
+    if let Some(p) = player(h) {
+        look_now(&p);
+    }
+}
+
+/// [`Engine::look`], at most once per `nori_player::heard::LOOK_AFTER_MS`: an engine that has nothing to
+/// say (let go, waiting for a song) is not woken every frame for it.
+fn look_now(p: &Player) {
+    let now = mono_ns() / 1_000_000;
+    let last = p.looked_ms.load(Ordering::Relaxed);
+    if now - last >= nori_player::heard::LOOK_AFTER_MS && p.looked_ms.compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        p.engine.look();
+    }
 }
 
 extern "system" fn mixing(h: jlong) -> jboolean {

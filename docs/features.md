@@ -279,7 +279,7 @@ again on the next unmetered network, since it has no fetch time.
 | Server synced + plain lyrics, tap to seek | x | x | x | yes | |
 | Word-by-word (karaoke) cues from OpenSubsonic enhanced lyrics | x | stub | x | yes | done: server cues, inline LRC tags, or estimated per line; swept in the draw phase at 30 fps, only while visible; switchable |
 | Translations | x | | | yes | done |
-| Lyrics services for songs the server has none for, ranked, each switchable | | x | x | yes | done: sixteen services under "Look things up online" (on by default since 2026-09-25); nine on under it (four asked first, five only when those miss or score low), the other seven off until switched on; every answer scored and the best shown, the choice kept with its score; see "Lyrics services" below |
+| Lyrics services for songs the server has none for, ranked, each switchable | | x | x | yes | done: sixteen services under "Look things up online" (on by default since 2026-09-25); all on under it since 2026-09-26 (six asked first: PaxSenix, BiniLyrics, Unison, KuGou, SimpMusic, LRCLIB; the rest only when those miss, score low, or have no word timing while words are preferred; the two that need a PaxSenix key stay silent until it is given); every answer scored and the best shown, the choice kept with its score; see "Lyrics services" below |
 | Offset adjust; keep screen on; text size / alignment | x | x | x | yes | done (alignment: no) |
 | Lyrics cached with downloads | x | x | x | | add |
 | Share lyrics as image / text | | | x | | add (text); image: skip |

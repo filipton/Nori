@@ -3,6 +3,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use futures_util::future::join_all;
+
 use crate::cache_policy::{Page, Read};
 use crate::client::Client;
 use crate::{queue, Song};
@@ -48,9 +50,12 @@ impl Client {
                 if !top.is_empty() {
                     return Ok(top);
                 }
+                // Side by side: three round trips one after another were three times the wait.
+                let albums = self.artist_albums(seed).await?;
+                let reads = albums.into_iter().take(3).map(|a| self.songs(Read::AlbumSongs { id: a.id }));
                 let mut all = Vec::new();
-                for a in self.artist_albums(seed).await?.into_iter().take(3) {
-                    all.extend(self.songs(Read::AlbumSongs { id: a.id }).await?);
+                for songs in join_all(reads).await {
+                    all.extend(songs?);
                 }
                 all
             }
@@ -112,14 +117,12 @@ impl Client {
         let ranked = self.turns(Picked::Album, pool);
         let mut short = Vec::new();
         let mut short_id = None;
-        for pick in ranked.into_iter().take(ALBUM_TRIES) {
-            let songs: Vec<Song> = self
-                .songs(Read::AlbumSongs { id: pick.clone() })
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|s| !queued.contains(s.id.as_str()) && !s.is_external)
-                .collect();
+        // The candidates are read side by side (six round trips one after another could be a second or
+        // more on a phone) and still chosen in their ranked order.
+        let picks: Vec<String> = ranked.into_iter().take(ALBUM_TRIES).collect();
+        let reads = join_all(picks.iter().map(|pick| self.songs(Read::AlbumSongs { id: pick.clone() }))).await;
+        for (pick, read) in picks.into_iter().zip(reads) {
+            let songs: Vec<Song> = read.unwrap_or_default().into_iter().filter(|s| !queued.contains(s.id.as_str()) && !s.is_external).collect();
             if songs.len() >= ALBUM_MIN {
                 self.picked(Picked::Album, &[pick]);
                 return songs;
@@ -169,8 +172,19 @@ impl Client {
 
 impl Client {
     async fn autofill_as(&self, kind: i32, basis: i32) -> Vec<Song> {
-        let (current, ids) = crate::playlist::snapshot();
-        let Some(seed) = current.and_then(queue::queue_song) else { return Vec::new() };
+        let began = std::time::Instant::now();
+        let fresh = self.autofill_from(kind, basis).await;
+        // The perf report's word on how long the end of the queue waited (a server asking Last.fm for
+        // similar songs takes seconds).
+        crate::alog::info(&format!("autofill: {} songs in {} ms (kind {kind}, basis {basis})", fresh.len(), began.elapsed().as_millis()));
+        fresh
+    }
+
+    async fn autofill_from(&self, kind: i32, basis: i32) -> Vec<Song> {
+        let (_, ids) = crate::playlist::snapshot();
+        // Carried on from the queue's last song, not the one playing: the fetch starts a song or two
+        // ahead of the end, and what comes follows the end.
+        let Some(seed) = autofill_seed().and_then(queue::queue_song) else { return Vec::new() };
         if seed.is_external {
             return Vec::new();
         }

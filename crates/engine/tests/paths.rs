@@ -1712,6 +1712,27 @@ fn the_track_holds_four_minutes_at_most_whatever_the_platform_would_take() {
     rig.engine.stop();
 }
 
+/// Offloaded, the engine sleeps for minutes while the chip plays on (the app hidden): its status is the
+/// place at its last wake. A look - the screen coming back, or a seek bar whose reading is old - reads the
+/// chip at once, and the status is the ear's place.
+#[test]
+fn a_look_reads_the_place_the_chip_played_to_while_the_engine_slept() {
+    let d = dir();
+    let Some((rig, fake)) = two_on_the_chip(&d, 20) else { return };
+    // Ten seconds go by with the chip playing them, and the engine is not told.
+    rig.run(10_000);
+    fake.advance_quietly(10 * 44_100);
+    let stale = rig.engine.status();
+    assert!(stale.offloaded && stale.position_ms < 2_000, "the engine has not looked: {stale:?}");
+    rig.engine.look();
+    // At once: within 20 ms of the clock, not at the engine's next wake.
+    assert!(rig.time.until(Duration::from_millis(20), || rig.engine.status().position_ms >= 10_990), "{:?}", rig.engine.status());
+    let s = rig.engine.status();
+    assert!(s.offloaded && s.index == Some(0) && s.position_ms <= 11_400, "eleven seconds into a, on the chip: {s:?}");
+    assert!(!fake.notes().iter().any(|n| n.contains("ahead of the clock")), "{:?}", fake.notes());
+    rig.engine.stop();
+}
+
 #[test]
 fn a_pause_after_the_engine_slept_through_the_music_keeps_the_ear_where_it_is() {
     let d = dir();

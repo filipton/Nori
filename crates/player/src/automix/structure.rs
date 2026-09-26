@@ -320,6 +320,10 @@ struct Bars {
 }
 
 fn bar_lines(t: &Tempo, db: &Downbeat, music: (f64, f64)) -> Option<Bars> {
+    // No beat, no bars (a bar of no length would make endless ones).
+    if !(t.period_s > 0.0) {
+        return None;
+    }
     let bpb = if db.beats_per_bar == 3 { 3 } else { 4 };
     let bar = bpb as f64 * t.period_s;
     // The first downbeat at or just before the beat starts: the tracked beats leave out a beatless opening.

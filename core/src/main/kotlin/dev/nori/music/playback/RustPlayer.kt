@@ -55,6 +55,10 @@ internal object RustPlayerJni {
     @JvmStatic @CriticalNative external fun applySettings(h: Long)
     /** Where the ear is in it now (the engine's `status().position_now()`), read when asked, never ticked. */
     @JvmStatic @CriticalNative external fun positionMs(h: Long): Long
+    /** [positionMs] for the seek bar on screen in queue index [index] (-1: the engine is on another song): see `EnginePlayer.shownMs`. */
+    @JvmStatic @CriticalNative external fun shownMs(h: Long, index: Int): Long
+    /** The engine reads its output once, now. */
+    @JvmStatic @CriticalNative external fun look(h: Long)
     @JvmStatic @CriticalNative external fun mixing(h: Long): Boolean
     @JvmStatic @CriticalNative external fun chainIn(h: Long): Boolean
     @JvmStatic @CriticalNative external fun onCpu(h: Long): Boolean
@@ -100,7 +104,11 @@ internal object RustBridge {
 
     /** [encoding] is `AudioFormat.ENCODING_*`: 16-bit, 24-bit packed (a song played as it is) or float. */
     @JvmStatic fun openTrack(rate: Int, channels: Int, encoding: Int, frames: Int): AudioTrack? = player?.openTrack(rate, channels, encoding, frames)
-    @JvmStatic fun open(url: String, key: String, from: Long): RustBody? = player?.open(url, key, from)
+    /** [ticket]: the request's number, by which [cancel] calls it off (see [Tickets]). */
+    @JvmStatic fun open(url: String, key: String, from: Long, ticket: Long): RustBody? =
+        player?.open(url, key, from, ticket) ?: null.also { Tickets.end(ticket) }
+    /** The Rust side lets a request go that has not answered or sends nothing: its call is cancelled. From any of its threads. */
+    @JvmStatic fun cancel(ticket: Long) = Tickets.cancel(ticket)
     @JvmStatic fun openLive(url: String): RustBody? = player?.openLive(url)
     /**
      * For the songs fetched ahead (nori-engine's one fetcher, through [open]): whether all of [key] is in the
@@ -281,6 +289,24 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     val pcmWhy: String? get() = RustPlayerJni.pcmWhy(h)
     /** What the engine cannot see of the output: something USB attached (the chip cannot reach it), a DAC playing bit-perfect. */
     fun setOutput(usb: Boolean, bitPerfect: Boolean) = RustPlayerJni.setOutput(h, usb, bitPerfect)
+
+    /**
+     * The engine's own place in the song at queue index [index], for the seek bar on screen; -1 when the
+     * engine is on another song. Its last reading run on for two seconds at most, the engine asked to read
+     * its output again whenever that reading is a second old (nori_player::heard::screen_place).
+     */
+    fun shownMs(index: Int): Long = RustPlayerJni.shownMs(h, index)
+    /** The engine reads its output once, now: the screen is coming back (its last wake may be minutes old). */
+    fun look() = RustPlayerJni.look(h)
+    /**
+     * The session and its controllers run their place on from its last word, and media3 lets them run on
+     * until a play, a pause or a seek says it again (periodic updates are off). One that drifted from the
+     * engine's own place is put right here: the place said again as a discontinuity, as after a change of path.
+     */
+    fun reanchor() {
+        placed = true
+        invalidateState()
+    }
 
     // ---- the state media3 reads ----
 
@@ -843,9 +869,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
      * cache, then the network on the app's one OkHttp client (its TLS, certificates and headers). Called
      * on a loader thread; while one is open the service holds the Wi-Fi lock.
      */
-    internal fun open(url: String, key: String, from: Long): RustBody? {
+    internal fun open(url: String, key: String, from: Long, ticket: Long = 0): RustBody? {
         val (source, length) = try {
-            nori.sources.openResolved(url, key, from)
+            nori.sources.openResolved(url, key, from, ticket)
         } catch (e: MediaSources.PastEnd) {
             // Not a failure: the song ends before [from] (a transcode's estimated length was longer).
             android.util.Log.i("nori", "rust player: $key from byte $from: past its end (${if (e.whole >= 0) "at ${e.whole}" else "unknown"})")
@@ -857,7 +883,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             return if (status > 0) RustBody(null, -1, status = status) {} else null
         }
         loaded(+1)
-        return RustBody(source, if (length == C.LENGTH_UNSET.toLong()) -1 else length) { loaded(-1) }
+        return RustBody(source, if (length == C.LENGTH_UNSET.toLong()) -1 else length) { Tickets.end(ticket); loaded(-1) }
     }
 
     internal fun kept(key: String): Boolean = runCatching { MediaSources.isWhole(nori.sources.streamCache, key) }.getOrDefault(true)

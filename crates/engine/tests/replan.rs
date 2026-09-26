@@ -1,7 +1,8 @@
 //! A transition setting changed while an album plays is heard at the very next boundary, and a play right
 //! after a change is planned with it: the engine playing the core's queue over the core's settings and
 //! transition planner, on the test's clock, as Android and the terminal run it. The core keeps one queue,
-//! one planner and one set of settings per process, so these stories run one after the other in one test.
+//! one planner and one set of settings per process, so these stories run one after the other in one test,
+//! never beside album.rs's (both hold `core_turn` in main.rs).
 mod common;
 
 use std::collections::HashMap;
@@ -109,7 +110,7 @@ impl Rig {
             .collect();
         let net = Arc::new(Net(ids.iter().enumerate().map(|(k, id)| (id.to_string(), Arc::new(tone_wav(SECS, k as u32)))).collect()));
         nori_core::queue::queue_register(songs);
-        nori_core::playlist::playlist_set(ids.iter().map(|s| s.to_string()).collect(), 0, false);
+        nori_core::playlist::playlist_set(ids.iter().map(|s| s.to_string()).collect(), 0, false, None);
         let library = CoreLibrary { client, bytes: net, metered: false, store: Some(store) };
         let card = Card::new();
         let clock = Virtual::default();
@@ -168,6 +169,7 @@ impl Drop for Rig {
 
 #[test]
 fn transition_settings_changed_are_planned_with_at_once() {
+    let _turn = crate::core_turn();
     keeping_albums_gapless_switched_off_while_an_album_plays_mixes_its_next_boundary();
     switched_off_near_the_end_with_the_ending_made_gapless_it_still_mixes();
     every_transition_setting_changed_while_playing_is_planned_with();

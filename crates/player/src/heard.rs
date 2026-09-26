@@ -129,7 +129,10 @@ impl HeardTracker {
 /// those are the bar and the lyrics' word fill stepping back, or skipping a piece of a word, in one frame.
 /// Up to [`GLIDE_MS`] behind, the place shown runs on at half the music's pace until the reading has
 /// caught up with it (stands, paused); up to [`GLIDE_MS`] ahead, at twice it until it has caught the
-/// reading. A jump the listener asked for ([`Playhead::jumped`]) is shown as it is, as is another song.
+/// reading. A jump the listener asked for ([`Playhead::jumped`]) is shown as it is, as is another song,
+/// and so is the first reading after the bar went unasked for [`STALE_MS`] while the music played (the
+/// app was hidden): the easing is for jitter between readings of a bar on screen, never a reason to keep
+/// a place from before the app went away, or one that had run ahead of the music.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Playhead {
     ms: i64,
@@ -146,6 +149,41 @@ pub const GLIDE_MS: i64 = 2_000;
 /// The most time one question counts for a glide: a bar not asked for a while (the screen was away, the
 /// music paused) does not run a glide on over the whole of it.
 pub const GLIDE_STEP_MS: i64 = 250;
+/// A place shown longer ago than this, while the music plays, is no anchor for the next reading: the bar
+/// was not drawn in between (the app was hidden, the screen off), so nothing on screen moves back if the
+/// reading is behind it, and a place that had run ahead of the music is not kept. A drawn bar asks at
+/// least once a second.
+pub const STALE_MS: i64 = 2_000;
+/// The furthest a place is run on past its last reading with nothing new to go by: the engine's last
+/// word ([`screen_place`]) or the place last shown ([`Playhead::run_on`]). A reading older than
+/// [`LOOK_AFTER_MS`] is asked for anew, so on a player that answers this is never reached; one that does
+/// not answer leaves the bar standing a moment past its last word rather than running on to the song's
+/// end over a place nobody has read.
+pub const RUN_ON_MS: i64 = 2_000;
+/// A reading of the engine older than this, while the music plays and a bar is drawn, is asked for again.
+pub const LOOK_AFTER_MS: i64 = 1_000;
+/// The place a player's controllers run on from (the session's last word, run on at one times by the
+/// clock since) further than this from the engine's own reading, in the same song, has drifted: the
+/// session is to say its place again, and a perf build notes it.
+pub const DRIFT_MS: i64 = 2_000;
+
+/// What a seek bar shows from the engine's last reading, `reading_ms` taken `age_ms` ago while playing at
+/// `speed`: run on at that pace for at most [`RUN_ON_MS`], and whether the reading is old enough
+/// ([`LOOK_AFTER_MS`]) that a fresh one is to be asked for. Paused, the reading stands.
+pub fn screen_place(reading_ms: i64, age_ms: i64, speed: f32, playing: bool) -> (i64, bool) {
+    if !playing {
+        return (reading_ms.max(0), false);
+    }
+    let age = age_ms.max(0);
+    let run = (age.min(RUN_ON_MS) as f64 * speed.max(0.0) as f64) as i64;
+    ((reading_ms + run).max(0), age >= LOOK_AFTER_MS)
+}
+
+/// Whether the place a controller runs on from (`word_ms`) has drifted from the engine's own reading
+/// (`engine_ms`; negative: none to compare - another song, or a seek on its way): see [`DRIFT_MS`].
+pub fn drifted(word_ms: i64, engine_ms: i64) -> bool {
+    engine_ms >= 0 && (word_ms - engine_ms).abs() > DRIFT_MS
+}
 
 impl Playhead {
     pub const fn new() -> Self {
@@ -185,7 +223,9 @@ impl Playhead {
 
     /// Shows `ms` in `song` at `now_ms`, never back by itself within the song: see [`Playhead`].
     fn put(&mut self, now_ms: i64, song: Option<usize>, ms: i64, playing: bool) -> i64 {
-        let same = !self.jumped && self.at_ms > 0 && self.song == song;
+        // A place shown long ago while the music played was not on screen since: nothing to glide from.
+        let stale = playing && now_ms - self.at_ms > STALE_MS;
+        let same = !self.jumped && !stale && self.at_ms > 0 && self.song == song;
         let step = (now_ms - self.at_ms).max(0);
         // Where the place shown would be, run on at one times since it was shown.
         let run = self.ms + step;
@@ -205,9 +245,11 @@ impl Playhead {
         shown
     }
 
-    /// Where the bar is at `now_ms` with nothing to ask: the last place, run on at one times if `playing`.
+    /// Where the bar is at `now_ms` with nothing to ask: the last place, run on at one times if `playing`,
+    /// for at most [`RUN_ON_MS`] - a place shown before the app was hidden is not run on over the whole
+    /// time it was away.
     pub fn run_on(&self, now_ms: i64, playing: bool) -> i64 {
-        let elapsed = if playing && self.at_ms > 0 { now_ms - self.at_ms } else { 0 };
+        let elapsed = if playing && self.at_ms > 0 { (now_ms - self.at_ms).clamp(0, RUN_ON_MS) } else { 0 };
         (self.ms + elapsed).max(0)
     }
 }
@@ -556,9 +598,11 @@ mod tests {
         assert_eq!(p.show_for(&t, player(49_100), Some(A), 9_000, Some(A), 49_100, false), 49_216);
         // A step back further than a glide is a jump (another controller's seek): shown as it is.
         assert_eq!(p.show_for(&t, player(30_000), Some(A), 9_016, Some(A), 30_000, true), 30_000);
-        // Resumed after a long pause a little behind the place shown: the glide runs on one step's worth,
-        // not over the whole pause.
-        assert_eq!(p.show_for(&t, player(29_900), Some(A), 60_000, Some(A), 29_900, true), 30_000 + GLIDE_STEP_MS / 2);
+        // Resumed a moment later a little behind the place shown: the glide runs on one step's worth, not
+        // over the whole wait.
+        assert_eq!(p.show_for(&t, player(29_900), Some(A), 10_500, Some(A), 29_900, true), 30_000 + GLIDE_STEP_MS / 2);
+        // Asked again only long after (the bar was not drawn): the reading as it is, nothing held from then.
+        assert_eq!(p.show_for(&t, player(29_900), Some(A), 60_000, Some(A), 29_900, true), 29_900);
     }
 
     /// A held ending on the ExoPlayer path: the ear's reading takes over from the player's 400 ms ahead of
@@ -583,5 +627,206 @@ mod tests {
         }
         assert!(caught.is_some_and(|c| c - 61_000 <= 420), "caught up with the ear within the step: {caught:?}");
         assert_eq!(last, 180_000 + 9_984, "back on the player's clock by the end");
+    }
+}
+
+/// The seek bar through an app hidden for minutes and brought back, on a wall clock the test moves (the
+/// S22's report: after the phone was unlocked the bar sat at the end of a song that had 14 s left, until a
+/// pause and a play). The engine reads its output only when it wakes: by itself every `wake_ms` (an
+/// offloaded track: minutes; the CPU's deep buffer: seconds; a held ending before a mix: a quarter
+/// second), and a moment after it is asked to look. The bar is asked every frame while it is on screen,
+/// never while the app is hidden.
+#[cfg(test)]
+mod away {
+    use super::*;
+
+    const SONG_MS: i64 = 600_000;
+    /// The song's place at the wall clock's 0.
+    const FROM_MS: i64 = 100_000;
+    const FRAME_MS: i64 = 16;
+    /// How long a wake the engine was asked for takes to come.
+    const LOOK_TAKES_MS: i64 = 2;
+    const A: usize = 0;
+
+    fn truth(now: i64) -> i64 {
+        (FROM_MS + now).min(SONG_MS)
+    }
+
+    struct Engine {
+        wake_ms: i64,
+        /// The last reading: the place, and when it was taken.
+        reading: (i64, i64),
+        next_wake: i64,
+        look_at: Option<i64>,
+        /// What the next reading is off by (then nothing).
+        off_next: i64,
+    }
+
+    impl Engine {
+        fn new(wake_ms: i64) -> Engine {
+            Engine { wake_ms, reading: (FROM_MS, 0), next_wake: wake_ms, look_at: None, off_next: 0 }
+        }
+
+        /// Moves the engine's thread on to `now`: every wake due by then reads the output.
+        fn to(&mut self, now: i64) {
+            loop {
+                let due = self.look_at.map_or(self.next_wake, |l| l.min(self.next_wake));
+                if due > now {
+                    return;
+                }
+                self.reading = (truth(due) + std::mem::take(&mut self.off_next), due);
+                self.next_wake = due + self.wake_ms;
+                self.look_at = None;
+            }
+        }
+
+        fn look(&mut self, now: i64) {
+            self.look_at.get_or_insert(now + LOOK_TAKES_MS);
+        }
+
+        /// What the screen's door answers ([`screen_place`]), asking for a look when the reading is old.
+        fn screen(&mut self, now: i64) -> i64 {
+            self.to(now);
+            let (ms, look) = screen_place(self.reading.0, now - self.reading.1, 1.0, true);
+            if look {
+                self.look(now);
+            }
+            ms
+        }
+
+        /// The engine's own place run on without a bound, as the session reads it (`Status::position_now`).
+        fn session(&mut self, now: i64) -> i64 {
+            self.to(now);
+            self.reading.0 + now - self.reading.1
+        }
+    }
+
+    fn clock() -> HeardTracker {
+        let mut t = HeardTracker::new();
+        t.set_queue([("a".to_string(), SONG_MS)]);
+        t
+    }
+
+    fn show(p: &mut Playhead, t: &HeardTracker, now: i64, ms: i64) -> i64 {
+        p.show_for(t, Seen { index: None, ms, changed: false }, Some(A), now, Some(A), ms, true)
+    }
+
+    /// A second on screen, `away_ms` hidden, then on screen to the song's end, asking the engine the way
+    /// the app does now: a look as the app comes back (before its first frame), the engine's reading
+    /// every frame. The first reading after the app came back is off by `off_ms`. Returns each frame after
+    /// the return: the time, the place shown, the true place.
+    fn fixed(wake_ms: i64, away_ms: i64, off_ms: i64) -> Vec<(i64, i64, i64)> {
+        let (t, mut p, mut e) = (clock(), Playhead::new(), Engine::new(wake_ms));
+        let mut now = 0;
+        while now < 1_000 {
+            show(&mut p, &t, now, e.screen(now));
+            now += FRAME_MS;
+        }
+        let back = now + away_ms;
+        e.to(back - 1);
+        e.off_next = off_ms;
+        // MainActivity.onStart: the engine is asked to look before the first frame is made.
+        e.look(back);
+        let mut frames = Vec::new();
+        now = back + FRAME_MS;
+        while truth(now) < SONG_MS {
+            let shown = show(&mut p, &t, now, e.screen(now));
+            frames.push((now, shown, truth(now)));
+            now += FRAME_MS;
+        }
+        frames
+    }
+
+    /// The same, the way the app asked before: the controller's place - the session's word taken as the
+    /// controller connected again, a moment after the first frame, run on at one times and clamped at the
+    /// song's length, as media3 does, with nothing to correct it until a play, a pause or a seek.
+    fn before(wake_ms: i64, away_ms: i64, off_ms: i64) -> Vec<(i64, i64, i64)> {
+        let (t, mut p, mut e) = (clock(), Playhead::new(), Engine::new(wake_ms));
+        let back = 1_000 + away_ms;
+        e.to(back - 1);
+        e.off_next = off_ms;
+        // The engine happens to wake as the controller connects: the word is that (off) reading.
+        e.look(back + 300 - LOOK_TAKES_MS);
+        let word = (e.session(back + 300), back + 300);
+        let mut frames = Vec::new();
+        let mut now = back + 300;
+        while truth(now) < SONG_MS {
+            let controller = (word.0 + now - word.1).min(SONG_MS);
+            frames.push((now, show(&mut p, &t, now, controller), truth(now)));
+            now += FRAME_MS;
+        }
+        frames
+    }
+
+    const OFFLOADED: i64 = 180_000;
+    const DEEP_BUFFER: i64 = 8_000;
+    const MIX_HOLD: i64 = 250;
+    const MINUTES: i64 = 5 * 60_000;
+    const PATHS: [(&str, i64); 3] = [("offloaded", OFFLOADED), ("deep buffer", DEEP_BUFFER), ("mix hold", MIX_HOLD)];
+
+    /// Frames with the bar at the song's end while the song still had more than a second to play.
+    fn at_the_end(frames: &[(i64, i64, i64)]) -> i64 {
+        frames.iter().filter(|(_, shown, truth)| *shown >= SONG_MS && *truth < SONG_MS - 1_000).count() as i64
+    }
+
+    #[test]
+    fn before_the_fix_a_word_off_at_the_return_kept_the_bar_at_the_end() {
+        // The session's word taken ahead as the app came back: the bar sits at the end for the song's last
+        // 14 seconds, whatever the engine read after.
+        let away = SONG_MS - FROM_MS - 1_000 - 14_300 - FRAME_MS;
+        let frames = before(DEEP_BUFFER, away, 14_000);
+        assert!(at_the_end(&frames) * FRAME_MS > 12_000, "{} frames at the end", at_the_end(&frames));
+    }
+
+    #[test]
+    fn coming_back_the_bar_is_where_the_song_is_from_the_first_frame() {
+        for (what, wake) in PATHS {
+            for away in [10_000, MINUTES, 30 * 60_000 / 6] {
+                let frames = fixed(wake, away, 0);
+                let (_, first, truth) = frames[0];
+                assert!((first - truth).abs() <= FRAME_MS + LOOK_TAKES_MS, "{what}, away {away} ms: first frame {first}, the song at {truth}");
+                for &(now, shown, truth) in &frames {
+                    assert!((shown - truth).abs() <= 2 * FRAME_MS, "{what}, away {away} ms: {shown} shown at {now} with the song at {truth}");
+                }
+                assert_eq!(at_the_end(&frames), 0, "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_reading_off_at_the_return_is_put_right_by_the_next_one() {
+        for (what, wake) in PATHS {
+            // The first reading after the screen came on 14 s ahead, with 14 s of the song left.
+            let away = SONG_MS - FROM_MS - 1_000 - 14_000 - FRAME_MS;
+            let frames = fixed(wake, away, 14_000);
+            let wrong: Vec<_> = frames.iter().filter(|(_, shown, truth)| (shown - truth).abs() > 2 * FRAME_MS).collect();
+            let last = wrong.last().map_or(0, |w| w.0 - frames[0].0);
+            assert!(last <= LOOK_AFTER_MS + FRAME_MS, "{what}: off for {last} ms after the return");
+            assert!(at_the_end(&frames) * FRAME_MS <= LOOK_AFTER_MS + FRAME_MS, "{what}: at the end for {} frames", at_the_end(&frames));
+        }
+    }
+
+    #[test]
+    fn an_engine_that_does_not_answer_is_not_run_on_to_the_end() {
+        // The last reading 30 s before the end and no other: the bar stands a moment past it.
+        let (ms, look) = screen_place(570_000, 60_000, 1.0, true);
+        assert_eq!(ms, 570_000 + RUN_ON_MS);
+        assert!(look, "and asks again");
+        assert_eq!(screen_place(570_000, 500, 1.0, true), (570_500, false), "a fresh reading runs on as it is");
+        assert_eq!(screen_place(570_000, 60_000, 1.0, false), (570_000, false), "paused, it stands");
+        assert_eq!(screen_place(570_000, 1_000, 2.0, true), (572_000, true), "at the playing speed");
+        // The place last shown, while nothing can be asked (the app reconnecting): the same bound.
+        let (t, mut p) = (clock(), Playhead::new());
+        show(&mut p, &t, 1_000, 100_000);
+        assert_eq!(p.run_on(1_500, true), 100_500);
+        assert_eq!(p.run_on(1_000 + MINUTES, true), 100_000 + RUN_ON_MS, "not over the minutes the app was away");
+    }
+
+    #[test]
+    fn a_controller_s_word_far_from_the_engine_s_has_drifted() {
+        assert!(!drifted(586_000, 586_000 - DRIFT_MS));
+        assert!(drifted(600_000, 586_000), "the S22's bar at the end with 14 s left");
+        assert!(drifted(570_000, 586_000));
+        assert!(!drifted(600_000, -1), "nothing to compare: another song, or a seek on its way");
     }
 }

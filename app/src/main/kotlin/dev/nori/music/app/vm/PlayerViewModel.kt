@@ -37,6 +37,12 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     /** Just the id, so a list can highlight its playing row without observing the whole player. */
     val currentId: StateFlow<String?> = state.map { it.current?.id }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /**
+     * Whether the queue is the one [page] started (nori-queue `playlist_from`): its Play or Shuffle, or a
+     * row of its list, and any edit since. Asked when [PlayerState.origin] moves, not on every event.
+     */
+    fun playsFrom(page: dev.nori.music.ffi.library.PageQueue): Boolean = dev.nori.music.ffi.queue.playlistFrom(page)
+
     /** Just the play/pause flag, for the same reason: the marked row's bars move only while it sounds. */
     val sounding: StateFlow<Boolean> = state.map { it.playing }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
@@ -115,10 +121,6 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
         if (motionLazy.isInitialized()) motion.pause()
     }
 
-    fun motionRest() {
-        if (motionLazy.isInitialized()) motion.rest()
-    }
-
     fun motionRelease() {
         if (motionLazy.isInitialized()) motion.release()
     }
@@ -150,10 +152,14 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
                 .distinctUntilChanged()
                 .collect { around ->
                     _coversNear.value = around.near
-                    // Into memory, decoded: a skip lands on a picture that is already there.
+                    // The covers a skip lands on (either side of the song playing) into memory, decoded: a
+                    // skip lands on a picture that is already there. The ones further out onto the disk
+                    // only, as the server sent them: decoded they held a megabyte or two each, ten either
+                    // way with "Covers fetched ahead" at 10, and a skip that far is a disk read away.
                     val loader = dev.nori.music.data.CoverLoader.get(getApplication<Application>())
                     for (want in around.wants) {
-                        nori.library.coverUrl(want.id, want.size.toInt())?.let(loader::prefetch)
+                        val url = nori.library.coverUrl(want.id, want.size.toInt()) ?: continue
+                        if (want.id in around.near) loader.prefetch(url) else loader.warm(url)
                     }
                 }
         }

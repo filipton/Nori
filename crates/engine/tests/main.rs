@@ -12,6 +12,19 @@ mod radio;
 mod tempo;
 #[path = "estimated.rs"]
 mod estimated;
+#[path = "hung.rs"]
+mod hung;
 #[cfg(feature = "core")]
 #[path = "replan.rs"]
 mod replan;
+#[cfg(feature = "core")]
+#[path = "album.rs"]
+mod album;
+
+/// The core keeps one queue, planner, database and set of settings per process: the tests here that play
+/// through it take turns.
+#[cfg(feature = "core")]
+fn core_turn() -> parking_lot::MutexGuard<'static, ()> {
+    static CORE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    CORE.lock()
+}

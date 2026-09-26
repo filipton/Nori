@@ -280,7 +280,7 @@ fn queue(old: &Connection, core: &Core) -> Step {
     }
     let json: Option<String> = old.query_row("SELECT value FROM kv WHERE key='queue'", [], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
     let Some(q) = json.and_then(|j| serde_json::from_str::<Q>(&j).ok()).filter(|q| !q.songs.is_empty()) else { return Ok(()) };
-    core.save_queue(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position }).map_err(|e| e.to_string())
+    core.save_queue(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position, origin: None }).map_err(|e| e.to_string())
 }
 
 fn smart(old: &Connection, core: &Core) -> Step {

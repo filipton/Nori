@@ -198,6 +198,13 @@ impl Status {
             _ => self.position_ms,
         }
     }
+
+    /// The place for a seek bar on screen: the last reading run on at the playing speed for at most
+    /// `nori_player::heard::RUN_ON_MS`, and whether it is old enough that the engine is to be asked to
+    /// look again ([`Engine::look`]); see `nori_player::heard::screen_place`.
+    pub fn screen_now(&self) -> (i64, bool) {
+        nori_player::heard::screen_place(self.position_ms, self.at.elapsed().as_millis() as i64, self.speed, self.state == State::Playing)
+    }
 }
 
 /// How the engine is set up.
@@ -236,6 +243,8 @@ enum Command {
     Gain,
     Tuning(bool),
     Positions(Option<Duration>),
+    /// Nothing to do but wake: the turn reads the output and the status is said again.
+    Look,
     Device(Device),
     Stop,
 }
@@ -454,6 +463,14 @@ impl Engine {
     /// Position events this often while music plays, or none (the default: an idle screen is not woken).
     pub fn position_updates(&self, every: Option<Duration>) {
         self.send(Command::Positions(every));
+    }
+
+    /// Reads the output once, now, and says the status again: for a screen coming back, or a seek bar
+    /// whose reading is old ([`Status::screen_now`]). Between its own wakes the engine sleeps - minutes
+    /// with the songs offloaded - and a place run on from a reading that old is only as good as that
+    /// reading was.
+    pub fn look(&self) {
+        self.send(Command::Look);
     }
 
     pub fn status(&self) -> Status {
@@ -1011,7 +1028,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
                 self.next_position = now;
             }
             Command::Device(d) => self.device(d),
-            Command::Stop => {}
+            Command::Look | Command::Stop => {}
         }
     }
 
@@ -1602,6 +1619,11 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             Switched::Resound => return,
         };
         self.held = Some((i, ms, self.p.id_at(i)));
+        // The queue is where the user put it, heard or not: a queue saved now (and a program started
+        // again from it) comes back on this song, not the one before the skip.
+        if !matches!(s, Switched::Seek(_)) {
+            self.p.queue.moved_to(i);
+        }
     }
 
     /// The queue was edited: a held place stays on its song, wherever that is now.

@@ -358,6 +358,53 @@ pub struct PlayQueue {
     pub songs: Vec<Song>,
     pub index: u32,
     pub position_ms: u64,
+    /// The page the queue was started from, kept with it so a queue put back still lights its page.
+    /// None for one from the server or saved before origins were kept.
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    pub origin: Option<PageOrigin>,
+}
+
+/// What kind of place a queue was started from. Saved with the queue by name, so only ever add.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum OriginKind {
+    /// An album's songs (its page, or the album played whole from anywhere).
+    Album,
+    /// All of an artist's songs (the artist page's Play and Shuffle).
+    Artist,
+    /// The top songs listed on an artist's page: not the page's own Play, which is all the songs.
+    ArtistTop,
+    Playlist,
+    /// A smart playlist.
+    Smart,
+    /// A made-for-you mix, by its key.
+    Mix,
+    Genre,
+    Folder,
+    /// The library's list of songs.
+    Songs,
+    /// A search's results, by the query.
+    Search,
+    /// A shelf of the home page, by its key.
+    Shelf,
+    /// The downloaded songs.
+    Downloads,
+}
+
+/// The page a queue was started from: its kind and the id of what it shows. A page is "the one
+/// playing" exactly when the queue's origin is its own (nori-queue `playlist_from`), not when the song
+/// playing happens to be among its songs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct PageOrigin {
+    pub kind: OriginKind,
+    pub id: String,
+}
+
+impl PageOrigin {
+    pub fn new(kind: OriginKind, id: impl Into<String>) -> Self {
+        PageOrigin { kind, id: id.into() }
+    }
 }
 
 /// The order is the wire format: `dsp.rs` reads the ordinal out of the flat band array, so only append.

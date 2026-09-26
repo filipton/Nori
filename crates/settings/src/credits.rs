@@ -16,11 +16,18 @@ pub struct Credit {
 
 /// The core's own credits, for the licences page of any app built on it. A line here is added in the
 /// same commit that adds the dependency. Where a crate offers MIT or Apache-2.0, the MIT text is shown.
-const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 18] = [
+const CORE_CREDITS: [(&str, &str, &str, &str, Option<&str>); 19] = [
     ("uniffi", "Generates the Kotlin bindings to the core and the JNI calls under them", "Mozilla Foundation", "MPL-2.0", Some("MPL-2.0")),
     ("rusqlite", "The library index, full-text search and caches", "Copyright (c) 2014 The rusqlite developers", "MIT", Some("MIT")),
     ("SQLite", "The database itself, bundled into the core", "D. Richard Hipp and the SQLite developers, dedicated to the public domain", "Public domain", None),
     ("RustFFT", "The spectrum analysis behind tempo, beats and key", "Copyright (c) 2015 The RustFFT Developers", "MIT or Apache-2.0", Some("MIT")),
+    (
+        "ebur128",
+        "Measuring how loud each song is, for AutoMix's levels",
+        "Copyright (c) 2011 Jan Kokemüller; Copyright (c) 2020 Sebastian Dröge",
+        "MIT",
+        Some("MIT"),
+    ),
     (
         "Signalsmith Stretch",
         "Time-stretching for beat-matched mixes",

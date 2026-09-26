@@ -5,6 +5,8 @@ import android.os.Bundle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import dev.nori.music.ffi.queue.Hand
+import dev.nori.music.ffi.model.OriginKind
+import dev.nori.music.ffi.model.PageOrigin
 import dev.nori.music.ffi.model.RadioStation
 import dev.nori.music.ffi.model.Song
 
@@ -84,6 +86,24 @@ fun MediaItem.queued(how: Hand): MediaItem = withExtra { putString(QUEUED, how.n
 private const val ORDERED = "ordered"
 fun MediaItem.inOrder(): Boolean = mediaMetadata.extras?.getBoolean(ORDERED) == true
 fun MediaItem.ordered(): MediaItem = withExtra { putBoolean(ORDERED, true) }
+
+/**
+ * The page a new queue is started from (nori-queue `playlist_set`'s origin), marked on its first item so
+ * the service hands it to the core with the songs: that page's Play then reads Pause while the queue
+ * plays, and no other page's does. A list without it (radio, a car, a selection) is from no page.
+ */
+private const val ORIGIN_KIND = "originKind"
+private const val ORIGIN_ID = "originId"
+fun MediaItem.origin(): PageOrigin? {
+    val extras = mediaMetadata.extras ?: return null
+    val kind = extras.getString(ORIGIN_KIND)?.let { runCatching { OriginKind.valueOf(it) }.getOrNull() } ?: return null
+    return PageOrigin(kind, extras.getString(ORIGIN_ID).orEmpty())
+}
+fun MediaItem.from(origin: PageOrigin): MediaItem = withExtra { putString(ORIGIN_KIND, origin.kind.name); putString(ORIGIN_ID, origin.id) }
+
+/** [items] with [origin] marked on the first. */
+fun startedFrom(items: List<MediaItem>, origin: PageOrigin?): List<MediaItem> =
+    if (origin == null || items.isEmpty()) items else listOf(items.first().from(origin)) + items.drop(1)
 
 private inline fun MediaItem.withExtra(put: Bundle.() -> Unit): MediaItem =
     buildUpon().setMediaMetadata(mediaMetadata.buildUpon().setExtras(Bundle(mediaMetadata.extras ?: Bundle.EMPTY).apply(put)).build()).build()

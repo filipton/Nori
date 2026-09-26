@@ -1472,7 +1472,7 @@ fn deck_level(plan: &crate::types::TransitionPlan, outgoing: bool) -> Vec<f64> {
 /// Short-term loudness (EBU R128: 3 s windows, K-weighted, LUFS), one window every 100 ms, of mono `x` at `rate`.
 fn short_term(x: &[f32], rate: f64) -> Vec<f64> {
     let mut m = loudness::Meter::new(rate, 0);
-    x.iter().for_each(|v| m.push(*v));
+    m.feed(x);
     m.finish();
     m.blocks_k.windows(30).map(|w| -0.691 + 10.0 * (w.iter().map(|v| *v as f64).sum::<f64>() / 30.0).max(1e-12).log10()).collect()
 }

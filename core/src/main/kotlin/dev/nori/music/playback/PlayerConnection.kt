@@ -20,6 +20,7 @@ import dev.nori.music.Nori
 import dev.nori.music.core.R
 import dev.nori.music.ffi.queue.Hand
 import dev.nori.music.ffi.queue.NextAction
+import dev.nori.music.ffi.model.PageOrigin
 import dev.nori.music.ffi.model.RadioStation
 import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,6 +55,11 @@ data class PlayerState(
      * bridge block and comes back when the network does.
      */
     val bridging: Boolean = false,
+    /**
+     * Moves whenever a new queue is set (nori-queue `playlist_origin_gen`), so a page asks whether the
+     * queue is its own (`playlist_from`) only then.
+     */
+    val origin: Int = 0,
 ) {
     val current: Song? get() = queue.getOrNull(index)
 }
@@ -103,6 +109,9 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * over when it connects.
      */
     fun catchUp() {
+        // The engine may have slept for minutes (the songs offloaded): it reads its output now, so that the
+        // first frame's seek bar starts from a fresh reading, not one run on from its last wake.
+        engine()?.look()
         if (controller != null) return
         val p = local() ?: return
         if (p.mediaItemCount == 0) return
@@ -128,13 +137,39 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         return heardIndex >= 0
     }
 
-    /** [heard] for the seek bar, whose page shows queue index [shown]: the place the bar shows. */
+    /**
+     * [heard] for the seek bar, whose page shows queue index [shown]: the place the bar shows. It goes by
+     * the engine's own place, read in this process ([EnginePlayer.shownMs]), not by the controller's: a
+     * controller's place is the session's last word run on at one times and held at the song's length,
+     * put right only by a play, a pause or a seek, so a word taken off (the S22's first reading as the
+     * phone was unlocked) kept the bar at the song's end with 14 s left. A controller that drifted like
+     * that is put right as well, for the notification and the lock screen that go by the same word. The
+     * controller's own place stands while a seek is on its way (it has the seek; the engine not yet) and
+     * on another song than the engine's.
+     */
     private fun heard(c: Player, shown: Int): Long {
         val raw = c.currentPosition
-        val out = read(PlayheadJni.position(clock, android.os.SystemClock.elapsedRealtime(), c.isPlaying, c.currentMediaItemIndex, c.nextMediaItemIndex, raw, shown))
-        if (tracePositions) android.util.Log.d("noripos", "raw=$raw out=$out on=${c.currentMediaItemIndex} shown=$shown heard=$heardIndex c=${c.javaClass.simpleName} t=${Thread.currentThread().name}")
+        val now = android.os.SystemClock.elapsedRealtime()
+        val on = c.currentMediaItemIndex
+        val engine = engine()?.takeIf { _pendingSeek.value == null && now - seekAsked > SEEK_GRACE_MS }?.shownMs(on) ?: -1L
+        val out = read(PlayheadJni.position(clock, now, c.isPlaying, on, c.nextMediaItemIndex, raw, shown, engine))
+        if (c === controller && c.isPlaying && PlayheadJni.drifted(raw, engine) && now - reanchored > REANCHOR_GAP_MS) {
+            reanchored = now
+            android.util.Log.i("nori", "seek bar: the controller ran on to $raw ms, the engine is at $engine ms: the session says its place again")
+            engine()?.reanchor()
+        }
+        if (tracePositions) android.util.Log.d("noripos", "raw=$raw engine=$engine out=$out on=$on shown=$shown heard=$heardIndex c=${c.javaClass.simpleName} t=${Thread.currentThread().name}")
         return out
     }
+
+    /** The service's engine, on the main thread only (where it lives): null with no service. */
+    private fun engine(): EnginePlayer? =
+        PlaybackService.rustPlayer?.takeIf { android.os.Looper.myLooper() == android.os.Looper.getMainLooper() }
+
+    /** When a drifted controller was last put right ([heard]), elapsed realtime ms. */
+    private var reanchored = Long.MIN_VALUE / 2
+    /** When a seek was last asked for ([seekTo]), elapsed realtime ms. */
+    private var seekAsked = Long.MIN_VALUE / 2
 
     /** Unpacks an answer into [heardIndex]; returns the place in it. */
     private fun read(r: Long): Long {
@@ -277,6 +312,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
             durationMs = PlayheadJni.durationMs(heardIndex?.let { queue[it].duration.toLong() } ?: -1, p.duration, item?.mediaMetadata?.durationMs ?: 0),
             error = if (p.playerError == null) null else old.error,
             bridging = view?.bridging ?: old.bridging,
+            origin = PlaylistJni.origin(),
         )
     }
 
@@ -308,7 +344,12 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     // ---- queue ----
 
-    fun play(songs: List<Song>, startIndex: Int = 0, shuffle: Boolean = false) = with { c ->
+    /**
+     * A new queue of [songs]. [from]: the page they are the songs of (its Play, Shuffle or a row of its
+     * list), which that page then answers for; null for a queue from no page (one song, a selection, a
+     * radio or a mix drawn from a song, a queue picked up from the server).
+     */
+    fun play(songs: List<Song>, startIndex: Int = 0, shuffle: Boolean = false, from: PageOrigin? = null) = with { c ->
         if (songs.isEmpty()) return@with
         // Shuffle lit when this start asked for shuffle; cleared on a plain Play, so the album
         // control does not stay on after the row's Play starts some other queue. Pause and resume on
@@ -316,7 +357,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         // core at once, so the page does not flicker while the queue's own change is on its way.
         dev.nori.music.ffi.queue.playlistShowShuffle(shuffle)
         c.shuffleModeEnabled = shuffle
-        c.setMediaItems(items(songs), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)
+        c.setMediaItems(startedFrom(items(songs), from), if (shuffle) C.INDEX_UNSET else startIndex.coerceIn(0, songs.lastIndex), 0)
         c.prepare()
         c.play()
     }
@@ -325,13 +366,13 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
      * Play [songs] in [order] (positions in it, the core's weighted shuffle) while keeping the Shuffle
      * control lit. Used for weighted artist-spread shuffles: media3's own shuffle would undo the spread.
      */
-    fun playShuffledOrder(songs: List<Song>, order: List<UInt>) = with { c ->
+    fun playShuffledOrder(songs: List<Song>, order: List<UInt>, from: PageOrigin? = null) = with { c ->
         if (songs.isEmpty() || order.isEmpty()) return@with
         dev.nori.music.ffi.queue.playlistShowShuffle(true)
         // Marked as already in order: the service takes it as it is and turns the player's own shuffle off.
         val made = items(songs)
         val items = order.map { made[it.toInt()] }
-        c.setMediaItems(listOf(items.first().ordered()) + items.drop(1), 0, 0)
+        c.setMediaItems(startedFrom(listOf(items.first().ordered()) + items.drop(1), from), 0, 0)
         c.prepare()
         c.play()
         _state.value = _state.value.copy(shuffle = true)
@@ -397,6 +438,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
     fun seekTo(ms: Long) = with { c ->
         // Asked for: the bar and the lyrics go there as they are, even a moment back (heard.rs Playhead).
         PlayheadJni.jumped(clock)
+        seekAsked = android.os.SystemClock.elapsedRealtime()
         // A tap is a place in the song on the page. While the ear is still on the song the player
         // has left (see publish), that is the earlier song: the seek goes to it, not to the one the
         // player is already counting.
@@ -515,11 +557,26 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 /** Every seek bar reading logged (tag noripos), for a check frame by frame: the test bridge's "tracelyrics". */
 @Volatile var tracePositions = false
 
+/** A drifted controller is put right at most this often (PlayerConnection.heard). */
+private const val REANCHOR_GAP_MS = 2_000L
+/**
+ * For this long after a seek is asked for, the bar goes by the controller's place, which has the seek, and
+ * not by the engine's, which may not have it yet: a seek sent through a controller reaches the player a
+ * main-thread turn or two later (and one the connection applies outright never enters [PlayerConnection.pendingSeek]).
+ */
+private const val SEEK_GRACE_MS = 500L
+
 internal object PlayheadJni {
     init { System.loadLibrary("norimusic") }
 
-    /** As [HeardJni.at], with the place the bar shows while the page shows queue index [shown] (-1: nothing). */
-    @JvmStatic @CriticalNative external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int): Long
+    /**
+     * As [HeardJni.at], with the place the bar shows while the page shows queue index [shown] (-1: nothing).
+     * [positionMs] is the player's word, [engineMs] the engine's own place in song [on] (-1: none), which the
+     * bar goes by when there is one.
+     */
+    @JvmStatic @CriticalNative external fun position(h: Long, nowMs: Long, playing: Boolean, on: Int, next: Int, positionMs: Long, shown: Int, engineMs: Long): Long
+    /** A controller's place [wordMs] has drifted from the engine's own [engineMs] (-1: none): nori_player::heard::drifted. */
+    @JvmStatic @CriticalNative external fun drifted(wordMs: Long, engineMs: Long): Boolean
     /** The last place shown, run on from then if [playing]: for while the controller cannot be asked. */
     @JvmStatic @CriticalNative external fun runOn(h: Long, nowMs: Long, playing: Boolean): Long
     /** The listener asked for a place (a seek): the next reading is shown as it is, even a moment back in the song. */
@@ -537,6 +594,8 @@ internal object PlaylistJni {
 
     /** Changes whenever the list or its order does. */
     @JvmStatic @CriticalNative external fun rev(): Long
+    /** Moves whenever a new queue is set, and with it perhaps the page it came from. */
+    @JvmStatic @CriticalNative external fun origin(): Int
     /** Shuffle shown as on (the player's own, or a weighted shuffle's). */
     @JvmStatic @CriticalNative external fun shuffleShown(): Boolean
     /** The play order while shuffling, written into [out] when it is exactly that long; its length, -1 when not shuffling. */

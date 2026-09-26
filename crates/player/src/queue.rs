@@ -187,16 +187,32 @@ impl ErrorRun {
     }
 }
 
-/// Keeping the music going past the end of the queue. A fetch starts when the last song is reached *or*
-/// when only one still follows - that one-ahead start is what stops a fast next from hitting a wall while
-/// similar songs are still on the wire - and only one is on the wire at a time. A next pressed with
-/// nothing after is remembered, and taken when the songs land, unless the user has moved on since.
+/// Keeping the music going past the end of the queue. A fetch starts when the queue's end is near - the
+/// last song, or up to [`FILL_AHEAD`] still following - so that a fast run of nexts does not hit a wall
+/// while similar songs are still on the wire (a server asking Last.fm for them takes seconds), and only
+/// one is on the wire at a time. What comes back goes in after the song that was last when the fetch
+/// started, and only while it still is: a queue given songs from elsewhere meanwhile is left alone.
+///
+/// A next pressed with nothing after is remembered, and taken when the songs land - unless the user has
+/// moved on since, or the press is older than [`NEXT_KEPT_MS`]: by then the user has settled on the song
+/// and a skip out of nowhere would be a surprise (a phone's refill took 4.6 s once, and the song the user
+/// had been listening to for four seconds was skipped). The songs still go in; only the skip is dropped.
+/// Many presses at the end are one skip, timed from the last of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Refill {
     in_flight: bool,
-    /// The song a next was pressed on with nothing after it.
+    /// The queue's last song (in play order) when the fetch started.
+    end: Option<String>,
+    /// The song a next was pressed on with nothing after it, and when (the latest press, in ms of the
+    /// caller's monotonic clock).
     pending_from: Option<String>,
+    pending_at_ms: i64,
 }
+
+/// How many songs may still follow the current one when the refill starts.
+pub const FILL_AHEAD: usize = 2;
+/// How long a next pressed at the end waits for the songs to land. Past this, the press is forgotten.
+pub const NEXT_KEPT_MS: i64 = 2_000;
 
 /// Whether a queue may be refilled at all: a song is playing and not a radio stream, repeat is off (a
 /// repeating queue has no end) and the user has the setting on.
@@ -206,50 +222,65 @@ pub fn refillable(song: bool, radio: bool, repeat: u8, setting: bool) -> bool {
 
 impl Refill {
     pub const fn new() -> Self {
-        Refill { in_flight: false, pending_from: None }
+        Refill { in_flight: false, end: None, pending_from: None, pending_at_ms: 0 }
     }
 
     /// The queue moved (or a next was pressed): whether to start fetching now, `after` songs still
-    /// following the current one. A true answer means a fetch is on the wire until [`Refill::arrived`].
-    pub fn start(&mut self, refillable: bool, after: usize) -> bool {
-        if !refillable || after > 1 || self.in_flight {
+    /// following the current one and `end` last. A true answer means a fetch is on the wire until
+    /// [`Refill::arrived`].
+    pub fn start(&mut self, refillable: bool, after: usize, end: Option<&str>) -> bool {
+        if !refillable || after > FILL_AHEAD || self.in_flight {
             return false;
         }
         self.in_flight = true;
+        self.end = end.map(str::to_string);
         true
     }
 
-    /// Next pressed on `current`: true to skip at once. With nothing after, the press is remembered -
-    /// only while the queue can be refilled at all (repeat off, setting on) - and the caller starts a fetch.
-    pub fn next(&mut self, has_next: bool, can_refill: bool, current: Option<&str>) -> bool {
+    /// Next pressed on `current` at `now_ms`: true to skip at once. With nothing after, the press is
+    /// remembered - only while the queue can be refilled at all (repeat off, setting on) - and the caller
+    /// starts a fetch unless one is out.
+    pub fn next(&mut self, has_next: bool, can_refill: bool, current: Option<&str>, now_ms: i64) -> bool {
         if has_next {
             self.pending_from = None;
             return true;
         }
         if can_refill {
             self.pending_from = current.map(str::to_string);
+            self.pending_at_ms = now_ms;
         }
         false
     }
 
-    /// The fetch came back with `count` songs while `after` songs follow the current one: whether they go
-    /// in. They do not when there are none, or when the queue was given songs from elsewhere meanwhile;
-    /// the fetch is then over, and so is a waiting next.
-    pub fn arrived(&mut self, count: usize, after: usize) -> bool {
-        let keep = count > 0 && after <= 1;
+    /// The fetch came back with `count` songs while `end` is the queue's last song: whether they go in.
+    /// They do not when there are none, or when the queue's end is no longer the one they were fetched
+    /// for (songs added, a new queue); the fetch is then over, and so is a waiting next.
+    pub fn arrived(&mut self, count: usize, end: Option<&str>) -> bool {
+        let keep = count > 0 && end.is_some() && self.end.as_deref() == end;
         if !keep {
             self.pending_from = None;
             self.in_flight = false;
+            self.end = None;
         }
         keep
     }
 
     /// The songs that arrived are in the queue: whether to take the waiting next now, which it is only
-    /// if the user is still on the song it was pressed on and there is somewhere to go.
-    pub fn landed(&mut self, current: Option<&str>, has_next: bool) -> bool {
+    /// if the user is still on the song it was pressed on, the press is recent, and there is somewhere
+    /// to go.
+    pub fn landed(&mut self, current: Option<&str>, has_next: bool, now_ms: i64) -> bool {
+        let waiting = self.skip_waiting(current, now_ms);
         self.in_flight = false;
-        let still = self.pending_from.take().is_some_and(|p| Some(p.as_str()) == current);
-        still && has_next
+        self.end = None;
+        self.pending_from = None;
+        waiting && has_next
+    }
+
+    /// Whether a next pressed at the end is waiting for songs on the wire and will be taken if they come
+    /// now: what a screen may show as a skip on its way (the next button busy). It turns false by itself
+    /// [`NEXT_KEPT_MS`] after the last press.
+    pub fn skip_waiting(&self, current: Option<&str>, now_ms: i64) -> bool {
+        self.in_flight && self.pending_from.as_deref().is_some_and(|p| Some(p) == current) && now_ms - self.pending_at_ms <= NEXT_KEPT_MS
     }
 
     pub fn in_flight(&self) -> bool {
@@ -392,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn refilling_starts_one_ahead_and_once() {
+    fn refilling_starts_ahead_and_once() {
         assert!(refillable(true, false, 0, true));
         assert!(!refillable(false, false, 0, true), "nothing playing");
         assert!(!refillable(true, true, 0, true), "a radio stream");
@@ -400,55 +431,93 @@ mod tests {
         assert!(!refillable(true, false, 1, true), "repeat one");
         assert!(!refillable(true, false, 0, false), "setting off");
         let mut f = Refill::new();
-        assert!(!f.start(true, 2), "plenty left");
-        assert!(!f.start(false, 0), "not refillable");
-        assert!(f.start(true, 1), "one left: fetch now");
-        assert!(!f.start(true, 0), "already on the wire");
-        assert!(f.arrived(5, 1));
-        assert!(!f.landed(Some("a"), true), "no next was waiting");
+        assert!(!f.start(true, FILL_AHEAD + 1, Some("e")), "plenty left");
+        assert!(!f.start(false, 0, Some("e")), "not refillable");
+        assert!(f.start(true, FILL_AHEAD, Some("e")), "the end in sight: fetch now");
+        assert!(!f.start(true, 0, Some("e")), "already on the wire");
+        assert!(f.arrived(5, Some("e")), "the end is where it was, however far the user is from it");
+        assert!(!f.landed(Some("a"), true, 0), "no next was waiting");
         assert!(!f.in_flight());
-        assert!(f.start(true, 0));
-        assert!(!f.arrived(0, 0), "nothing came");
-        assert!(f.start(true, 0), "and the next move may try again");
-        assert!(!f.arrived(3, 2), "the queue was filled meanwhile");
+        assert!(f.start(true, 0, Some("e")));
+        assert!(!f.arrived(0, Some("e")), "nothing came");
+        assert!(f.start(true, 0, Some("e")), "and the next move may try again");
+        assert!(!f.arrived(3, Some("added")), "the queue was given songs meanwhile");
+        assert!(f.start(true, 1, Some("e")));
+        assert!(!f.arrived(3, None), "the queue was emptied");
     }
 
     #[test]
     fn a_next_at_the_end_is_taken_when_the_songs_land() {
         let mut f = Refill::new();
-        assert!(!f.next(false, true, Some("last")));
-        assert!(f.start(true, 0));
-        assert!(f.arrived(3, 0));
-        assert!(f.landed(Some("last"), true));
+        assert!(!f.next(false, true, Some("last"), 0));
+        assert!(f.start(true, 0, Some("last")));
+        assert!(f.skip_waiting(Some("last"), 10), "a screen may show the skip on its way");
+        assert!(f.arrived(3, Some("last")));
+        assert!(f.landed(Some("last"), true, 800));
         // Moved on meanwhile (previous, a jump): the press is dropped.
-        assert!(!f.next(false, true, Some("last")));
-        assert!(f.start(true, 0));
-        assert!(f.arrived(3, 0));
-        assert!(!f.landed(Some("other"), true));
+        assert!(!f.next(false, true, Some("last"), 1_000));
+        assert!(f.start(true, 0, Some("last")));
+        assert!(!f.skip_waiting(Some("other"), 1_010));
+        assert!(f.arrived(3, Some("last")));
+        assert!(!f.landed(Some("other"), true, 1_200));
         // A press while a fetch is out waits for it; a press with a song after clears the waiting one.
-        assert!(f.start(true, 1));
-        assert!(!f.next(false, true, Some("x")));
-        assert!(!f.start(true, 0), "one on the wire");
-        assert!(f.next(true, true, Some("x")), "there is a next now");
-        assert!(f.arrived(2, 1));
-        assert!(!f.landed(Some("x"), true), "that press was already taken");
+        assert!(f.start(true, 1, Some("y")));
+        assert!(!f.next(false, true, Some("x"), 2_000));
+        assert!(!f.start(true, 0, Some("y")), "one on the wire");
+        assert!(f.next(true, true, Some("x"), 2_100), "there is a next now");
+        assert!(f.arrived(2, Some("y")));
+        assert!(!f.landed(Some("x"), true, 2_200), "that press was already taken");
         // A queue that cannot be refilled remembers nothing.
-        assert!(!f.next(false, false, Some("r")));
-        assert!(f.start(true, 0));
-        assert!(f.arrived(1, 0));
-        assert!(!f.landed(Some("r"), true));
+        assert!(!f.next(false, false, Some("r"), 3_000));
+        assert!(!f.skip_waiting(Some("r"), 3_000));
+        assert!(f.start(true, 0, Some("r")));
+        assert!(f.arrived(1, Some("r")));
+        assert!(!f.landed(Some("r"), true, 3_100));
         // Nothing came: the waiting next goes with the fetch.
-        assert!(!f.next(false, true, Some("y")));
-        assert!(f.start(true, 0));
-        assert!(!f.arrived(0, 0));
-        assert!(f.start(true, 0));
-        assert!(f.arrived(1, 0));
-        assert!(!f.landed(Some("y"), true));
+        assert!(!f.next(false, true, Some("y"), 4_000));
+        assert!(f.start(true, 0, Some("y")));
+        assert!(!f.arrived(0, Some("y")));
+        assert!(f.start(true, 0, Some("y")));
+        assert!(f.arrived(1, Some("y")));
+        assert!(!f.landed(Some("y"), true, 4_100));
         // Landed with nowhere to go (the songs went in but the player cannot step): no skip.
-        assert!(!f.next(false, true, Some("z")));
-        assert!(f.start(true, 0));
-        assert!(f.arrived(1, 0));
-        assert!(!f.landed(Some("z"), false));
+        assert!(!f.next(false, true, Some("z"), 5_000));
+        assert!(f.start(true, 0, Some("z")));
+        assert!(f.arrived(1, Some("z")));
+        assert!(!f.landed(Some("z"), false, 5_100));
+    }
+
+    #[test]
+    fn a_next_at_the_end_expires_and_counts_once() {
+        // The phone's case: the songs took 4.6 s, the user had settled on the song. They go in; no skip.
+        let mut f = Refill::new();
+        assert!(!f.next(false, true, Some("fpt"), 10_000));
+        assert!(f.start(true, 0, Some("fpt")));
+        assert!(f.skip_waiting(Some("fpt"), 10_000 + NEXT_KEPT_MS));
+        assert!(!f.skip_waiting(Some("fpt"), 10_001 + NEXT_KEPT_MS), "the wait shows no longer than it holds");
+        assert!(f.arrived(15, Some("fpt")), "the songs still go in");
+        assert!(!f.landed(Some("fpt"), true, 14_600), "a press 4.6 s old is not taken");
+        // A fast answer: taken.
+        assert!(!f.next(false, true, Some("a"), 20_000));
+        assert!(f.start(true, 0, Some("a")));
+        assert!(f.arrived(15, Some("a")));
+        assert!(f.landed(Some("a"), true, 20_000 + NEXT_KEPT_MS), "at the edge of the window still");
+        // Mashed: six presses, one skip, the window counted from the last of them.
+        assert!(!f.next(false, true, Some("b"), 30_000));
+        assert!(f.start(true, 0, Some("b")));
+        for k in 1..6 {
+            assert!(!f.next(false, true, Some("b"), 30_000 + k * 150));
+            assert!(!f.start(true, 0, Some("b")), "one fetch for all of them");
+        }
+        assert!(f.arrived(15, Some("b")));
+        assert!(f.landed(Some("b"), true, 30_750 + NEXT_KEPT_MS - 1), "within the window of the last press");
+        assert!(!f.landed(Some("b"), true, 30_750 + NEXT_KEPT_MS - 1), "and only once");
+        // Mashed and then the answer was slow: nothing.
+        assert!(!f.next(false, true, Some("c"), 40_000));
+        assert!(f.start(true, 0, Some("c")));
+        assert!(!f.next(false, true, Some("c"), 40_300));
+        assert!(f.arrived(15, Some("c")));
+        assert!(!f.landed(Some("c"), true, 40_301 + NEXT_KEPT_MS));
     }
 
     #[test]

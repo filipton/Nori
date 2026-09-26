@@ -1,6 +1,9 @@
 //! Level measurements at the native rate: BS.1770 K-weighted loudness (integrated, gated), plain RMS for silence
-//! trimming, and the MixRamp points. Everything is accumulated in 100 ms blocks while the audio streams past, so
-//! the whole track costs two biquads per sample and one float per block.
+//! trimming, and the MixRamp points. The `ebur128` crate K-weights the audio and measures each 100 ms block of it
+//! while the audio streams past; the gating and the MixRamp windows are read from those blocks once the whole
+//! track is in, so the track costs one filter per sample and one float per block.
+
+use ebur128::{EbuR128, Mode};
 
 /// Block length for every level measurement.
 pub const BLOCK_MS: i64 = 100;
@@ -9,49 +12,16 @@ pub const SILENCE_DB: f64 = -55.0;
 /// MixRamp threshold relative to integrated loudness, dB.
 pub const MIXRAMP_DB: f64 = -17.0;
 
-#[derive(Clone, Copy, Default)]
-struct Biquad {
-    b: [f64; 3],
-    a: [f64; 2],
-    s: [f64; 2],
-}
-
-impl Biquad {
-    #[inline]
-    fn run(&mut self, x: f64) -> f64 {
-        let y = self.b[0] * x + self.s[0];
-        self.s[0] = self.b[1] * x - self.a[0] * y + self.s[1];
-        self.s[1] = self.b[2] * x - self.a[1] * y;
-        y
-    }
-}
-
-/// The two BS.1770 K-weighting stages for any sample rate (the libebur128 derivation).
-fn k_weighting(rate: f64) -> [Biquad; 2] {
-    use std::f64::consts::PI;
-    let (f0, g, q) = (1681.974450955533, 3.999843853973347, 0.7071752369554196);
-    let k = (PI * f0 / rate).tan();
-    let vh = 10f64.powf(g / 20.0);
-    let vb = vh.powf(0.4996667741545416);
-    let a0 = 1.0 + k / q + k * k;
-    let shelf = Biquad {
-        b: [(vh + vb * k / q + k * k) / a0, 2.0 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0],
-        a: [2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0],
-        s: [0.0; 2],
-    };
-    let (f0, q) = (38.13547087602444, 0.5003270373238773);
-    let k = (PI * f0 / rate).tan();
-    let a0 = 1.0 + k / q + k * k;
-    let hp = Biquad { b: [1.0, -2.0, 1.0], a: [2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0], s: [0.0; 2] };
-    [shelf, hp]
-}
-
-/// Streaming 100 ms block meter.
+/// Streaming 100 ms block meter: each block's mean square, K-weighted (by ebur128) and plain.
+///
+/// ebur128's own integrated loudness (its `Mode::I`) is not asked for: it sums the last 400 ms again at every
+/// 100 ms step, which made the meter 75 % dearer; [`integrated`] gates the same windows from the blocks and
+/// reads what it does (`integrated_reads_what_ebur128_does`).
 pub struct Meter {
-    k: [Biquad; 2],
+    r128: EbuR128,
+    /// Samples per block: ebur128's own 100 ms step.
     block: usize,
     n: usize,
-    acc_k: f64,
     acc_raw: f64,
     /// Mean square per block, K-weighted.
     pub blocks_k: Vec<f32>,
@@ -61,37 +31,60 @@ pub struct Meter {
 
 impl Meter {
     pub fn new(rate: f64, expected_blocks: usize) -> Self {
+        let rate = (rate.round() as u32).clamp(16, 2_822_400);
         Meter {
-            k: k_weighting(rate),
-            block: ((rate * BLOCK_MS as f64 / 1000.0).round() as usize).max(1),
+            r128: EbuR128::new(1, rate, Mode::M).expect("one channel at a rate ebur128 takes"),
+            block: (rate as usize + 5) / 10,
             n: 0,
-            acc_k: 0.0,
             acc_raw: 0.0,
             blocks_k: Vec::with_capacity(expected_blocks),
             blocks_raw: Vec::with_capacity(expected_blocks),
         }
     }
 
-    #[inline]
-    pub fn push(&mut self, x: f32) {
-        let x = x as f64;
-        let s = self.k[0].run(x);
-        let y = self.k[1].run(s);
-        self.acc_k += y * y;
-        self.acc_raw += x * x;
-        self.n += 1;
-        if self.n == self.block {
-            self.flush_block();
+    /// Mono samples in [-1, 1]; a sample that is not a number counts as silence.
+    pub fn feed(&mut self, mut x: &[f32]) {
+        while !x.is_empty() {
+            let (part, rest) = x.split_at((self.block - self.n).min(x.len()));
+            // A NaN or an infinity makes the sum one too: only then are the samples looked at one by one.
+            let raw = sum_of_squares(part);
+            if raw.is_finite() {
+                self.add(part, raw);
+            } else {
+                let mut clean = [0f32; 256];
+                for c in part.chunks(clean.len()) {
+                    for (d, v) in clean.iter_mut().zip(c) {
+                        *d = if v.is_finite() { *v } else { 0.0 };
+                    }
+                    let clean = &clean[..c.len()];
+                    self.add(clean, sum_of_squares(clean));
+                }
+            }
+            if self.n == self.block {
+                self.flush_block();
+            }
+            x = rest;
         }
+    }
+
+    fn add(&mut self, x: &[f32], raw: f64) {
+        // Only an empty slice or a count of samples ebur128 cannot take fails: neither happens here.
+        let _ = self.r128.add_frames_f32(x);
+        self.acc_raw += raw;
+        self.n += x.len();
     }
 
     fn flush_block(&mut self) {
         if self.n == 0 {
             return;
         }
-        self.blocks_k.push((self.acc_k / self.n as f64) as f32);
+        // The K-weighted mean square of the last `n` samples, which ebur128 keeps filtered.
+        let window_ms = (self.n as u64 * 1000 / self.r128.rate() as u64).max(1) as u32;
+        let lufs = self.r128.loudness_window(window_ms).unwrap_or(f64::NEG_INFINITY);
+        let ms = if lufs.is_finite() { 10f64.powf((lufs + 0.691) / 10.0) } else { 0.0 };
+        self.blocks_k.push(ms as f32);
         self.blocks_raw.push((self.acc_raw / self.n as f64) as f32);
-        (self.acc_k, self.acc_raw, self.n) = (0.0, 0.0, 0);
+        (self.acc_raw, self.n) = (0.0, 0);
     }
 
     /// Closes a partial last block when it is at least a quarter full; a shorter one would read as a false fade.
@@ -99,8 +92,28 @@ impl Meter {
         if self.n * 4 >= self.block {
             self.flush_block();
         }
-        (self.acc_k, self.acc_raw, self.n) = (0.0, 0.0, 0);
+        (self.acc_raw, self.n) = (0.0, 0);
     }
+
+    /// Ready for the next song, keeping what it has allocated.
+    pub fn reset(&mut self) {
+        self.r128.reset();
+        (self.acc_raw, self.n) = (0.0, 0);
+        self.blocks_k.clear();
+        self.blocks_raw.clear();
+    }
+}
+
+/// Sum of the squares, in eight lanes so it vectorises.
+fn sum_of_squares(x: &[f32]) -> f64 {
+    let mut lanes = [0f64; 8];
+    let mut chunks = x.chunks_exact(8);
+    for c in &mut chunks {
+        for (l, v) in lanes.iter_mut().zip(c) {
+            *l += *v as f64 * *v as f64;
+        }
+    }
+    chunks.remainder().iter().map(|v| *v as f64 * *v as f64).sum::<f64>() + lanes.iter().sum::<f64>()
 }
 
 fn lufs_of(mean_square: f64) -> f64 {
@@ -189,7 +202,7 @@ mod tests {
 
     fn meter(x: &[f32], rate: f64) -> Meter {
         let mut m = Meter::new(rate, 0);
-        x.iter().for_each(|v| m.push(*v));
+        x.chunks(1000).for_each(|c| m.feed(c));
         m.finish();
         m
     }
@@ -208,6 +221,49 @@ mod tests {
         }
         let m = meter(&sine(997.0, 0.1, 5.0, 44100.0), 44100.0);
         assert!((integrated(&m.blocks_k) + 23.01).abs() < 0.1);
+    }
+
+    #[test]
+    fn integrated_reads_what_ebur128_does() {
+        let rate = 44100.0;
+        let mut steps = sine(440.0, 0.5, 10.0, rate);
+        steps.extend(sine(440.0, 0.02, 10.0, rate)); // below the relative gate
+        steps.extend(vec![0f32; 44100]); // below the absolute one
+        steps.extend(sine(3000.0, 0.2, 7.3, rate));
+        let mut seed = 1u32;
+        let noise: Vec<f32> = (0..44100 * 30)
+            .map(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed as f32 / u32::MAX as f32 - 0.5) * (0.05 + 0.4 * ((i as f32 / 44100.0 * 0.3).sin().abs()))
+            })
+            .collect();
+        for (name, x, rate) in [("997 Hz", sine(997.0, 0.3, 5.0, 48000.0), 48000.0), ("steps", steps, rate), ("noise", noise, rate)] {
+            let mut r = EbuR128::new(1, rate as u32, Mode::I).unwrap();
+            r.add_frames_f32(&x).unwrap();
+            let theirs = r.loudness_global().unwrap();
+            let ours = integrated(&meter(&x, rate).blocks_k);
+            assert!((ours - theirs).abs() < 0.01, "{name}: {ours} against ebur128's {theirs}");
+        }
+    }
+
+    #[test]
+    fn slices_of_any_length_and_samples_that_are_not_numbers() {
+        let rate = 44100.0;
+        let x = sine(440.0, 0.5, 3.0, rate);
+        let whole = meter(&x, rate);
+        let mut m = Meter::new(rate, 0);
+        for c in x.chunks(777) {
+            m.feed(c);
+        }
+        m.finish();
+        assert_eq!((&m.blocks_k, &m.blocks_raw), (&whole.blocks_k, &whole.blocks_raw));
+
+        let (mut with_nan, mut with_zero) = (x.clone(), x);
+        for i in [10_000, 10_001, 50_000] {
+            (with_nan[i], with_zero[i]) = (if i == 50_000 { f32::INFINITY } else { f32::NAN }, 0.0);
+        }
+        let (a, b) = (meter(&with_nan, rate), meter(&with_zero, rate));
+        assert_eq!((&a.blocks_k, &a.blocks_raw), (&b.blocks_k, &b.blocks_raw));
     }
 
     #[test]

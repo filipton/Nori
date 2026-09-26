@@ -9,11 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 # The Kotlin bindings go through JNI (uniffi-bindgen-kotlin-jni), which is only on uniffi's main branch so
-# far. Every uniffi crate has to come from one revision; the JNI runtime is a copy of this revision's, in
-# crates/uniffi-jni-runtime. Without default features uniffi's macros emit no scaffolding of their own:
-# crates/android generates the JNI one.
+# far. Every uniffi crate has to come from one revision, the JNI runtime included (crates/uniffi-jni-runtime
+# puts the app's two Android changes over it). Without default features uniffi's macros emit no scaffolding of
+# their own: crates/android generates the JNI one. A first build fetches this repository once; cargo keeps it.
 uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e", default-features = false }
 uniffi-bindgen-kotlin-jni = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e" }
+uniffi-bindgen-kotlin-jni-runtime = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e" }
 
 # Signalsmith Stretch is about ten times slower unoptimised; keep it fast in debug builds and tests too.
 [profile.dev.package.signalsmith-stretch]

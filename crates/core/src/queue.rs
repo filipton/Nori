@@ -6,8 +6,9 @@ use crate::Core;
 pub use nori_queue::queue::*;
 
 impl Core {
-    /// Saves the queue for next time from its ids (radio streams are left out: they do not come back).
-    pub(crate) fn queue_save(&self, ids: Vec<String>, index: u32, position_ms: u64) -> crate::Result<()> {
+    /// Saves the queue for next time from its ids (radio streams are left out: they do not come back),
+    /// with the page it was started from.
+    pub(crate) fn queue_save(&self, ids: Vec<String>, index: u32, position_ms: u64, origin: Option<crate::PageOrigin>) -> crate::Result<()> {
         let (songs, index) = with(|s| {
             let mut kept = Vec::with_capacity(ids.len());
             let mut at = 0;
@@ -24,6 +25,6 @@ impl Core {
             }
             (kept, at.min(index))
         });
-        self.save_queue(crate::PlayQueue { index: index.min(songs.len().saturating_sub(1) as u32), songs, position_ms })
+        self.save_queue(crate::PlayQueue { index: index.min(songs.len().saturating_sub(1) as u32), songs, position_ms, origin })
     }
 }

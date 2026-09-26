@@ -1712,7 +1712,8 @@ mod tests {
         assert!(fresh.third_party_lookups && fresh.lyrics_online && fresh.auto_eq_download);
         assert!(!fresh.motion_artwork, "moving covers are heavier and stay off");
         let asked: Vec<&str> = crate::lyrics_sources::lyrics_lookup(&fresh).services.iter().map(|s| s.name()).collect();
-        assert_eq!(asked, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"], "nine on, four of them asked first");
+        let keyless: Vec<String> = crate::lyrics_sources::default_order().into_iter().filter(|n| crate::lyrics_sources::LyricsService::named(n).is_some_and(|s| s.needs().is_none())).collect();
+        assert_eq!(asked, keyless, "every service on; the ones that need a key wait for it");
         assert_eq!(fresh, StoredPrefs::default());
         // An install that stored the lookups off keeps them off: no migration.
         let kept = load(&save(&StoredPrefs { third_party_lookups: false, auto_eq_download: false, ..StoredPrefs::default() }));
@@ -1739,11 +1740,14 @@ mod tests {
     #[test]
     fn lyrics_services_are_switched_ranked_and_kept() {
         let p = StoredPrefs::default();
-        let on = set_by_name(&p, "lyricsService:portato", "true").unwrap().prefs;
-        assert_eq!(on.lyrics_on, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB", "PORTATO"]);
+        let all = p.lyrics_on.len();
+        let off = set_by_name(&p, "lyricsService:portato", "false").unwrap().prefs;
+        assert!(!off.lyrics_on.iter().any(|n| n == "PORTATO") && off.lyrics_on.len() == all - 1);
+        let on = set_by_name(&off, "lyricsService:portato", "true").unwrap().prefs;
+        assert!(on.lyrics_on.iter().any(|n| n == "PORTATO") && on.lyrics_on.len() == all);
         assert_eq!(on.lyrics_order, p.lyrics_order, "a switch never moves a service");
         let off = set_by_name(&on, "lyricsService:paxsenix", "false").unwrap().prefs;
-        assert_eq!((off.lyrics_order.clone(), off.lyrics_on.len()), (p.lyrics_order.clone(), 9));
+        assert_eq!((off.lyrics_order.clone(), off.lyrics_on.len()), (p.lyrics_order.clone(), all - 1));
         assert!(set_by_name(&p, "lyricsService:nobody", "true").is_none(), "no such service");
         let at = |o: &[String], n: &str| o.iter().position(|x| x == n).unwrap();
         let moved = set_by_name(&on, "lyricsMove", "LRCLIB:-1").unwrap().prefs;
@@ -1760,7 +1764,7 @@ mod tests {
         let keyed = set_by_name(&placed, "paxSenixKey", "  k  ").unwrap().prefs;
         let back = load(&save(&keyed));
         assert_eq!((back.lyrics_on, back.lyrics_order, back.paxsenix_key), (keyed.lyrics_on.clone(), keyed.lyrics_order.clone(), "k".to_string()));
-        assert_eq!(load(&HashMap::new()).lyrics_on, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"], "nothing stored: the defaults");
+        assert_eq!(load(&HashMap::new()).lyrics_on, crate::lyrics_sources::default_order(), "nothing stored: the defaults, every service");
         assert_eq!(load(&HashMap::new()).lyrics_order, crate::lyrics_sources::default_order());
     }
 

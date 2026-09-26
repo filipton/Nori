@@ -6,7 +6,10 @@
 //! cap is one budget for the songs kept: a song fetched ahead holds what the one playing leaves of it
 //! (`Loader::limit`), and the rest in a burst of its own once it plays.
 //! Given a stream cache entry to fill, the loader writes each burst into it as it comes; a song heard
-//! again then plays from the disk and the network is not asked at all.
+//! again then plays from the disk and the network is not asked at all. Once the whole song is in the
+//! entry, the loader lets its copy in memory go and reads the entry instead: a song is a few megabytes of
+//! music and, from many a library, as many again of pictures in its tags, and the page cache has the file
+//! it has just written.
 //!
 //! A live stream (internet radio) has no end and cannot be asked for again from where it stopped, so it
 //! is not fetched in bursts: its one connection stays open for as long as it plays, and what it holds is
@@ -14,9 +17,10 @@
 //! `StreamTitle`), sent between its bytes, are taken out as they come and said once the reader passes
 //! them ([`Loader::announced`]).
 
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread::Thread;
 use std::time::Duration;
 
@@ -53,6 +57,10 @@ pub enum OpenError {
     Status(u16),
     /// The bytes could not be had now (no network, the server out of reach): asked for again.
     Failed(String),
+    /// No answer within [`stall_ms`] of asking, or no byte within it of the last: called off. A song
+    /// whose first bytes never come fails of it at once, as the network's failure; a body that stalls
+    /// half way is asked for again from where it stopped.
+    TimedOut,
 }
 
 impl From<String> for OpenError {
@@ -74,7 +82,328 @@ impl std::fmt::Display for OpenError {
             OpenError::PastEnd { len: None } => f.write_str("past the end"),
             OpenError::Status(status) => write!(f, "HTTP {status}"),
             OpenError::Failed(why) => f.write_str(why),
+            OpenError::TimedOut => write!(f, "no answer within {} ms", stall_ms()),
         }
+    }
+}
+
+// ---- requests called off ----
+
+/// Longest a request may wait for its answer, or for its next byte, before it is called off
+/// ([`OpenError::TimedOut`]): well under the reader's own [`READ_TIMEOUT`], so a song whose server never
+/// answers fails of the network, not of a reader that gave up. A song on octo-fiesta that it must
+/// download first answers within this, or fails as it did at the reader's timeout before.
+const STALL_MS: u64 = 20_000;
+static STALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(STALL_MS);
+
+/// How long a request may stall before it is called off, ms.
+pub fn stall_ms() -> u64 {
+    STALL.load(Ordering::Relaxed)
+}
+
+/// For tests on a virtual clock only: requests stall this long, in real time, before they are called
+/// off. Such a clock stands still while bytes are awaited, so a server paced on it can take longer in
+/// real time than any stall on a phone.
+#[doc(hidden)]
+pub fn set_stall_ms(ms: u64) {
+    STALL.store(ms, Ordering::Relaxed);
+}
+
+/// A request that may be called off from another thread: a song let go while its bytes had not come,
+/// its answer or next byte taking longer than [`stall_ms`], or crowded out by newer ones ([`MAX_ASKING`]).
+/// Handed to [`ByteSource::open_cancellable`]; the client's HTTP stack calls its own request off when
+/// told ([`Cancel::on_cancel`]), or looks at [`Cancel::cancelled`] while it waits. One per loader (and
+/// per song fetched ahead), made anew for each request ([`Cancel::begin`]).
+#[derive(Clone, Default)]
+pub struct Cancel(Arc<Called>);
+
+#[derive(Default)]
+struct Called {
+    s: Mutex<CallState>,
+}
+
+#[derive(Default)]
+struct CallState {
+    /// The song is let go: every request of it, now and to come, is off.
+    closed: bool,
+    /// This request is off; `timed_out` says it stalled.
+    off: bool,
+    timed_out: bool,
+    /// How the client calls this request off, once it is running.
+    hook: Option<Box<dyn FnOnce() + Send>>,
+    /// Called off at this moment unless it moves on first.
+    deadline: Option<std::time::Instant>,
+    watched: bool,
+    /// Its own stall, in place of [`stall_ms`] (a test's).
+    stall_ms: Option<u64>,
+}
+
+impl Cancel {
+    pub fn new() -> Cancel {
+        Cancel::default()
+    }
+
+    /// Whether the request is called off: an HTTP stack that cannot be told looks at this as it waits.
+    pub fn cancelled(&self) -> bool {
+        let s = self.0.s.lock();
+        s.closed || s.off
+    }
+
+    /// Whether it was called off for stalling.
+    pub fn timed_out(&self) -> bool {
+        self.0.s.lock().timed_out
+    }
+
+    /// The client's way of calling its running request off (cancelling the platform's call), run at once
+    /// if it is off already. One at a time: a request's own replaces the one before.
+    pub fn on_cancel(&self, off: impl FnOnce() + Send + 'static) {
+        let mut s = self.0.s.lock();
+        if s.closed || s.off {
+            drop(s);
+            off();
+            return;
+        }
+        s.hook = Some(Box::new(off));
+    }
+
+    /// A new request begins: whatever called the last one off is forgotten (not a song let go), and it
+    /// is called off unless it answers within [`stall_ms`].
+    pub(crate) fn begin(&self) {
+        self.stalls(true);
+    }
+
+    /// The request moved on (its answer, a byte): called off unless the next comes within [`stall_ms`].
+    pub(crate) fn moved(&self) {
+        self.stalls(false);
+    }
+
+    /// A request that stalls after `ms` rather than [`stall_ms`]: for a test on the wall clock.
+    #[cfg(test)]
+    fn stalling_after(ms: u64) -> Cancel {
+        let c = Cancel::new();
+        c.0.s.lock().stall_ms = Some(ms);
+        c
+    }
+
+    /// Watched from now on: called off unless it moves within its stall. `anew`: a new request, which
+    /// forgets whatever called the one before off, in the same step as its deadline is set, so the one
+    /// before's cannot land on it.
+    fn stalls(&self, anew: bool) {
+        let mut s = self.0.s.lock();
+        if anew {
+            s.off = false;
+            s.timed_out = false;
+            s.hook = None;
+        }
+        let ms = s.stall_ms.unwrap_or_else(stall_ms);
+        s.deadline = Some(std::time::Instant::now() + Duration::from_millis(ms));
+        if !s.watched {
+            s.watched = true;
+            drop(s);
+            watch(Arc::downgrade(&self.0));
+        }
+    }
+
+    /// The request is over (its body let go): nothing to call off, nothing to watch.
+    pub(crate) fn end(&self) {
+        let mut s = self.0.s.lock();
+        s.hook = None;
+        s.deadline = None;
+    }
+
+    /// Calls the running request off, `stalled` or not.
+    pub(crate) fn call_off(&self, stalled: bool) {
+        let hook = {
+            let mut s = self.0.s.lock();
+            s.off = true;
+            s.timed_out |= stalled;
+            s.deadline = None;
+            s.hook.take()
+        };
+        if let Some(h) = hook {
+            h();
+        }
+    }
+
+    /// The song is let go: its request is called off, and any it would make.
+    pub(crate) fn close(&self) {
+        self.0.s.lock().closed = true;
+        self.call_off(false);
+    }
+
+    /// Whether the song is let go.
+    pub(crate) fn closed(&self) -> bool {
+        self.0.s.lock().closed
+    }
+}
+
+/// The requests waiting for an answer or a byte, and the one thread that calls off those that stall: it
+/// lives only while there are any, and sleeps until the first of them is due.
+#[derive(Default)]
+struct Watch {
+    calls: Vec<std::sync::Weak<Called>>,
+    running: bool,
+}
+
+static WATCH: Mutex<Watch> = Mutex::new(Watch { calls: Vec::new(), running: false });
+static WATCH_CV: Condvar = Condvar::new();
+
+fn watch(call: std::sync::Weak<Called>) {
+    let mut w = WATCH.lock();
+    w.calls.push(call);
+    if w.running {
+        WATCH_CV.notify_all();
+        return;
+    }
+    w.running = true;
+    drop(w);
+    if std::thread::Builder::new().name("nori-stall".into()).spawn(watching).is_err() {
+        WATCH.lock().running = false;
+    }
+}
+
+fn watching() {
+    let mut w = WATCH.lock();
+    loop {
+        let now = std::time::Instant::now();
+        let mut due = Vec::new();
+        let mut next: Option<std::time::Instant> = None;
+        w.calls.retain(|c| {
+            let Some(c) = c.upgrade() else { return false };
+            let mut s = c.s.lock();
+            match s.deadline {
+                Some(at) if at <= now => {
+                    due.push(c.clone());
+                    s.watched = false;
+                    false
+                }
+                Some(at) => {
+                    next = Some(next.map_or(at, |n| n.min(at)));
+                    true
+                }
+                None => {
+                    s.watched = false;
+                    false
+                }
+            }
+        });
+        if !due.is_empty() {
+            drop(w);
+            for c in due {
+                Cancel(c).call_off(true);
+            }
+            w = WATCH.lock();
+            continue;
+        }
+        match next {
+            Some(at) => {
+                WATCH_CV.wait_until(&mut w, at);
+            }
+            None => {
+                w.running = false;
+                return;
+            }
+        }
+    }
+}
+
+/// Requests the player and the fetching ahead have waiting for an answer at once. A server that never
+/// answers must not take every request the platform lets run to it (OkHttp's per-host cap, a
+/// connection's HTTP/2 streams): past this many the oldest still waiting is called off, the newest
+/// asked being the one wanted.
+pub const MAX_ASKING: usize = 4;
+
+static ASKING: Asking = Asking(Mutex::new(Vec::new()));
+static CROWDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// For tests that run many engines in one process only: their requests are not counted together. The
+/// most waiting at once is one player's (and one fetching ahead's), not every engine's in a test binary.
+#[doc(hidden)]
+pub fn set_crowding(on: bool) {
+    CROWDING.store(on, Ordering::Relaxed);
+}
+
+/// The requests waiting for an answer, oldest first.
+struct Asking(Mutex<Vec<Cancel>>);
+
+impl Asking {
+    /// `cancel`'s request is about to be made: it counts among the ones waiting for an answer until
+    /// [`Asking::answered`], and the oldest waiting is called off when there are too many.
+    fn asking(&self, cancel: &Cancel) {
+        let crowded = {
+            let mut a = self.0.lock();
+            a.retain(|c| !c.cancelled());
+            a.push(cancel.clone());
+            if a.len() > MAX_ASKING {
+                Some(a.remove(0))
+            } else {
+                None
+            }
+        };
+        if let Some(c) = crowded {
+            c.call_off(false);
+        }
+    }
+
+    fn answered(&self, cancel: &Cancel) {
+        self.0.lock().retain(|c| !Arc::ptr_eq(&c.0, &cancel.0));
+    }
+}
+
+/// `source`'s answer for `url` (under the cache key `key`, when it keeps what it reads) from `from`, made
+/// as `cancel`'s request: called off when it stalls, is crowded out or the song is let go. Its body is
+/// watched the same way as it is read.
+pub(crate) fn open_watched(source: &dyn ByteSource, url: &str, key: Option<&str>, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+    if cancel.closed() {
+        return Err("the song is no longer wanted".into());
+    }
+    cancel.begin();
+    if CROWDING.load(Ordering::Relaxed) {
+        ASKING.asking(cancel);
+    }
+    let opened = source.open_cancellable(url, key, from, cancel);
+    ASKING.answered(cancel);
+    let stalled = cancel.timed_out();
+    match opened {
+        Ok(mut b) if !cancel.cancelled() => {
+            cancel.moved();
+            b.reader = Box::new(Watched { inner: b.reader, cancel: cancel.clone() });
+            Ok(b)
+        }
+        Ok(_) if stalled => Err(OpenError::TimedOut),
+        Ok(_) => Err("called off".into()),
+        // Called off for stalling: whatever the client made of it, it stalled.
+        Err(OpenError::Failed(_)) if stalled => Err(OpenError::TimedOut),
+        Err(e) => {
+            cancel.end();
+            Err(e)
+        }
+    }
+}
+
+/// A body read under watch: every read that brings bytes puts the stall off again, and one that ends it
+/// lets the watch go.
+struct Watched {
+    inner: Box<dyn Read + Send>,
+    cancel: Cancel,
+}
+
+impl Read for Watched {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let got = self.inner.read(buf);
+        match &got {
+            Ok(0) => self.cancel.end(),
+            Ok(_) => self.cancel.moved(),
+            Err(_) if self.cancel.timed_out() => return Err(io::Error::new(io::ErrorKind::TimedOut, OpenError::TimedOut.to_string())),
+            Err(_) => {}
+        }
+        got
+    }
+}
+
+impl Drop for Watched {
+    fn drop(&mut self) {
+        self.cancel.end();
     }
 }
 
@@ -91,6 +420,21 @@ pub trait ByteSource: Send + Sync {
         self.open(url, from)
     }
 
+    /// [`ByteSource::open`] (or [`ByteSource::open_keyed`] with a cache `key`) as a request that may be
+    /// called off from another thread while it waits for its answer or its body's bytes: the song let go,
+    /// its answer or a byte later than [`stall_ms`], newer requests crowding it out. The client tells its
+    /// HTTP stack through [`Cancel::on_cancel`] (cancelling the call, which makes the open or the body's
+    /// read fail at once), or looks at [`Cancel::cancelled`] while it waits. A request left running holds
+    /// what the platform has only so much of (a connection, a slot of its dispatcher, a cache entry's
+    /// lock) until the server gives up on it, and a server that never answers never does. By default the
+    /// request is not told, and runs on until it ends.
+    fn open_cancellable(&self, url: &str, key: Option<&str>, from: u64, _cancel: &Cancel) -> Result<Body, OpenError> {
+        match key {
+            Some(k) => self.open_keyed(url, k, from),
+            None => self.open(url, from),
+        }
+    }
+
     /// A live stream from where it is now, asking for the station's announcements between its bytes
     /// (the `Icy-MetaData: 1` header): the body, and how many bytes of music come between two
     /// announcements (the answer's `icy-metaint`; none when the server sends none).
@@ -102,13 +446,14 @@ pub trait ByteSource: Send + Sync {
 /// `source`'s body of `url` read from `from` on: a whole answer from a server that would not do ranges
 /// is read past what comes before. One that ends before `from` is [`OpenError::PastEnd`] with where it
 /// ended; one that breaks on the way is a failure.
-fn open_at(source: &dyn ByteSource, url: &str, from: u64) -> Result<Body, OpenError> {
-    let mut b = source.open(url, from)?;
+fn open_at(source: &dyn ByteSource, url: &str, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+    let mut b = open_watched(source, url, None, from, cancel)?;
     if b.start < from {
         let want = from - b.start;
         match io::copy(&mut (&mut b.reader).take(want), &mut io::sink()) {
             Ok(n) if n == want => {}
             Ok(n) => return Err(OpenError::PastEnd { len: Some(b.start + n) }),
+            Err(_) if cancel.timed_out() => return Err(OpenError::TimedOut),
             Err(e) => return Err(OpenError::Failed(e.to_string())),
         }
         b.len = b.len.filter(|&l| l >= from);
@@ -180,6 +525,9 @@ struct State {
     /// Bytes `base..base + data.len()` of the resource.
     base: u64,
     data: Vec<u8>,
+    /// The whole song, read from its stream cache entry rather than kept in `data` (empty then), once
+    /// the entry has all of it.
+    disk: Option<Arc<File>>,
     len: Option<u64>,
     /// Loaded to the end of the resource.
     done: bool,
@@ -250,7 +598,10 @@ impl State {
     }
 
     fn end(&self) -> u64 {
-        self.base + self.data.len() as u64
+        match (&self.disk, self.len) {
+            (Some(_), Some(len)) => len,
+            _ => self.base + self.data.len() as u64,
+        }
     }
 
     fn ahead(&self) -> u64 {
@@ -277,6 +628,8 @@ impl State {
 struct Loaded {
     state: Mutex<State>,
     cv: Condvar,
+    /// The request running for it: called off when the song is let go.
+    cancel: Cancel,
 }
 
 /// A song being loaded. The library and the song's readers share it; when the last of them lets go
@@ -295,7 +648,8 @@ impl Loader {
     /// (AutoMix's measuring, `crate::arriving`): told the song was whole only when every byte of it came
     /// in order, and given up at a jump.
     pub fn start_within(source: Arc<dyn ByteSource>, url: String, load: [i64; 5], duration_ms: Option<i64>, keep: Option<Keep>, budget: Option<u64>, taker: Option<Listening>) -> Arc<Loader> {
-        let loaded = Arc::new(Loaded { state: Mutex::new(State { budget, ..State::default() }), cv: Condvar::new() });
+        let loaded = Arc::new(Loaded { state: Mutex::new(State { budget, ..State::default() }), cv: Condvar::new(), cancel: Cancel::new() });
+        alive(&loaded);
         let l = loaded.clone();
         std::thread::Builder::new()
             .name("nori-load".into())
@@ -306,7 +660,8 @@ impl Loader {
 
     /// A live stream (internet radio) at `url`, played for as long as it is held: see the module's words.
     pub fn live(source: Arc<dyn ByteSource>, url: String) -> Arc<Loader> {
-        let loaded = Arc::new(Loaded { state: Mutex::new(State { live: true, ..State::default() }), cv: Condvar::new() });
+        let loaded = Arc::new(Loaded { state: Mutex::new(State { live: true, ..State::default() }), cv: Condvar::new(), cancel: Cancel::new() });
+        alive(&loaded);
         let l = loaded.clone();
         std::thread::Builder::new().name("nori-live".into()).spawn(move || l.run_live(&*source, &url)).expect("a thread for loading");
         Arc::new(Loader(loaded))
@@ -324,7 +679,10 @@ impl Loader {
     pub fn words(&self) -> String {
         let s = self.0.state.lock();
         let len = s.len.map_or("?".to_string(), |l| l.to_string());
-        let mut w = format!("{}..{} of {len} bytes, reader at {}", s.base, s.base + s.data.len() as u64, s.reader_at);
+        let mut w = format!("{}..{} of {len} bytes, reader at {}", s.base, s.end(), s.reader_at);
+        if s.disk.is_some() {
+            w.push_str(", read from the disk");
+        }
         if s.done {
             w.push_str(", loaded to its end");
         }
@@ -360,10 +718,19 @@ impl Loader {
         self.0.state.lock().data.len()
     }
 
+    /// Whether the song is read from its stream cache entry, its copy in memory let go.
+    pub fn on_disk(&self) -> bool {
+        self.0.state.lock().disk.is_some()
+    }
+
     /// Bytes it will hold once its burst is in: the rest of the song from where it keeps it, or what is
-    /// here while the length is not known yet; never more than its window's cap.
+    /// here while the length is not known yet; never more than its window's cap. None once it reads the
+    /// song from the disk.
     pub fn holding(&self) -> u64 {
         let s = self.0.state.lock();
+        if s.disk.is_some() {
+            return 0;
+        }
         let cap = s.window.map_or(u64::MAX, |w| w.cap).min(s.budget.unwrap_or(u64::MAX));
         s.len.map_or(s.data.len() as u64, |l| l.saturating_sub(s.base)).min(cap)
     }
@@ -457,9 +824,12 @@ impl Loader {
 }
 
 impl Drop for Loader {
+    /// The song is let go: its loader stops, and a request still waiting for its answer or its bytes is
+    /// called off at once rather than left to hold the platform's connection until the server gives up.
     fn drop(&mut self) {
         self.0.state.lock().closed = true;
         self.0.cv.notify_all();
+        self.0.cancel.close();
     }
 }
 
@@ -511,7 +881,12 @@ impl Loaded {
                         body = None;
                         s.done = true;
                         if let (Some(k), Some(len), None) = (keep.take(), s.len, &s.error) {
-                            k.finish(len);
+                            // All of it is in the entry: read from there, and the memory goes.
+                            let whole = s.base == 0 && s.data.len() as u64 == len;
+                            if let Some(file) = k.finish_open(len).filter(|_| whole) {
+                                s.data = Vec::new();
+                                s.disk = Some(Arc::new(file));
+                            }
                         }
                         if let Some(t) = taker.take() {
                             // A restart gave it up: what it heard came in order from the first byte.
@@ -540,7 +915,7 @@ impl Loaded {
                 s.end()
             };
             if body.is_none() {
-                match open_at(source, url, from) {
+                match open_at(source, url, from, &self.cancel) {
                     Ok(b) => {
                         let reader = b.reader;
                         go_on = false;
@@ -586,9 +961,14 @@ impl Loaded {
                         self.wake(&mut s);
                         continue;
                     }
+                    // Let go while it asked: nothing more to do.
+                    Err(_) if self.cancel.closed() => return,
                     Err(e) => {
                         failures += 1;
-                        if failures > RETRIES {
+                        // No answer in time: a server that does not answer a song is not asked again
+                        // and again while the player waits on it (octo-fiesta fetching a provider's song
+                        // it cannot have). The network's failure, as the queue's rules take it.
+                        if failures > RETRIES || e == OpenError::TimedOut {
                             let mut s = self.state.lock();
                             s.answered = if let OpenError::Status(status) = e { Some(status) } else { None };
                             s.error = Some(e.to_string());
@@ -621,7 +1001,18 @@ impl Loaded {
                         took = n;
                     }
                 }
-                Err(_) => body = None,
+                // Broken off: asked for again from where it broke. One that stalled counts as a failure,
+                // so a server that answers and then never sends gives up for good after a few.
+                Err(_) => {
+                    body = None;
+                    if self.cancel.timed_out() {
+                        failures += 1;
+                        if failures > RETRIES {
+                            s.error = Some(OpenError::TimedOut.to_string());
+                            s.done = true;
+                        }
+                    }
+                }
             }
             self.wake(&mut s);
             drop(s);
@@ -737,6 +1128,17 @@ impl Read for LoadedReader {
                 return Err(io::Error::other("the song is no longer wanted"));
             }
             let end = s.end();
+            if let Some(file) = s.disk.clone() {
+                if self.pos >= end {
+                    return Ok(0);
+                }
+                s.reader_at = self.pos;
+                drop(s);
+                let want = buf.len().min((end - self.pos) as usize);
+                let n = read_at(&file, &mut buf[..want], self.pos)?;
+                self.pos += n as u64;
+                return Ok(n);
+            }
             if self.pos >= s.base && self.pos < end {
                 let from = (self.pos - s.base) as usize;
                 let n = buf.len().min(s.data.len() - from);
@@ -776,6 +1178,54 @@ impl Read for LoadedReader {
             }
         }
     }
+}
+
+/// `buf.len()` bytes or fewer of `file` from byte `at`, leaving no place in it behind: several readers may
+/// read one song's entry at once.
+fn read_at(file: &File, buf: &mut [u8], at: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::read_at(file, buf, at);
+    #[cfg(windows)]
+    return std::os::windows::fs::FileExt::seek_read(file, buf, at);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let mut f = file;
+        f.seek(SeekFrom::Start(at))?;
+        f.read(buf)
+    }
+}
+
+/// Every song's loader still running or held, for the perf report's memory line ([`held`]).
+static ALIVE: Mutex<Vec<Weak<Loaded>>> = Mutex::new(Vec::new());
+
+fn alive(loaded: &Arc<Loaded>) {
+    let mut all = ALIVE.lock();
+    all.retain(|w| w.strong_count() > 0);
+    all.push(Arc::downgrade(loaded));
+}
+
+/// What the songs' loaders hold now: for the perf report, read at a stretch's ends only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Held {
+    /// Loaders alive: kept by the engine for a song it plays or will, or still running.
+    pub songs: u32,
+    /// Bytes they keep in memory, as allocated.
+    pub bytes: u64,
+    /// Of them, songs read from their stream cache entry, their memory let go.
+    pub on_disk: u32,
+}
+
+/// What every song's loader holds in memory now.
+pub fn held() -> Held {
+    let all: Vec<Arc<Loaded>> = ALIVE.lock().iter().filter_map(Weak::upgrade).collect();
+    let mut h = Held::default();
+    for l in all {
+        let s = l.state.lock();
+        h.songs += 1;
+        h.bytes += s.data.capacity() as u64;
+        h.on_disk += s.disk.is_some() as u32;
+    }
+    h
 }
 
 /// A live stream's body with the station's announcements taken out: every `every` bytes of music the
@@ -983,6 +1433,28 @@ mod tests {
         let all = read(&mut r, 600_000);
         assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8), "every byte, in order");
         assert_eq!(*s.opens.lock(), vec![0, ahead], "one more request, from where the budget stopped it");
+    }
+
+    #[test]
+    fn a_song_whole_in_the_stream_cache_is_read_from_there_and_its_memory_goes() {
+        let d = nori_testdir::TempDir::new("source-disk");
+        let store = Arc::new(crate::store::Store::open(d.path(), 1 << 22, Box::new(crate::store::Recent::default())).unwrap());
+        let s = server(300_000);
+        let l = Loader::start(s.clone(), "song".into(), LOAD, Some(3_000), store.writer("song:0"));
+        let mut r = l.reader();
+        let all = read(&mut r, 300_000);
+        assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8));
+        assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0, "the end");
+        assert!(l.on_disk(), "{}", l.words());
+        assert_eq!((l.held(), l.holding()), (0, 0), "nothing kept in memory");
+        assert!(l.complete());
+        // Read again from anywhere, as a seek back would.
+        let mut again = l.reader();
+        again.seek(SeekFrom::Start(123_456)).unwrap();
+        assert_eq!(read(&mut again, 10), (123_456..123_466).map(|i| i as u8).collect::<Vec<_>>());
+        assert_eq!(*s.opens.lock(), vec![0], "and the network was asked once");
+        let h = held();
+        assert!(h.on_disk >= 1 && h.songs >= 1, "{h:?}");
     }
 
     #[test]
@@ -1221,5 +1693,139 @@ mod tests {
         assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0);
         assert_eq!(l.length(), Some(2_000_000), "where the whole answer ended");
         assert!(l.error().is_none());
+    }
+
+    // ---- requests called off ----
+
+    /// A server that never answers, or answers and never sends a byte, until the request is called off
+    /// (as OkHttp's cancelled call fails): counts the requests made and the ones called off.
+    #[derive(Default)]
+    struct Silent {
+        headers: bool,
+        asked: AtomicU64,
+        called_off: Arc<AtomicU64>,
+    }
+
+    struct Nothing(Arc<AtomicBool>, Arc<AtomicU64>);
+
+    impl Nothing {
+        fn wait(&self) {
+            let until = Instant::now() + Duration::from_secs(30);
+            while !self.0.load(Ordering::Acquire) {
+                assert!(Instant::now() < until, "never called off");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            self.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Read for Nothing {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            self.wait();
+            Err(io::Error::other("Canceled"))
+        }
+    }
+
+    impl ByteSource for Silent {
+        fn open(&self, _: &str, _: u64) -> Result<Body, OpenError> {
+            unreachable!("asked as a request that may be called off")
+        }
+
+        fn open_cancellable(&self, _: &str, _: Option<&str>, from: u64, cancel: &Cancel) -> Result<Body, OpenError> {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            let off = Arc::new(AtomicBool::new(false));
+            let o = off.clone();
+            cancel.on_cancel(move || o.store(true, Ordering::Release));
+            let nothing = Nothing(off, self.called_off.clone());
+            if self.headers {
+                nothing.wait();
+                return Err("Canceled".into());
+            }
+            Ok(Body { start: from, len: Some(1_000_000), reader: Box::new(nothing) })
+        }
+    }
+
+    fn called_off(s: &Silent, n: u64) {
+        let until = Instant::now() + Duration::from_secs(10);
+        while s.called_off.load(Ordering::Relaxed) < n {
+            assert!(Instant::now() < until, "{} of {n} called off", s.called_off.load(Ordering::Relaxed));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_song_let_go_calls_off_its_request_that_never_answers_or_never_sends() {
+        for headers in [true, false] {
+            let s = Arc::new(Silent { headers, ..Silent::default() });
+            let l = Loader::start(s.clone(), "ext-1".into(), LOAD, Some(3_000), None);
+            let until = Instant::now() + Duration::from_secs(10);
+            while s.asked.load(Ordering::Relaxed) == 0 {
+                assert!(Instant::now() < until);
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            drop(l);
+            called_off(&s, 1);
+            assert_eq!(s.asked.load(Ordering::Relaxed), 1, "and not asked again (headers {headers})");
+        }
+    }
+
+    #[test]
+    fn a_request_with_no_answer_in_time_is_called_off_as_timed_out() {
+        let s = Silent { headers: true, ..Silent::default() };
+        let cancel = Cancel::stalling_after(100);
+        let t = Instant::now();
+        let got = open_watched(&s, "ext-1", None, 0, &cancel);
+        assert_eq!(got.err(), Some(OpenError::TimedOut));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        // And a body whose bytes stop: its read fails as timed out, so the loader asks again.
+        let s = Silent { headers: false, ..Silent::default() };
+        let cancel = Cancel::stalling_after(100);
+        let Ok(mut b) = open_watched(&s, "ext-1", None, 0, &cancel) else { panic!("the headers came") };
+        let e = b.reader.read(&mut [0u8; 16]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// No answer in time: the song fails at once, of the network (no error status), not after asking
+    /// again and again while the player waits on it.
+    #[test]
+    fn a_song_whose_server_does_not_answer_in_time_fails_at_once_as_the_network_s_failure() {
+        struct Late(Mutex<u32>);
+        impl ByteSource for Late {
+            fn open(&self, _: &str, _: u64) -> Result<Body, OpenError> {
+                *self.0.lock() += 1;
+                Err(OpenError::TimedOut)
+            }
+        }
+        let s = Arc::new(Late(Mutex::new(0)));
+        let l = Loader::start(s.clone(), "ext-1".into(), LOAD, Some(3_000), None);
+        let mut r = l.reader();
+        assert!(r.read(&mut [0u8; 16]).is_err());
+        assert_eq!(l.error(), Some(OpenError::TimedOut.to_string()));
+        assert_eq!(l.answered(), None, "the network's failure, not the server's");
+        assert_eq!(*s.0.lock(), 1, "asked once");
+    }
+
+    /// However many songs hang, no more than [`MAX_ASKING`] of their requests wait at once: the newest
+    /// asked is the one wanted, the oldest waiting is called off.
+    #[test]
+    fn past_the_most_waiting_at_once_the_oldest_request_is_called_off() {
+        let asking = Asking(Mutex::new(Vec::new()));
+        let off = Arc::new(Mutex::new(Vec::new()));
+        let calls: Vec<Cancel> = (0..MAX_ASKING + 2)
+            .map(|k| {
+                let c = Cancel::new();
+                let o = off.clone();
+                c.on_cancel(move || o.lock().push(k));
+                asking.asking(&c);
+                c
+            })
+            .collect();
+        assert_eq!(*off.lock(), [0, 1], "the two oldest called off");
+        assert!(calls[2..].iter().all(|c| !c.cancelled()), "the newest go on");
+        // One answered makes room: the next asked calls nobody off.
+        asking.answered(&calls[5]);
+        let c = Cancel::new();
+        asking.asking(&c);
+        assert_eq!(off.lock().len(), 2);
     }
 }

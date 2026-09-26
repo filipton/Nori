@@ -184,10 +184,12 @@ crates/android/ Rust, Android only: the library the app loads (package nori-andr
                 over arrays or direct buffers `@FastNative`. A new door goes into its module's `Class`
                 table with the JVM signature javap shows; the Kotlin `external fun` and the Rust
                 function must agree on the annotation (critical: no `env`/class parameters).
-crates/uniffi-jni-runtime/ uniffi's JNI runtime, copied from the revision Cargo.toml pins, with two
-                changes marked NORI: a class looked up from a thread the core started is found through the
-                app's class loader, and a thread the runtime attached to the JVM is detached when it ends
-                (Android aborts otherwise). Take upstream's again when the revision moves, and keep both.
+crates/uniffi-jni-runtime/ uniffi's JNI runtime (package nori-uniffi-jni-runtime): upstream's crate, a git
+                dependency at the revision Cargo.toml pins, re-exported whole with two changes marked NORI
+                over it: a class looked up from a thread the core started is found through the app's class
+                loader (loader.rs, and caching.rs, upstream's with three lines changed), and a thread the
+                runtime attached to the JVM is detached when it ends (attach.rs; Android aborts otherwise).
+                Take upstream's caching.rs and attach.rs again when the revision moves, and keep both.
 core/           Android library, no UI: net/, data/ (Library = the repository; CoverLoader, the covers'
                 Bitmaps), playback/ (the media3 session service, DAC, scrobbling; RustPlayer.kt is
                 nori-engine as a media3 player, the app's one player - ExoPlayer plays only the moving

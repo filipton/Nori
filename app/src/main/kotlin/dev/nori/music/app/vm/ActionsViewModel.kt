@@ -14,6 +14,8 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.model.OriginKind
+import dev.nori.music.ffi.model.PageOrigin
 import dev.nori.music.ffi.model.Playlist
 import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.channels.Channel
@@ -59,11 +61,15 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     /** The page on screen is now [key] (a back stack entry): a selection does not outlive its page. */
     fun onPage(key: String) = picked.onPage(key)
 
-    /** What a plain tap on row [index] of [songs] does: the core's answer from the settings (`tap_plan`). */
-    fun tap(songs: List<Song>, index: Int) {
+    /**
+     * What a plain tap on row [index] of [songs] does: the core's answer from the settings (`tap_plan`).
+     * [from] is the page whose list [songs] is: playing the list from the row is that page's queue, and
+     * its Play reads Pause; one song on its own is no page's.
+     */
+    fun tap(songs: List<Song>, index: Int, from: PageOrigin? = null) {
         when (tapPlan(picked.items.value.isNotEmpty())) {
             TapPlan.SELECT -> toggleSelected(songs[index])
-            TapPlan.PLAY_LIST -> nori.player.play(songs, index)
+            TapPlan.PLAY_LIST -> nori.player.play(songs, index, from = from)
             TapPlan.PLAY_ONE -> nori.player.play(listOf(songs[index]))
             TapPlan.QUEUE -> enqueue(listOf(songs[index]))
             TapPlan.PLAY_NEXT -> playNext(listOf(songs[index]))
@@ -74,18 +80,21 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     val swipes: Pair<SwipeAction, SwipeAction> get() = nori.settings.value.let { it.swipeRight to it.swipeLeft }
 
     // By id: the core has the artist's albums from reading the page, so they need not be handed back.
-    fun playArtist(artistId: String, shuffle: Boolean = false) = attempt(null) { nori.player.play(nori.library.artistSongs(artistId), shuffle = shuffle) }
+    fun playArtist(artistId: String, shuffle: Boolean = false) = attempt(null) {
+        nori.player.play(nori.library.artistSongs(artistId), shuffle = shuffle, from = PageOrigin(OriginKind.ARTIST, artistId))
+    }
     fun queueArtist(artistId: String) = attempt(null) { enqueue(nori.library.artistSongs(artistId)) }
     fun downloadArtist(artistId: String) = attempt(null) { download(nori.library.artistSongs(artistId)) }
 
-    fun play(songs: List<Song>, index: Int = 0) = nori.player.play(songs, index)
+    /** [songs] from [index]; [from] the page they are the list of, if they are one page's (see [tap]). */
+    fun play(songs: List<Song>, index: Int = 0, from: PageOrigin? = null) = nori.player.play(songs, index, from = from)
 
     /** Spreads artists and albums apart (in the core) unless the user prefers a plain random order. */
-    fun shuffle(songs: List<Song>) {
+    fun shuffle(songs: List<Song>, from: PageOrigin? = null) {
         when (val plan = shufflePlan(songs)) {
             ShufflePlan.Empty -> {}
-            ShufflePlan.PlayerShuffle -> nori.player.play(songs, shuffle = true)
-            is ShufflePlan.Order -> nori.player.playShuffledOrder(songs, plan.order)
+            ShufflePlan.PlayerShuffle -> nori.player.play(songs, shuffle = true, from = from)
+            is ShufflePlan.Order -> nori.player.playShuffledOrder(songs, plan.order, from)
         }
     }
 

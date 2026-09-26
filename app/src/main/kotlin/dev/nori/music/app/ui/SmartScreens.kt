@@ -162,14 +162,13 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
     val playing by player.currentId.collectAsStateWithLifecycle()
     val menu = LocalSongMenu.current
     LoadBox(load) { m ->
-        val queue = remember(m) { songsQueue(m.songs) }
         HeroPage(
             coverUrl = null,
             title = m.title,
             caption = m.caption,
-            onPlay = { if (m.songs.isNotEmpty()) actions.play(m.songs) },
-            onShuffle = { if (m.songs.isNotEmpty()) actions.shuffle(m.songs) },
-            queue = queue,
+            onPlay = { if (m.songs.isNotEmpty()) actions.play(m.songs, from = m.origin) },
+            onShuffle = { if (m.songs.isNotEmpty()) actions.shuffle(m.songs, m.origin) },
+            queue = m.queue,
             art = { MixArt(MixCard(m.id, m.title, m.covers, m.favourites), 236.dp, large = true) },
             actions = {
                 if (m.refreshable) CircleButton(Icons.Filled.Refresh, say.newMix) { vm.refresh() }
@@ -179,7 +178,7 @@ fun MixScreen(id: String, actions: ActionsViewModel, vm: MixViewModel = viewMode
             if (m.songs.isEmpty()) item(key = "empty") {
                 EmptyNote(if (m.favourites) Note.NO_FAVOURITE_SONGS else Note.NOTHING_TO_MIX)
             }
-            songRows(m.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, animated = true)
+            songRows(m.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, animated = true, from = m.origin)
         }
     }
 }
@@ -219,8 +218,10 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
     val menu = LocalSongMenu.current
     val done = actions.downloads.collectAsState().value.doneIds
     val selection by actions.selection.collectAsStateWithLifecycle()
+    val selected = remember(selection) { selection.mapTo(HashSet()) { it.id } }
     val player: PlayerViewModel = viewModel()
     val playing by player.currentId.collectAsStateWithLifecycle()
+    val from = remember(id) { dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.SMART, id) }
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
@@ -232,13 +233,13 @@ fun SmartScreen(id: String, actions: ActionsViewModel, vm: SmartViewModel = view
             LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
                 item {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-                        Button({ actions.play(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text(say.play) }
-                        OutlinedButton({ actions.shuffle(songs) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text(say.shuffle) }
+                        Button({ actions.play(songs, from = from) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.PlayArrow, null); Text(say.play) }
+                        OutlinedButton({ actions.shuffle(songs, from) }, Modifier.weight(1f), enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Shuffle, null); Text(say.shuffle) }
                         TextButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Text(say.get) }
                     }
                     Text(remember(page) { say.listCaption(page.songs.size, page.seconds.toLong(), true) }, Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
                 }
-                songRows(songs, actions, playing, done, selection.mapTo(HashSet()) { it.id }, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+                songRows(songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, from = from)
             }
         }
     }

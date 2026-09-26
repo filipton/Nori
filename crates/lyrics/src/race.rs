@@ -207,7 +207,17 @@ impl Race {
         if e.best < 2 {
             return self.timed_done() && leader.is_none();
         }
-        e.first_wave || (self.first_wave_done() && leader.is_none_or(|(_, s)| s < WIDEN_BELOW))
+        e.first_wave || (self.first_wave_done() && (leader.is_none_or(|(_, s)| s < WIDEN_BELOW) || self.wants_words(rank, leader)))
+    }
+
+    /// Whether `rank` is still worth asking for word timing: words are preferred, the best answer in hand
+    /// is only line-timed, and `rank` can time words. Without this a good line-timed answer from the first
+    /// wave ended the search, and the services that time words were never asked (the owner saw word-timed
+    /// lyrics only once every service was on). The answer is kept per song, so it costs once.
+    fn wants_words(&self, rank: usize, leader: Option<(usize, f64)>) -> bool {
+        self.prefer_words
+            && self.entries[rank].best >= 3
+            && leader.is_some_and(|(r, _)| self.answers[r].as_ref().is_some_and(|(l, _)| timing(l) < 3))
     }
 
     /// Whether `rank`, not asked yet, can ever be asked: a service whose timing is no better than the
@@ -215,7 +225,7 @@ impl Race {
     fn hopeless(&self, rank: usize, leader: Option<(usize, f64)>) -> bool {
         let e = self.entries[rank];
         e.best <= self.server_timing
-            || (e.best >= 2 && !e.first_wave && self.first_wave_done() && leader.is_some_and(|(_, s)| s >= WIDEN_BELOW))
+            || (e.best >= 2 && !e.first_wave && self.first_wave_done() && leader.is_some_and(|(_, s)| s >= WIDEN_BELOW) && !self.wants_words(rank, leader))
             || (e.best < 2 && self.timed_done() && leader.is_some())
     }
 
@@ -605,6 +615,27 @@ mod tests {
         let (rank, _) = r.to_show(false).expect("shown");
         assert_eq!(rank, 2, "the word-timed answer the others agree with");
         assert!(r.runner_up().is_some_and(|(r, _)| r == 1));
+    }
+
+    #[test]
+    fn a_good_line_timed_first_wave_still_asks_the_services_that_time_words() {
+        // First wave: two services agreeing on this song's words, timed by line, so their best scores
+        // well. Second wave: one that times words. With words preferred it is asked; without, the good
+        // line-timed answer ends the search, as it did for every song before (the owner saw word-timed
+        // lyrics only once every service was on).
+        let wave = || vec![entry(0.95, true, 3), entry(0.9, true, 3), entry(0.75, false, 3)];
+        let answered = |prefer: bool| {
+            let mut r = Race::new(&tune(), wave(), prefer, 0);
+            assert_eq!(r.next(0, 6), [0, 1]);
+            r.answer(0, Some((words(&OURS, false), naming("Glass Harbour"))));
+            r.answer(1, Some((words(&OURS, false), naming("Glass Harbour"))));
+            r
+        };
+        let mut r = answered(true);
+        assert!(r.leader().is_some_and(|(_, s)| s >= WIDEN_BELOW), "agreeing line-timed answers score well: {:?}", r.leader());
+        assert_eq!(r.next(0, 6), [2], "the word-timing service is asked all the same");
+        let mut lines_will_do = answered(false);
+        assert!(lines_will_do.next(0, 6).is_empty(), "words not preferred: a good line-timed answer is enough");
     }
 
     #[test]

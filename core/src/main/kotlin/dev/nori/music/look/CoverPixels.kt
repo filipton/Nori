@@ -24,6 +24,12 @@ object CoverPixels {
     /** Not a JPEG, PNG, WebP or GIF (a HEIF cover, say): the view keeps its placeholder. */
     const val UNKNOWN = 3
     const val BROKEN = 4
+    /** Nobody waited for the cover when its file came, or the loader closed: asked again, it comes. */
+    const val CLOSED = 5
+    /** The request did not come back: this plus the transport's `FailureKind` ordinal. */
+    const val NETWORK = 100
+    /** The server answered with an error: this plus the HTTP status. */
+    const val HTTP = 1000
 
     /** Who waits for a cover. Called from native code by name: see consumer-rules.pro. */
     interface Waiter {

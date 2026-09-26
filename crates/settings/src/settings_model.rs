@@ -484,7 +484,7 @@ mod tests {
         // Every lyrics service, in the order they are asked, each on or off where it stands.
         assert_eq!(s.lyrics_sources.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), d.lyrics_order);
         let on: Vec<&str> = s.lyrics_sources.iter().filter(|l| l.on).map(|l| l.id.as_str()).collect();
-        assert_eq!(on, ["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"]);
+        assert_eq!(on, d.lyrics_order.iter().map(String::as_str).collect::<Vec<_>>(), "every service on");
         let off = set_by_name(&d, "lyricsService:BINILYRICS", "false").unwrap().prefs;
         let s2 = state(&off, Output::default());
         assert_eq!(s2.lyrics_sources[1], LyricsSource { id: "BINILYRICS".into(), on: false, timing: 3, needs_key: false }, "switched off where it stands");

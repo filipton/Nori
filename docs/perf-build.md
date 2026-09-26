@@ -166,8 +166,9 @@ with `tools/cost.sh` (below), the test bridge's `states` and simpleperf:
   long as the page was open: that is the "other page" cost. They now step about twenty times a second.
 - **The moving cover** plays at its own 24 frames a second (Apple's HLS says `FRAME-RATE=24.000`); nothing
   else redraws with it. Its playback thread no longer wakes every 10 ms (`experimentalSetDynamicScheduling`).
-  With the music paused it stops on the frame it shows, and after 5 s lets its decoder go (the frame stays;
-  playing again carries on from it): a cover looping over a paused song redrew the screen 24 times a second.
+  With the music paused it goes on looping (the owner's call, 2026-09-26: held, it stopped mid-motion on an odd
+  frame). It costs its 24 frames a second while the player is open and the screen on; the screen's timeout, the
+  app going behind or the player closing stops it.
 - **The equalizer's shallow buffer** stayed on for as long as the equalizer page stayed composed, and the
   page stays composed under the player: opening the player after moving a band kept a 160 ms AudioTrack
   (and the CPU that feeds it) for the whole time the player was open, and each later switch back reopened

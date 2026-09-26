@@ -12,6 +12,7 @@ pub(crate) static CLASS: Class = Class {
     name: c"dev/nori/music/playback/PlaylistJni",
     methods: &[
         native!(c"rev", c"()J", rev),
+        native!(c"origin", c"()I", origin),
         native!(c"shuffleShown", c"()Z", shuffle_shown),
         native!(c"order", c"([I)I", order),
     ],
@@ -46,4 +47,10 @@ extern "system" fn order(env: JNIEnv, _: JClass, out: JIntArray) -> jint {
 /// What the list looks like now, cheaply, so an unchanged queue is not copied over again.
 extern "system" fn rev() -> jlong {
     playlist::playlist_rev() as jlong
+}
+
+/// Moves whenever a new queue is set (`playlist_origin_gen`): a page asks whether the queue is its own
+/// only when this has moved.
+extern "system" fn origin() -> jint {
+    playlist::playlist_origin_gen() as jint
 }

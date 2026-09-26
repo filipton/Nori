@@ -1942,6 +1942,15 @@ private fun rememberSleeveArt(url: String?): SleeveArt {
                 // away while the sleeve underneath was still showing the cover before it, which is the
                 // frame of the previous cover that appeared as the record grew back.
                 art.shownUrl = url
+            } else if (art.shownUrl != url) {
+                // This picture's fade was cut short (the effect ran again for the same song: a record slid
+                // in for another one and was not taken up, the cover's state moved): it finishes from where
+                // it got to. Left there, the picture stayed faint over the plate for the rest of the song.
+                art.loading = false
+                if (AppMotion.reduce) art.fade.snapTo(1f)
+                else art.fade.animateTo(1f, androidx.compose.animation.core.tween(((1f - art.fade.value) * PICTURE_IN_MS).toInt().coerceAtLeast(1)))
+                art.previous = null
+                art.shownUrl = url
             }
             cover.state == CoverImage.LOADING -> {
                 if (art.current == null) art.loading = true

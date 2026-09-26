@@ -104,7 +104,7 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                 when (s) {
                     is dev.nori.music.app.vm.Shelf.Albums -> shelf(say.homeRow(s.row), s.albums, vm, arrival, place++, rise)
                     is dev.nori.music.app.vm.Shelf.Playlists -> playlistShelf(say.homeRow(s.row), s.playlists, vm, arrival, place++, rise)
-                    is dev.nori.music.app.vm.Shelf.Songs -> songShelf(say.homeRow(s.row), s.songs, vm, actions, arrival, place++, rise)
+                    is dev.nori.music.app.vm.Shelf.Songs -> songShelf(say.homeRow(s.row), s.songs, vm, actions, arrival, place++, rise, s.origin)
                 }
             }
         }
@@ -193,13 +193,15 @@ private fun androidx.compose.foundation.lazy.LazyListScope.songShelf(
     arrival: State<Float>,
     place: Int,
     rise: Float,
+    /** The shelf: the songs played from it are its queue. */
+    from: dev.nori.music.ffi.model.PageOrigin,
 ) {
     item(key = title, contentType = "shelf") {
         Column(Modifier.arriving(arrival, place, rise)) {
             SectionTitle(title)
             LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 itemsIndexed(songs, key = { _, s -> s.id }, contentType = { _, _ -> "song" }) { i, s ->
-                    CoverCard(s.title, s.artist, vm.cover(s.coverArt, CoverSize.CARD), 150.dp, { actions.play(songs, i) })
+                    CoverCard(s.title, s.artist, vm.cover(s.coverArt, CoverSize.CARD), 150.dp, { actions.play(songs, i, from) })
                 }
             }
         }

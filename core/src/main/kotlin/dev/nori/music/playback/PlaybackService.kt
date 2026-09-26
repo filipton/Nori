@@ -34,6 +34,7 @@ import dev.nori.music.ffi.model.Song
 import dev.nori.music.settings.Prefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.guava.future
@@ -287,9 +288,17 @@ class PlaybackService : MediaLibraryService() {
             if (isPlaying) dev.nori.music.ffi.queue.queuePlaying()
             announce()
             scrobbler.onPlaying(isPlaying)
-            if (!isPlaying && !player.playWhenReady) keepQueue(dev.nori.music.ffi.queue.QueueMoment.PAUSED)
             main.removeCallbacks(idleRelease)
             if (LongPause.arms(isPlaying, player.playWhenReady, player.playbackState)) main.postDelayed(idleRelease, timings.idleReleaseMs)
+        }
+
+        /**
+         * Paused by the listener (or stopped by the queue's rules): the queue is kept at once. Asked here and
+         * not on the music stopping, since a player that never sounded (a song whose bytes never came) is
+         * paused without ever having played, and a queue skipped through meanwhile was never saved.
+         */
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playWhenReady) keepQueue(dev.nori.music.ffi.queue.QueueMoment.PAUSED)
         }
 
         override fun onShuffleModeEnabledChanged(on: Boolean) = refreshButtons()
@@ -440,14 +449,16 @@ class PlaybackService : MediaLibraryService() {
             // A list already in the order it plays (a weighted shuffle) goes in as it is, shown as
             // shuffled; the player's own shuffle, which would undo that order, goes off.
             val ordered = mediaItems.firstOrNull()?.inOrder() == true
-            val c = if (ordered) dev.nori.music.ffi.queue.playlistSetOrdered(ids(mediaItems))
-            else dev.nori.music.ffi.queue.playlistSet(ids(mediaItems), startIndex.coerceAtMost(mediaItems.size - 1), wrappedPlayer.shuffleModeEnabled)
+            // The page it was started from, if any (MediaItems.origin): a new queue replaces the last one's.
+            val origin = mediaItems.firstOrNull()?.origin()
+            val c = if (ordered) dev.nori.music.ffi.queue.playlistSetOrdered(ids(mediaItems), origin)
+            else dev.nori.music.ffi.queue.playlistSet(ids(mediaItems), startIndex.coerceAtMost(mediaItems.size - 1), wrappedPlayer.shuffleModeEnabled, origin)
             if (ordered && wrappedPlayer.shuffleModeEnabled) super.setShuffleModeEnabled(false)
             super.setMediaItems(mediaItems, c.at.coerceAtLeast(0), if (startIndex == C.INDEX_UNSET) C.TIME_UNSET else startPositionMs)
         }
         override fun clearMediaItems() {
             offlineBridge?.abandon()
-            dev.nori.music.ffi.queue.playlistSet(emptyList(), -1, false)
+            dev.nori.music.ffi.queue.playlistSet(emptyList(), -1, false, null)
             super.clearMediaItems()
         }
         override fun removeMediaItem(index: Int) = removeMediaItems(index, index + 1)
@@ -507,8 +518,10 @@ class PlaybackService : MediaLibraryService() {
     private fun analyseAhead() = analyser.update()
 
     /**
-     * Keeps the music going past the end of the queue. When to fetch (the last song, or one song left,
-     * one fetch at a time; never for a radio stream or a repeating queue) is the core's
+     * Keeps the music going past the end of the queue. When to fetch (the end in sight, two songs left
+     * at most, one fetch at a time; never for a radio stream or a repeating queue), what it carries on
+     * from (the queue's last song) and whether a next pressed meanwhile is still wanted (within two
+     * seconds of the last press, once) are the core's
      * (crates/queue/src/autofill.rs over nori_player::queue::Refill, asked as a song arrives), and so is
      * what comes - the user's choice twice over, and every route reads the library, so this never makes
      * octo-fiesta download a provider track.
@@ -519,7 +532,8 @@ class PlaybackService : MediaLibraryService() {
         if (dev.nori.music.ffi.queue.autofillArrived(fresh.size.toUInt())) {
             controls.addMediaItems(held(fresh))
         }
-        // A next pressed at the end while these were on the way is taken now, if the user is still there.
+        // A next pressed at the end while these were on the way is taken now, if the user is still there
+        // and pressed it moments ago; a press the user has long since settled after is not.
         if (dev.nori.music.ffi.queue.autofillLanded()) player.seekToNextMediaItem()
     }
 
@@ -550,7 +564,9 @@ class PlaybackService : MediaLibraryService() {
         // The queue is the core's (crates/queue/src/playlist.rs); only the place in the song is the player's.
         val current = player.currentMediaItem?.mediaId
         val position = player.currentPosition.coerceAtLeast(0)
-        scope.launch(Dispatchers.IO) {
+        // Not a child of the service's scope: the save made as the service closes runs after the scope is
+        // cancelled, and was lost with it, leaving the queue where it was saved before.
+        scope.launch(Dispatchers.IO + NonCancellable) {
             runCatching { nori.core.playlistSave(position.toULong()) }
             // What the server is handed (only with scrobbling on, radio left out) is the core's too, read there.
             if (push) runCatching { nori.library.pushQueue(current, position) }
@@ -562,7 +578,8 @@ class PlaybackService : MediaLibraryService() {
         if (q.songs.isEmpty() || player.mediaItemCount > 0) return@launch
         // Not prepared: nothing touches the network until the user presses play. The core keeps the index
         // inside the queue it hands back.
-        controls.setMediaItems(held(q.songs), q.index.toInt(), q.positionMs.toLong())
+        // With the page it was started from, so that page still answers for it.
+        controls.setMediaItems(startedFrom(held(q.songs), q.origin), q.index.toInt(), q.positionMs.toLong())
     }
 
     /** Songs as the player's items, handed to the core in one call (see MediaItems.toMediaItems). */
@@ -641,7 +658,7 @@ class PlaybackService : MediaLibraryService() {
 
         override fun onPlaybackResumption(session: MediaSession, controller: MediaSession.ControllerInfo): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = scope.future {
             val q = withContext(Dispatchers.IO) { nori.core.loadQueue() }
-            MediaSession.MediaItemsWithStartPosition(held(q.songs), q.index.toInt(), q.positionMs.toLong())
+            MediaSession.MediaItemsWithStartPosition(startedFrom(held(q.songs), q.origin), q.index.toInt(), q.positionMs.toLong())
         }
 
         override fun onGetLibraryRoot(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, params: LibraryParams?) =

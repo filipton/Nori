@@ -43,10 +43,12 @@ pub struct TransitionPrefs {
     pub replay_gain: bool,
 }
 
-/// Two songs follow on the same album, in order: `b` is the track after `a` on the same disc. Not while
-/// shuffling, which plays them next to each other by chance.
+/// Two songs follow on the same album, in order: `b` is the track after `a` on the same disc, or the first
+/// track of the next disc (a double album goes on from one disc to the next as it does within one). Not
+/// while shuffling, which plays them next to each other by chance.
 pub fn follows_on_album(a: &WindowSong, b: &WindowSong, shuffling: bool) -> bool {
-    !shuffling && a.album_id.is_some() && a.album_id == b.album_id && a.disc == b.disc && b.track == a.track + 1
+    let next = (a.disc == b.disc && b.track == a.track + 1) || (b.disc == a.disc + 1 && b.track == 1);
+    !shuffling && a.album_id.is_some() && a.album_id == b.album_id && next
 }
 
 /// `current` sits inside an album played in order: it follows the song before or leads into the one after.
@@ -214,6 +216,13 @@ mod tests {
         assert!(!pick(&TransitionPrefs { keep_albums: false, ..prefs() }, false, &w, "a", false).unwrap().settings.same_album_in_order);
         let skip = [song("a", Some("x"), 3), song("b", Some("x"), 5)];
         assert!(!pick(&prefs(), false, &skip, "a", false).unwrap().settings.same_album_in_order, "a track skipped");
+        let disc = |id: &str, disc: i32, track: i32| WindowSong { disc, ..song(id, Some("x"), track) };
+        let turn = [disc("a", 1, 12), disc("b", 2, 1)];
+        assert!(pick(&prefs(), false, &turn, "a", false).unwrap().settings.same_album_in_order, "on to the next disc");
+        let back = [disc("a", 2, 1), disc("b", 1, 2)];
+        assert!(!pick(&prefs(), false, &back, "a", false).unwrap().settings.same_album_in_order, "back to the disc before");
+        let past = [disc("a", 1, 12), disc("b", 2, 2)];
+        assert!(!pick(&prefs(), false, &past, "a", false).unwrap().settings.same_album_in_order, "the next disc's first track skipped");
         assert!(in_album_run(None, &w[0], Some(&w[1]), false) && in_album_run(Some(&w[0]), &w[1], None, false));
         assert!(!in_album_run(None, &song("c", None, 1), None, false));
     }

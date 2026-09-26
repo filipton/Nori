@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
@@ -43,7 +44,16 @@ data class MixPage(
     val refreshable: Boolean, val favourites: Boolean,
     /** "12 songs · 48:10", the core's; empty with no songs. */
     val caption: String,
-)
+) {
+    /** What a queue started from this page carries: the mix, whichever draw of it. */
+    val origin = dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.MIX, id)
+
+    /**
+     * The page's own queue (the core's `PageQueue`), made where the page is. Outside the constructor, so
+     * two draws of the same songs are still equal.
+     */
+    val queue: dev.nori.music.ffi.library.PageQueue = dev.nori.music.ffi.library.PageQueue(origin)
+}
 
 /** The core names the covers; the list rendition of each, so they are cache hits. */
 private val tileSize: Int get() = dev.nori.music.data.Covers.rules.row.toInt()
@@ -130,5 +140,8 @@ class MixViewModel(app: Application) : NoriViewModel(app) {
                     MixLookup.NotDrawn -> {}
                 }
             }.distinctUntilChanged()
+            // Making the page and comparing it with the last (every song of a long favourites list) is
+            // off the main thread, which may be drawing the page's slide in the meantime.
+            .flowOn(Dispatchers.Default)
     }.asLoad()
 }

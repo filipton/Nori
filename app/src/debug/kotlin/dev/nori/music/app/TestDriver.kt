@@ -64,6 +64,13 @@ fun TestDriver(controller: NavHostController, nav: Nav, sheet: PlayerSheet, sett
                 """"motionPlayers":${dev.nori.music.playback.MotionPlayer.live},"motionVideo":"${player2.motionVideo.value.orEmpty()}",""" +
                 // Everything the app's Java side has allocated since it started, for allocation checks.
                 """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
+                // What the app itself holds, KB (the perf report's memory line): the native heap allocated,
+                // the Rust heap, the songs' bytes in memory, the ring, the beat model, the covers' Bitmaps.
+                dev.nori.music.ffi.perf.perfRustMemory().let { r ->
+                    val covers = dev.nori.music.data.CoverLoader.get(context)
+                    """"memNative":${android.os.Debug.getNativeHeapAllocatedSize() / 1024},"memRust":${r.heapKb},"memSongs":${r.songsKb},"memSongLoaders":${r.songs},""" +
+                        """"memSongsOnDisk":${r.songsOnDisk},"memRing":${r.ringKb},"memModel":${r.modelKb},"memCovers":${covers.keptBytes() / 1024},"memCoverCount":${covers.keptCount()},"""
+                } +
                 dev.nori.music.Nori.get(context).dac.state.value.let { d ->
                     """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
                         """"dacBlocked":"${d.blockedBy?.let { dev.nori.music.app.vm.dacBlockWords(context.resources, it) }.orEmpty()}","dacTrack":"${d.track?.let { dev.nori.music.app.vm.dacTrackWords(context.resources, it) }.orEmpty()}","""

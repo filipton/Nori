@@ -90,7 +90,7 @@ fun SearchScreen(actions: ActionsViewModel, vm: SearchViewModel = viewModel()) {
                 // and reaching for the menu to queue one was the odd thing out here.
                 val (onRight, onLeft) = actions.swipes
                 SongRow(
-                    s, vm.cover(s.coverArt, CoverSize.ROW), onClick = { vm.remember(); actions.play(listOf(s)) }, onMenu = { menu(s) },
+                    s, vm.cover(s.coverArt, CoverSize.ROW), onClick = { vm.remember(); actions.play(listOf(s), from = dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.SEARCH, ui.query)) }, onMenu = { menu(s) },
                     downloaded = s.id in downloads.doneIds,
                     swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
                 )

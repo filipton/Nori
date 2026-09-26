@@ -10,6 +10,7 @@
 #   Nori E2E / Long Album       twelve songs of 75-130 s, every third one FLAC (the bridge, album pages)
 #   Nori E2E Two / Far Side     three songs of 150-190 s off another album (crossfades are not gapless
 #                               album joins), "Far Song One" the one transcoded to Opus in the checks
+#   Nori Bench 1000 (playlist)  a thousand songs, for opening a long page (tools/open-bench.sh)
 set -euo pipefail
 common=$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
 if [ -n "$common" ] && [ "$(basename "$common")" = .git ]; then top=$(dirname "$common"); else top="$(cd "$(dirname "$0")/.." && pwd)"; fi
@@ -88,5 +89,16 @@ if [ "$seeded" = 1 ] || ! curl -s "localhost:4533/rest/search3?$a&query=Long%20T
       ! curl -s "localhost:4533/rest/getScanStatus?$a" | grep -q '"scanning":true' && break
     sleep 1
   done
+fi
+# A playlist of a thousand songs, for opening and scrolling a long page (tools/open-bench.sh): every song
+# the server has, in turn, over again when there are fewer than a thousand. Made once.
+big="Nori Bench 1000"
+if ! curl -s "localhost:4533/rest/getPlaylists?$a" | grep -q "\"name\":\"$big\""; then
+  ids=$(curl -s "localhost:4533/rest/search3?$a&query=&songCount=1000&artistCount=0&albumCount=0" |
+    python3 -c 'import sys, json
+songs = json.load(sys.stdin)["subsonic-response"].get("searchResult3", {}).get("song", [])
+print("&".join("songId=" + songs[i % len(songs)]["id"] for i in range(1000)) if songs else "")')
+  [ -n "$ids" ] && curl -s -X POST "localhost:4533/rest/createPlaylist" --data "$a&name=${big// /%20}&$ids" >/dev/null &&
+    echo "navidrome: made the playlist \"$big\""
 fi
 echo "navidrome: http://localhost:4533  (admin/admin)"

@@ -248,9 +248,9 @@ impl Analyzer {
 
     /// Mono samples in [-1, 1].
     pub fn feed(&mut self, x: &[f32]) {
+        self.meter.feed(x);
         for v in x {
             let v = if v.is_finite() { *v } else { 0.0 };
-            self.meter.push(v);
             self.acc += v;
             self.acc_n += 1;
             if self.acc_n == self.dec {
@@ -428,7 +428,7 @@ impl Analyzer {
         self.ring.fill(0.0);
         (self.written, self.since_hop, self.hops, self.samples, self.acc, self.acc_n) = (0, 0, 0, 0, 0.0, 0);
         (self.prev, self.prev_low) = ([0.0; BANDS], [0.0; 8]);
-        self.meter = Meter::new(self.rate, 0);
+        self.meter.reset();
         for v in [&mut self.f.onset, &mut self.f.low_onset, &mut self.f.power, &mut self.f.low_power, &mut self.f.vocal, &mut self.f.centroid] {
             v.clear();
         }

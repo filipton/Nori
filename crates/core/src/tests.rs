@@ -35,10 +35,10 @@ fn search_parses_indexes_and_skips_external() {
 fn queue_and_cache_round_trip() {
     let core = Core::new(String::new(), "t".into()).unwrap();
     let songs = core.parse_search(SEARCH.into()).unwrap().songs;
-    core.save_queue(PlayQueue { songs: songs.clone(), index: 1, position_ms: 5000 }).unwrap();
+    core.save_queue(PlayQueue { songs: songs.clone(), index: 1, position_ms: 5000, origin: None }).unwrap();
     let q = core.load_queue().unwrap();
     assert_eq!((q.songs, q.index, q.position_ms), (songs.clone(), 1, 5000));
-    core.save_queue(PlayQueue { songs: songs.clone(), index: 99, position_ms: 0 }).unwrap();
+    core.save_queue(PlayQueue { songs: songs.clone(), index: 99, position_ms: 0, origin: None }).unwrap();
     assert_eq!(core.load_queue().unwrap().index as usize, songs.len() - 1, "an index past the end: the last song");
 
     core.cache_put("getAlbum?id=1".into(), vec![1, 2]).unwrap();

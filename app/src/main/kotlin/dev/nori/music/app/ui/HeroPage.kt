@@ -75,9 +75,10 @@ fun HeroPage(
      */
     awaitingPlay: Boolean = false,
     /**
-     * What "this page's own queue" means - its songs, or the albums of an artist - held by the core
-     * (`pages::PageQueue`), so the two big buttons answer for that queue rather than for the player in
-     * general (`pages::hero_buttons`). Null: the page has no queue of its own.
+     * This page's own queue (`pages::PageQueue`): the origin a queue started from the page carries. The
+     * two big buttons answer for that queue rather than for the player in general
+     * (`pages::hero_buttons`), and only for it: another page's queue playing a song this page also has
+     * leaves them Play and Shuffle. Null: the page has no queue of its own.
      */
     queue: dev.nori.music.ffi.library.PageQueue? = null,
     /** Icon buttons on the line with the pills: favourite, queue, download. */
@@ -97,9 +98,8 @@ fun HeroPage(
     val player: PlayerViewModel = viewModel()
     val playerState by player.state.collectAsStateWithLifecycle()
     // The queue this page started is what is on - whichever song of it happens to be sounding. Asked
-    // when the song changes, not on every change of the player's state.
-    val current = playerState.current
-    val here = remember(queue, current?.id, current?.albumId) { queue?.plays(current?.id, current?.albumId) ?: false }
+    // when a new queue is set (the core's origin generation), not on every change of the player's state.
+    val here = remember(queue, playerState.origin) { queue != null && player.playsFrom(queue) }
     // The core's answer (`pages::hero_buttons`) over JNI, one int, on every play and pause.
     val bits = remember(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null) {
         CoverLook.heroButtons(here, playerState.shuffle, playerState.playing, playerState.buffering, onPlay != null, onShuffle != null)

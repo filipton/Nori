@@ -71,7 +71,9 @@ builds:
   rows of the same kinds.
 - **Plays and the queue's end**: `scrobble_playing` and `scrobble_track` on the engine's events (the
   history and the scrobbles are the core's), and `autofill_start`/`autofill_next` with
-  `Client::autofill` when the queue runs out.
+  `Client::autofill` when the queue runs out. A next pressed at the end is taken when the songs land
+  (`autofill_landed`) only within 2 s of the last press; `autofill_skip_waiting` says whether one is
+  waiting, for a client that shows it (Android does not yet).
 - **Pictures**: nori-covers decodes the cover (fetched through the same `Transport`), nori-look's
   `cover::derive` gives the page, text and accent colours, and ratatui-image draws the picture in
   whichever protocol the terminal answers to (kitty graphics, sixel, iTerm2) or in half blocks. ratatui

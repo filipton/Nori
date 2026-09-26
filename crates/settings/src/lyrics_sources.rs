@@ -161,25 +161,24 @@ impl LyricsService {
     /// key for most songs), and the ones that read web pages or YouTube never meant for an app
     /// (YouTube's captions and lyrics tab, Megalobiz, Genius).
     pub fn on_by_default(self) -> bool {
-        matches!(
-            self,
-            LyricsService::Paxsenix
-                | LyricsService::Binilyrics
-                | LyricsService::Unison
-                | LyricsService::BetterLyrics
-                | LyricsService::Kugou
-                | LyricsService::Netease
-                | LyricsService::LyricsPlus
-                | LyricsService::Simpmusic
-                | LyricsService::Lrclib
-        )
+        // Every service, the owner's call (2026-09-26): with the nine above alone most songs had no
+        // word timing, and word-timed lyrics came from the rest. The waves keep the cost down: the others
+        // are asked only when the first wave misses, scores low, or has no word timing
+        // (nori-lyrics' race.rs `wants_words`); the ones needing a key stay silent until it is given.
+        let _ = self;
+        true
     }
 
     /// Asked in the first wave of a lookup: cheap (one or two requests), quick and good. The others that
     /// are on are asked only when the first wave misses or its best answer scores low, so a song that
     /// PaxSenix, BiniLyrics, Unison or LRCLIB have costs no more than those few requests.
     pub fn first_wave(self) -> bool {
-        matches!(self, LyricsService::Paxsenix | LyricsService::Binilyrics | LyricsService::Unison | LyricsService::Lrclib)
+        // KuGou and SimpMusic too: in the owner's library they, PaxSenix and BiniLyrics gave most of the
+        // word-timed lyrics shown (2026-09-26), so waiting for a first wave without them only delayed them.
+        matches!(
+            self,
+            LyricsService::Paxsenix | LyricsService::Binilyrics | LyricsService::Unison | LyricsService::Kugou | LyricsService::Simpmusic | LyricsService::Lrclib
+        )
     }
 
     /// How far its answers are trusted before anything else is known, 0 to 1: the services that match
@@ -328,12 +327,15 @@ mod tests {
 
     #[test]
     fn the_reputable_services_are_on_out_of_the_box_best_first() {
-        assert_eq!(default_on(), names(&["PAXSENIX", "BINILYRICS", "UNISON", "BETTER_LYRICS", "KUGOU", "NETEASE", "LYRICS_PLUS", "SIMPMUSIC", "LRCLIB"]));
+        assert_eq!(default_on(), default_order(), "every service is on out of the box, in its order");
         let on = StoredPrefs::default();
         assert!(on.third_party_lookups && on.lyrics_online, "looking lyrics up is on out of the box");
         assert!(lyrics_lookup(&StoredPrefs { third_party_lookups: false, ..on.clone() }).services.is_empty(), "and off under the lookups switch");
         let first: Vec<LyricsService> = lyrics_lookup(&on).services.into_iter().filter(|s| s.first_wave()).collect();
-        assert_eq!(first, [LyricsService::Paxsenix, LyricsService::Binilyrics, LyricsService::Unison, LyricsService::Lrclib], "the cheap and good ones first");
+        let mut want = vec![LyricsService::Paxsenix, LyricsService::Binilyrics, LyricsService::Unison, LyricsService::Kugou, LyricsService::Simpmusic, LyricsService::Lrclib];
+        want.sort_by_key(|s| default_order().iter().position(|n| n == s.name()));
+        assert_eq!(first, want, "the cheap and good ones first");
+        assert!(lyrics_lookup(&on).services.iter().all(|s| s.needs().is_none()), "the ones that need a key are skipped until it is given");
         let off = StoredPrefs { lyrics_online: false, ..on };
         assert!(lyrics_lookup(&off).services.is_empty());
     }
@@ -348,27 +350,7 @@ mod tests {
         assert!(order[..lrclib].iter().all(|s| s.best() == 3), "only services that time words rank above LRCLIB");
         assert!(order[lrclib..].windows(2).all(|w| w[0].best() >= w[1].best() || w[0] == LyricsService::Lrclib), "then by line, then untimed");
         assert_eq!(order[14..], [LyricsService::YoutubeMusic, LyricsService::Genius]);
-        // Every service on out of the box ranks above every one off that times as finely.
-        for s in LyricsService::ALL.into_iter().filter(|s| s.on_by_default()) {
-            for o in LyricsService::ALL.into_iter().filter(|o| !o.on_by_default() && o.best() == s.best() && *o != LyricsService::Lrclib) {
-                if s != LyricsService::Lrclib {
-                    assert!(rank(s) < rank(o), "{s:?} above {o:?}");
-                }
-            }
-        }
-        // Off out of the box: the ones that need a key and the scrapers.
-        for s in [
-            LyricsService::PaxsenixSpotify,
-            LyricsService::PaxsenixMusixmatch,
-            LyricsService::Portato,
-            LyricsService::YoutubeCaptions,
-            LyricsService::YoutubeMusic,
-            LyricsService::Megalobiz,
-            LyricsService::Genius,
-        ] {
-            assert!(!s.on_by_default(), "{s:?}");
-        }
-        assert!(LyricsService::ALL.into_iter().filter(|s| s.on_by_default()).all(|s| s.needs().is_none()), "nothing on waits for a key");
+        assert!(LyricsService::ALL.into_iter().all(|s| s.on_by_default()), "every service on out of the box");
         assert!(LyricsService::ALL.into_iter().filter(|s| s.first_wave()).all(|s| s.on_by_default() && s.best() == 3 || s == LyricsService::Lrclib));
         assert!(LyricsService::ALL.into_iter().all(|s| (0.0..=1.0).contains(&s.prior())));
     }

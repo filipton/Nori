@@ -129,6 +129,14 @@ fn noise_is_reported_as_unreliable() {
 }
 
 #[test]
+fn a_steady_tone_without_a_beat_is_measured() {
+    // No beat means no bars: the closing breakdown is looked for in plain blocks instead.
+    let x: Vec<f32> = (0..44100 * 5).map(|i| (2.0 * std::f64::consts::PI * 997.0 * i as f64 / 44100.0).sin() as f32).collect();
+    let t = analyse("tone", &x, 44100).track;
+    assert!((t.lufs + 3.01).abs() < 0.1, "lufs {}", t.lufs);
+}
+
+#[test]
 fn silence_and_trims() {    let t = analyse("s", &vec![0f32; 44100 * 20], 44100).track;
     assert_eq!((t.bpm, t.bpm_confidence, t.lufs, t.key), (0.0, 0.0, -70.0, 0));
     assert_eq!((t.silence_start_ms, t.silence_end_ms), (0, 0));

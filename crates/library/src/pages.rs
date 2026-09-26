@@ -2,7 +2,7 @@
 //! the letters down the side of a long list, what a filter keeps. Worked out once per page (or once per
 //! keystroke for a filter) here, so the UI only lays out what it is handed.
 
-use nori_model::model::{Album, Artist, DiscTitle, Playlist, Song};
+use nori_model::model::{Album, Artist, DiscTitle, OriginKind, PageOrigin, Playlist, Song};
 
 /// One disc of an album: whether it is headed and its name (the client words "Disc 2 · Bonus"), and the
 /// positions of its songs in the album's song list, in the album's order.
@@ -233,53 +233,51 @@ impl TextIndex {
     }
 }
 
-/// What makes a page's queue the one playing: its songs (an album also claims a song of its own record
-/// that some other queue carried along), or for an artist, whose page has no song list of its own, a
-/// song of one of its albums.
-#[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
-pub enum PageOwn {
-    Songs { ids: Vec<String>, album_id: Option<String> },
-    Albums { ids: Vec<String> },
-}
-
-/// A page's own queue, held for the life of the page so that asking whether it is playing sends only
-/// the song playing. The pages read from the server come with theirs (`AlbumDetail::queue` and the
-/// like), made from what was read, so their ids never cross to the platform and back.
-#[derive(Debug, Default)]
+/// A page's own queue: the origin a queue started from this page carries, held for the life of the
+/// page so that asking whether it is the one playing (nori-queue `playlist_from`) sends nothing. The
+/// pages read from the server come with theirs (`AlbumDetail::queue` and the like).
+///
+/// A page is the one playing only when the queue was started from it - its Play or Shuffle, or a row
+/// of its songs tapped, which plays its songs from that row - and stays so through every edit of that
+/// queue. The song playing being one of its songs is not enough: playlist B does not light for a song
+/// it shares with playlist A playing from A, an album's page does not light for its song played from a
+/// playlist or a search, and an artist's page lights only for a queue its own Play or Shuffle started.
+#[derive(Debug)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Object))]
 pub struct PageQueue {
-    songs: std::collections::HashSet<String>,
-    album: Option<String>,
-    albums: std::collections::HashSet<String>,
+    origin: PageOrigin,
 }
 
 impl PageQueue {
-    /// The queue of a page of `songs` (an album's, with `album_id`).
-    pub(crate) fn of_songs(songs: &[Song], album_id: Option<&str>) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(PageQueue { songs: songs.iter().map(|s| s.id.clone()).collect(), album: album_id.map(String::from), albums: Default::default() })
-    }
-
-    /// The queue of an artist's page: a song of one of `albums`.
-    pub(crate) fn of_albums(albums: &[Album]) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(PageQueue { albums: albums.iter().map(|a| a.id.clone()).collect(), ..Default::default() })
+    pub(crate) fn of(kind: OriginKind, id: &str) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(PageQueue { origin: PageOrigin::new(kind, id) })
     }
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
 impl PageQueue {
     #[cfg_attr(feature = "ffi", uniffi::constructor)]
-    pub fn new(own: PageOwn) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(match own {
-            PageOwn::Songs { ids, album_id } => PageQueue { songs: ids.into_iter().collect(), album: album_id, albums: Default::default() },
-            PageOwn::Albums { ids } => PageQueue { songs: Default::default(), album: None, albums: ids.into_iter().collect() },
-        })
+    pub fn new(origin: PageOrigin) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(PageQueue { origin })
     }
 
-    /// Whether the song playing (its id and album) is this page's.
-    pub fn plays(&self, song_id: Option<String>, album_id: Option<String>) -> bool {
-        let Some(id) = song_id else { return false };
-        self.songs.contains(&id) || album_id.is_some_and(|a| self.album.as_deref() == Some(a.as_str()) || self.albums.contains(&a))
+    /// What a queue started from this page is started with (`playlist_set`'s `origin`).
+    pub fn origin(&self) -> PageOrigin {
+        self.origin.clone()
+    }
+}
+
+impl PageQueue {
+    /// The origin, lent.
+    pub fn origin_ref(&self) -> &PageOrigin {
+        &self.origin
+    }
+}
+
+/// A page not read yet: no queue is ever started with an empty id, so it is never the one playing.
+impl Default for PageQueue {
+    fn default() -> Self {
+        PageQueue { origin: PageOrigin::new(OriginKind::Album, "") }
     }
 }
 
@@ -312,7 +310,8 @@ pub struct HeroButtons {
 /// The two big buttons answer for the queue the page started rather than for the player in general:
 /// Play becomes Pause while it sounds (and picks it up where it stopped rather than starting the record
 /// again), Shuffle lights while it is shuffling, and a second press on Shuffle turns shuffle off instead
-/// of drawing the same songs into a new queue. `here` is [`PageQueue::plays`]; `can_play` and
+/// of drawing the same songs into a new queue. `here` is whether the queue is the page's own
+/// (nori-queue `playlist_from`, over [`PageQueue`]): false shows Play and Shuffle that start; `can_play` and
 /// `can_shuffle` say the page has songs to start.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn hero_buttons(here: bool, shuffle: bool, playing: bool, buffering: bool, can_play: bool, can_shuffle: bool) -> HeroButtons {
@@ -423,7 +422,7 @@ pub struct AlbumDetail {
     /// The songs' summed length in seconds, for the line under the title ("2019 · 12 songs · 48:10 · FLAC
     /// 16/44.1", which the client words from this, the album and its first song).
     pub seconds: u64,
-    /// The page's own queue: these songs, and any song of this album another queue carried along.
+    /// The page's own queue: one started from this album.
     pub queue: std::sync::Arc<PageQueue>,
 }
 
@@ -432,7 +431,7 @@ impl AlbumDetail {
     pub fn new(album: Album, songs: Vec<Song>, disc_titles: Vec<DiscTitle>) -> Self {
         let discs = album_discs(&album, &songs, &disc_titles);
         let seconds = total_seconds(&songs);
-        let queue = PageQueue::of_songs(&songs, Some(&album.id));
+        let queue = PageQueue::of(OriginKind::Album, &album.id);
         AlbumDetail { album, songs, disc_titles, discs, seconds, queue }
     }
 }
@@ -444,14 +443,14 @@ pub struct ArtistDetail {
     pub albums: Vec<Album>,
     /// The releases by kind, headed and in order ([`release_groups`]).
     pub groups: Vec<ReleaseGroup>,
-    /// The page's own queue: a song of one of these albums.
+    /// The page's own queue: one its Play or Shuffle started (all the artist's songs).
     pub queue: std::sync::Arc<PageQueue>,
 }
 
 impl ArtistDetail {
     pub fn new(artist: Artist, albums: Vec<Album>) -> Self {
         let groups = release_groups(&albums);
-        let queue = PageQueue::of_albums(&albums);
+        let queue = PageQueue::of(OriginKind::Artist, &artist.id);
         ArtistDetail { artist, albums, groups, queue }
     }
 }
@@ -463,14 +462,14 @@ pub struct PlaylistDetail {
     pub songs: Vec<Song>,
     /// The songs' summed length in seconds, for the line under the title ("12 songs · 48:10").
     pub seconds: u64,
-    /// The page's own queue: these songs.
+    /// The page's own queue: one started from this playlist.
     pub queue: std::sync::Arc<PageQueue>,
 }
 
 impl PlaylistDetail {
     pub fn new(playlist: Playlist, songs: Vec<Song>) -> Self {
         let seconds = total_seconds(&songs);
-        let queue = PageQueue::of_songs(&songs, None);
+        let queue = PageQueue::of(OriginKind::Playlist, &playlist.id);
         PlaylistDetail { playlist, songs, seconds, queue }
     }
 }
@@ -557,22 +556,23 @@ mod tests {
     }
 
     #[test]
-    fn a_page_knows_its_own_queue() {
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let album = PageQueue::new(PageOwn::Songs { ids: s(&["1", "2"]), album_id: Some("al".into()) });
-        assert!(album.plays(Some("1".into()), None));
-        assert!(album.plays(Some("9".into()), Some("al".into())), "a song of the record carried by another queue");
-        assert!(!album.plays(Some("9".into()), Some("other".into())));
-        assert!(!album.plays(None, Some("al".into())), "nothing playing");
-        let artist = PageQueue::new(PageOwn::Albums { ids: s(&["a1", "a2"]) });
-        assert!(artist.plays(Some("x".into()), Some("a2".into())));
-        assert!(!artist.plays(Some("x".into()), None));
+    fn a_page_knows_its_own_queue_by_what_it_shows() {
+        let album = AlbumDetail::new(Album { id: "al".into(), ..Default::default() }, vec![], vec![]);
+        assert_eq!(album.queue.origin(), PageOrigin::new(OriginKind::Album, "al"));
+        let artist = ArtistDetail::new(Artist { id: "ar".into(), ..Default::default() }, vec![Album { id: "al".into(), ..Default::default() }]);
+        assert_eq!(artist.queue.origin(), PageOrigin::new(OriginKind::Artist, "ar"), "the artist, not its albums");
+        let playlist = PlaylistDetail::new(Playlist { id: "pl".into(), ..Default::default() }, vec![]);
+        assert_eq!(playlist.queue.origin_ref(), &PageOrigin::new(OriginKind::Playlist, "pl"));
+        assert_eq!(PageQueue::default().origin_ref().id, "", "a page not read yet is no queue's");
     }
 
     #[test]
     fn the_big_buttons_answer_for_the_pages_own_queue() {
+        // Another page's queue playing and shuffling: this page shows Play and Shuffle, and both start its own.
         let away = hero_buttons(false, true, true, false, true, true);
         assert_eq!((away.shuffle_lit, away.pausing, away.play_press, away.shuffle_press), (false, false, HeroPress::Start, HeroPress::Start));
+        assert!(away.play_enabled && away.shuffle_enabled);
+        assert_eq!(away.pack() & 0b100, 0, "Play, not Pause");
         let here = hero_buttons(true, true, false, true, true, true);
         assert_eq!((here.shuffle_lit, here.pausing, here.play_press, here.shuffle_press), (true, true, HeroPress::Toggle, HeroPress::ShuffleOff));
         let waiting = hero_buttons(false, false, false, false, false, false);

@@ -1,5 +1,9 @@
 package dev.nori.music.app.ui
 
+import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
+import dev.nori.music.app.PerfHooks
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Stable
@@ -26,7 +30,7 @@ import kotlin.math.roundToInt
  * [state]; nothing here runs per frame.
  */
 @Stable
-class CoverImage internal constructor(val url: String?, private val loader: CoverLoader?) {
+class CoverImage internal constructor(val url: String?, loader: CoverLoader?) {
     private val kept = url?.let { loader?.kept(it) }
 
     /** The picture, once there is one. A smaller one kept from another view may stand in until it comes. */
@@ -39,7 +43,11 @@ class CoverImage internal constructor(val url: String?, private val loader: Cove
     var state by mutableStateOf(if (url == null) MISSING else if (kept != null) READY else LOADING)
         private set
 
-    private var request: CoverLoader.Request? = null
+    private val fetch = CoverFetch(
+        url, if (loader != null) Loads(loader) else Nowhere, kept?.bitmap,
+        shown = { b -> if (image?.asAndroidBitmap() !== b) image = b.asImageBitmap(); state = READY },
+        missing = { state = MISSING },
+    )
     private var painted: Pair<ImageBitmap, Painter>? = null
 
     /** [image] as a painter, made once per picture, for the places that take one. */
@@ -50,31 +58,47 @@ class CoverImage internal constructor(val url: String?, private val loader: Cove
             return BitmapPainter(i, filterQuality = FilterQuality.Low).also { painted = i to it }
         }
 
-    /** Asks for the picture a view [width] x [height] pixels draws, unless what is kept will do. Main thread. */
-    internal fun want(width: Int, height: Int) {
-        val url = url ?: return
-        val loader = loader ?: return
-        val k = loader.kept(url)
-        if (k != null && image == null) { image = k.bitmap.asImageBitmap(); state = READY }
-        if (k != null && k.fits(width, height)) {
-            if (image?.asAndroidBitmap() !== k.bitmap) image = k.bitmap.asImageBitmap()
-            return
+    /**
+     * Asks for the picture a view [width] x [height] pixels draws, unless what is kept will do; a load
+     * that fails is asked again once, a moment later (see [CoverFetch]). Main thread.
+     */
+    internal fun want(width: Int, height: Int) = fetch.want(width, height)
+
+    /** The view has gone, or wants another size: whatever is on its way is let go. */
+    internal fun stop() = fetch.stop()
+
+    /** The app's loader, as a [CoverFetch] asks it. */
+    private class Loads(private val loader: CoverLoader) : CoverFetch.Source<Bitmap> {
+        override fun kept(url: String, width: Int, height: Int): Pair<Bitmap, Boolean>? =
+            loader.kept(url)?.let { it.bitmap to it.fits(width, height) }
+
+        override fun load(url: String, width: Int, height: Int, done: (Bitmap?, Int) -> Unit): CoverFetch.Handle {
+            val r = loader.request(url, width, height, done)
+            return CoverFetch.Handle { r.cancel() }
         }
-        request?.cancel()
-        request = loader.load(url, width, height) { b ->
-            request = null
-            if (b != null) { image = b.asImageBitmap(); state = READY }
-            else if (image == null) state = MISSING
+
+        override fun later(ms: Long, run: () -> Unit): CoverFetch.Handle {
+            val r = Runnable(run)
+            main.postDelayed(r, ms)
+            return CoverFetch.Handle { main.removeCallbacks(r) }
+        }
+
+        override fun failed(url: String, status: Int, again: Boolean) {
+            PerfHooks.recorder?.coverFailed(url, status, again)
         }
     }
 
-    /** The view has gone, or wants another size: whatever is on its way is let go. */
-    internal fun stop() {
-        request?.cancel()
-        request = null
+    /** No loader (a preview): nothing is ever asked for. */
+    private object Nowhere : CoverFetch.Source<Bitmap> {
+        override fun kept(url: String, width: Int, height: Int): Pair<Bitmap, Boolean>? = null
+        override fun load(url: String, width: Int, height: Int, done: (Bitmap?, Int) -> Unit) = CoverFetch.Handle {}
+        override fun later(ms: Long, run: () -> Unit) = CoverFetch.Handle {}
+        override fun failed(url: String, status: Int, again: Boolean) {}
     }
 
     companion object {
+        private val main = Handler(Looper.getMainLooper())
+
         const val LOADING = 0
         const val READY = 1
         /** No cover, or none that can be drawn: the plate stays. */

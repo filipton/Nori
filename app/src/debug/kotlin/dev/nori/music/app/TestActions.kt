@@ -85,11 +85,16 @@ object TestActions {
         return true
     }
 
-    /** "song:<id>", "album:<id>", "search:<text>" (first song hit) or "downloaded:<n>". */
+    /**
+     * "song:<id>", "album:<id>", "search:<text>" (first song hit) or "downloaded:<n>". An album is played
+     * as its page's Play plays it, so the page answers for it.
+     */
     fun playByRef(context: Context, actions: ActionsViewModel, ref: String) = actions.attempt(null) {
         val nori = Nori.get(context)
-        val songs = songsOf(nori, testRef(ref))
-        if (songs.isNotEmpty()) nori.player.play(songs, 0)
+        val r = testRef(ref)
+        val songs = songsOf(nori, r)
+        val from = (r as? TestRef.Album)?.let { dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.ALBUM, it.id) }
+        if (songs.isNotEmpty()) nori.player.play(songs, 0, from = from)
     }
 
     /**

@@ -179,17 +179,35 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     }.getOrDefault(false)
 
     /**
+     * The same sources as [cached], over a network whose every OkHttp call [ticket] can cancel: made per
+     * request the Rust player may call off, a few builders and nothing else.
+     */
+    private fun cancellable(ticket: Ticket): DataSource.Factory {
+        val net = OkHttpDataSource.Factory(okhttp3.Call.Factory { http.stream.newCall(it).also(ticket::track) })
+        val stream = CacheDataSource.Factory().setCache(streamCache).setUpstreamDataSourceFactory(net)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        return CacheDataSource.Factory().setCache(downloadCache).setCacheWriteDataSinkFactory(null).setUpstreamDataSourceFactory(stream)
+    }
+
+    /**
      * A song's bytes from [from] on, at [url] under the cache key [key] as the core resolved them (the Rust
      * player opens its songs so): a download, then the stream cache, then the network. The source and how
-     * many bytes are left (C.LENGTH_UNSET unknown).
+     * many bytes are left (C.LENGTH_UNSET unknown). [ticket] is the request's number when the Rust side may
+     * call it off ([Tickets]); it is let go here when the open fails, and by the body's close otherwise.
      */
-    fun openResolved(url: String, key: String, from: Long): Pair<DataSource, Long> {
+    fun openResolved(url: String, key: String, from: Long, ticket: Long = 0): Pair<DataSource, Long> {
         applyStreamLimit()
-        val source = cached.createDataSource()
+        val t = Tickets.start(ticket)
+        val source = (if (t == null) cached else cancellable(t)).createDataSource()
         try {
+            t?.opening()
+            if (t?.cancelled == true) throw java.io.InterruptedIOException("called off")
             return source.open(DataSpec.Builder().setUri(Uri.parse(url)).setKey(key).setPosition(from).build()).let { source to it }
         } catch (e: IOException) {
+            // Let go at once: the stream cache's lock on the song goes with it.
             runCatching { source.close() }
+            Tickets.end(ticket)
+            if (t?.cancelled == true) throw e
             val said = (if (from > 0) pastEnd(e) else null) ?: throw e
             // A 416 that does not say the length (a proxy drops Content-Range): the first byte asked for
             // alone, whose ranged answer does. Past the end, the server holds the finished transcode and
@@ -197,6 +215,8 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
             val whole = if (said >= 0) said else wholeLength(url).takeIf { it in 1..from } ?: -1
             forgetEstimate(key, from, whole)
             throw PastEnd(whole)
+        } finally {
+            t?.opened()
         }
     }
 

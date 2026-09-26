@@ -42,6 +42,9 @@ Podman; one already answering on 4533 is used as it is), its music and database 
 - `Nori E2E / Long Album`: twelve songs of 80-135 s, every third one FLAC (the bridge, album pages, AutoMix).
 - `Nori E2E Two / Far Side`: three songs of 150-190 s off another album (a crossfade between two albums,
   since an album's own songs join gaplessly).
+- `Nori Bench 1000`: a playlist of a thousand songs (the server's own, over again if it has fewer), for
+  opening and scrolling a long page: `tools/open-bench.sh <package> "Nori Bench 1000" 10 3` from Library >
+  Playlists, on a perf or release build, prints the frames and janky frames of each open and of the flings.
 
 The app talks to it through `tools/lying-proxy.py` on port 4534 (`http://10.0.2.2:4534` from the
 emulator): a transcoded stream is stated a quarter longer than its bytes, the connection closes short, and
@@ -51,6 +54,13 @@ real end. The generated songs have no lyrics anywhere, so the `lyrics` section o
 server. Other songs come through the proxy at about 4 MB/s, so a download can be seen running beside
 another. Navidrome itself states the estimate only on a transcode it has not cached yet (a cached one comes
 chunked, with no length), so the proxy makes every transcode overstated, every time. The real server stays the default; never play or stream an `ext-` item on it.
+
+The proxy also stands in for octo-fiesta asked for a provider's song it cannot fetch: `NORI_HANG=id1,id2`
+(`NORI_HANG_MODE=headers|body`) at its start, or `curl 'localhost:4534/_hang?ids=id1,id2&mode=body'` at any
+time, makes those songs' streams never answer (or answer and never send), and `curl localhost:4534/_hang`
+says how many hang now and how many the app closed. What the engine does with such songs is tested in Rust
+(crates/engine tests/hung.rs); the device check is only that media3 and OkHttp let go of a request the engine
+calls off (the count hanging now falls as the songs are skipped), which only the real stack shows.
 
 ## What moved to Rust and what stays on the device
 
@@ -111,6 +121,7 @@ is Android glue and stays on the device. 50 moved, 60 stay.
 | the second tap puts it back | a | stars.rs `only_an_unstarred_mark_removes`, shown.rs (the section still puts it back) |
 | the pill reads Play / Pause; shuffle lights; stays Pause; a second press turns it off; pill pauses; reads Play; Play picks up (8) | b | feature-e2e `album-page` (taps on the real screen) |
 | without drawing a new queue; without restarting it (2) | a | pages.rs `the_big_buttons_answer_for_the_pages_own_queue`, controls.rs `shuffle_switched_on_keeps_the_song_playing_first_and_play_next_next` |
+| (new) only the page a queue was started from answers for it, through edits and a restore; another page sharing the song reads Play | a | queue playlist.rs `a_page_is_the_one_playing_only_when_the_queue_came_from_it`, core playlist.rs `the_queue_is_saved_and_put_back_with_the_page_it_came_from`, cli tests.rs `a_queue_started_from_a_page_carries_the_page` |
 | a downloaded song plays with the network off | b | smoke `offline` |
 | downloads stand in while the server is out of reach; they play; the album comes back with the network (3) | b | feature-e2e `bridge` (the network really going and coming) |
 | at the song that could not play | a | core bridge.rs `a_bridge_is_started_and_undone_over_the_core_queue`, queue `the_bridge_step_follows_the_setting_and_the_parked_song`, paths.rs `a_song_the_network_will_not_bring_is_handed_to_the_offline_bridge` |
@@ -124,6 +135,8 @@ is Android glue and stays on the device. 50 moved, 60 stay.
 | a transition is planned at a track boundary (real album) | a | crossfade.rs, automix.rs, engine.rs `automix_switched_on_while_playing_mixes_out_of_the_song_playing`; smoke `automix` hears one |
 | the songs coming up are measured before they are played | b | audio-e2e `automix` (it was checked twice) |
 | the queue is carried on past its last song; a whole album when albums are chosen (2) | a | core autofill.rs `similar_songs_skip_what_is_queued_and_keep_their_order`, `an_album_prefers_one_with_a_side_to_it_and_skips_the_seeds`, `a_radio_with_nothing_similar_goes_on_with_random_songs`, queue `when_to_refill_is_read_off_the_queue` |
+| a next pressed at the queue's end skips once the songs land, only if they land within 2 s of the last press; mashed, it is one skip; songs for an end that moved stay out | a | queue autofill.rs `a_next_at_the_end_skips_only_when_the_songs_come_soon`, `songs_fetched_for_an_end_that_moved_stay_out`; player queue.rs `a_next_at_the_end_expires_and_counts_once` |
+| the playing song's cover comes after fast skips, loads answered out of order, a failed load asked again once | a | covers loader.rs `a_cover_let_go_of_while_fetched_and_asked_for_again_comes`; app CoverFetchTest |
 | offload asked on the phone; stands down for USB; the DAC is seen; audio flows to it; bit-perfect engages; says what the track was opened with (6) | b | feature-e2e `dac` |
 | a DAC this app cannot feed says why; is not claimed bit-perfect (2) | a | dac.rs `a_missing_mode_says_why`, `nothing_usable_releases_and_says_why` |
 | a device with a profile gets it on connect; the sound from before comes back without it (2) | b | feature-e2e `device-sound` (the platform's output events) |
@@ -157,7 +170,7 @@ as its slowest test or its total over the cores, whichever is more. The binaries
 
 | Binary | Tests | Time | Its slowest |
 | --- | --- | --- | --- |
-| crates/engine `--test engine` (engine.rs, paths.rs, radio.rs, tempo.rs, estimated.rs) | 135 | 10 s | offload tests of a few ffmpeg songs, 4-7 s each, and next pressed fast through four queues, 6 s |
+| crates/engine `--test engine` (engine.rs, paths.rs, radio.rs, tempo.rs, estimated.rs, hung.rs) | 138 | 10 s | offload tests of a few ffmpeg songs, 4-7 s each, and next pressed fast through four queues, 6 s |
 | crates/player `--test pipeline` | 67 | 4.6 s | levels.rs, 3-4 s each: every kind of transition through two 60 s songs |
 | crates/player lib | 262 | 3.6 s | automix/tests.rs, the synthetic songs analysed side by side |
 | crates/android lib | 31 | 6 s | track.rs's two tests of the real engine thread on the wall clock, the rapid skips over a phone-like track 6 s |
@@ -169,7 +182,7 @@ as its slowest test or its total over the cores, whichever is more. The binaries
 | Crate | What is checked |
 | --- | --- |
 | player | the sound chain sample by sample (decoders, ReplayGain, equalizer, limiter, speed, silence skipping), AutoMix's analysis on synthetic songs with a known tempo, key and structure, the planner, the mixer, and the whole player on a simulated output and virtual clock (`sim`, tests/pipeline): gapless joins, crossfades, levels through a mix, controls, the output |
-| engine | the player for platforms without one, on the virtual clock of tests/common: loading and the loader (source.rs), fetching ahead (ahead.rs), the stream cache, offload onto a simulated chip (paths.rs), radio, tempo, a transcode's estimated length and its 416 (estimated.rs), one fetch per song with AutoMix measuring (one_fetch.rs), downloads and the core (core.rs) |
+| engine | the player for platforms without one, on the virtual clock of tests/common: loading and the loader (source.rs), fetching ahead (ahead.rs), the stream cache, offload onto a simulated chip (paths.rs), radio, tempo, a transcode's estimated length and its 416 (estimated.rs), one fetch per song with AutoMix measuring (one_fetch.rs), transition settings changed while playing (replan.rs), an album kept gapless under AutoMix or a crossfade heard to every sample, the core's planner and measurer included (album.rs), downloads and the core (core.rs) |
 | core | the FFI surface over the real SQLite: the index and search, smart playlists, mixes, history, lyrics' race, covers, AutoEQ and device profiles, the Subsonic client against a fake transport, stream addresses, transfers, the Kotlin twins (tests/twins.rs), the active client (tests/active_client.rs) |
 | lyrics | every lyrics format, the services' answers, trust and fitting, the race between services |
 | covers | decoders against Pillow's references, the scaler, the disk and memory caches, the loader's workers |
@@ -179,7 +192,8 @@ as its slowest test or its total over the cores, whichever is more. The binaries
 | testdir | the tests' temp directories, and tests/registered.rs: every file under a crate's `tests/` is in a test binary |
 
 The Kotlin unit tests (`./gradlew :core:testDebugUnitTest :app:testDebugUnitTest`, a minute, no device)
-cover what the Kotlin keeps: formatting, the media3 error reading, the frame fades, and InitOrderTest, which
+cover what the Kotlin keeps: formatting, the media3 error reading, the frame fades, the player's cover across
+fast skips (CoverTurnTest, CoverFetchTest: loads answered out of order, cancelled, failed and asked again), and InitOrderTest, which
 reads Nori.kt and Downloads.kt and fails when a field a constructor's thread reaches is declared after the
 line that starts the thread (the start-up NPE of 2026-09-25).
 

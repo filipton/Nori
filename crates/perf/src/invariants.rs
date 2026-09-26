@@ -16,6 +16,9 @@
 //! - one press of a skip moves one song;
 //! - the song on the screen is the one heard, give or take [`DIFFER_MS`];
 //! - the lyrics shown are the song heard's;
+//! - playing, the seek bar's place is the engine's, give or take [`PLACE_MS`], and so is the place a
+//!   controller runs on from (the S22's bar at the end of a song with 14 s left, after the phone was
+//!   unlocked: a controller's word, taken ahead and never put right);
 //! - with AutoMix on, every song in the queue has a length (the planner has nothing to plan from without);
 //! - a setting changed is in the engine a second later, judged only while it plays through an open output
 //!   and [`SETTLE_MS`] after the player service started or ended (an engine switch restarts it).
@@ -34,6 +37,9 @@ pub const STILL_MS: i64 = 2_000;
 pub const STARVED_MS: i64 = 5_000;
 /// The screen may trail the ear by this much at a song change.
 pub const DIFFER_MS: i64 = 1_000;
+/// Playing, the seek bar's place (or a controller's) further than this from the engine's own for longer
+/// than [`DIFFER_MS`] is a break.
+pub const PLACE_MS: i64 = 2_000;
 /// Presses closer together than this are one run of skips.
 pub const RUN_MS: i64 = 3_000;
 /// After the player service starts or ends (an engine switch does both) its settings are not judged for
@@ -114,6 +120,34 @@ pub struct Watch {
     hidden: bool,
     skips: Option<Skips>,
     queue_said: Vec<String>,
+    /// Since when the bar's place, and a controller's, have been far from the engine's, and whether that
+    /// was said.
+    bar_off: Off,
+    word_off: Off,
+}
+
+/// A place far from the engine's: since when, and whether it was said.
+#[derive(Default, Clone, Copy)]
+struct Off {
+    since: Option<i64>,
+    said: bool,
+}
+
+impl Off {
+    /// Whether a place `far` from the engine's at `now` has been so for longer than [`DIFFER_MS`], said
+    /// once for each time it goes far.
+    fn follow(&mut self, now: i64, far: bool) -> bool {
+        if !far {
+            *self = Off::default();
+            return false;
+        }
+        let since = *self.since.get_or_insert(now);
+        if self.said || now - since <= DIFFER_MS {
+            return false;
+        }
+        self.said = true;
+        true
+    }
 }
 
 impl Watch {
@@ -221,6 +255,21 @@ impl Watch {
         }
         self.differ_said = true;
         Some(Break::new("shown-heard", format!("the screen showed {shown} while {heard} was heard, for {} ms", now - since)))
+    }
+
+    /// The seek bar was drawn at `now` (ms, any clock that runs on): it showed `shown_ms`, the engine's own
+    /// place was `engine_ms` (negative: none to go by - another song, a seek on its way) and the
+    /// controller's `word_ms`. Judged only while `playing` with the page on the player's song. Either place
+    /// further than [`PLACE_MS`] from the engine's for longer than [`DIFFER_MS`] is a break, said once.
+    pub fn place(&mut self, now: i64, playing: bool, shown_ms: i64, engine_ms: i64, word_ms: i64) -> Option<Break> {
+        let judged = playing && engine_ms >= 0;
+        let bar = self.bar_off.follow(now, judged && (shown_ms - engine_ms).abs() > PLACE_MS);
+        let word = self.word_off.follow(now, judged && (word_ms - engine_ms).abs() > PLACE_MS);
+        let s = |ms: i64| format!("{:.1} s", ms as f64 / 1000.0);
+        if bar {
+            return Some(Break::new("place", format!("the seek bar showed {} while the engine was at {} (the controller's word {})", s(shown_ms), s(engine_ms), s(word_ms))));
+        }
+        word.then(|| Break::new("place", format!("the controller ran on to {} while the engine was at {} (the seek bar showed {})", s(word_ms), s(engine_ms), s(shown_ms))))
     }
 
     /// The user pressed next or previous on the song at `index` (its place in the queue).
@@ -474,6 +523,15 @@ pub fn perf_watch_look(wall_ms: i64) {
     said(wall_ms, b);
 }
 
+/// The seek bar was drawn (the Android library's seek bar door, which asks [`on`] first): see
+/// [`Watch::place`]. `now_ms` times how long a place stays off; the timeline gets the wall clock.
+pub fn place_seen(now_ms: i64, playing: bool, shown_ms: i64, engine_ms: i64, word_ms: i64) {
+    let b = with(|w| w.place(now_ms, playing, shown_ms, engine_ms, word_ms));
+    if b.is_some() {
+        said(wall_ms(), b);
+    }
+}
+
 /// The user pressed next or previous on the song at queue place `index`.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_watch_skip(wall_ms: i64, index: i64) {
@@ -679,6 +737,42 @@ mod tests {
         assert_eq!(b.detail, "the screen showed b while c was heard, for 1100 ms");
         assert_eq!(w.compare(9000), None, "said once");
         assert_eq!(w.shown(9100, Some("c")), None);
+    }
+
+    #[test]
+    fn the_seek_bar_far_from_the_engine_for_a_second_is_a_break() {
+        let mut w = Watch::default();
+        // The S22's report: the controller's word 14 s ahead, the bar at the end of the song, frame by frame.
+        assert_eq!(w.place(0, true, 600_000, 586_000, 600_000), None, "a frame off is not yet a break");
+        assert_eq!(w.place(900, true, 600_000, 586_900, 600_000), None);
+        let b = w.place(1_100, true, 600_000, 587_100, 600_000).expect("off for over a second");
+        assert_eq!(b.line(), "place: the seek bar showed 600.0 s while the engine was at 587.1 s (the controller's word 600.0 s)");
+        assert_eq!(w.place(1_200, true, 600_000, 587_200, 600_000), None, "said once");
+        // Back with the engine: the next time it goes off is said again.
+        assert_eq!(w.place(1_300, true, 587_300, 587_300, 587_300), None);
+        w.place(2_000, true, 590_000, 587_000, 587_000);
+        assert!(w.place(3_100, true, 591_100, 588_100, 588_100).is_some());
+    }
+
+    #[test]
+    fn a_controller_s_word_far_from_the_engine_s_is_a_break_even_with_the_bar_right() {
+        let mut w = Watch::default();
+        w.place(0, true, 586_000, 586_000, 600_000);
+        let b = w.place(1_500, true, 587_500, 587_500, 600_000).expect("the word off for 1.5 s");
+        assert_eq!(b.detail, "the controller ran on to 600.0 s while the engine was at 587.5 s (the seek bar showed 587.5 s)");
+    }
+
+    #[test]
+    fn the_place_is_judged_only_playing_with_the_engine_s_to_go_by() {
+        let mut w = Watch::default();
+        for t in (0..5_000).step_by(100) {
+            assert_eq!(w.place(t, false, 600_000, 100_000, 600_000), None, "paused");
+            assert_eq!(w.place(t, true, 600_000, -1, 600_000), None, "no engine's place: another song, or a seek on its way");
+        }
+        // A glide within the bound is not a break however long.
+        for t in (5_000..10_000).step_by(100) {
+            assert_eq!(w.place(t, true, 100_000 + t, 100_000 + t - PLACE_MS, 100_000 + t), None);
+        }
     }
 
     #[test]

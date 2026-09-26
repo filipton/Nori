@@ -113,7 +113,7 @@ impl Client {
     pub async fn resume_from_server(&self) -> NetResult<ResumePlan> {
         match self.read_now(Read::PullQueue).await? {
             Page::Queue { v } => Ok(resume_plan(v)),
-            _ => Ok(resume_plan(PlayQueue { songs: vec![], index: 0, position_ms: 0 })),
+            _ => Ok(resume_plan(PlayQueue { songs: vec![], index: 0, position_ms: 0, origin: None })),
         }
     }
 }

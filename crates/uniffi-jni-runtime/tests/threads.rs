@@ -8,7 +8,7 @@ use std::ptr::{addr_of_mut, null_mut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use uniffi_bindgen_kotlin_jni_runtime::*;
+use nori_uniffi_jni_runtime::*;
 
 const CLASS: jclass = 0x10 as jclass;
 const CLASS_CLASS: jclass = 0x20 as jclass;

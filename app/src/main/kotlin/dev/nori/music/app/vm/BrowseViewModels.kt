@@ -59,6 +59,8 @@ sealed interface Shelf {
     }
 
     data class Songs(override val row: HomeRow, val songs: List<Song>) : Shelf {
+        /** What a queue played from this shelf carries. */
+        val origin = dev.nori.music.ffi.model.PageOrigin(dev.nori.music.ffi.model.OriginKind.SHELF, row.name)
         override val isEmpty get() = songs.isEmpty()
     }
 }

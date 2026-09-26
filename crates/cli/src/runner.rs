@@ -471,7 +471,7 @@ impl Runner {
         let Some(s) = &self.session else { return };
         match c {
             Cmd::Load(req) => s.load(req),
-            Cmd::Play { songs, start, shuffle } => s.play(songs, start, shuffle),
+            Cmd::Play { songs, start, shuffle, from } => s.play(songs, start, shuffle, from),
             Cmd::PlayFetch(what, shuffle) => s.play_later(what, shuffle),
             Cmd::Enqueue(songs, next) => s.enqueue(songs, next),
             Cmd::EnqueueFetch(what, next) => s.enqueue_later(what, next),

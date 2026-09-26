@@ -381,6 +381,13 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   colours, text and buttons with the wash; a fade cut short by the next change finishes from where it is.
   Colours measured while a record is already on its way are not brought up mid-slide; the page fades to
   them once the record is in.
+- Found (2026-09-26, the owner's phone): after fast skips the sleeve stayed on the plate for the whole
+  song. A load that came back with nothing was final (`CoverImage` went to MISSING and never asked
+  again), and the loader could answer with nothing a view that asked for a cover just as a fetch of it
+  that nobody waited for any more was ending. Now the loader ends such a fetch under the same lock as its
+  look (nori-covers loader.rs), a failed load is asked again once after 2 s with the sheen still on
+  (`CoverFetch`, CoverFetchTest), the perf build logs every failure with its reason ("cover: … did not
+  load: …"), and a picture whose fade was cut short finishes it rather than stay faint over the plate.
 - Check: with the network slow or a cold cover cache, on the player: tap next; swipe; tap next five times
   quickly. No frame shows the last song's cover in the middle after a record has landed; the plate is
   grey, not the last song's colour; the picture and the colours come in as fades. With the cover on the

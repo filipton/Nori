@@ -19,6 +19,11 @@ use jni::JNIEnv;
 
 include!(concat!(env!("OUT_DIR"), "/uniffi_bindgen_kotlin_jni.uniffi.rs"));
 
+/// The Rust heap, counted for the perf report's memory line (nori_model::heap): a relaxed add per
+/// allocation and per free.
+#[global_allocator]
+static HEAP: nori_core::heap::Counting = nori_core::heap::Counting;
+
 mod covers;
 mod dsp;
 mod heard;
@@ -99,7 +104,21 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
         register(&mut env, class);
     }
     watch();
+    nori_core::heap::Counting::installed();
+    nori_perf::memory::install(engine_memory);
     JNI_VERSION_1_6
+}
+
+/// What the engine holds, for the perf report's memory line (nori_perf::memory): read at a stretch's ends.
+fn engine_memory() -> nori_perf::memory::EngineMemory {
+    let songs = nori_engine::source::held();
+    nori_perf::memory::EngineMemory {
+        songs: songs.songs as i32,
+        songs_kb: (songs.bytes / 1024) as i64,
+        songs_on_disk: songs.on_disk as i32,
+        ring_kb: (nori_engine::output::ring_bytes() / 1024) as i64,
+        model_kb: (nori_engine::core::beat_model_bytes() / 1024) as i64,
+    }
 }
 
 /// The engine tells the perf build's invariant watch what each wake of its thread saw

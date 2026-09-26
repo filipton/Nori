@@ -325,7 +325,7 @@ fun DownloadsScreen(actions: ActionsViewModel) {
                 DownloadRow(
                     song, cover(song.coverArt), DownloadPhase.DONE, i < s.finished.lastIndex, plain,
                     moving(plain),
-                    onClick = { actions.play(s.finished, i) },
+                    onClick = { actions.play(s.finished, i, DOWNLOADED_SONGS) },
                 ) {
                     Box(Modifier.size(40.dp), Alignment.Center) { Icon(Icons.Filled.DownloadDone, say.downloaded, Modifier.size(MARK), MaterialTheme.colorScheme.onSurfaceVariant) }
                 }

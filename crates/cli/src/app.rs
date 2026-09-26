@@ -10,7 +10,7 @@ use nori_core::playlist::PlaylistView;
 use nori_core::search::SearchView;
 use nori_core::settings::{EqLevel, SavedServer, SoundBand, StoredPrefs};
 use nori_core::settings_store::SoundTool;
-use nori_core::{Album, AlbumDetail, Artist, ArtistDetail, Playlist, PlaylistDetail, Song};
+use nori_core::{Album, AlbumDetail, Artist, ArtistDetail, OriginKind, PageOrigin, Playlist, PlaylistDetail, Song};
 use nori_engine::{Event, State};
 use nori_core::rules::equalizer_tuning;
 use nori_look::cover::CoverColours;
@@ -57,7 +57,8 @@ pub const LIB_TABS: [&str; 4] = ["Albums", "Artists", "Playlists", "Songs"];
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cmd {
     Load(Req),
-    Play { songs: Vec<Song>, start: usize, shuffle: bool },
+    /// `from`: the page the songs are that page's own list from (nori-queue `playlist_set`'s origin).
+    Play { songs: Vec<Song>, start: usize, shuffle: bool, from: Option<PageOrigin> },
     PlayFetch(Fetch, bool),
     Enqueue(Vec<Song>, bool),
     EnqueueFetch(Fetch, bool),
@@ -100,7 +101,7 @@ impl Cmd {
     pub fn brief(&self) -> String {
         match self {
             Cmd::Load(r) => format!("load {r:?}"),
-            Cmd::Play { songs, start, shuffle } => format!("play {} songs from {start} shuffle={shuffle}", songs.len()),
+            Cmd::Play { songs, start, shuffle, .. } => format!("play {} songs from {start} shuffle={shuffle}", songs.len()),
             Cmd::Enqueue(songs, next) => format!("enqueue {} songs next={next}", songs.len()),
             Cmd::Download(songs) => format!("download {} songs", songs.len()),
             Cmd::Login(p) => format!("log in to {}", p.url),
@@ -631,7 +632,7 @@ impl App {
         self.open_page(Page::Artist { id, detail: Load::Loading, sel: Sel::default() });
     }
 
-    fn open_playlist(&mut self, id: String) {
+    pub(crate) fn open_playlist(&mut self, id: String) {
         self.open_page(Page::Playlist { id, detail: Load::Loading, sel: Sel::default() });
     }
 
@@ -1508,10 +1509,32 @@ impl App {
     /// A song picked from a list, as the "Choosing a song" setting says.
     fn tap(&mut self, songs: Vec<Song>, i: usize) {
         match self.prefs.tap_action {
-            1 => self.cmds.push(Cmd::Play { songs: vec![songs[i].clone()], start: 0, shuffle: false }),
+            // One song on its own is no page's queue.
+            1 => self.cmds.push(Cmd::Play { songs: vec![songs[i].clone()], start: 0, shuffle: false, from: None }),
             2 => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], false)),
             3 => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], true)),
-            _ => self.cmds.push(Cmd::Play { songs, start: i, shuffle: false }),
+            _ => {
+                let from = self.origin_here();
+                self.cmds.push(Cmd::Play { songs, start: i, shuffle: false, from })
+            }
+        }
+    }
+
+    /// The page whose own list of songs is the one picked from here, for the queue it starts: the page
+    /// open, or the screen's song list. None where the list is not one place's.
+    fn origin_here(&self) -> Option<PageOrigin> {
+        if let Some(page) = self.page() {
+            return Some(match page {
+                Page::Album { id, .. } => PageOrigin::new(OriginKind::Album, id.as_str()),
+                Page::Artist { id, .. } => PageOrigin::new(OriginKind::Artist, id.as_str()),
+                Page::Playlist { id, .. } => PageOrigin::new(OriginKind::Playlist, id.as_str()),
+            });
+        }
+        match self.screen {
+            Screen::Library => Some(PageOrigin::new(OriginKind::Songs, "")),
+            Screen::Search => Some(PageOrigin::new(OriginKind::Search, self.search.text.as_str())),
+            Screen::Downloads => Some(PageOrigin::new(OriginKind::Downloads, "")),
+            _ => None,
         }
     }
 
@@ -1521,7 +1544,8 @@ impl App {
                 Some(Page::Artist { id, .. }) => self.cmds.push(Cmd::PlayFetch(Fetch::Artist(id.clone()), shuffle)),
                 Some(p) => {
                     if let Some(songs) = p.songs() {
-                        self.cmds.push(Cmd::Play { songs: songs.to_vec(), start: 0, shuffle });
+                        let from = self.origin_here();
+                        self.cmds.push(Cmd::Play { songs: songs.to_vec(), start: 0, shuffle, from });
                     }
                 }
                 None => {}
@@ -1532,7 +1556,10 @@ impl App {
             Some(Item::Album(a)) => self.cmds.push(Cmd::PlayFetch(Fetch::Album(a.id), shuffle)),
             Some(Item::Artist(a)) => self.cmds.push(Cmd::PlayFetch(Fetch::Artist(a.id), shuffle)),
             Some(Item::Playlist(p)) => self.cmds.push(Cmd::PlayFetch(Fetch::Playlist(p.id), shuffle)),
-            Some(Item::Song(songs, _)) => self.cmds.push(Cmd::Play { songs, start: 0, shuffle }),
+            Some(Item::Song(songs, _)) => {
+                let from = self.origin_here();
+                self.cmds.push(Cmd::Play { songs, start: 0, shuffle, from })
+            }
             None => {}
         }
     }

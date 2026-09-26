@@ -580,3 +580,32 @@ fn a_cover_is_sent_on_the_first_frame_and_again_when_the_song_changes() {
         assert!(sent(&mut t, &mut a, &mut art) > 0, "{protocol:?}: sent again after resend");
     }
 }
+
+#[test]
+fn a_queue_started_from_a_page_carries_the_page() {
+    use nori_core::{OriginKind, PageOrigin, Playlist, PlaylistDetail};
+    let mut a = app();
+    a.go(Screen::Library);
+    a.open_album("al-3".into());
+    let songs = vec![song("1", "One", 200), song("2", "Two", 200)];
+    a.handle(Msg::Data(Req::Album("al-3".into()), Ok(Data::Album(Box::new(nori_core::AlbumDetail::new(album("al-3", "Three"), songs.clone(), vec![]))))));
+    // A row tapped plays the album's songs from it, as the album's own queue; so does the page's Play.
+    a.cmds.clear();
+    key(&mut a, KeyCode::Down);
+    key(&mut a, KeyCode::Enter);
+    key(&mut a, KeyCode::Char('x'));
+    let from = |c: &Cmd| match c {
+        Cmd::Play { from, start, .. } => Some((from.clone(), *start)),
+        _ => None,
+    };
+    let album_page = Some(PageOrigin::new(OriginKind::Album, "al-3"));
+    assert_eq!(a.cmds.iter().filter_map(from).collect::<Vec<_>>(), [(album_page.clone(), 1), (album_page, 0)]);
+    // A playlist's page is its own, not the album's its songs come from.
+    key(&mut a, KeyCode::Esc);
+    a.open_playlist("pl-1".into());
+    let pl = PlaylistDetail::new(Playlist { id: "pl-1".into(), ..Default::default() }, songs);
+    a.handle(Msg::Data(Req::Playlist("pl-1".into()), Ok(Data::Playlist(Box::new(pl)))));
+    a.cmds.clear();
+    key(&mut a, KeyCode::Enter);
+    assert_eq!(a.cmds.iter().filter_map(from).collect::<Vec<_>>(), [(Some(PageOrigin::new(OriginKind::Playlist, "pl-1")), 0)]);
+}

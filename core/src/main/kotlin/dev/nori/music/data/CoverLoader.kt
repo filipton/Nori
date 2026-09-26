@@ -104,6 +104,10 @@ class CoverLoader private constructor(context: Context) {
     /** What is kept for [url], at whatever size. */
     fun kept(url: String): Kept? = memory.get(url)
 
+    /** Bytes of the Bitmaps kept in memory, and how many there are: for the perf report's memory line. */
+    fun keptBytes(): Long = memory.size().toLong()
+    fun keptCount(): Int = memory.snapshot().size
+
     /** The addresses of the covers kept in memory: covers the app has shown, for the benchmark to load again. */
     fun keptAddresses(): List<String> = memory.snapshot().keys.toList()
 
@@ -113,7 +117,14 @@ class CoverLoader private constructor(context: Context) {
      * [done] is called on the main thread with the Bitmap, or null when there is none (no such cover, a
      * format the core does not decode, the network), unless the request is cancelled first. Main thread.
      */
-    fun load(url: String, width: Int, height: Int, done: (Bitmap?) -> Unit): Request =
+    fun load(url: String, width: Int, height: Int, done: (Bitmap?) -> Unit): Request = request(url, width, height) { b, _ -> done(b) }
+
+    /**
+     * [load], told why there is no picture: [done] gets the Bitmap and [CoverPixels.OK], or null and what
+     * stopped it ([CoverPixels.UNKNOWN], [CoverPixels.CLOSED], [CoverPixels.NETWORK] plus the failure's
+     * kind, [CoverPixels.HTTP] plus the status, ...).
+     */
+    fun request(url: String, width: Int, height: Int, done: (Bitmap?, Int) -> Unit): Request =
         Request(url, width, height, done).also { it.start() }
 
     /**
@@ -173,20 +184,22 @@ class CoverLoader private constructor(context: Context) {
         private val url: String,
         private val width: Int,
         private val height: Int,
-        private val then: (Bitmap?) -> Unit,
+        private val then: (Bitmap?, Int) -> Unit,
     ) : CoverPixels.Waiter, Runnable {
         private var ticket = 0L
         private var over = false
         @Volatile private var got: Bitmap? = null
+        @Volatile private var status = CoverPixels.OK
 
         internal fun start() {
             ticket = CoverPixels.request(loader, url, width, height, this)
-            if (ticket == 0L) { over = true; then(null) }
+            if (ticket == 0L) { over = true; then(null, CoverPixels.UNREADABLE) }
         }
 
         /** On a loader thread. */
         override fun done(bitmap: Bitmap?, status: Int) {
             got = bitmap
+            this.status = status
             main.post(this)
         }
 
@@ -200,7 +213,7 @@ class CoverLoader private constructor(context: Context) {
             got = null
             // Smaller than asked for, or asked for at its own size: that is the whole picture.
             if (b != null && !Covers.isProvider(url)) keep(url, b, width == 0 || b.width < width || b.height < height)
-            then(b)
+            then(b, status)
         }
 
         /** The view has gone: its cover is not wanted, and it is not handed on. */

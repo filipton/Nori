@@ -72,9 +72,9 @@ mod tests {
 
     #[test]
     fn nothing_saved_on_the_server_says_so() {
-        assert_eq!(resume_plan(PlayQueue { songs: vec![], index: 3, position_ms: 9 }), ResumePlan::Nothing);
+        assert_eq!(resume_plan(PlayQueue { songs: vec![], index: 3, position_ms: 9, origin: None }), ResumePlan::Nothing);
         let s = Song { id: "a".into(), ..Default::default() };
-        assert_eq!(resume_plan(PlayQueue { songs: vec![s.clone()], index: 0, position_ms: 1200 }), ResumePlan::Play { songs: vec![s], index: 0, position_ms: 1200 });
+        assert_eq!(resume_plan(PlayQueue { songs: vec![s.clone()], index: 0, position_ms: 1200, origin: None }), ResumePlan::Play { songs: vec![s], index: 0, position_ms: 1200 });
     }
 
     #[test]

@@ -265,6 +265,36 @@ fn a_clients_painter_decodes_once_and_every_waiter_is_called_back_with_the_one_p
 }
 
 #[test]
+fn a_cover_let_go_of_while_fetched_and_asked_for_again_comes() {
+    // The player skipping away from a song and back while its cover is on the wire: the second view gets
+    // the picture, whether it asked while the first fetch was out or after it ended with nobody waiting.
+    let d = dir("again");
+    let server = Server::new(200);
+    server.hold();
+    let loader = Loader::new(Config { memory_bytes: 0, ..config(Some(d.path().to_path_buf()), 1) }, server.clone());
+    let (tx, rx) = mpsc::channel();
+    let first = loader.request(PHOTO, 8, 8, |_| {});
+    server.wait_calls(1);
+    drop(first);
+    let tx2 = tx.clone();
+    let back = loader.request(PHOTO, 8, 8, move |r| tx2.send(r).unwrap());
+    server.release();
+    assert!(answers(&rx, 1)[0].is_ok(), "joined the fetch that was out");
+    drop(back);
+    server.hold();
+    let gone = loader.request("http://s/other", 8, 8, |_| {});
+    server.wait_calls(2);
+    drop(gone);
+    server.release();
+    // The fetch nobody waited for has ended; asked again, the cover comes from the disk.
+    loader.load("http://s/next", 8, 8).unwrap();
+    let again = loader.request("http://s/other", 8, 8, move |r| tx.send(r).unwrap());
+    assert!(answers(&rx, 1)[0].is_ok(), "asked again after the flight ended with nobody waiting");
+    assert_eq!(server.calls(), 3, "the second ask was answered from the disk");
+    drop(again);
+}
+
+#[test]
 fn a_view_that_leaves_while_its_cover_is_fetched_is_never_called_back_nor_decoded_for() {
     let server = Server::new(200);
     server.hold();

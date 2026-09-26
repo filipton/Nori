@@ -102,8 +102,13 @@ impl HeardClock {
 
     /// [`HeardClock::at`] for the seek bar itself, whose page shows queue index `shown`: the same answer,
     /// but the place is the one the bar shows - held while the ear has moved to a song the page has not
-    /// followed to yet (`nori_player::heard::Playhead`).
-    pub fn position(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64, shown: Option<usize>) -> HeardAt {
+    /// followed to yet (`nori_player::heard::Playhead`). `engine_ms` is the engine's own place in the song
+    /// `on`, read on this side of the controller (negative: none, another song or a seek on its way): what
+    /// the bar goes by when there is one, rather than `position_ms`, which through a controller is the
+    /// session's last word run on at one times, never put right until the next play, pause or seek.
+    #[allow(clippy::too_many_arguments)]
+    pub fn position(&mut self, now_ms: i64, playing: bool, on: Option<usize>, next: Option<usize>, position_ms: i64, shown: Option<usize>, engine_ms: i64) -> HeardAt {
+        let position_ms = if engine_ms >= 0 { engine_ms } else { position_ms };
         let s = self.seen(now_ms, playing, on, next, position_ms);
         let ms = self.head.show_for(&self.t, s, shown, now_ms, on, position_ms, playing);
         at(s, ms)

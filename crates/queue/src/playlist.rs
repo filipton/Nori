@@ -12,11 +12,44 @@ pub use nori_player::playlist::Hand;
 pub use nori_player::queue::Onto;
 
 use crate::queue;
-use nori_model::Song;
+use nori_model::{PageOrigin, Song};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 static LIST: Mutex<Playlist> = Mutex::new(Playlist::new());
 /// The planner's window as it was last handed over, so it is handed over only when it changes.
 static WINDOW: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
+/// The page the queue was started from ([`PageOrigin`]); none for a queue started anywhere else.
+/// Set with each new queue and kept through every edit of it (added, put next, removed, moved,
+/// refilled, bridged): the queue still came from that page.
+static ORIGIN: Mutex<Option<PageOrigin>> = Mutex::new(None);
+/// Moves each time a new queue is set, so a page asks again whether it is the one playing only then.
+static ORIGIN_GEN: AtomicU32 = AtomicU32::new(0);
+
+fn set_origin(origin: Option<PageOrigin>) {
+    *ORIGIN.lock() = origin;
+    ORIGIN_GEN.fetch_add(1, Ordering::Release);
+}
+
+/// The page the queue was started from, if it was; saved with the queue (`Core::playlist_save`).
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn playlist_origin() -> Option<PageOrigin> {
+    ORIGIN.lock().clone()
+}
+
+/// Moves whenever a new queue is set, and with it perhaps its origin: a page asks [`playlist_from`]
+/// again only when this has moved (`PlaylistJni.origin`, one int on each player event).
+pub fn playlist_origin_gen() -> u32 {
+    ORIGIN_GEN.load(Ordering::Acquire)
+}
+
+/// Whether the queue is the one `page` started: its origin is the page's own, kind and id. Not
+/// whether the song playing is one of the page's: a song of playlist A playing from A leaves playlist
+/// B, which has it too, alone, and an album's song played from anywhere else leaves the album's page
+/// alone. Asked when the queue changes ([`playlist_origin_gen`]), never per frame.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn playlist_from(page: std::sync::Arc<nori_library::pages::PageQueue>) -> bool {
+    ORIGIN.lock().as_ref() == Some(page.origin_ref())
+}
 
 /// The queue, lent to `f` to read.
 pub fn with<R>(f: impl FnOnce(&Playlist) -> R) -> R {
@@ -101,15 +134,18 @@ pub struct BridgeState {
     pub current: Option<String>,
 }
 
-/// A new queue (`start` -1: wherever shuffle starts).
+/// A new queue (`start` -1: wherever shuffle starts), started from the page `origin` (none: from
+/// anywhere that is not a page's songs, such as one song, a selection, a radio or a mix drawn from a song).
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn playlist_set(ids: Vec<String>, start: i32, shuffle: bool) -> QueueChange {
+pub fn playlist_set(ids: Vec<String>, start: i32, shuffle: bool, origin: Option<PageOrigin>) -> QueueChange {
+    set_origin(origin);
     edit(|p| p.set(ids, usize::try_from(start).ok(), shuffle, seed()))
 }
 
-/// A new queue already in the order it plays, shown as shuffled (a weighted shuffle).
+/// A new queue already in the order it plays, shown as shuffled (a weighted shuffle), from `origin`.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn playlist_set_ordered(ids: Vec<String>) -> QueueChange {
+pub fn playlist_set_ordered(ids: Vec<String>, origin: Option<PageOrigin>) -> QueueChange {
+    set_origin(origin);
     edit(|p| p.set_ordered(ids))
 }
 
@@ -405,7 +441,7 @@ pub(crate) mod tests {
 
     pub(crate) fn hold(ids: &[&str], start: i32) -> parking_lot::MutexGuard<'static, ()> {
         let g = TURN.lock();
-        playlist_set(ids.iter().map(|s| s.to_string()).collect(), start, false);
+        playlist_set(ids.iter().map(|s| s.to_string()).collect(), start, false, None);
         playlist_repeat(0);
         g
     }
@@ -483,13 +519,59 @@ pub(crate) mod tests {
         assert!(!playlist_shuffle_shown());
         playlist_show_shuffle(true);
         assert!(playlist_shuffle_shown(), "at once, before the queue changes");
-        playlist_set_ordered(ids(&["s2", "s1"]));
+        playlist_set_ordered(ids(&["s2", "s1"]), None);
         assert!(playlist_shuffle_shown(), "a weighted shuffle stays lit");
         playlist_take(0, ids(&["s3"]), vec![Hand::Last]);
         assert!(playlist_shuffle_shown());
         playlist_show_shuffle(false);
         playlist_shuffle(false);
         assert!(!playlist_shuffle_shown());
+    }
+
+    fn page(kind: nori_model::OriginKind, id: &str) -> std::sync::Arc<nori_library::pages::PageQueue> {
+        nori_library::pages::PageQueue::new(PageOrigin::new(kind, id))
+    }
+
+    #[test]
+    fn a_page_is_the_one_playing_only_when_the_queue_came_from_it() {
+        use nori_model::OriginKind::{Album, Artist, Playlist, Search};
+        let _g = hold(&["o0"], 0);
+        let (a, b, album, artist) = (page(Playlist, "A"), page(Playlist, "B"), page(Album, "al"), page(Artist, "ar"));
+        // Playlist A plays; its song "shared" is in playlist B as well, and is on album "al" by "ar".
+        let gen = playlist_origin_gen();
+        playlist_set(ids(&["a1", "shared", "a3"]), 1, false, Some(a.origin()));
+        assert_ne!(playlist_origin_gen(), gen, "a new queue moves the generation");
+        assert!(playlist_from(a.clone()));
+        assert!(!playlist_from(b.clone()), "B shares the song playing but did not start the queue");
+        assert!(!playlist_from(album.clone()), "the album's song, played from a playlist");
+        assert!(!playlist_from(artist.clone()), "the artist's song, played from a playlist");
+        assert!(!playlist_from(page(Album, "A")), "the same id of another kind");
+
+        // The album page lights only for a queue its own start made.
+        playlist_set(ids(&["shared", "al2"]), 0, false, Some(album.origin()));
+        assert!(playlist_from(album.clone()) && !playlist_from(a.clone()) && !playlist_from(artist.clone()));
+
+        // Every edit keeps the origin: the queue still came from the album.
+        let gen = playlist_origin_gen();
+        playlist_take(9, ids(&["x"]), vec![Hand::Next]);
+        playlist_take(9, ids(&["y"]), vec![Hand::Last]);
+        playlist_take(9, ids(&["fill1", "fill2"]), vec![Hand::No; 2]);
+        playlist_move(0, 1, 2);
+        playlist_remove(1, 2);
+        playlist_shuffle(true);
+        playlist_shuffle(false);
+        playlist_moved_to(1);
+        assert!(playlist_from(album.clone()), "added, put next, refilled, moved, removed, shuffled");
+        assert_eq!(playlist_origin_gen(), gen, "an edit does not make the pages ask again");
+
+        // A new queue replaces it: from another page, or from no page at all.
+        playlist_set_ordered(ids(&["r1", "r2"]), Some(artist.origin()));
+        assert!(playlist_from(artist.clone()) && !playlist_from(album.clone()));
+        playlist_set(ids(&["one"]), 0, false, Some(PageOrigin::new(Search, "q")));
+        assert!(!playlist_from(artist.clone()));
+        playlist_set(ids(&["radio:1"]), 0, false, None);
+        assert_eq!(playlist_origin(), None);
+        assert!(!playlist_from(a) && !playlist_from(b) && !playlist_from(album) && !playlist_from(artist));
     }
 
     #[test]

@@ -26,10 +26,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import dev.nori.music.Nori
 import dev.nori.music.app.PerfHooks
+import dev.nori.music.look.CoverPixels
 import dev.nori.music.ffi.perf.PerfCounters
 import dev.nori.music.ffi.perf.PerfDevice
 import dev.nori.music.ffi.perf.PerfFrames
 import dev.nori.music.ffi.perf.PerfLogs
+import dev.nori.music.ffi.perf.PerfMemory
 import dev.nori.music.ffi.perf.PerfNote
 import dev.nori.music.ffi.perf.PerfOutput
 import dev.nori.music.ffi.perf.PerfPage
@@ -285,6 +287,22 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         handler.post { dev.nori.music.ffi.perf.perfWatchArrived(t, index.toLong(), auto, shuffled) }
     }
 
+    override fun coverFailed(url: String, status: Int, again: Boolean) {
+        // The cover's id and size, not the address: that carries the login's token.
+        val uri = android.net.Uri.parse(url)
+        val which = listOfNotNull(uri.getQueryParameter("id"), uri.getQueryParameter("size")?.let { "at $it" }).joinToString(" ").ifEmpty { "a cover" }
+        val why = when {
+            status >= CoverPixels.HTTP -> "HTTP ${status - CoverPixels.HTTP}"
+            status >= CoverPixels.NETWORK -> "network: " + (dev.nori.music.ffi.net.FailureKind.entries.getOrNull(status - CoverPixels.NETWORK)?.name ?: "failure ${status - CoverPixels.NETWORK}")
+            status == CoverPixels.CLOSED -> "answered with nothing (nobody waited, or the loader closed)"
+            status == CoverPixels.UNKNOWN -> "a format that is not decoded"
+            status == CoverPixels.BROKEN -> "a broken file"
+            status == CoverPixels.BAD_BITMAP -> "no Bitmap to draw into"
+            else -> "unreadable ($status)"
+        }
+        android.util.Log.i("nori", "cover: $which did not load: $why; " + if (again) "asking again in ${dev.nori.music.app.ui.CoverFetch.RETRY_MS} ms" else "the placeholder stays")
+    }
+
     override fun lyricsShown(songId: String) {
         val t = System.currentTimeMillis()
         handler.post { dev.nori.music.ffi.perf.perfWatchLyrics(t, songId) }
@@ -490,6 +508,25 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             tempDeci = b?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0,
             rxBytes = TrafficStats.getUidRxBytes(Process.myUid()).takeIf { it != TrafficStats.UNSUPPORTED.toLong() },
             txBytes = TrafficStats.getUidTxBytes(Process.myUid()).takeIf { it != TrafficStats.UNSUPPORTED.toLong() },
+            memory = memory(memory),
+        )
+    }
+
+    /**
+     * Where the memory is (the core's `memory_line` says it): Android's app summary of the PSS just read,
+     * the native heap's allocated bytes, and what of it is the app's own - the Rust side's (the core's
+     * `perf_rust_memory`), the covers' Bitmaps and the moving cover's player.
+     */
+    private fun memory(m: Debug.MemoryInfo): PerfMemory {
+        fun stat(name: String) = m.getMemoryStat("summary.$name")?.toLongOrNull() ?: 0L
+        val covers = dev.nori.music.data.CoverLoader.get(app)
+        return PerfMemory(
+            javaKb = stat("java-heap"), nativeKb = stat("native-heap"), codeKb = stat("code"), stackKb = stat("stack"),
+            graphicsKb = stat("graphics"), otherKb = stat("private-other"), systemKb = stat("system"),
+            nativeAllocKb = Debug.getNativeHeapAllocatedSize() / 1024,
+            coversKb = covers.keptBytes() / 1024, covers = covers.keptCount(),
+            motion = dev.nori.music.playback.MotionPlayer.live,
+            rust = runCatching { dev.nori.music.ffi.perf.perfRustMemory() }.getOrNull(),
         )
     }
 

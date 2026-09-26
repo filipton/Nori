@@ -56,7 +56,8 @@ if want automix; then section "one AutoMix transition"
   "$app" set crossfadeKeepAlbums false >/dev/null; "$app" set autoMix true >/dev/null
   "$app" play "album:$album" >/dev/null
   sounds 20
-  wait_for durationMs ">30000" 10 >/dev/null
+  # A cold start on the real server can take a while to know the length; the seek needs it.
+  wait_for durationMs ">30000" 30 >/dev/null
   leaving=$(field title); dur=$(field durationMs)
   # 30 s before the end: a song with a long outro plans its mix up to about 20 s early, and a seek past
   # the planned start rightly goes straight on to the next song, with no mix to see.
@@ -136,7 +137,8 @@ if want offline; then section "a download plays offline"
   [ "${held:-0}" -gt 0 ] && before=$((before - 1))
   "$app" do "download song:$id" >/dev/null
   dl_done() { local v; v=$(fields downloading downloaded | tr '\n' ' '); set -- $v; [ "${1:-1}" = 0 ] && [ "${2:-0}" -gt "${before:-0}" ]; }
-  check "the download finishes" wait_until 60 dl_done
+  # A whole song over the internet from the real server can take longer than from the local one.
+  check "the download finishes" wait_until "$([ "$NORI_E2E_SERVER" = local ] && echo 60 || echo 180)" dl_done
   offline
   adb shell am force-stop "$pkg" >/dev/null 2>&1; "$app" launch >/dev/null
   # From the device's own list: looking the song up by id would need the network and prove nothing. This
