@@ -13,8 +13,8 @@ android {
         applicationId = "dev.nori.music"
         minSdk = 26
         targetSdk = 36
-        versionName = "0.3.3"
-        versionCode = 303
+        versionName = "0.4.0"
+        versionCode = 400
         ndk { abiFilters += (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",") }
         // What About can say about this build beyond a version number: the commit it was cut from, and
         // the versions of what it is built on - the Rust crates read from Cargo.lock, the Android ones
