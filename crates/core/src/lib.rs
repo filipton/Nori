@@ -2,19 +2,34 @@
 //! SQLite index. No sockets and no threads of its own; every call is coarse
 //! (one response, one page) so the FFI crossing stays off the hot path.
 
-uniffi::setup_scaffolding!();
-
-mod api;
-mod autoeq;
 pub mod automix;
-mod db;
-mod lyrics;
-pub mod dsp;
-mod history;
-mod m3u;
-mod mixes;
-mod model;
-mod smart;
+pub mod transfers;
+pub mod queue;
+pub mod bridge;
+pub mod history;
+pub mod m3u;
+pub mod mixes;
+pub mod profiles;
+pub mod smart;
+pub mod actions;
+pub mod browse;
+pub mod covers;
+pub mod motion;
+pub mod search;
+pub mod shown;
+pub mod client;
+pub mod cache_policy;
+pub mod race;
+pub mod stream;
+pub mod autofill;
+pub mod car;
+pub mod playlist;
+pub mod library;
+pub mod stage;
+#[cfg(feature = "neural-beats")]
+pub mod beat_download;
+// Remove with migrate_034 once 0.3.4 users have updated (see its "How to delete this").
+pub mod migrate_034;
 
 use std::sync::Arc;
 
@@ -22,27 +37,26 @@ use parking_lot::{Mutex, RwLock};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 
-pub use model::*;
+pub use nori_db::{self as db, background};
+pub use nori_model::{alog, heap, lines, model, CoreError};
+pub use nori_automix::beat_model;
+pub use nori_devices::{autoeq, outputs};
+pub use nori_library::{menus, pages, rows, stars};
+pub use nori_lyrics::lyrics::lyrics_from_lrc;
+pub use nori_lyrics::{formats, look, lrclib, lyrics, services};
+pub use nori_net::{api, transport};
+pub use nori_perf::perf_log;
+pub use nori_queue::{heard, rules, scrobble};
+pub use nori_transfers::stream_cache;
+pub use nori_settings::{credits, dsp, lyrics_sources, settings, settings_model, settings_store};
+pub use nori_settings::settings::parse_eq_preset;
+pub use nori_model::model::*;
+pub use nori_library::pages::{AlbumDetail, ArtistDetail, PlaylistDetail, Starred};
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum CoreError {
-    #[error("{reason}")]
-    Api { code: i32, reason: String },
-    #[error("bad response: {reason}")]
-    Parse { reason: String },
-    #[error("database: {reason}")]
-    Db { reason: String },
-}
+use nori_model::Result;
 
-impl From<rusqlite::Error> for CoreError {
-    fn from(e: rusqlite::Error) -> Self {
-        CoreError::Db { reason: e.to_string() }
-    }
-}
-
-type Result<T> = std::result::Result<T, CoreError>;
-
-#[derive(Debug, Clone, Default, uniffi::Record)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct ServerConfig {
     pub url: String,
     pub user: String,
@@ -52,14 +66,16 @@ pub struct ServerConfig {
     pub legacy_auth: bool,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct PendingCall {
     pub row_id: i64,
     pub endpoint: String,
     pub params: Vec<Param>,
 }
 
-#[derive(Debug, Clone, uniffi::Record)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct Param {
     pub key: String,
     pub value: String,
@@ -256,24 +272,46 @@ fn parse(body: &[u8]) -> Result<Response> {
 
 // ---- the object Kotlin holds -----------------------------------------------
 
-#[derive(uniffi::Object)]
-pub struct Core {
-    db: Mutex<Connection>,
-    server: RwLock<api::Server>,
+/// The core the app is using now, for a player's measurer that reads the core's queue and analyses
+/// (nori-engine's `Measurer::on_shelf`). The crates below find its database and downloads through
+/// `nori_db::active` and `transfers::held`.
+static ACTIVE: Mutex<std::sync::Weak<Core>> = Mutex::new(std::sync::Weak::new());
+
+/// The core the app is using now, if there is one.
+pub fn active() -> Option<Arc<Core>> {
+    ACTIVE.lock().upgrade()
 }
 
-#[uniffi::export]
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
+pub struct Core {
+    /// Shared with nori-db's active database while this is the newest core ([`nori_db::active`]).
+    db: Arc<Mutex<Connection>>,
+    server: RwLock<api::Server>,
+    /// The downloads table's ids, for asking about one song without the database (transfers.rs); shared
+    /// with nori-transfers' active downloads while this is the newest core.
+    held: Arc<Mutex<transfers::Held>>,
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
 impl Core {
-    /// `db_path` empty opens an in-memory index.
-    #[uniffi::constructor]
-    pub fn new(db_path: String) -> Result<Arc<Self>> {
-        let db = db::open(&db_path)?;
-        automix::store::migrate(&db)?;
-        Ok(Arc::new(Core { db: Mutex::new(db), server: RwLock::new(api::Server::default()) }))
+    /// The app's database at `db_path` (empty: in memory), for `server`'s rows (a server profile's id).
+    #[cfg_attr(feature = "ffi", uniffi::constructor)]
+    pub fn new(db_path: String, server: String) -> Result<Arc<Self>> {
+        let db = db::open(&db_path, &server)?;
+        nori_automix::beat_model::set_home(&db_path);
+        let held = transfers::Held::load(&db)?;
+        let core = Arc::new(Core { db: Arc::new(Mutex::new(db)), server: RwLock::new(api::Server::default()), held: Arc::new(Mutex::new(held)) });
+        // The newest core is the one the app is using: the parts of the core that run without Kotlin (the
+        // transition planner on the audio thread, analyses finished in the background, a song asked
+        // about by a list row) find its database and its downloads through these.
+        *ACTIVE.lock() = Arc::downgrade(&core);
+        nori_db::set_active(&core.db);
+        transfers::set_active_held(&core.held);
+        Ok(core)
     }
 
-    /// Returns the normalised base url. Each server profile has its own database file, so the
-    /// index is only dropped when the same file is pointed at a different server or user.
+    /// Returns the normalised base url. Each server profile has its own rows, so the index is only
+    /// dropped when the same profile is pointed at a different server or user.
     pub fn configure(&self, config: ServerConfig) -> Result<String> {
         let auth = match (&config.api_key, config.legacy_auth) {
             (Some(k), _) if !k.is_empty() => api::Auth::ApiKey(k),
@@ -290,39 +328,6 @@ impl Core {
         let base = s.base.clone();
         *self.server.write() = s;
         Ok(base)
-    }
-
-    /// Points requests at another address of the same server (LAN vs WAN) without touching the index.
-    pub fn use_address(&self, url: String) {
-        let next = self.server.read().rebased(&url);
-        *self.server.write() = next;
-    }
-
-    /// getIndexes: the top of the folder tree.
-    pub fn parse_indexes(&self, body: Vec<u8>) -> Result<Vec<Artist>> {
-        Ok(parse(&body)?.indexes.unwrap_or_default().index.into_iter().flat_map(|i| i.artist).collect())
-    }
-
-    pub fn parse_directory(&self, body: Vec<u8>) -> Result<Directory> {
-        let d = parse(&body)?.directory.unwrap_or_default();
-        let mut out = Directory { id: d.id, name: d.name, ..Default::default() };
-        for c in d.child {
-            if c.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false) {
-                if let Ok(mut a) = serde_json::from_value::<Artist>(c.clone()) {
-                    if a.name.is_empty() {
-                        a.name = c.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
-                    }
-                    out.folders.push(a);
-                }
-            } else if let Ok(s) = serde_json::from_value::<Song>(c) {
-                out.songs.push(s);
-            }
-        }
-        Ok(out)
-    }
-
-    pub fn parse_music_folders(&self, body: Vec<u8>) -> Result<Vec<MusicFolder>> {
-        Ok(parse(&body)?.music_folders.unwrap_or_default().music_folder)
     }
 
     pub fn url(&self, endpoint: String, params: Vec<Param>) -> String {
@@ -364,6 +369,171 @@ impl Core {
 
     // ---- parsing; library items seen on the way are indexed ----
 
+    // ---- local index ----
+
+    pub fn local_search(&self, query: String, limit: u32) -> Result<SearchResult> {
+        Ok(db::search(&self.db.lock(), &query, limit)?)
+    }
+
+    pub fn index_size(&self) -> Result<IngestStats> {
+        let c = self.db.lock();
+        Ok(IngestStats { artists: db::count(&c, db::ARTIST)?, albums: db::count(&c, db::ALBUM)?, songs: db::count(&c, db::SONG)? })
+    }
+
+    // ---- response cache (stale-while-revalidate is driven from Kotlin) ----
+
+    // ---- play queue, survives process death ----
+
+    pub fn save_queue(&self, queue: PlayQueue) -> Result<()> {
+        let json = serde_json::json!({ "songs": queue.songs, "index": queue.index, "position": queue.position_ms, "origin": queue.origin });
+        Ok(db::kv_put(&self.db.lock(), "queue", &json.to_string())?)
+    }
+
+    pub fn load_queue(&self) -> Result<PlayQueue> {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Q {
+            songs: Vec<Song>,
+            index: u32,
+            position: u64,
+            /// Read on its own, so an origin this version does not know loses only itself, not the queue.
+            origin: serde_json::Value,
+        }
+        let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
+        // A saved queue that points past its end plays its last song.
+        let index = q.index.min(q.songs.len().saturating_sub(1) as u32);
+        // Kept for the queue it is about to become, so the platform does not hand the songs straight back.
+        crate::queue::queue_register(q.songs.clone());
+        let origin = serde_json::from_value::<Option<crate::PageOrigin>>(q.origin).ok().flatten();
+        Ok(PlayQueue { songs: q.songs, index, position_ms: q.position, origin })
+    }
+
+    // ---- writes made while offline (stars, ratings, playlist edits, scrobbles), replayed in order ----
+
+    /// The "all songs" list: a sorted, optionally filtered page of the index. `sort` is one of
+    /// title, artist, album, year, duration, created, playCount, userRating; anything else means index order.
+    pub fn browse_songs(&self, sort: String, descending: bool, starred_only: bool, year_from: u32, year_to: u32, offset: u32, limit: u32) -> Result<Vec<Song>> {
+        let key = match sort.as_str() {
+            "title" | "artist" | "album" => format!("json_extract(json, '$.{sort}') COLLATE NOCASE"),
+            "year" | "duration" | "created" | "playCount" | "userRating" => format!("json_extract(json, '$.{sort}')"),
+            _ => "rowid".to_string(),
+        };
+        let mut sql = String::from("SELECT json FROM items WHERE server=sid() AND kind=?1");
+        if starred_only {
+            sql.push_str(" AND json_extract(json, '$.starred') = 1");
+        }
+        if year_to > 0 {
+            sql.push_str(" AND json_extract(json, '$.year') BETWEEN ?4 AND ?5");
+        }
+        sql.push_str(&format!(" ORDER BY {key} {} LIMIT ?3 OFFSET ?2", if descending { "DESC" } else { "ASC" }));
+        let c = self.db.lock();
+        let mut st = c.prepare_cached(&sql)?;
+        let map = |r: &rusqlite::Row| r.get::<_, String>(0);
+        let rows: Vec<String> = if year_to > 0 {
+            st.query_map(params![db::SONG, offset, limit, year_from, year_to], map)?.filter_map(|r| r.ok()).collect()
+        } else {
+            st.query_map(params![db::SONG, offset, limit], map)?.filter_map(|r| r.ok()).collect()
+        };
+        Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
+    }
+
+    // ---- downloads: the metadata side; media3 owns the bytes. Songs are queued by transfers.rs ----
+
+    /// The ids alone of [`Self::downloads`], in the same order: for walking them without the songs.
+    pub fn download_ids(&self, done: bool) -> Result<Vec<String>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT id FROM downloads WHERE server=sid() AND done=?1 ORDER BY ts DESC")?;
+        let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|id| id.ok()).collect())
+    }
+
+    pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT json FROM downloads WHERE server=sid() AND done=?1 ORDER BY ts DESC")?;
+        let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
+    }
+
+    // ---- AutoEQ headphone database (kept by `Client::autoeq_update`, see profiles.rs) ----
+
+    pub fn autoeq_search(&self, query: String, limit: u32) -> Result<Vec<AutoEqEntry>> {
+        Ok(autoeq::search(&self.db.lock(), &query, limit)?)
+    }
+
+    pub fn autoeq_count(&self) -> Result<u32> {
+        Ok(autoeq::count(&self.db.lock())?)
+    }
+
+    // ---- saved sound profiles ----
+
+    pub fn profiles(&self) -> Result<Vec<SoundProfile>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT name, json, outputs FROM profiles ORDER BY name")?;
+        let rows = st.query_map([], |r| {
+            Ok(SoundProfile {
+                name: r.get(0)?,
+                json: r.get(1)?,
+                outputs: r.get::<_, String>(2)?.lines().filter(|l| !l.is_empty()).map(str::to_string).collect(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn profile_delete(&self, name: String) -> Result<()> {
+        self.db.lock().execute("DELETE FROM profiles WHERE name=?1", [name])?;
+        Ok(())
+    }
+
+    // ---- search history ----
+
+    pub fn search_history(&self) -> Result<Vec<String>> {
+        let c = self.db.lock();
+        let mut st = c.prepare_cached("SELECT query FROM searches WHERE server=sid() ORDER BY ts DESC")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn search_forget(&self) -> Result<()> {
+        self.db.lock().execute("DELETE FROM searches WHERE server=sid()", [])?;
+        Ok(())
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// Points requests at another address of the same server (LAN vs WAN) without touching the index.
+    pub fn use_address(&self, url: String) {
+        let next = self.server.read().rebased(&url);
+        *self.server.write() = next;
+    }
+
+    /// getIndexes: the top of the folder tree.
+    pub fn parse_indexes(&self, body: Vec<u8>) -> Result<Vec<Artist>> {
+        Ok(parse(&body)?.indexes.unwrap_or_default().index.into_iter().flat_map(|i| i.artist).collect())
+    }
+
+    pub fn parse_directory(&self, body: Vec<u8>) -> Result<Directory> {
+        let d = parse(&body)?.directory.unwrap_or_default();
+        let mut out = Directory { id: d.id, name: d.name, ..Default::default() };
+        for c in d.child {
+            if c.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false) {
+                if let Ok(mut a) = serde_json::from_value::<Artist>(c.clone()) {
+                    if a.name.is_empty() {
+                        a.name = c.get("title").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+                    }
+                    out.folders.push(a);
+                }
+            } else if let Ok(s) = serde_json::from_value::<Song>(c) {
+                out.songs.push(s);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn parse_music_folders(&self, body: Vec<u8>) -> Result<Vec<MusicFolder>> {
+        Ok(parse(&body)?.music_folders.unwrap_or_default().music_folder)
+    }
+
     /// Validates any response; used for ping and for calls with no payload.
     pub fn parse_status(&self, body: Vec<u8>) -> Result<ServerInfo> {
         let r = parse(&body)?;
@@ -390,19 +560,19 @@ impl Core {
     pub fn parse_starred(&self, body: Vec<u8>) -> Result<Starred> {
         let f = parse(&body)?.starred2.unwrap_or_default();
         db::index(&mut self.db.lock(), &f.artist, &f.album, &f.song)?;
-        Ok(Starred { artists: f.artist, albums: f.album, songs: f.song })
+        Ok(Starred::new(f.artist, f.album, f.song))
     }
 
     pub fn parse_album(&self, body: Vec<u8>) -> Result<AlbumDetail> {
         let a = parse(&body)?.album.unwrap_or_default();
         db::index(&mut self.db.lock(), &[], std::slice::from_ref(&a.album), &a.song)?;
-        Ok(AlbumDetail { album: a.album, songs: a.song, disc_titles: a.disc_titles })
+        Ok(AlbumDetail::new(a.album, a.song, a.disc_titles))
     }
 
     pub fn parse_artist(&self, body: Vec<u8>) -> Result<ArtistDetail> {
         let a = parse(&body)?.artist.unwrap_or_default();
         db::index(&mut self.db.lock(), std::slice::from_ref(&a.artist), &a.album, &[])?;
-        Ok(ArtistDetail { artist: a.artist, albums: a.album })
+        Ok(ArtistDetail::new(a.artist, a.album))
     }
 
     pub fn parse_artist_info(&self, body: Vec<u8>) -> Result<ArtistInfo> {
@@ -450,7 +620,7 @@ impl Core {
     pub fn parse_playlist(&self, body: Vec<u8>) -> Result<PlaylistDetail> {
         let p = parse(&body)?.playlist.unwrap_or_default();
         db::index(&mut self.db.lock(), &[], &[], &p.entry)?;
-        Ok(PlaylistDetail { playlist: p.playlist, songs: p.entry })
+        Ok(PlaylistDetail::new(p.playlist, p.entry))
     }
 
     pub fn parse_genres(&self, body: Vec<u8>) -> Result<Vec<Genre>> {
@@ -476,78 +646,44 @@ impl Core {
         let q = parse(&body)?.play_queue.unwrap_or_default();
         let current = q.current.map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
         let index = current.and_then(|c| q.entry.iter().position(|s| s.id == c)).unwrap_or(0) as u32;
-        Ok(PlayQueue { songs: q.entry, index, position_ms: q.position })
+        Ok(PlayQueue { songs: q.entry, index, position_ms: q.position, origin: None })
     }
-
-    // ---- local index ----
-
-    pub fn local_search(&self, query: String, limit: u32) -> Result<SearchResult> {
-        Ok(db::search(&self.db.lock(), &query, limit)?)
-    }
-
-    pub fn index_size(&self) -> Result<IngestStats> {
-        let c = self.db.lock();
-        Ok(IngestStats { artists: db::count(&c, db::ARTIST)?, albums: db::count(&c, db::ALBUM)?, songs: db::count(&c, db::SONG)? })
-    }
-
-    // ---- response cache (stale-while-revalidate is driven from Kotlin) ----
 
     pub fn cache_get(&self, key: String) -> Result<Option<Vec<u8>>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT body FROM cache WHERE key=?1")?;
+        let mut st = c.prepare_cached("SELECT body FROM cache WHERE server=sid() AND key=?1")?;
         Ok(st.query_row([key], |r| r.get(0)).optional()?)
     }
 
     /// True when `key` was stored less than `max_age_ms` ago: the caller can skip asking the server again.
     pub fn cache_fresh(&self, key: String, max_age_ms: i64) -> Result<bool> {
         let c = self.db.lock();
-        let ts: Option<i64> = c.prepare_cached("SELECT ts FROM cache WHERE key=?1")?.query_row([key], |r| r.get(0)).optional()?;
+        let ts: Option<i64> = c.prepare_cached("SELECT ts FROM cache WHERE server=sid() AND key=?1")?.query_row([key], |r| r.get(0)).optional()?;
         Ok(ts.is_some_and(|t| db::now_ms() - t < max_age_ms))
     }
 
     pub fn cache_put(&self, key: String, body: Vec<u8>) -> Result<()> {
         let c = self.db.lock();
-        c.prepare_cached("INSERT OR REPLACE INTO cache(key, body, ts) VALUES(?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;
+        c.prepare_cached("INSERT OR REPLACE INTO cache(server, key, body, ts) VALUES(sid(), ?1, ?2, ?3)")?.execute(params![key, body, db::now_ms()])?;
         Ok(())
     }
 
     /// Drops cached responses whose key starts with `prefix` (after a write to the server).
     pub fn cache_evict(&self, prefix: String) -> Result<()> {
         let c = self.db.lock();
-        c.execute("DELETE FROM cache WHERE key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
+        c.execute("DELETE FROM cache WHERE server=sid() AND key >= ?1 AND key < ?1 || x'ff'", [prefix])?;
         Ok(())
     }
 
-    // ---- play queue, survives process death ----
-
-    pub fn save_queue(&self, queue: PlayQueue) -> Result<()> {
-        let json = serde_json::json!({ "songs": queue.songs, "index": queue.index, "position": queue.position_ms });
-        Ok(db::kv_put(&self.db.lock(), "queue", &json.to_string())?)
-    }
-
-    pub fn load_queue(&self) -> Result<PlayQueue> {
-        #[derive(Deserialize, Default)]
-        #[serde(default)]
-        struct Q {
-            songs: Vec<Song>,
-            index: u32,
-            position: u64,
-        }
-        let q: Q = db::kv_get(&self.db.lock(), "queue")?.and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default();
-        Ok(PlayQueue { songs: q.songs, index: q.index, position_ms: q.position })
-    }
-
-    // ---- writes made while offline (stars, ratings, playlist edits, scrobbles), replayed in order ----
-
     pub fn pending_add(&self, endpoint: String, params: Vec<Param>) -> Result<()> {
         let json = serde_json::to_string(&params.iter().map(|p| (&p.key, &p.value)).collect::<Vec<_>>()).unwrap_or_default();
-        self.db.lock().execute("INSERT INTO pending(endpoint, params) VALUES(?1, ?2)", params![endpoint, json])?;
+        self.db.lock().execute("INSERT INTO pending(server, endpoint, params) VALUES(sid(), ?1, ?2)", params![endpoint, json])?;
         Ok(())
     }
 
     pub fn pending_list(&self) -> Result<Vec<PendingCall>> {
         let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT rowid, endpoint, params FROM pending ORDER BY rowid LIMIT 200")?;
+        let mut st = c.prepare_cached("SELECT rowid, endpoint, params FROM pending WHERE server=sid() ORDER BY rowid LIMIT 200")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
         Ok(rows
             .filter_map(|r| r.ok())
@@ -559,93 +695,12 @@ impl Core {
     }
 
     pub fn pending_done(&self, row_id: i64) -> Result<()> {
-        self.db.lock().execute("DELETE FROM pending WHERE rowid=?1", [row_id])?;
-        Ok(())
-    }
-
-    /// The "all songs" list: a sorted, optionally filtered page of the index. `sort` is one of
-    /// title, artist, album, year, duration, created, playCount, userRating; anything else means index order.
-    pub fn browse_songs(&self, sort: String, descending: bool, starred_only: bool, year_from: u32, year_to: u32, offset: u32, limit: u32) -> Result<Vec<Song>> {
-        let key = match sort.as_str() {
-            "title" | "artist" | "album" => format!("json_extract(json, '$.{sort}') COLLATE NOCASE"),
-            "year" | "duration" | "created" | "playCount" | "userRating" => format!("json_extract(json, '$.{sort}')"),
-            _ => "rowid".to_string(),
-        };
-        let mut sql = String::from("SELECT json FROM items WHERE kind=?1");
-        if starred_only {
-            sql.push_str(" AND json_extract(json, '$.starred') = 1");
-        }
-        if year_to > 0 {
-            sql.push_str(" AND json_extract(json, '$.year') BETWEEN ?4 AND ?5");
-        }
-        sql.push_str(&format!(" ORDER BY {key} {} LIMIT ?3 OFFSET ?2", if descending { "DESC" } else { "ASC" }));
-        let c = self.db.lock();
-        let mut st = c.prepare_cached(&sql)?;
-        let map = |r: &rusqlite::Row| r.get::<_, String>(0);
-        let rows: Vec<String> = if year_to > 0 {
-            st.query_map(params![db::SONG, offset, limit, year_from, year_to], map)?.filter_map(|r| r.ok()).collect()
-        } else {
-            st.query_map(params![db::SONG, offset, limit], map)?.filter_map(|r| r.ok()).collect()
-        };
-        Ok(rows.iter().filter_map(|j| serde_json::from_str(j).ok()).collect())
-    }
-
-    /// Decades that have songs in the index, newest first, with how many: what "browse by decade" lists.
-    pub fn browse_decades(&self) -> Result<Vec<Genre>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT (json_extract(json, '$.year') / 10) * 10 AS d, count(*) FROM items WHERE kind=?1 AND json_extract(json, '$.year') > 0 GROUP BY d ORDER BY d DESC")?;
-        let rows = st.query_map([db::SONG], |r| Ok(Genre { name: r.get::<_, i64>(0)?.to_string(), song_count: r.get(1)?, album_count: 0 }))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
-    }
-
-    /// A page of every indexed song, for "download the whole library".
-    pub fn indexed_songs(&self, offset: u32, limit: u32) -> Result<Vec<Song>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT json FROM items WHERE kind=?1 ORDER BY rowid LIMIT ?3 OFFSET ?2")?;
-        let rows = st.query_map(params![db::SONG, offset, limit], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
-    }
-
-    // ---- downloads: the metadata side; media3 owns the bytes ----
-
-    /// Queued, not yet complete; [download_done] makes it show up in [downloads].
-    pub fn download_add(&self, song: Song) -> Result<()> {
-        let json = serde_json::to_string(&song).unwrap_or_default();
-        self.db.lock().execute("INSERT OR IGNORE INTO downloads(id, json, ts) VALUES(?1, ?2, ?3)", params![song.id, json, db::now_ms()])?;
-        Ok(())
-    }
-
-    pub fn download_done(&self, id: String) -> Result<()> {
-        self.db.lock().execute("UPDATE downloads SET done=1 WHERE id=?1", [id])?;
+        self.db.lock().execute("DELETE FROM pending WHERE server=sid() AND rowid=?1", [row_id])?;
         Ok(())
     }
 
     pub fn download_remove(&self, id: String) -> Result<()> {
-        self.db.lock().execute("DELETE FROM downloads WHERE id=?1", [id])?;
-        Ok(())
-    }
-
-    pub fn downloads(&self, done: bool) -> Result<Vec<Song>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT json FROM downloads WHERE done=?1 ORDER BY ts DESC")?;
-        let rows = st.query_map([done], |r| r.get::<_, String>(0))?;
-        Ok(rows.filter_map(|j| serde_json::from_str(&j.ok()?).ok()).collect())
-    }
-
-    // ---- AutoEQ headphone database (only fetched when the user opens the browser) ----
-
-    /// The url of the index the caller should download and hand to [autoeq_store].
-    pub fn autoeq_index_url(&self) -> String {
-        autoeq::INDEX_URL.to_string()
-    }
-
-    /// Parses `INDEX.md` into the local table; returns how many headphones it holds.
-    pub fn autoeq_store(&self, markdown: String) -> Result<u32> {
-        Ok(autoeq::store(&mut self.db.lock(), &markdown)?)
-    }
-
-    pub fn autoeq_search(&self, query: String, limit: u32) -> Result<Vec<AutoEqEntry>> {
-        Ok(autoeq::search(&self.db.lock(), &query, limit)?)
+        self.download_settle(vec![id], vec![false])
     }
 
     /// The curves measured for the headphones behind an output device's own name (a Bluetooth name, a USB
@@ -654,38 +709,10 @@ impl Core {
         Ok(autoeq::matching(&self.db.lock(), &device, limit)?)
     }
 
-    pub fn autoeq_count(&self) -> Result<u32> {
-        Ok(autoeq::count(&self.db.lock())?)
-    }
-
-    pub fn autoeq_preset_url(&self, entry: AutoEqEntry) -> String {
-        autoeq::preset_url(&entry)
-    }
-
-    // ---- saved sound profiles ----
-
     pub fn profile_save(&self, profile: SoundProfile) -> Result<()> {
         let c = self.db.lock();
         c.prepare_cached("INSERT OR REPLACE INTO profiles(name, json, outputs) VALUES(?1, ?2, ?3)")?
             .execute(params![profile.name, profile.json, profile.outputs.join("\n")])?;
-        Ok(())
-    }
-
-    pub fn profiles(&self) -> Result<Vec<SoundProfile>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT name, json, outputs FROM profiles ORDER BY name")?;
-        let rows = st.query_map([], |r| {
-            Ok(SoundProfile {
-                name: r.get(0)?,
-                json: r.get(1)?,
-                outputs: r.get::<_, String>(2)?.lines().filter(|l| !l.is_empty()).map(str::to_string).collect(),
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn profile_delete(&self, name: String) -> Result<()> {
-        self.db.lock().execute("DELETE FROM profiles WHERE name=?1", [name])?;
         Ok(())
     }
 
@@ -718,71 +745,22 @@ impl Core {
         Ok(self.profiles()?.into_iter().find(|p| p.outputs.iter().any(|o| *o == output)))
     }
 
-    // ---- search history ----
-
     pub fn search_remember(&self, query: String) -> Result<()> {
         let c = self.db.lock();
-        c.execute("INSERT OR REPLACE INTO searches(query, ts) VALUES(?1, ?2)", params![query.trim(), db::now_ms()])?;
-        c.execute("DELETE FROM searches WHERE query NOT IN (SELECT query FROM searches ORDER BY ts DESC LIMIT 20)", [])?;
-        Ok(())
-    }
-
-    pub fn search_history(&self) -> Result<Vec<String>> {
-        let c = self.db.lock();
-        let mut st = c.prepare_cached("SELECT query FROM searches ORDER BY ts DESC")?;
-        let rows = st.query_map([], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn search_forget(&self) -> Result<()> {
-        self.db.lock().execute("DELETE FROM searches", [])?;
+        c.execute("INSERT OR REPLACE INTO searches(server, query, ts) VALUES(sid(), ?1, ?2)", params![query.trim(), db::now_ms()])?;
+        c.execute("DELETE FROM searches WHERE server=sid() AND query NOT IN (SELECT query FROM searches WHERE server=sid() ORDER BY ts DESC LIMIT 20)", [])?;
         Ok(())
     }
 }
 
-/// LRC or plain lyrics text, from a third-party provider, into the app's lyrics shape.
-#[uniffi::export]
-pub fn lyrics_from_lrc(text: String) -> Lyrics {
-    lyrics::from_lrc(&text)
-}
-
-/// Reads an AutoEQ "ParametricEQ.txt" / Equalizer APO preset:
-/// `Preamp: -6.2 dB` and `Filter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70` lines; anything else is ignored.
-#[uniffi::export]
-pub fn parse_eq_preset(text: String) -> EqPreset {
-    let mut preset = EqPreset::default();
-    for line in text.lines() {
-        let t: Vec<&str> = line.split_whitespace().collect();
-        let after = |key: &str| t.iter().position(|w| w.eq_ignore_ascii_case(key)).and_then(|i| t.get(i + 1)).and_then(|v| v.parse::<f32>().ok());
-        if t.first().is_some_and(|w| w.eq_ignore_ascii_case("preamp:")) {
-            preset.preamp_db = t.get(1).and_then(|v| v.parse().ok()).unwrap_or(0.0);
-        } else if t.first().is_some_and(|w| w.eq_ignore_ascii_case("filter")) {
-            let Some(on) = t.iter().position(|w| w.eq_ignore_ascii_case("ON")) else { continue };
-            let token = t.get(on + 1).map(|k| k.to_ascii_uppercase()).unwrap_or_default();
-            let kind = match token.as_str() {
-                "PK" | "PEQ" | "MODAL" => EqKind::Peaking,
-                "LS" | "LSC" | "LSQ" => EqKind::LowShelf,
-                "HS" | "HSC" | "HSQ" => EqKind::HighShelf,
-                "LSC 6DB" | "LS 6DB" | "LS6" => EqKind::LowShelfSlope,
-                "HSC 6DB" | "HS 6DB" | "HS6" => EqKind::HighShelfSlope,
-                "LP" | "LPQ" => EqKind::LowPass,
-                "HP" | "HPQ" => EqKind::HighPass,
-                "BP" => EqKind::BandPass,
-                "NO" | "NOTCH" => EqKind::Notch,
-                "AP" => EqKind::AllPass,
-                _ => continue,
-            };
-            // Only the shelving and peaking kinds carry a gain; a pass filter line has none.
-            let Some(freq) = after("Fc") else { continue };
-            let gain_db = after("Gain").unwrap_or(0.0);
-            if matches!(kind, EqKind::Peaking | EqKind::LowShelf | EqKind::HighShelf | EqKind::LowShelfSlope | EqKind::HighShelfSlope) && after("Gain").is_none() {
-                continue;
-            }
-            preset.bands.push(EqBand { kind, freq, gain_db, q: after("Q").unwrap_or(0.71) });
-        }
+/// Only the tests settle one download this way; the app settles them in batches (`download_settle`).
+#[cfg(test)]
+impl Core {
+    /// A queued song finished; [downloads] with `done` lists it from now on.
+    pub fn download_done(&self, id: String) -> Result<()> {
+        self.download_settle(vec![id], vec![true])
     }
-    preset
 }
 
 #[cfg(test)]
-mod tests;
+pub mod tests;

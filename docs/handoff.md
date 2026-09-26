@@ -12,6 +12,105 @@ Apple's own App Store screenshots and the differences closed. What is left is li
 
 ## Recently closed
 
+- **Ported onto the Rust core: the lyrics, moving-cover and player work of `claude/lyrics-motion-artwork`.**
+  That branch was written on master before the rewrite, with the lyrics services and Apple's catalogue
+  asked from Kotlin. Here everything that computes is Rust, and Kotlin only draws and carries bytes:
+  - **Lyrics services, asked together.** Sixteen services, ranked in Settings → Lyrics (held and dragged;
+    only the switch turns one off), with "Prefer word-by-word lyrics" and fields for a PaxSenix and a
+    BetterLyrics key. Out of the box nothing is asked ("Look things up online" is off); under it only the
+    open LRCLIB and Unison are on, and the fourteen others stay off until switched on. The service table
+    and the ranking are nori-settings' (`lyrics_sources.rs`, stored as `lyricsOrder` and `lyricsOn`); the
+    requests, matching and answers nori-lyrics' (`services.rs`); the race `race.rs`: what each service
+    answered before is read from the response cache first (a hit for good, a miss for a week), the rest
+    are asked six at a time, each request cut off at 6 s and each service at 12 s (30 s for the keyed
+    PaxSenix routes), a finer answer shown as soon as it comes, and everything dropped once nobody still
+    out could beat the answer in hand. A service that failed is not asked about the same song again for
+    half an hour, and one that fails three songs in a row rests ten minutes: nothing is hammered. It is
+    one future on no thread of its own, polled by the caller (`Client::lyrics_lookup`, handing each pick
+    to Kotlin's `LyricsShown`); leaving the lyrics cancels it. The core's `Transport` gained `send`, a
+    third party's headers and a JSON body (NetEase's Referer, the keys, YouTube Music's player API);
+    OkHttp still only carries the bytes. The cache is JSON now, every word time kept (`formats::to_cache`);
+    the old `lrclib2|` rows are dropped once per run.
+  - **Every format read in Rust, with fixtures.** LRCLIB's `lyricsfile` (YAML, word timing where a
+    contributor timed words; it beats the LRC beside it), Apple-style TTML, NetEase's YRC, KuGou's KRC
+    (decrypted and inflated), QQ's QRC, LyricsPlus, PaxSenix's Apple JSON, Spotify's and Musixmatch's
+    JSON through any envelope, YouTube's search, lyrics tab and captions, Genius and Megalobiz pages and
+    escaped LRC: nori-lyrics `formats.rs`, `json.rs`, `html.rs`, each tested against a sample in
+    `crates/lyrics/testdata/` (invented words, real shapes). Backing vocals are kept apart from their line
+    (`LyricLine.backing`, `backing_words`) and duets get sides (`LyricLine.voice`).
+  - **Apple-style lyric fill** (docs/motion.md item 20): a soft edge, words that rise and settle, held
+    notes that glow, backing vocals under their line, duet sides. The clock's timing is nori-look's
+    (`backing_sung`, `moving`, the `lively` flag and the timings in `stage`); the drawing is Kotlin's.
+  - **Moving covers** (docs/features.md, "Player artwork"; motion.md item 19): found by the core
+    (`crates/core/src/motion.rs`: the iTunes Search API, the web player's token, the catalogue's
+    `editorialVideo`, kept per album in the response cache), played by `MotionPlayer` (its own muted
+    ExoPlayer with media3's HLS module, a 64 MB cache) in a TextureView inside the showing record
+    (`SleeveMotion.kt`). Off by default, behind the lookups switch, Wi-Fi only unless allowed; switched
+    off nothing of it is built, and switched on it plays only while the player is open, at rest and on
+    screen, and is released when the player is put away, the app is left or the screen goes off.
+  - **"Keep playing" takes turns** (nori-queue `autofill.rs`, `autofill_picks` in the app's database,
+    per server): candidates neither picked nor played in the last two weeks first, the first of them drawn
+    from the top three, then the rest least lately used first; the core's refill ranks and remembers
+    (`Client::autofill`), so no platform code changed.
+  - **Shuffle always spreads artists and albums**: `weighted_shuffle` is gone from the settings, their
+    page and `shuffle_plan`.
+  - **The player**: the blur at the sleeve's foot moves with each move (`SoftSleeve`, motion.md item 18),
+    no hairline half way up the opening player (the sleeve measured against the player's own root, and
+    the wash's plain bands run a row under the sleeve's), and the tab stays lit on the pages opened inside
+    it (`tabRoute` in App.kt).
+  **Checked**: `cargo test --workspace` and both Android builds. **Not checked**: none of the services'
+  or Apple's hosts could be reached from where this was written, so every request shape is what their
+  documentation or other clients of September 2026 show; `tools/feature-e2e.sh` now asks each lyrics
+  service on its own and reports it, checks that nothing is asked with lookups off, and checks that the
+  moving cover builds no player switched off and lets it go when the player is put away. Run it on a
+  phone, and `tools/bench.sh dev.nori.music 90 off` with moving covers off (must match the numbers
+  below) and on with the player closed. On the phone, also judge: the lyrics settings' drag on the
+  longer list and the key dialogs; a word-timed song, a duet and backing vocals; a slow swipe held half
+  way (no haze on the lifted card), a slow pull on the sheet; and, with an album that has a moving
+  cover, the fade in and out and `dumpsys gfxinfo` while it plays.
+- **"Better beat detection", an opt-in neural beat tracker for AutoMix, all in the core.** Settings, Playback,
+  under AutoMix; off by default, and only in a build with the `neural-beats` cargo feature (nori-engine's, which
+  pulls in tract through nori-core and nori-player). On, the measurer (nori-engine `Measurer`, lowest priority,
+  songs whole on the disk only) makes Beat This!'s small model once: the core carries only its graph
+  (`crates/player/models/beat-this-small0.graph.onnx`, 186 kB, no weights), and fetches the authors' own
+  checkpoint through the client's transport (`crates/core/src/beat_download.rs`: their URL, Wi-Fi unless
+  allowed, SHA-256 checked), reads it with a restricted unpickler (`automix/checkpoint.rs`), converts it into the
+  weights file the graph reads (`automix/weights.rs`, 4.2 MB, its own SHA-256 pinned), keeps that beside the
+  database and deletes it when switched off (`crates/automix/src/beat_model.rs` holds the pins and where it
+  is). On the desktop the whole of it took 0.48 s (0.44 s of it the download) and 31 MB at the peak. It then keeps the first and last 35 s of the song playing and the next one as it decodes them
+  (`automix::beats::Ends`, mono at about 22 kHz, 3.4 MB each), and reads each end once; the grid replaces the
+  classical one at an end when it is sure (`automix/beats.rs`). The model is loaded when a look needs it and let
+  go when the measuring thread ends. Synthetic mix windows right and trusted 24 to 27 of 32, none wrong (the
+  branch's measurement; see the research). The debug and perf builds carry the feature, a release build leaves it
+  out unless `-PrustFeatures=neural-beats` (it makes the arm64 perf APK 15.7 MB bigger: the library 9.6 to 25.3 MB, the graph 0.19 MB of it; the APK was 34.7 MB with the bundled weights, 29.8 MB now), and the row is not shown
+  without it. No copy of the weights is shipped or hosted (the old bundled export and its dead download URL are
+  gone): the weights made on the device give the old export's logits within 4e-5 and the same beats (research
+  7.1, `automix::weights` test). On *Kid A* it changes no mix
+  window as shipped (research 7.1). Open: the branch's charging backlog (`BeatBacklog`, a JobScheduler job over downloaded
+  songs) was not carried over, so only songs about to play are read; and nothing was timed on a phone: 6.7 s of one
+  desktop core per new song, expect 25-35 s of a phone's big core. Research and numbers: `docs/research/analysis.md`, sections 5 to 7.
+- **AutoMix enters the next song on its drop, leaves before a dead ending, and keeps two singers apart.** The
+  analysis finds where the incoming song's arrangement arrives (the drop), a closing breakdown and the silence
+  before a hidden track; the planner searches for the window where the drop lands on a downbeat (and phrase line)
+  of the outgoing song, the bass changing hands there, with a run-up of whole phrases under it. The 15 s cap now
+  counts music only: the silence at either end of a file and a hidden track's gap are free, so a mix is never laid
+  over silence. When both songs sing, the incoming voice band is held 18 dB down until the swap and the outgoing
+  voice is thinned by a rising high-pass after it, instead of the echo-out. A drum intro is exempt from the key
+  caps. All of it is in nori-player's `automix` (analysis, plan and mixer); the rows gained their columns in
+  nori-automix's store, and an older database gets them added when it opens (nori-db). `ANALYSIS_VERSION` is 8. The transition harness (`transition_eval`, `landmark_eval`) and the numbers are
+  in section 7 of `docs/research/automix.md`.
+
+- **AutoMix reads songs better, and it is measured.** `crates/player/src/automix/eval.rs` renders 16 synthetic songs with known
+  beats, bars, key and sections (swing, drum and bass, a one-drop, a waltz, drifting bands, a detuned band, a
+  beatless intro) and scores the analysis the way the literature does, plus what the mix needs: over the half
+  minute at each end, is the grid right, and was it trusted. Against it: the tempo is a comb over the bar, so
+  syncopated grooves no longer read at a beat and a half; a rival tempo lowers confidence; 3/4 is measured
+  (`beats_per_bar`, and a waltz never locks to a four-beat song); half-time bars start on the kick; the key
+  takes the band's tuning out and uses a minor profile that suits pop; intros and outros are where the music's
+  sound changes (drum-only intros were missed entirely). Right-and-trusted mix windows 18 to 24 of 32, cues 11
+  to 26 of 32, 6 % more CPU. Old rows are measured again as songs play (the analysis version moved). The
+  research, numbers and the neural beat tracker's plan are in `docs/research/analysis.md`.
+
 - **The bar shows what is heard.** With a crossfade or AutoMix on, `TransitionSink` holds the outgoing
   song's ending and mixes the next one into it, and the player counts that held ending as played the
   moment it is decoded (it has to: ExoPlayer only starts reading the next item within ten seconds of
@@ -30,6 +129,30 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   it reads the position, moves the bar towards it at a steady rate (a short exponential approach), and
   only teleports when the gap is a whole song. A song change and an outside seek glide; a finger holds
   the bar exactly where it is and seeks once, on release.
+- **The seek bar reads the engine, not the controller.** A MediaController's place is the session's
+  last word run on at one times and held at the song's length, and with the session's periodic updates
+  off nothing puts it right until a play, a pause or a seek: a word taken off as the phone was unlocked
+  kept the S22's bar at the end of a song with 14 s left. `PlayerConnection.heard` now goes by the
+  engine's own place (`EnginePlayer.shownMs`: the last reading run on for 2 s at most, the engine asked
+  to look again when it is a second old, `nori_player::heard::screen_place`), asks the engine to look as
+  the app comes back (`catchUp`), and has the session say its place again when a controller drifts more
+  than 2 s from it (`drifted`, `EnginePlayer.reanchor`). The controller's place stands for half a
+  second after a seek and on another song than the engine's. The perf build's "place" invariant says
+  when the bar or a controller is more than 2 s from the engine for over a second.
+- **A tempo-stretched mix keeps the song's own time.** The incoming song of a beat-matched mix is
+  played at the mix's tempo (x1.071 on the S22: 84 to 90 BPM) through it and eased back after. Its
+  mixed audio was stamped with a clock that ran at one times, so the place fell behind the music by
+  ~1.7 s over a 22 s mix and leapt ahead where the song's own timestamps came back - or, from the ear's
+  reading (which did run at the tempo), fell back 2 s as the player's clock took over: "0:32 came back
+  to 0:30". Now every chunk the transition engine hands down says the song time a frame of it stands
+  for (`Downstream::media_pace`, from `Stretcher::take_content`), the sink counts played music and its
+  clock in that time, the running clock moves on by it, and `Status::pace` (the speed times the tempo
+  heard) is what a place is run on at between readings. The session is told the place again once the
+  song is back at its own tempo (`Event::Placed`). crates/engine tests/stretch.rs reads the true place
+  off the sound heard, through the mix, a seek into it and at 1.25x.
+- **Buffering is not starving.** The perf build's "starved" watch on the CPU's track waits while the
+  engine says it plays nothing (a provider's song still coming, a jump's dip): the report's false alarm
+  on a qobuz song buffering (`Watch::track`).
 - **One soft bottom, the sleeve's.** Every record - flat, lifted, sliding or flying in from the now
   playing bar or the lyrics thumbnail - used to carry its own blurred bottom, which travelled and
   changed size with it, and two records side by side met at a seam between two blurs. Now the records
@@ -92,12 +215,13 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   (Settings, then Playing): songs or a whole album at a time, and what that is chosen by - what the
   server calls similar, the same artist, the same genre or the same decade. Albums queue the record
   in its own order, skipping one the queue has already played. `PlaybackService.autoFill`.
-- **Tracks are measured before they are played.** `AutoMixPrefetch` decodes the track playing and the
-  two after it with MediaCodec on a background thread and feeds the streaming analyser, so a
+- **Tracks are measured before they are played.** nori-engine's `Measurer` (crates/android/src/measure.rs,
+  with `AutoMixPrefetch` saying where the files are) decodes the track playing and the two after it on
+  a thread of the lowest priority and feeds the streaming analyser, each once, so a
   transition has both halves' tempo, beats and cues the first time those two songs meet - until now
   the tap only finished a track as it ended, which is one boundary too late. It never fetches
   anything: a track is measured only once its bytes are on the device (downloaded, or brought in by
-  the precacher), and the whole thing is off unless AutoMix is on.
+  the fetching ahead, which measures a song as it comes), and the whole thing is off unless AutoMix is on.
 - **The mix no longer allocates as it starts.** The tail buffer, the mixer, the time stretcher and
   the chunk pool are built when the plan is made, at the start of the outgoing track, instead of
   between two buffers on the audio thread at the moment the mix begins (`TransitionSink.prepare`).
@@ -306,7 +430,7 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   (`MediaItem.queued`); the service's `Controls.addMediaItems` sends marked items to `upNext`, which
   places them in the list and, under shuffle, rebuilds the `DefaultShuffleOrder` so they are not
   scattered. Turning shuffle on puts the playing song first, keeps the hand-added run after it and
-  shuffles only the rest (`shuffleAroundCurrent`). The queue panel lists songs in play order
+  shuffles only the rest (the core's `playlist_shuffle`, over nori-player's `queue::shuffle_around`). The queue panel lists songs in play order
   (`PlayerState.order`), marks hand-added ones, and hides reordering under shuffle. Checked with
   `build/upnext.sh`-style runs via `do enqueue|playnext|shuffle` and the `upNext` state field.
 - **Swipes.** A song row moves only in a direction that has an action. Right adds to the queue, left
@@ -321,6 +445,53 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   through the queue. Bit-perfect also read the wrong format — the *decoder's* input rather than what
   the sink writes — so no mode ever matched; it is now applied from the audio track provider, which
   is the last moment the framework still reads preferred mixer attributes.
+- **Offload on the Rust engine: a second of music, then silence (S22, Android 16).** Not confirmed on
+  the phone yet. In the report the songs changed on the user's own taps (`ViewPostIme` before each
+  "to song N"), so the engine was not ending songs by itself; what it did was write each whole song
+  and its end of stream within a quarter second, and every skip then paused and flushed a track that
+  `setOffloadEndOfStream` had stopped. Android's `AudioTrack` keeps such a track "stopping": a write
+  that does not wait takes nothing (`blockUntilOffloadDrain`) and a late `onPresentationEnded` can
+  follow. `offload.rs` now opens a new track instead, as media3 does, says an end of stream only
+  while the track plays, writes four minutes ahead at most, reads a failed `getPlaybackHeadPosition`
+  as no reading (it was nought, which skipped to the next song on a gapless track), takes a lower
+  count for a join only where the clock says the ear can be, and hands the song to the CPU when the
+  head keeps making no sense. Its reasons reach the perf report as `offload:` events ("… ended by
+  the play head …", "the play head read …"). The next report says which of these it was.
+- **Offload on a small track, with the screen off (S21 FE and S22, Android 16).** Not confirmed on the
+  phones yet. The S21 FE grants an offloaded track 32 KB of the 8 MB asked (819 ms of a 320 kbps song),
+  the S22 64 KB; the engine topped them up on a timer worked out from those bytes (every ~409 ms), and
+  its watchdog gave the chip up when the count stood still for what the track holds and two seconds
+  (2.8 s): with the screen off the S21 FE's timestamp and play head stood that long while it played, so
+  the CPU took over and offload was given up for the song. Now: a full track waits for the platform's
+  `onDataRequest` once the platform has asked once (media3 sleeps for offload the same way), each wake
+  writes all the track takes, and the next song is written once less than 30 s is left however small
+  the track. On the simulated chips (crates/engine tests/paths.rs `on_a_small_grant_…`) the engine wakes
+  exactly as often as the platform asks: 2.40/s on 32 KB and 1.20/s on 64 KB when the chip buffers
+  nothing of its own (the platform's own pace: no fewer is possible without risking a gap), 0.27/s and
+  0.22/s with a DSP buffering 256 KB (before: 0.55/s and 0.47/s). The watchdog gives a chip up only when
+  its count has not moved and the platform has asked for nothing for longer than the music written past
+  the count and a slack of 10 s (twice the longest the count was seen standing, up to a minute), and the
+  CPU then plays on from where the chip's count last put the ear, never from the clock. A count that
+  stands while the platform keeps asking is one it does not keep: the play head is tried, then the
+  clock (the platform played what it asked for). Note on the report: "left at 245306 ms (chip said 94130
+  ms …)" was most likely no 150 s skip: the first is the place in the song, the others the track's own
+  count, which starts where offload took the song over (part way in, at ~150 s, if the two agree); what
+  the old watchdog put the ear past was the 867 ms written beyond the count.
+  The `nori:engine` wake lock is let go while the songs are offloaded, the track fed, the platform has
+  shown it asks for more, and nothing else is due (nori-engine's `Event::Awake(false)`, RustPlayer.kt
+  `holdCpu`); it is taken again (on the engine's thread, before it goes on) for a control, a song
+  starting, its bytes awaited or fetched (any open body), a fade, a count to look at again, the CPU path,
+  and from a few seconds before the ear reaches the next song or the end of the music (half again the
+  longest the platform went between two asks, and a second: the song's event and its ReplayGain volume
+  come on time). What that relies on, as media3 does (`ExoPlayerImpl` lets its lock go while it sleeps
+  for offload): the audio HAL and audioserver keep the offloaded track playing from the DSP with the CPU
+  asleep, and wake it (with their own wake lock) to pull more, which is when `StreamEventCallback.
+  onDataRequest` reaches the app's callback thread, which unparks the engine. Nothing in the app polls
+  meanwhile: the engine's own timers do not run while the phone sleeps, which is why the lock comes back
+  before a join. The media session needs no lock: it changes only on the engine's events, which come
+  with it held. To check on the phones: a perf report of a playlist with the screen off for 5+ minutes.
+  Its offloaded stretch should say the wake lock was held a few % of the time, nori-engine's wakeups/s
+  about the chip's asks/s, no "offload given up", and every song's "ended by the play head".
 - **The player against Apple's.** The sleeve runs to all three edges — **including up under the
   status bar**, which is the point: Apple's artwork has no top edge, and stopping ours below the
   handle drew a line across the screen. The handle and the close button float over it, with the same
@@ -380,10 +551,10 @@ red but darker. The background *is* the artwork, enormously enlarged and blurred
 matches the sleeve so exactly.
 
 One average of the cover's bottom rows cannot do that. *In Rainbows* is vivid everywhere and near
-black along its bottom edge, so the page came out brown mud next to a rainbow. `CoverColors.washOf`
-now shrinks the cover to 16 px a side, smooths it once off the main thread, pulls every pixel to
+black along its bottom edge, so the page came out brown mud next to a rainbow. nori-look's `wash_of`
+(crates/look/src/cover.rs) now shrinks the cover to 16 px a side, smooths it once off the main thread, pulls every pixel to
 within 0.05 of the page colour's own lightness (0.035 in light mode) and holds its saturation back —
-then `Design.drawPageWash` draws that stretched over the page and lets the GPU's bilinear filter do
+then `sleeveWash` (Design.kt) draws that stretched over the page and lets the GPU's bilinear filter do
 the enlarging. The hues vary the way the record's do; the contrast text needs does not move.
 
 It is still static: one 4 kB texture per cover, uploaded once, drawn as one quad. Neither fill covers
@@ -428,12 +599,12 @@ about an eighth of the cover off each side, which is the price of the sleeve rea
 sleeve, Apple's colour varies *more* than ours ever did - channel spreads of 36/21/17 against our
 8/5/5 now - but all of their variation is inside one red, because that cover is one hue. A cover that
 is teal down one side and warm down the other gives the page teal and warm patches at the same
-spread, and a patch reads as a fault where a glow does not. `CoverColors.MUTE` pulls every pixel most
+spread, and a patch reads as a fault where a glow does not. `MUTE` in nori-look's cover.rs pulls every pixel most
 of the way back to the flat page colour after the lightness clamp; that is what makes it subtle
 without making it grey.
 
 Below that, the sleeve's last rows are rubbed out of the records' layer (`rubOutBottom` in
-PlayerScreen, a `DstOut` gradient over the last `MELT` of the sleeve) and `drawSleeveWash` draws the
+PlayerScreen, a `DstOut` gradient over the last `MELT` of the sleeve) and `sleeveWash` draws the
 cover's blur behind and below at the sleeve's own scale, so what shows through the rubbed-out rows is
 the same picture gone soft and the join cannot be seen. (`drawSleeveMelt`, which painted the blurred
 rows over each record, is gone: a band painted on a record travelled with it.) **Nowhere in either is
@@ -443,7 +614,7 @@ page along a dead straight line every time.
 
 Two traps at that edge: the rub-out must reach full strength *before* the sleeve's last row, not on
 it, or a hairline of raw cover is left along the bottom (plain to see the moment a lifted record grows
-back); and `drawSleeveWash`'s three bands must round their *edges*, not their heights, or a row of page
+back); and `sleeveWash`'s three bands must round their *edges*, not their heights, or a row of page
 colour shows between them.
 
 ## Sizes, measured
@@ -516,8 +687,8 @@ look like waiting. The pieces:
   loading state, whose content now fades in over it) and by the lyrics, placed where the first line
   will be.
 - `Modifier.loadingSheen`: a faint band crossing a cover's plate while it loads, same 250 ms grace.
-  Every `Cover` uses it, fades its picture in (coil crossfade, which skips memory hits) and fades in
-  the note glyph when there is no picture.
+  Every `Cover` uses it, fades its picture in (260 ms, skipped for a picture already in memory) and
+  fades in the note glyph when there is no picture.
 - The player's sleeve (`SleeveArt`) keeps the old cover while the next one loads and cross-fades;
   after 600 ms without it, the old one fades out to the sheen so it never stands under the wrong
   title. The page colours cross-fade with it and hold the old palette while the new one is worked out.
@@ -531,7 +702,7 @@ look like waiting. The pieces:
   load skip its cross-fade), so the change has no second step. A swipe back is `previousItem()`
   (always the previous song), not `previous()` (which restarts the song past 3 s).
 - Lyrics go back through the loader on every song (`PlayerViewModel.lyrics` starts each song from
-  `Loading`), and an empty server answer is not emitted while LRCLIB may still answer. The lyrics
+  `Loading`), and an empty server answer is not emitted while a lyrics service may still answer. The lyrics
   loader sits centred, where "No lyrics" would be.
 - `PlayPauseGlyph`: play, pause and the buffering spinner cross-fade, the spinner only after 300 ms.
 
@@ -541,7 +712,8 @@ Compose scales every animation by Android's animator duration scale. Plenty of p
 for speed (and GrapheneOS users often do), and at 0 every tween finishes on its first frame - the
 owner's lyrics jumped from line to line on the phone while gliding on the emulator. `reduceMotion()`
 also followed that switch. `Prefs.ignoreSystemMotion` ("Animate even when Android's are off") makes
-`reduceMotion()` ignore it. The speed itself is app-wide: `MainActivity` builds the window's
+`reduceMotion()` ignore it. It is on by default (stored as "animateAnyway"): the owner's phone has
+Android's animations off, and the app looked broken there; Reduce motion in the app still turns them off. The speed itself is app-wide: `MainActivity` builds the window's
 recomposer with `AppMotion` (a `MotionDurationScale`) in its context, and every animation in the
 composition, ours and the libraries' (page transitions, sheets, fades, the lyrics), reads its scale
 from there - the system's normally, 1 when the switch is on. It replaced a per-animation override
@@ -641,6 +813,19 @@ Two traps this measurement fell into, both worth knowing:
 
 ## Not done
 
+- **The vocal gate cannot tell a voice from a pad.** It reads the voice band's share of the power; a beatless pad
+  intro reads as sung. The candidates (a separation mask, a singing classifier) and their licences are in
+  `docs/research/analysis.md`. The new vocal separation only acts on what this gate calls sung, so on real songs
+  it will miss most pairs of singers until the gate is better; the harness measures it with the voices taken from
+  the truth.
+- **AutoMix's new transitions have not been heard on a phone.** Listen for: the drop landing on the swap with the
+  outgoing song let go a beat later (a DJ move, or a jump?); the vocal duck and high-pass ride between two sung
+  songs; up to 15 s of an instrumental intro skipped to reach a drop; leaving on a closing breakdown or before a
+  short hidden track. One thing to watch in the logs: the transition engine drops the skipped remainder of the
+  outgoing song by decoding through it and the skipped start of the incoming one the same way, so leaving before
+  a hidden track after minutes of silence needs the whole rest of the file decoded (and, when streaming, fetched)
+  within the hold's runway; if it is not, the hold lets go and the held ending plays unmixed, as it does when the
+  next song is late.
 - **Bit-perfect at 24 bit.** media3's sink writes 16-bit or float and nothing else, so a DAC that
   only offers bit-perfect modes at 24 or 32 bit is told so rather than driven. Feeding one needs an
   integer output path: an audio processor at the end of the chain that widens to
@@ -703,7 +888,7 @@ Every one of these produced a wrong conclusion in an earlier session:
   off deliberately to save wakeups. A test that watches it passes in silence.
 - **A `MediaController` in the background reports a stale position**, so the app's own numbers lie
   too while it is not on screen.
-- **`BurstSink.bytesWritten` is honest but bursty** — ten seconds of audio are written at once, then
+- **`TransitionSink.bytesWritten` (the burst count) is honest but bursty** — ten seconds of audio are written at once, then
   nothing for about eight. A three-second sampling window sees zero and calls it silence.
 - What can be trusted: `adb shell dumpsys audio` showing our `AudioTrack` as `state:started`, plus
   sink bytes measured over a full buffer cycle. `tools/audio-e2e.sh` does exactly this.

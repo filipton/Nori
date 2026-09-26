@@ -1,0 +1,42 @@
+//! `resolve_now` streams through the newest client and the network the platform last named: both are
+//! process-wide, so this is a binary of its own. Among the unit tests, which make clients side by side,
+//! the client it resolved through could be another test's, or already gone.
+
+use std::sync::Arc;
+
+use nori_core::client::{Client, NetProfile};
+use nori_core::stream::{network_metered, resolve_now};
+use nori_core::transport::{Exchange, Transport, TransportError, TransportResponse};
+use nori_core::Core;
+
+/// Resolving a song's address asks the server nothing.
+struct NoApi;
+
+#[async_trait::async_trait]
+impl Transport for NoApi {
+    async fn get(&self, _url: String, _timeout_ms: u32) -> Result<TransportResponse, TransportError> {
+        Ok(TransportResponse { status: 500, body: Vec::new() })
+    }
+
+    async fn send(&self, _request: Exchange) -> Result<TransportResponse, TransportError> {
+        Ok(TransportResponse { status: 500, body: Vec::new() })
+    }
+
+    fn address_changed(&self) {}
+}
+
+#[test]
+fn a_song_opened_in_rust_follows_the_network_the_platform_last_named() {
+    assert!(resolve_now("s1").is_none(), "no client yet, nothing to stream through");
+    let core = Core::new(String::new(), "t".into()).unwrap();
+    let client = Client::new(core, Arc::new(NoApi));
+    client.set_profile(NetProfile { url: "h".into(), ..Default::default() });
+    network_metered(true);
+    let metered = resolve_now("s1").expect("the client just made");
+    network_metered(false);
+    let wifi = resolve_now("s1").expect("the client just made");
+    // The settings' defaults: 192k opus on a metered network, the original file on Wi-Fi.
+    assert_eq!((metered.key.as_str(), wifi.key.as_str()), ("s1:192opus", "s1:0"));
+    drop(client);
+    assert!(resolve_now("s1").is_none(), "the client gone, nothing streams through it");
+}

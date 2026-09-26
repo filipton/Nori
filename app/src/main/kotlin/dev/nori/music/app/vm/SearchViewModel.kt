@@ -2,7 +2,11 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.SearchResult
+import dev.nori.music.ffi.model.SearchResult
+import dev.nori.music.ffi.library.SearchScope
+import dev.nori.music.ffi.SearchSession
+import dev.nori.music.ffi.library.SearchView
+import dev.nori.music.net.said
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -11,85 +15,90 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-enum class SearchScope { EVERYTHING, LIBRARY, PROVIDERS }
-
+/** What the search screen shows: the core's view of the search (`search.rs`), and the recent searches. */
 data class SearchUi(
     val query: String = "",
-    val result: SearchResult? = null,
-    /** True once [result] is the server's answer rather than the offline index's. */
-    val fromServer: Boolean = false,
+    /** The answer narrowed to the scope; null with no query, when the recent searches show instead. */
+    val shown: SearchResult? = null,
     val searching: Boolean = false,
     val error: String? = null,
-    val history: List<String> = emptyList(),
     val scope: SearchScope = SearchScope.EVERYTHING,
+    val scopesOffered: Boolean = false,
+    val nothingFound: Boolean = false,
+    val history: List<String> = emptyList(),
 ) {
-    /** [result] narrowed to what [scope] asks for; octo-fiesta marks provider items, Navidrome's are the rest. */
-    val shown: SearchResult? get() = result?.let { r ->
-        when (scope) {
-            SearchScope.EVERYTHING -> r
-            SearchScope.LIBRARY -> SearchResult(r.artists.filterNot { it.isExternal }, r.albums.filterNot { it.isExternal }, r.songs.filterNot { it.isExternal })
-            SearchScope.PROVIDERS -> SearchResult(r.artists.filter { it.isExternal }, r.albums.filter { it.isExternal }, r.songs.filter { it.isExternal })
-        }
-    }
-    val hasProviders: Boolean get() = result?.let { r -> r.songs.any { it.isExternal } || r.albums.any { it.isExternal } || r.artists.any { it.isExternal } } == true
+    internal fun with(v: SearchView) = copy(
+        query = v.text, shown = v.shown, searching = v.searching, error = v.error?.let { dev.nori.music.app.ui.say.searchFallback(it.reason) }, scope = v.scope,
+        scopesOffered = v.scopesOffered, nothingFound = v.nothingFound,
+    )
 }
 
 /**
- * Live search in two layers. Every keystroke is answered at once from the
- * offline index; once typing pauses the server is asked too, because only the
- * server (octo-fiesta) knows about tracks that are not in the library yet. A
- * newer keystroke cancels the request in flight, socket included.
+ * Live search in two layers. Every keystroke is answered at once from the offline index; once typing
+ * pauses the server is asked too, because only the server (octo-fiesta) knows about tracks that are not
+ * in the library yet. A newer keystroke cancels the request in flight, socket included. Which answer is
+ * still worth showing, and what the screen then says, is the core's [SearchSession].
  */
 @OptIn(FlowPreview::class)
 class SearchViewModel(app: Application) : NoriViewModel(app) {
+    private val session = SearchSession()
+    /** What is in the field, as typed; the session is told off the main thread. */
+    private val text = MutableStateFlow("")
     private val query = MutableStateFlow("")
     private val _ui = MutableStateFlow(SearchUi())
     val ui: StateFlow<SearchUi> = _ui
+    private val localLimit by lazy { dev.nori.music.ffi.library.librarySizes().localSearch }
 
     init {
         viewModelScope.launch { _ui.update { it.copy(history = nori.library.searchHistory()) } }
         viewModelScope.launch {
+            text.collectLatest { t ->
+                val v = withContext(Dispatchers.Default) { session.typed(t) }
+                _ui.update { it.with(v) }
+                query.value = v.query
+            }
+        }
+        viewModelScope.launch {
             query.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
-                val local = runCatching { nori.library.localSearch(q) }.getOrNull() ?: return@collectLatest
-                _ui.update { if (it.query.trim() == q && !it.fromServer) it.copy(result = local) else it }
+                val v = runCatching { withContext(Dispatchers.IO) { session.local(nori.core, q, localLimit) } }.getOrNull() ?: return@collectLatest
+                _ui.update { it.with(v) }
             }
         }
         viewModelScope.launch {
             query.debounce { if (it.isBlank()) 0L else nori.settings.value.liveSearchDelayMs.toLong() }.collectLatest { q ->
                 if (q.isBlank()) return@collectLatest
-                try {
-                    // A merged provider result may repeat an id, and lists are keyed by id.
-                    val remote = nori.library.search(q).let { r -> r.copy(artists = r.artists.distinctBy { it.id }, albums = r.albums.distinctBy { it.id }, songs = r.songs.distinctBy { it.id }) }
-                    _ui.update { if (it.query.trim() == q) it.copy(result = remote, fromServer = true, searching = false, error = null) else it }
+                val v = try {
+                    // The core asks and takes the answer itself: it never comes out here to be handed back.
+                    nori.library.searchInto(session, q)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    _ui.update { if (it.query.trim() == q) it.copy(searching = false, error = e.message) else it }
+                    session.failed(q, e.said)
                 }
+                if (v != null) _ui.update { it.with(v) }
             }
         }
     }
 
+    /** The field follows the finger at once; what the search makes of it follows from the core. */
     fun setQuery(text: String) {
-        val q = text.trim()
-        _ui.update {
-            if (q.isEmpty()) it.copy(query = text, result = null, fromServer = false, searching = false, error = null)
-            else it.copy(query = text, fromServer = false, searching = true, error = null)
-        }
-        query.value = q
+        _ui.update { it.copy(query = text) }
+        this.text.value = text
     }
 
     /** Called when the user acts on a result: that is a query worth remembering. */
     fun remember() = viewModelScope.launch {
         val q = query.value
-        if (q.length < 2) return@launch
-        nori.library.rememberSearch(q)
-        _ui.update { it.copy(history = nori.library.searchHistory()) }
+        // Too short to be a query (the core says): nothing remembered, nothing to show.
+        val history = withContext(Dispatchers.IO) { nori.core.searchRememberRecent(q) } ?: return@launch
+        _ui.update { it.copy(history = history) }
     }
 
-    fun setScope(s: SearchScope) = _ui.update { it.copy(scope = s) }
+    fun setScope(s: SearchScope) { val v = session.scope(s); _ui.update { it.with(v) } }
 
     fun clearHistory() = viewModelScope.launch {
         nori.library.forgetSearches()

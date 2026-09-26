@@ -2,23 +2,32 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import androidx.lifecycle.viewModelScope
-import dev.nori.music.ffi.IngestStats
+import dev.nori.music.ffi.model.IngestStats
+import dev.nori.music.net.said
 import dev.nori.music.playback.DacState
 import dev.nori.music.playback.DeviceSound
 import dev.nori.music.playback.Outputs
-import dev.nori.music.settings.Prefs
-import dev.nori.music.settings.ServerProfile
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.settings.SavedServer
 import dev.nori.music.net.describeConnectionError
-import dev.nori.music.ffi.MusicFolder
-import dev.nori.music.settings.Band
-import dev.nori.music.settings.BandKind
-import dev.nori.music.settings.BandChannel
-import dev.nori.music.ffi.parseEqPreset
-import dev.nori.music.ffi.eqPresets
-import dev.nori.music.ffi.NamedPreset
-import dev.nori.music.ffi.AutoEqEntry
-import dev.nori.music.ffi.SoundProfile
-import dev.nori.music.settings.Sound
+import dev.nori.music.ffi.model.MusicFolder
+import dev.nori.music.ffi.settings.SoundBand
+import dev.nori.music.ffi.settings.HomeRow
+import dev.nori.music.ffi.devices.ChoiceKind
+import dev.nori.music.ffi.devices.deviceRows
+import dev.nori.music.ffi.settings.eqPresets
+import dev.nori.music.ffi.settings.SoundTool
+import dev.nori.music.ffi.settings.EqLevel
+import dev.nori.music.ffi.settings.SettingChange
+import dev.nori.music.ffi.settings.serverNewId
+import dev.nori.music.ffi.settings.settingSet
+import dev.nori.music.ffi.settings.soundFromJson
+import dev.nori.music.ffi.settings.storageIndexFiles
+import dev.nori.music.ffi.model.NamedPreset
+import dev.nori.music.ffi.model.AutoEqEntry
+import dev.nori.music.ffi.settings.SoundException
+import dev.nori.music.ffi.model.SoundProfile
+import dev.nori.music.settings.sound
 import dev.nori.music.settings.withSound
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -30,9 +39,24 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import dev.nori.music.settings.server
 
 data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
-data class AutoEqUi(val count: Int = 0, val query: String = "", val hits: List<AutoEqEntry> = emptyList(), val busy: Boolean = false, val applied: String? = null, val error: String? = null)
+/**
+ * The AutoEQ list: how many headphones it holds ([countWords] and [searchWords] say so), the query and
+ * its hits, and whether the query is still too short to search (the core's `autoeq_too_short`).
+ */
+data class AutoEqUi(
+    val count: Int = 0,
+    val query: String = "",
+    val hits: List<AutoEqHit> = emptyList(),
+    val tooShort: Boolean = true,
+    val busy: Boolean = false,
+    val applied: String? = null,
+    val error: String? = null,
+    val countWords: String = "",
+    val searchWords: String = "",
+)
 
 /**
  * One output device in the equalizer's device list: [name] is what it calls itself, [kind] where it is
@@ -40,15 +64,23 @@ data class AutoEqUi(val count: Int = 0, val query: String = "", val hits: List<A
  */
 data class DeviceRow(val output: String, val name: String, val kind: String?, val current: Boolean, val sound: String, val choice: DeviceSound.Choice)
 
+/** One AutoEQ curve with the lines under it, in the app's words: [caption] in the browser, [short] in a device's sheet. */
+data class AutoEqHit(val entry: dev.nori.music.ffi.model.AutoEqEntry, val caption: String, val short: String) {
+    companion object {
+        fun of(e: dev.nori.music.ffi.model.AutoEqEntry) = AutoEqHit(e, dev.nori.music.app.ui.say.autoeqCaption(e), dev.nori.music.app.ui.say.autoeqShort(e))
+    }
+}
+
 /** A line for the snackbar about the device that just connected, with the one thing it offers to do. */
 data class EqNotice(val message: String, val action: String, val source: DeviceSound.Notice)
 
 data class SyncUi(val running: Boolean = false, val indexed: IngestStats = IngestStats(0u, 0u, 0u), val error: String? = null)
 
-/** What lives on the phone: streamed music, covers, finished downloads and the library index. */
+/** What lives on the phone: streamed music, covers, lyrics found online, finished downloads and the library index. */
 data class StorageUi(
     val streamBytes: Long = 0L,
     val coverBytes: Long = 0L,
+    val lyricsBytes: Long = 0L,
     val downloadBytes: Long = 0L,
     val downloadSongs: Int = 0,
     val indexBytes: Long = 0L,
@@ -56,7 +88,7 @@ data class StorageUi(
 )
 
 class SettingsViewModel(app: Application) : NoriViewModel(app) {
-    val prefs: StateFlow<Prefs> = nori.settings.prefs
+    val prefs: StateFlow<StoredPrefs> = nori.settings.prefs
     val dac: StateFlow<DacState> = nori.dac.state
     private val _login = MutableStateFlow(LoginUi())
     val login: StateFlow<LoginUi> = _login
@@ -66,7 +98,86 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     init { viewModelScope.launch { runCatching { nori.library.indexSize() }.onSuccess { n -> _sync.update { it.copy(indexed = n) } } } }
 
-    fun update(change: (Prefs) -> Prefs) = nori.settings.update(change)
+    fun update(change: (StoredPrefs) -> StoredPrefs) = nori.settings.update(change)
+
+    // ---- the settings screen (SettingsPages.kt), on the core's settings model (nori-settings, settings_model.rs) ----
+
+    /** The groups the root of Settings lists, in [res]'s language. */
+    fun settingsGroups(res: android.content.res.Resources): List<SettingsGroup> = dev.nori.music.app.vm.settingsGroups(res)
+
+    private var search: Pair<android.content.res.Resources, SettingsSearch>? = null
+
+    /** The rows whose title (first) or words (after) contain [query]; the index is built once per [res]. */
+    fun searchSettings(query: String, res: android.content.res.Resources): List<SettingsHit> {
+        val s = search?.takeIf { it.first === res }?.second
+            ?: SettingsSearch(res, dev.nori.music.ffi.settings.settingsState(false, false).beatModel !is dev.nori.music.ffi.settings.BeatModel.Unavailable).also { search = res to it }
+        return s.find(query)
+    }
+
+    /**
+     * One group's page for settings [p] and [facts], in [res]'s language: one call into the core for what
+     * its rules make of the settings, asked only when they or [facts] change.
+     */
+    fun settingsPage(id: String, p: StoredPrefs, facts: SettingsFacts, res: android.content.res.Resources): SettingsPage? =
+        settingsPage(res, id, p, facts, dev.nori.music.ffi.settings.settingsState(facts.dac.bitPerfect, facts.dac.device != null))
+
+    /** Whether the settings action [action] asks first, and what it says; null for one done at once. */
+    fun actionAsks(action: String, res: android.content.res.Resources): ActionAsk? = settingsActionAsks(res, action, settingsFacts.value)
+
+    /** What a settings page depends on besides the settings, from this platform. */
+    val settingsFacts: StateFlow<SettingsFacts> by lazy {
+        combine(dac, _sync, _storage, _analysed, _folders, ::factsOf)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), factsOf(dac.value, _sync.value, _storage.value, _analysed.value, _folders.value))
+    }
+
+    private fun factsOf(d: DacState, s: SyncUi, st: StorageUi, analysed: Int, folders: List<MusicFolder>) = SettingsFacts(
+        dac = d,
+        // Wallpaper colours and the blurred sleeve both need Android 12.
+        wallpaperColours = android.os.Build.VERSION.SDK_INT >= 31,
+        coverBlur = android.os.Build.VERSION.SDK_INT >= 31,
+        analysed = analysed,
+        sync = s,
+        storage = st,
+        folders = folders,
+    )
+
+    /** A row's setting changed: its name and the value picked, which the core reads and applies; false for a name or value it does not take. */
+    fun set(name: String, value: String): Boolean {
+        apply(settingSet(name, value) ?: return false)
+        return true
+    }
+
+    /**
+     * A ranked row (a lyrics service) dragged by its handle and dropped at place [to] of the one list;
+     * whether the core took it. The ranking itself is the core's (`lyricsPlace`).
+     */
+    fun placeRanked(id: String, to: Int): Boolean {
+        val change = settingSet("lyricsPlace", "$id:$to") ?: return false
+        apply(change)
+        return true
+    }
+
+    private fun apply(change: SettingChange) {
+        // The active server's own settings go through the server's update, which connects it again.
+        if (change.server) {
+            change.prefs.server?.let(nori::updateServer)
+            return
+        }
+        nori.settings.took(change)
+        if (change.applyCacheLimit) applyCacheLimit()
+    }
+
+    /** A button on a settings row. */
+    fun act(action: String) {
+        when (action) {
+            "measure-again" -> clearAnalyses()
+            "sync-library" -> syncLibrary()
+            "download-library" -> downloadLibrary()
+            "clear-stream" -> clearStreamCache()
+            "clear-covers" -> clearCovers()
+            "clear-lyrics" -> clearLyrics()
+        }
+    }
 
     /** Applies "Space for streamed music" at once instead of at the next track. */
     fun applyCacheLimit() = viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() }
@@ -79,14 +190,16 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     /** Measures what is on the phone; the caches answer from their index, the rest is weighed. */
     fun refreshStorage() = viewModelScope.launch(Dispatchers.IO) {
         val app = getApplication<Application>()
+        // Which files are the index is the core's rule; weighing them is the file system's.
+        val files = app.filesDir.listFiles().orEmpty()
+        val index = storageIndexFiles(files.map { it.name })
         _storage.value = StorageUi(
             streamBytes = nori.sources.streamBytes(),
-            coverBytes = dirBytes(java.io.File(app.cacheDir, "covers")),
+            coverBytes = dirBytes(java.io.File(app.cacheDir, dev.nori.music.data.CoverLoader.DIR)),
+            lyricsBytes = runCatching { nori.core.lyricsCacheBytes() }.getOrDefault(0L),
             downloadBytes = nori.sources.downloadBytes(),
             downloadSongs = nori.downloads.state.value.done.size,
-            indexBytes = app.filesDir.listFiles()
-                ?.filter { it.name.startsWith("nori") && (it.name.endsWith(".db") || it.name.endsWith("-wal") || it.name.endsWith("-shm")) }
-                ?.sumOf { dirBytes(it) } ?: 0L,
+            indexBytes = index.sumOf { dirBytes(files[it.toInt()]) },
         )
     }
 
@@ -100,7 +213,14 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     /** Empties the cover cache; pictures are fetched again as they are shown. */
     fun clearCovers() = viewModelScope.launch(Dispatchers.IO) {
         _storage.update { it.copy(busy = true) }
-        runCatching { coil3.SingletonImageLoader.get(getApplication()).diskCache?.clear() }
+        dev.nori.music.data.CoverLoader.get(getApplication()).clearDisk()
+        refreshStorage()
+    }
+
+    /** Forgets the lyrics found online (the core's `lyrics_cache_clear`); they are looked up again when opened. */
+    fun clearLyrics() = viewModelScope.launch(Dispatchers.IO) {
+        _storage.update { it.copy(busy = true) }
+        runCatching { nori.core.lyricsCacheClear() }
         refreshStorage()
     }
 
@@ -109,10 +229,10 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         return f.listFiles()?.sumOf(::dirBytes) ?: 0L
     }
 
-    /** A blank profile for the "add server" form. */
-    fun newProfile() = ServerProfile(id = java.util.UUID.randomUUID().toString().take(8))
+    /** A blank profile for the "add server" form, with a fresh id from the core. */
+    fun newProfile() = dev.nori.music.settings.newServer(serverNewId())
 
-    fun login(profile: ServerProfile) {
+    fun login(profile: SavedServer) {
         if (_login.value.busy) return
         _login.value = LoginUi(busy = true)
         viewModelScope.launch {
@@ -126,12 +246,12 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     fun clearLoginResult() { _login.value = LoginUi() }
-    fun switchServer(profile: ServerProfile) = nori.activate(profile)
-    fun updateServer(profile: ServerProfile) = nori.updateServer(profile)
+    fun switchServer(profile: SavedServer) = nori.activate(profile)
+    fun updateServer(profile: SavedServer) = nori.updateServer(profile)
     fun removeServer(id: String) = nori.removeServer(id)
 
     /** Copies a picked PKCS#12 file into the app and returns the profile that uses it. */
-    fun importClientCert(profile: ServerProfile, uri: android.net.Uri, password: String): ServerProfile {
+    fun importClientCert(profile: SavedServer, uri: android.net.Uri, password: String): SavedServer {
         val name = "${profile.id}.p12"
         val dir = java.io.File(getApplication<Application>().filesDir, "certs").apply { mkdirs() }
         getApplication<Application>().contentResolver.openInputStream(uri)?.use { input -> java.io.File(dir, name).outputStream().use { input.copyTo(it) } }
@@ -146,130 +266,39 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     // ---- equalizer ----
 
-    /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
-    /** Moves one home shelf up or down the page. */
+    /** Moves one home shelf up or down the page (the core's `home_rows_moved`). */
     fun moveHomeRow(from: Int, to: Int) = update { p ->
-        val rows = p.homeRows.toMutableList()
-        if (from !in rows.indices || to !in rows.indices) return@update p
-        rows.add(to, rows.removeAt(from))
-        p.copy(homeRows = rows)
+        p.copy(homeRows = dev.nori.music.ffi.library.homeRowsMoved(p.homeRows.map { it.name }, from.toUInt(), to.toUInt()).map { HomeRow.valueOf(it) })
     }
 
+    /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
     fun setTuning(on: Boolean) = nori.player.setTuning(on)
-
-    /**
-     * Flips one setting by name, for the debug test bridge. Only the switches a check needs; anything
-     * else returns false so a typo in a script fails loudly instead of silently doing nothing.
-     */
-    fun setByName(name: String, value: String): Boolean {
-        if (testDevice(name, value)) return true
-        // Not a setting: the one button on that screen a check needs, so a run can start from a phone
-        // that has measured nothing and see the measuring happen.
-        if (name == "clearAnalyses") { clearAnalyses(); return true }
-        val on = value.equals("true", true) || value == "1"
-        val change: (dev.nori.music.settings.Prefs) -> dev.nori.music.settings.Prefs? = {
-            when (name) {
-                "limiter" -> it.copy(limiter = on)
-                "eq" -> it.copy(eqEnabled = on)
-                "mono" -> it.copy(mono = on)
-                "hiRes" -> it.copy(hiRes = on)
-                "bitPerfect" -> it.copy(bitPerfect = on)
-                "offload" -> it.copy(offload = on)
-                "autoMix" -> it.copy(autoMix = on)
-                "amoled" -> it.copy(amoled = on)
-                "ignoreSystemMotion" -> it.copy(ignoreSystemMotion = on)
-                "reduceMotion" -> it.copy(reduceMotion = on)
-                "playerColours" -> it.copy(playerColours = on)
-                "coverColors" -> it.copy(coverColors = on)
-                "thirdPartyLookups" -> it.copy(thirdPartyLookups = on)
-                "crossfadeKeepAlbums" -> it.copy(crossfadeKeepAlbums = on)
-                "lyricsSweep" -> it.copy(lyricsSweep = on)
-                "softSleeve" -> it.copy(softSleeve = on)
-                "favouriteNotice" -> it.copy(favouriteNotice = on)
-                "crossfadeSec" -> it.copy(crossfadeSec = value.toIntOrNull() ?: it.crossfadeSec)
-                "coversAhead" -> it.copy(coversAhead = value.toIntOrNull()?.coerceIn(0, 10) ?: it.coversAhead)
-                "cacheMb" -> it.copy(cacheMb = value.toIntOrNull()?.coerceIn(256, 16384) ?: it.cacheMb).also { viewModelScope.launch(Dispatchers.IO) { nori.applyCacheLimit() } }
-                "parallelDownloads" -> it.copy(parallelDownloads = value.toIntOrNull()?.coerceIn(1, 10) ?: it.parallelDownloads)
-                "crossfeedDb" -> it.copy(crossfeedDb = value.toFloatOrNull() ?: it.crossfeedDb)
-                "limiterThresholdDb" -> it.copy(limiterThresholdDb = value.toFloatOrNull() ?: it.limiterThresholdDb)
-                "autoFill" -> it.copy(autoFill = on)
-                "bridgeOffline" -> it.copy(bridgeOffline = on)
-                "autoFillKind" -> dev.nori.music.settings.AutoFillKind.entries.firstOrNull { k -> k.name.equals(value, true) }?.let { k -> it.copy(autoFillKind = k) }
-                "autoFillBasis" -> dev.nori.music.settings.AutoFillBasis.entries.firstOrNull { b -> b.name.equals(value, true) }?.let { b -> it.copy(autoFillBasis = b) }
-                "autoEqAuto" -> it.copy(autoEqAuto = on)
-                "profilePerOutput" -> it.copy(profilePerOutput = on)
-                else -> null
-            }
-        }
-        if (change(prefs.value) == null) return false
-        update { change(it) ?: it }
-        return true
-    }
-
-    /**
-     * The device-sound half of the test bridge: `set deviceSound "<output>=flat|auto|quiet|profile:<name>|curve:<search>"`,
-     * `set saveProfile <name>`, `set deleteProfile <name>`, `set forgetDevice <output>`, `set autoEqIndex 1`,
-     * `set eqNotice apply|undo` (presses the snackbar's button, whichever notice is up).
-     */
-    private fun testDevice(name: String, value: String): Boolean {
-        when (name) {
-            "deviceSound" -> viewModelScope.launch {
-                val output = value.substringBeforeLast('=')
-                val spec = value.substringAfterLast('=')
-                val choice = when {
-                    spec == "flat" -> DeviceSound.Choice.Flat
-                    spec == "quiet" -> DeviceSound.Choice.Quiet
-                    spec.startsWith("profile:") -> DeviceSound.Choice.Profile(spec.removePrefix("profile:"))
-                    spec.startsWith("curve:") -> withContext(Dispatchers.IO) { nori.core.autoeqSearch(spec.removePrefix("curve:"), 1u) }.firstOrNull()?.let { DeviceSound.Choice.Curve(it) } ?: return@launch
-                    else -> DeviceSound.Choice.Automatic
-                }
-                assignDevice(output, choice)
-            }
-            "saveProfile" -> saveProfile(value)
-            "deleteProfile" -> deleteProfile(value)
-            "forgetDevice" -> forgetDevice(value)
-            "autoEqIndex" -> downloadAutoEqIndex()
-            "eqNotice" -> devices.lastNotice?.let { n ->
-                viewModelScope.launch {
-                    when (n) {
-                        is DeviceSound.Offer -> if (value == "apply") devices.accept(n)
-                        is DeviceSound.Applied -> if (value == "undo") devices.undo(n)
-                    }
-                    devices.consume(n)
-                }
-            }
-            else -> return false
-        }
-        return true
-    }
 
     /** The built-in curves, straight from the core so the numbers live in one place. */
     val presets: List<NamedPreset> by lazy { eqPresets() }
 
-    fun applyPreset(p: NamedPreset) = update { prefs ->
-        prefs.copy(
-            eqEnabled = true, eqPreampDb = p.preampDb.takeIf { it != 0f },
-            eqBands = p.bands.map { Band(BandKind.entries[it.kind.ordinal], it.freq, it.gainDb, it.q) }.ifEmpty { Band.GRAPHIC },
-        )
-    }
+    // The edits themselves (a preset's pre-amp of 0 meaning automatic, the new band's defaults, the
+    // graphic bands coming back when the last one goes) are the core's (settings.rs), made where it keeps
+    // the settings (settings_store::settings_sound_tool).
+    fun applyPreset(p: NamedPreset) { nori.settings.soundTool(SoundTool.Preset(p)) }
 
-    fun setBand(index: Int, band: Band) = update { it.copy(eqBands = it.eqBands.toMutableList().also { l -> l[index] = band }) }
-    fun addBand() = update { it.copy(eqBands = it.eqBands + Band(BandKind.PEAKING, 1000f, 0f, 1f)) }
-    fun removeBand(index: Int) = update { it.copy(eqBands = it.eqBands.filterIndexed { i, _ -> i != index }.ifEmpty { Band.GRAPHIC }) }
-    fun resetBands() = update { it.copy(eqBands = Band.GRAPHIC, eqPreampDb = null) }
+    /** One band changed, held in the equalizer's ranges by the core; on every step of a drag, so edited in place there. */
+    fun setBand(index: Int, band: SoundBand) = nori.settings.setBand(index, band)
+
+    /** Pre-amp, balance, limiter ceiling or crossfeed moved; the core holds it in range and snaps it, in place like a band. */
+    fun setLevel(level: EqLevel, value: Float) = nori.settings.setLevel(level, value)
+
+    /** The automatic pre-amp on or off; off starts from the level it was at. */
+    fun setAutoPreamp(automatic: Boolean) { nori.settings.soundTool(SoundTool.AutoPreamp(automatic)) }
+    fun addBand() { nori.settings.soundTool(SoundTool.AddBand) }
+    fun removeBand(index: Int) { nori.settings.soundTool(SoundTool.RemoveBand(index.toUInt())) }
+    fun resetBands() { nori.settings.soundTool(SoundTool.ResetBands) }
 
     /** AutoEQ "ParametricEQ.txt" / Equalizer APO text. Returns how many filters were found. */
-    fun importPreset(text: String): Int {
-        val preset = parseEqPreset(text)
-        if (preset.bands.isEmpty()) return 0
-        update { p ->
-            p.copy(
-                eqEnabled = true, eqPreampDb = preset.preampDb,
-                eqBands = preset.bands.map { Band(BandKind.entries[it.kind.ordinal], it.freq, it.gainDb, it.q) },
-            )
-        }
-        return preset.bands.size
-    }
+    fun importPreset(text: String): Int = try { import(text) } catch (e: SoundException) { 0 }
+
+    /** Switches the preset in [text] on; throws, saying why, when it has no filters in it. */
+    private fun import(text: String): Int = nori.settings.soundTool(SoundTool.Import(text))
 
     // ---- saved profiles and the AutoEQ database ----
 
@@ -285,24 +314,24 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         // Filled from the start, so the list is there on the screen's first frame rather than popping in.
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), deviceRowsOf(nori.outputs.known.value, currentOutput.value, profiles.value, devices.quiet.value))
 
-    private fun deviceRowsOf(known: List<String>, current: String, profiles: List<SoundProfile>, quiet: Set<String>): List<DeviceRow> =
-        (known + current).distinct().map { o ->
-            val bound = profiles.firstOrNull { o in it.outputs }?.name
-            val choice = when {
-                bound == DeviceSound.FLAT -> DeviceSound.Choice.Flat
-                bound != null -> DeviceSound.Choice.Profile(bound)
-                o in quiet -> DeviceSound.Choice.Quiet
-                else -> DeviceSound.Choice.Automatic
+    /** The rows are the core's (nori_player::device::rows); their words are Say's, made once per change of the list. */
+    private fun deviceRowsOf(known: List<String>, current: String, profiles: List<SoundProfile>, quiet: List<String>): List<DeviceRow> =
+        deviceRows(known, current, profiles, quiet).map { r ->
+            val choice = when (r.choice) {
+                ChoiceKind.AUTOMATIC -> DeviceSound.Choice.Automatic
+                ChoiceKind.QUIET -> DeviceSound.Choice.Quiet
+                ChoiceKind.FLAT -> DeviceSound.Choice.Flat
+                ChoiceKind.PROFILE -> DeviceSound.Choice.Profile(r.profile.orEmpty())
             }
-            val sound = when (choice) {
-                DeviceSound.Choice.Automatic -> "Automatic"
-                DeviceSound.Choice.Quiet -> "Leave as is"
-                DeviceSound.Choice.Flat -> "Flat"
-                else -> bound.orEmpty()
+            val say = dev.nori.music.app.ui.say
+            val sound = when (r.choice) {
+                ChoiceKind.AUTOMATIC -> say.automatic
+                ChoiceKind.QUIET -> say.leaveAsIs
+                ChoiceKind.FLAT -> say.flat
+                ChoiceKind.PROFILE -> r.profile.orEmpty()
             }
-            val kind = o.substringBefore(": ", "").ifEmpty { null }
-            DeviceRow(o, o.substringAfter(": "), kind, o == current, sound, choice)
-        }.sortedWith(compareBy({ it.output != Outputs.SPEAKER }, { it.name.lowercase() }))
+            DeviceRow(r.output, say.outputName(r.port, r.name), say.outputKind(r.port), r.current, sound, choice)
+        }
 
     private val _assigning = MutableStateFlow<String?>(null)
     /** The device whose sound is being fetched and saved right now (an AutoEQ curve is a download). */
@@ -334,12 +363,13 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     /** What to say about the device that just connected; only while it is still the one playing. */
     val eqNotice: StateFlow<EqNotice?> = combine(devices.notice, currentOutput) { n, current ->
-        when {
-            n == null || n.output != current -> null
-            n is DeviceSound.Offer -> EqNotice("${n.entry.name} connected. Use its AutoEQ curve?", "Apply", n)
-            n is DeviceSound.Applied -> EqNotice("Using AutoEQ for ${n.curve}", "Undo", n)
-            else -> null
+        // Only about the device still playing; the words are Say's.
+        val text = when (n) {
+            is DeviceSound.Offer -> dev.nori.music.app.ui.say.deviceNotice(true, n.entry.name)
+            is DeviceSound.Applied -> dev.nori.music.app.ui.say.deviceNotice(false, n.curve)
+            null -> null
         }
+        if (n == null || text == null || n.output != current) null else EqNotice(text.first, text.second, n)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** The notice is on screen now, so it is not shown again. */
@@ -359,33 +389,33 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     /** Saves the sound settings as they are now under [name]. */
     fun saveProfile(name: String) = viewModelScope.launch {
-        val sound = Sound.of(prefs.value).toJson()
-        // Saving over a profile keeps the devices it is chosen for.
-        withContext(Dispatchers.IO) {
-            runCatching {
-                val kept = nori.core.profiles().firstOrNull { it.name == name.trim() }?.outputs.orEmpty()
-                nori.core.profileSave(SoundProfile(name.trim(), sound, kept))
-            }
-        }
+        val sound = prefs.value.sound()
+        // Saving over a profile keeps the devices it is chosen for (the core's profile_save_sound).
+        withContext(Dispatchers.IO) { runCatching { nori.core.profileSaveSound(name, sound) } }
         refreshProfiles()
     }
 
-    fun applyProfile(p: SoundProfile) = Sound.fromJson(p.json)?.let { s -> update { it.withSound(s) } }
+    fun applyProfile(p: SoundProfile) = soundFromJson(p.json)?.let { s -> update { it.withSound(s) } }
     fun deleteProfile(name: String) = viewModelScope.launch { runCatching { nori.core.profileDelete(name) }; refreshProfiles() }
 
     private val _autoEq = MutableStateFlow(AutoEqUi())
     val autoEq: StateFlow<AutoEqUi> = _autoEq
 
-    init { viewModelScope.launch { _autoEq.update { it.copy(count = runCatching { nori.core.autoeqCount() }.getOrDefault(0u).toInt()) } } }
+    init { viewModelScope.launch { val n = runCatching { nori.core.autoeqCount() }.getOrDefault(0u); _autoEq.update { it.counted(n) } } }
 
-    /** Downloads the AutoEQ index once (850 kB) so searching is local afterwards. */
+    private fun AutoEqUi.counted(n: UInt) = copy(count = n.toInt(), countWords = dev.nori.music.app.ui.say.autoeqCount(n.toInt()), searchWords = dev.nori.music.app.ui.say.autoeqSearch(n.toInt()))
+
+    /**
+     * Downloads the AutoEQ index (850 kB) now so searching is local afterwards; the core otherwise keeps
+     * it by itself on Wi-Fi (Nori.keepAutoEqList).
+     */
     fun downloadAutoEqIndex() = viewModelScope.launch {
-        // Asked for by name, with a button: that is the consent. The lookups switch is for what the app
-        // fetches on its own - missing lyrics, update checks - not for a download the user started.
+        // Asked for by name, with a button: that is the consent, on any network. The lookups switch and
+        // "Keep the AutoEQ list" are for what the app fetches on its own, not for a download the user started.
         _autoEq.update { it.copy(busy = true, error = null) }
         _autoEq.value = try {
-            val text = withContext(Dispatchers.IO) { nori.http.get(nori.core.autoeqIndexUrl()).decodeToString() }
-            AutoEqUi(count = withContext(Dispatchers.IO) { nori.core.autoeqStore(text) }.toInt())
+            val n = withContext(Dispatchers.IO) { nori.client.autoeqUpdate(true, nori.http.metered) }
+            AutoEqUi().counted(n ?: withContext(Dispatchers.IO) { nori.core.autoeqCount() })
         } catch (e: Exception) {
             AutoEqUi(error = describeConnectionError(e))
         }
@@ -393,9 +423,9 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     fun searchAutoEq(query: String) = viewModelScope.launch {
         _autoEq.update { it.copy(query = query) }
-        if (query.length < 2) return@launch _autoEq.update { it.copy(hits = emptyList()) }
-        val hits = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqSearch(query, 40u) }.getOrDefault(emptyList()) }
-        _autoEq.update { if (it.query == query) it.copy(hits = hits) else it }
+        // Too short a query, the limit and the lines under each hit are the core's (autoeq_browse).
+        val found = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqBrowse(query) }.getOrNull() }
+        _autoEq.update { if (it.query == query) it.copy(hits = found?.hits.orEmpty().map(AutoEqHit::of), tooShort = found?.tooShort ?: true) else it }
     }
 
     /**
@@ -403,14 +433,23 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
      * "Sony WH-1000XM5". Empty when the index is not downloaded or the name says nothing (the speaker, a
      * generic "USB Audio").
      */
-    suspend fun autoEqFor(output: String): List<AutoEqEntry> = devices.curvesFor(output)
+    suspend fun autoEqFor(output: String): List<AutoEqHit> = devices.curvesFor(output).map(AutoEqHit::of)
 
     /** Fetches one headphone's parametric preset and makes it the current curve. */
     fun applyAutoEq(entry: AutoEqEntry) = viewModelScope.launch {
         _autoEq.update { it.copy(busy = true, error = null) }
         try {
-            val text = withContext(Dispatchers.IO) { nori.http.get(nori.core.autoeqPresetUrl(entry)).decodeToString() }
-            if (importPreset(text) == 0) throw IllegalStateException("that file had no filters in it")
+            // The parametric preset, or the graphic curve fitted with parametric filters when that is all
+            // AutoEQ has (the core's autoeq_curve and parse_eq_preset); null when it has neither.
+            val text = withContext(Dispatchers.IO) { nori.client.autoeqCurve(entry) }
+            if (text == null) {
+                // The core has taken it out of the list: the search and the count say so at once.
+                val n = withContext(Dispatchers.IO) { runCatching { nori.core.autoeqCount() }.getOrDefault(0u) }
+                _autoEq.update { it.counted(n).copy(busy = false, error = dev.nori.music.app.ui.say.autoeqNoCurve) }
+                searchAutoEq(_autoEq.value.query)
+                return@launch
+            }
+            withContext(Dispatchers.IO) { import(text) }
             _autoEq.update { it.copy(busy = false, applied = entry.name) }
         } catch (e: Exception) {
             _autoEq.update { it.copy(busy = false, error = describeConnectionError(e)) }
@@ -428,15 +467,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     // ---- downloads ----
 
     /** Queues every song of the offline index for download; run [syncLibrary] first so the index is complete. */
-    fun downloadLibrary() = viewModelScope.launch {
-        var offset = 0
-        while (true) {
-            val page = nori.library.indexedSongs(offset, 500)
-            if (page.isEmpty()) break
-            nori.downloads.download(page)
-            offset += page.size
-        }
-    }
+    fun downloadLibrary() = nori.downloads.downloadLibrary()
 
     /** Fills the offline search index with the whole library. Optional: the app works without it. */
     fun syncLibrary() {
@@ -447,7 +478,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
                 nori.library.sync().collect { }
                 _sync.value = SyncUi(indexed = nori.library.indexSize())
             } catch (e: Exception) {
-                _sync.update { it.copy(running = false, error = e.message) }
+                _sync.update { it.copy(running = false, error = e.said) }
             }
         }
     }

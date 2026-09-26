@@ -1,0 +1,15 @@
+[package]
+name = "nori-settings-derive"
+version.workspace = true
+edition.workspace = true
+
+# `#[derive(Settings)]`: the settings table of nori-settings, read off `StoredPrefs`' fields, so each setting
+# is declared once, on its field, and the struct stays plain source for uniffi's bindings generator.
+[lib]
+name = "nori_settings_derive"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

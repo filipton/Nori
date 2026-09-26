@@ -6,6 +6,36 @@ hand. Versions follow [semantic versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-26
+
+The player is rewritten: playback, the queue, the library, lyrics and downloads now run in a Rust core
+shared with a new terminal client, and the Android app draws the screens.
+
+### Added
+
+- A new player engine in Rust replaces ExoPlayer's playback, with offload to the audio chip that lets the CPU sleep
+- Better beat detection (the Beat This! model, downloaded from its authors on first use) for AutoMix
+- A terminal client (nori-cli) that plays through the same core
+- Swipe a song out of the queue, with undo
+- Every lyrics service is on by default, word-timed lyrics are sought first, and synced lyrics are checked against the song's voice and shifted when early or late
+- Downloaded songs keep their lyrics offline, and a finished download shows while its lyrics and analysis are found
+- Updating from 0.3.4 keeps your servers, settings, downloads and queue
+
+### Fixed
+
+- Playback no longer goes silent after fast skipping, a hung remote song or an engine error, and a song never ends stuck at its last second
+- Transcoded songs play whole and start at once on mobile data
+- Albums stay gapless with AutoMix on, across discs too
+- The seek bar stays right after the app comes back and through tempo-matched mixes
+- The first equalizer change plays on with no gap, and dialogs, sheets and the selection bar animate even with system animations off
+- Covers never show the previous song's picture, playlist covers show offline, and a cover that cannot load settles on a placeholder
+
+### Performance
+
+- Far fewer wakeups while playing, and offload tops up only when the chip asks
+- Less memory: songs already cached are read from disk, covers ahead wait on disk, and the beat model hands its memory back
+- Long playlists open smoothly
+
 ## [0.3.4] - 2026-09-22
 
 ### Added

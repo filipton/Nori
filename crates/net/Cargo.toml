@@ -1,0 +1,24 @@
+[package]
+name = "nori-net"
+version.workspace = true
+edition.workspace = true
+
+# The Subsonic API below the client: signing and addresses, the Transport a platform implements, the
+# network policy, the writes as requests, and the audio's cache keys.
+[lib]
+name = "nori_net"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+md-5 = "0.11"
+# A network error can be the database's (a write kept for later could not be stored).
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+parking_lot = "0.12"
+# The platform's HTTP transport is an async foreign trait (uniffi generates it through async-trait).
+async-trait = "0.1"
+nori-model = { path = "../model" }

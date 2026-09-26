@@ -1,0 +1,14 @@
+[package]
+name = "nori-mpris"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nori on the Linux desktop's media controls: MPRIS over D-Bus"
+
+[lib]
+name = "nori_mpris"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# libdbus through thin bindings: a handful of small crates, where zbus brings an async runtime of its own.
+dbus = "0.9"
+dbus-crossroads = "0.5"

@@ -19,7 +19,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -39,9 +38,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.settings.Band
-import dev.nori.music.settings.BandChannel
-import dev.nori.music.settings.BandKind
+import dev.nori.music.ffi.settings.EqLevel
+import dev.nori.music.ffi.queue.equalizerTuning
+import dev.nori.music.ffi.settings.SoundBand
+import dev.nori.music.ffi.settings.BandChannel
+import dev.nori.music.ffi.model.EqKind
+import dev.nori.music.settings.EqBands
+import dev.nori.music.settings.EQ
+import dev.nori.music.settings.effectivePreampDb
+import dev.nori.music.settings.usesGain
+import dev.nori.music.settings.slope
 
 /** The limiter's gain reduction, sampled while this screen is resumed and dropped the moment it is not. */
 @Composable
@@ -51,14 +57,18 @@ private fun limiterMeter(): Float {
     androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
     androidx.compose.runtime.LaunchedEffect(resumed) {
         while (resumed) {
-            value = dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f
-            kotlinx.coroutines.delay(120)
+            value = dev.nori.music.playback.Equalizer.meterDb
+            kotlinx.coroutines.delay(stage.meterMs)
         }
     }
     return value
 }
 
-private fun hz(f: Float) = if (f >= 1000) "%.4gk".format(f / 1000).replace(".000k", "k").replace(".00k", "k") else "%.0f".format(f)
+/** A band's label, its frequency and a mark for its channel or kind (nori-core's `settings::band_label`). */
+private fun bandLabel(b: SoundBand): String = say.band(b.freq, dev.nori.music.ffi.settings.BandMark.entries[EqBands.mark(b.kind.ordinal, b.channel.ordinal)])
+
+/** How far each control goes: the core's, the same ranges it holds every edit in. */
+private val ranges get() = EQ.eqRanges
 
 @Composable
 fun EqualizerScreen(vm: SettingsViewModel) {
@@ -70,36 +80,50 @@ fun EqualizerScreen(vm: SettingsViewModel) {
     // Low-latency mode costs a rebuild of the audio output, which is a small drop in the sound. Opening
     // this screen to look is not a reason to pay it - the first change to a band is. That used to happen
     // on entry, and on a DAC it was a noticeable break in the music just for opening the page.
-    val tuned = remember { mutableStateOf(false) }
+    //
+    // And only while this screen is in sight. The page stays composed under the player when the player is
+    // opened over it, so "this screen is composed" held the shallow buffer - with its wakeups and a burst
+    // of CPU that can starve it - for as long as the player was open, and gave it up with a gap in the
+    // sound on some later close. Covered, left or with the app in the background, the deep buffer comes
+    // back, and a new change is needed before it is traded again. The service owns the switch (it passes
+    // on only real changes, and drops it when the app lets go of it); this screen only says what it wants.
+    val sheet = LocalPlayerSheet.current
+    var resumed by remember { mutableStateOf(false) }
+    androidx.lifecycle.compose.LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
+    val covered by remember(sheet) { androidx.compose.runtime.derivedStateOf { sheet.isOpen || sheet.progress.value > 0f } }
+    val inSight = resumed && !covered
+    val touched = remember { mutableStateOf(false) }
     val settled = remember { mutableStateOf(false) }
+    // Whether a change counts, and whether the shallow buffer is wanted, are the core's
+    // (rules.rs equalizer_tuning); whether the screen is in sight is this screen's own.
     LaunchedEffect(p.eqBands, p.eqPreampDb, p.crossfeedDb, p.balance) {
         if (!settled.value) { settled.value = true; return@LaunchedEffect }
-        if (!tuned.value && p.eqEnabled) { tuned.value = true; vm.setTuning(true) }
+        if (equalizerTuning(inSight, true, p.eqEnabled)) touched.value = true
     }
-    DisposableEffect(Unit) { onDispose { if (tuned.value) vm.setTuning(false) } }
+    LaunchedEffect(inSight) { if (!inSight) touched.value = false }
+    val want = remember(inSight, touched.value, p.eqEnabled) { equalizerTuning(inSight, touched.value, p.eqEnabled) }
+    val sent = remember { booleanArrayOf(false) }
+    LaunchedEffect(want) { if (want != sent[0]) { sent[0] = want; vm.setTuning(want) } }
+    DisposableEffect(Unit) { onDispose { if (sent[0]) { sent[0] = false; vm.setTuning(false) } } }
 
-    if (importing) ImportDialog(vm) { importing = false }
-    p.eqBands.getOrNull(editing)?.let { BandDialog(it, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
+    NoriDialog(importing, { importing = false }) { ImportDialog(vm) { importing = false } }
+    NoriDialog(p.eqBands.getOrNull(editing), { editing = -1 }) { band -> BandDialog(band, { b -> vm.setBand(editing, b) }, { vm.removeBand(editing); editing = -1 }) { editing = -1 } }
 
     Column(Modifier.verticalScroll(rememberScrollState()).padding(bottom = LocalChromeInset.current)) {
         Row(Modifier.padding(start = 4.dp, end = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
-            Text("Equalizer", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
+            Text(say.equalizer, Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall)
             NoriSwitch(p.eqEnabled, { on -> vm.update { it.copy(eqEnabled = on) } })
         }
         Text(
-            "Tap a band's label to change its frequency, width or type.",
+            say.eqHint,
             Modifier.padding(horizontal = Space.gutter, vertical = 2.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         // Two settings switch the whole sample chain off. Without this the screen looks broken: bands
         // move, the limiter says it is on, and nothing whatsoever happens to the sound.
         val dac by vm.dac.collectAsStateWithLifecycle()
-        val bypass = when {
-            dac.bitPerfect -> "Bit-perfect USB output is active, so nothing here touches the audio."
-            p.hiRes -> "High quality output is on, so nothing here changes the sound. Turn it off in Settings, under Sound."
-            else -> null
-        }
+        val bypass = remember(p.hiRes, dac.bitPerfect) { dev.nori.music.ffi.settings.eqBypassReason(p.hiRes, dac.bitPerfect)?.let(say::eqBypass) }
         if (bypass != null) Surface(
             shape = CardShape, color = MaterialTheme.colorScheme.errorContainer,
             modifier = Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp),
@@ -109,141 +133,149 @@ fun EqualizerScreen(vm: SettingsViewModel) {
 
         p.eqBands.forEachIndexed { i, b ->
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                val mark = when {
-                    b.channel == BandChannel.LEFT -> " L"
-                    b.channel == BandChannel.RIGHT -> " R"
-                    b.kind == BandKind.LOW_SHELF || b.kind == BandKind.LOW_SHELF_SLOPE -> " ↙"
-                    b.kind == BandKind.HIGH_SHELF || b.kind == BandKind.HIGH_SHELF_SLOPE -> " ↗"
-                    !b.kind.usesGain -> " ∿"
-                    else -> ""
-                }
-                Text(hz(b.freq) + mark, Modifier.width(56.dp).clickable { editing = i }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                // Once per band shape, not on every frame of a gain drag.
+                val label = remember(b.freq, b.channel, b.kind) { bandLabel(b) }
+                Text(label, Modifier.width(56.dp).clickable { editing = i }, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                 if (b.kind.usesGain) {
-                    NoriSlider(b.gainDb, -12f..12f, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
+                    NoriSlider(b.gainDb, ranges.gain.min..ranges.gain.max, { v -> vm.setBand(i, b.copy(gainDb = v)) }, Modifier.weight(1f), enabled = p.eqEnabled, centred = true)
                     Text(
-                        signedDb(b.gainDb), Modifier.width(42.dp),
+                        remember(b.gainDb) { dev.nori.music.text.Fmt.signedDb(b.gainDb) }, Modifier.width(42.dp),
                         style = MaterialTheme.typography.labelMedium, textAlign = androidx.compose.ui.text.style.TextAlign.End,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
-                    Text(b.kind.label, Modifier.weight(1f).clickable { editing = i }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(say.bandKind(b.kind), Modifier.weight(1f).clickable { editing = i }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         LazyRow(contentPadding = PaddingValues(horizontal = Space.gutter, vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { Chip("Add band", false, onClick = vm::addBand) }
-            item { Chip("Paste a preset", false) { importing = true } }
-            item { Chip("Headphone presets", false, onClick = nav::autoEq) }
-            item { Chip("Reset", false, onClick = vm::resetBands) }
+            item { Chip(say.addBand, false, onClick = vm::addBand) }
+            item { Chip(say.pastePreset, false) { importing = true } }
+            item { Chip(say.headphonePresets, false, onClick = nav::autoEq) }
+            item { Chip(say.reset, false, onClick = vm::resetBands) }
         }
-        SectionTitle("Presets")
+        SectionTitle(say.presets)
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(vm.presets) { preset -> Chip(preset.name, false) { vm.applyPreset(preset) } }
+            items(vm.presets) { preset -> Chip(say.preset(preset.kind), false) { vm.applyPreset(preset) } }
         }
 
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Pre-amp ${signedDb(p.effectivePreampDb)} dB${if (p.eqPreampDb == null) " (automatic)" else ""}")
-                Text("Automatic pulls the level down by the largest boost so the curve cannot clip", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(remember(p.effectivePreampDb, p.eqPreampDb == null) { say.preamp(p.effectivePreampDb, p.eqPreampDb == null) })
+                Text(say.autoPreampHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            NoriSwitch(p.eqPreampDb == null, { auto -> vm.update { it.copy(eqPreampDb = if (auto) null else it.effectivePreampDb) } })
+            NoriSwitch(p.eqPreampDb == null, vm::setAutoPreamp)
         }
-        p.eqPreampDb?.let { v -> NoriSlider(v, -20f..6f, { x -> vm.update { it.copy(eqPreampDb = x) } }, Modifier.padding(horizontal = Space.gutter), enabled = p.eqEnabled) }
+        p.eqPreampDb?.let { v -> NoriSlider(v, ranges.preamp.min..ranges.preamp.max, { x -> vm.setLevel(EqLevel.PREAMP, x) }, Modifier.padding(horizontal = Space.gutter), enabled = p.eqEnabled) }
 
-        SectionTitle("Output")
+        SectionTitle(say.output)
         Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-            Text("Balance", Modifier.width(80.dp))
-            NoriSlider(p.balance, -1f..1f, { v -> vm.update { it.copy(balance = if (kotlin.math.abs(v) < 0.04f) 0f else v) } }, Modifier.weight(1f), centred = true)
-            Text(if (p.balance == 0f) "centre" else "%s %.0f%%".format(if (p.balance < 0) "L" else "R", kotlin.math.abs(p.balance) * 100), Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
+            Text(say.balance, Modifier.width(80.dp))
+            NoriSlider(p.balance, ranges.balance.min..ranges.balance.max, { v -> vm.setLevel(EqLevel.BALANCE, v) }, Modifier.weight(1f), centred = true)
+            Text(remember(p.balance) { say.balance(p.balance) }, Modifier.width(72.dp), style = MaterialTheme.typography.labelMedium)
         }
-        Toggle("Mono", "Both channels summed, for one-earbud listening", p.mono) { on -> vm.update { it.copy(mono = on) } }
-        Toggle("Limiter", "Catches what a boost or a positive ReplayGain would clip. Adds 5 ms of delay; below the ceiling the audio passes through untouched.", p.limiter) { on -> vm.update { it.copy(limiter = on) } }
+        Toggle(say.mono, say.monoDetail, p.mono) { on -> vm.update { it.copy(mono = on) } }
+        Toggle(say.limiter, say.limiterDetail, p.limiter) { on -> vm.update { it.copy(limiter = on) } }
         if (p.limiter) {
             Row(Modifier.padding(horizontal = Space.gutter), verticalAlignment = Alignment.CenterVertically) {
-                Text("Ceiling %.1f dB".format(p.limiterThresholdDb), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                // Proof that it is working: what it is pulling back, right now. Polled only while this
-                // screen is on top, so it costs nothing the rest of the time.
-                val reduction = limiterMeter()
-                Text(
-                    if (reduction > 0.05f) "−%.1f dB".format(reduction) else "not clipping",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text(remember(p.limiterThresholdDb) { say.ceiling(p.limiterThresholdDb) }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                LimiterReduction()
             }
-            NoriSlider(p.limiterThresholdDb, -12f..0f, { v -> vm.update { it.copy(limiterThresholdDb = v) } }, Modifier.padding(horizontal = Space.gutter))
+            NoriSlider(p.limiterThresholdDb, ranges.limiter.min..ranges.limiter.max, { v -> vm.setLevel(EqLevel.LIMITER, v) }, Modifier.padding(horizontal = Space.gutter))
         }
 
         DevicesSection(vm)
 
-        SectionTitle("Profiles")
+        SectionTitle(say.profiles)
         val profiles by vm.profiles.collectAsStateWithLifecycle()
         var naming by remember { mutableStateOf(false) }
         var newName by remember { mutableStateOf("") }
-        if (naming) AlertDialog(
-            onDismissRequest = { naming = false }, title = { Text("Save these settings") },
-            text = { OutlinedTextField(newName, { newName = it }, singleLine = true, label = { Text("Name") }) },
-            confirmButton = { TextButton({ vm.saveProfile(newName); newName = ""; naming = false }, enabled = newName.isNotBlank()) { Text("Save") } },
-            dismissButton = { TextButton({ naming = false }) { Text("Cancel") } },
-        )
-        val rows by vm.deviceRows.collectAsStateWithLifecycle()
-        AnimatedRows(profiles, { it.name }) { profile ->
-            val used = rows.filter { it.output in profile.outputs }.joinToString(", ") { it.name }
-            NavRow(
-                profile.name, { vm.applyProfile(profile) },
-                subtitle = if (used.isEmpty()) "Tap to load" else "Used for $used",
-                action = { IconButton({ vm.deleteProfile(profile.name) }) { Icon(Icons.Outlined.Delete, "Delete ${profile.name}", tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
+        NoriDialog(naming, { naming = false }) {
+            AlertCard(
+                title = { Text(say.saveTheseSettings) },
+                text = { OutlinedTextField(newName, { newName = it }, singleLine = true, label = { Text(say.name) }) },
+                confirmButton = { TextButton({ vm.saveProfile(newName); naming = false }, enabled = newName.isNotBlank()) { Text(say.save) } },
+                dismissButton = { TextButton({ naming = false }) { Text(say.cancel) } },
             )
         }
-        ActionRow("Save current settings as a profile", Icons.Filled.Add, { naming = true }, divider = false)
+        val rows by vm.deviceRows.collectAsStateWithLifecycle()
+        AnimatedRows(profiles, { it.name }) { profile ->
+            val used = remember(rows, profile) { say.profileUse(rows.filter { it.output in profile.outputs }.map { it.name }) }
+            NavRow(
+                profile.name, { vm.applyProfile(profile) },
+                subtitle = used,
+                action = { IconButton({ vm.deleteProfile(profile.name) }) { Icon(Icons.Outlined.Delete, remember(profile.name) { say.deleteNamed(profile.name) }, tint = MaterialTheme.colorScheme.onSurfaceVariant) } },
+            )
+        }
+        ActionRow(say.saveAsProfile, Icons.Filled.Add, { newName = ""; naming = true }, divider = false)
 
-        SectionTitle("Crossfeed")
-        Text(if (p.crossfeedDb > 0f) "%.1f dB: each ear also hears a little of the other channel, like loudspeakers. For headphones.".format(p.crossfeedDb) else "Off", Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        NoriSlider(p.crossfeedDb, 0f..9f, { v -> vm.update { it.copy(crossfeedDb = if (v < 1f) 0f else v) } }, Modifier.padding(horizontal = Space.gutter))
+        SectionTitle(say.crossfeed)
+        Text(remember(p.crossfeedDb) { say.crossfeed(p.crossfeedDb) }, Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        NoriSlider(p.crossfeedDb, ranges.crossfeed.min..ranges.crossfeed.max, { v -> vm.setLevel(EqLevel.CROSSFEED, v) }, Modifier.padding(horizontal = Space.gutter))
     }
+}
+
+/**
+ * Proof that the limiter is working: what it is pulling back, right now. Polled only while this screen
+ * is on top, so it costs nothing the rest of the time. Its own scope, so each reading redraws this one
+ * line rather than recomposing the whole screen every 120 ms.
+ */
+@Composable
+private fun LimiterReduction() {
+    val reduction = limiterMeter()
+    // The words change only with the tenth of a dB they show; the meter moves far more finely.
+    Text(
+        remember(kotlin.math.round(reduction * 10f)) { say.reduction(reduction) },
+        style = MaterialTheme.typography.labelMedium,
+        color = if (reduction > 0.05f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
 private fun ImportDialog(vm: SettingsViewModel, onDone: () -> Unit) {
     var text by remember { mutableStateOf("") }
     var error by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text("Import preset") },
+    AlertCard(
+        title = { Text(say.importPreset) },
         text = {
             Column {
-                Text("Paste an AutoEQ ParametricEQ.txt or an Equalizer APO config.", style = MaterialTheme.typography.bodySmall)
-                OutlinedTextField(text, { text = it; error = false }, Modifier.fillMaxWidth().padding(top = 8.dp), minLines = 5, maxLines = 10, isError = error, placeholder = { Text("Preamp: -6.2 dB\nFilter 1: ON PK Fc 105 Hz Gain -3.5 dB Q 0.70") })
-                if (error) Text("No filters found in that text", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(say.importPresetHint, style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(text, { text = it; error = false }, Modifier.fillMaxWidth().padding(top = 8.dp), minLines = 5, maxLines = 10, isError = error, placeholder = { Text(say.importPresetExample) })
+                if (error) Text(say.noFiltersFound, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = { TextButton({ if (vm.importPreset(text) > 0) onDone() else error = true }) { Text("Import") } },
-        dismissButton = { TextButton(onDone) { Text("Cancel") } },
+        confirmButton = { TextButton({ if (vm.importPreset(text) > 0) onDone() else error = true }) { Text(say.import) } },
+        dismissButton = { TextButton(onDone) { Text(say.cancel) } },
     )
 }
 
 @Composable
-private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text("${hz(band.freq)} Hz") },
+private fun BandDialog(band: SoundBand, onChange: (SoundBand) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
+    // Asked again only when what they say changes, not on every recomposition a drag makes.
+    val title = remember(band.freq) { say.hzTitle(band.freq) }
+    val shape = remember(band.kind.slope, band.q) { say.shape(band.kind.slope, band.q) }
+    AlertCard(
+        title = { Text(title) },
         text = {
             Column {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(BandKind.entries) { k ->
-                        TextButton({ onChange(band.copy(kind = k)) }) { Text(k.label, color = if (band.kind == k) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                    items(EqKind.entries) { k ->
+                        TextButton({ onChange(band.copy(kind = k)) }) { Text(say.bandKind(k), color = if (band.kind == k) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     BandChannel.entries.forEach { c ->
-                        TextButton({ onChange(band.copy(channel = c)) }) { Text(c.label, color = if (band.channel == c) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                        TextButton({ onChange(band.copy(channel = c)) }) { Text(say.bandChannel(c), color = if (band.channel == c) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
                 }
-                Text("Frequency", style = MaterialTheme.typography.labelMedium)
+                Text(say.frequency, style = MaterialTheme.typography.labelMedium)
                 // Logarithmic: the slider position is the exponent, 20 Hz to 20 kHz.
-                NoriSlider(kotlin.math.log10(band.freq / 20f) / 3f, 0f..1f, { x -> onChange(band.copy(freq = (20f * Math.pow(10.0, x * 3.0).toFloat()))) })
-                Text(if (band.kind == BandKind.LOW_SHELF_SLOPE || band.kind == BandKind.HIGH_SHELF_SLOPE) "Slope %.2f".format(band.q) else "Q %.2f".format(band.q), style = MaterialTheme.typography.labelMedium)
-                NoriSlider(band.q, 0.2f..8f, { q -> onChange(band.copy(q = q)) })
+                NoriSlider(EqBands.freqToSlider(band.freq), 0f..1f, { x -> onChange(band.copy(freq = EqBands.sliderToFreq(x))) })
+                Text(shape, style = MaterialTheme.typography.labelMedium)
+                NoriSlider(band.q, ranges.q.min..ranges.q.max, { q -> onChange(band.copy(q = q)) })
             }
         },
-        confirmButton = { TextButton(onDone) { Text("Done") } },
-        dismissButton = { TextButton(onRemove) { Icon(Icons.Filled.Close, null); Text("Remove band") } },
+        confirmButton = { TextButton(onDone) { Text(say.done) } },
+        dismissButton = { TextButton(onRemove) { Icon(Icons.Filled.Close, null); Text(say.removeBand) } },
     )
 }

@@ -1,11 +1,16 @@
 package dev.nori.music.app.ui
 
-import androidx.compose.runtime.collectAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.filled.PlaylistRemove
+import dev.nori.music.ffi.model.Song
 import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -93,6 +98,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
@@ -124,52 +131,17 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.ActionsViewModel
+import dev.nori.music.look.CoverLook
+import androidx.compose.ui.draw.drawWithCache
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.playback.Repeat
-import dev.nori.music.settings.ThemeMode
+import dev.nori.music.ffi.settings.ThemeMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
-
-/**
- * A drag that follows the finger and decides on release: past [threshold] of the element's size in
- * the drag direction the matching action runs, otherwise it springs back. [horizontal] picks the axis.
- * Nothing runs until a finger is down, so this costs nothing while music plays.
- */
-internal fun Modifier.flingActions(
-    horizontal: Boolean, threshold: Float = 0.28f,
-    onStart: (() -> Unit)? = null, onEnd: (() -> Unit)? = null,
-): Modifier = composed {
-    val offset = remember { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    val haptics = LocalHapticFeedback.current
-    pointerInput(horizontal, onStart != null, onEnd != null) {
-        val extent = { (if (horizontal) size.width else size.height).toFloat() }
-        val release: () -> Unit = {
-            val v = offset.value
-            val fired = kotlin.math.abs(v) > extent() * threshold
-            if (fired) {
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                if (v < 0) onEnd?.invoke() else onStart?.invoke()
-            }
-            scope.launch { offset.animateTo(0f, spring(stiffness = Spring.StiffnessMediumLow)) }
-        }
-        val drag: (Float) -> Unit = { d ->
-            // Only follow the finger in a direction that has an action; the other way resists.
-            val next = offset.value + d
-            val allowed = (next > 0 && onStart != null) || (next < 0 && onEnd != null)
-            scope.launch { offset.snapTo(if (allowed) next.coerceIn(-extent(), extent()) else next * 0.15f) }
-        }
-        if (horizontal) detectHorizontalDragGestures(onDragEnd = release, onDragCancel = release) { _, d -> drag(d) }
-        else detectVerticalDragGestures(onDragEnd = release, onDragCancel = release) { _, d -> drag(d) }
-    }.graphicsLayer {
-        if (horizontal) translationX = offset.value else translationY = offset.value
-        alpha = 1f - (kotlin.math.abs(offset.value) / 1200f).coerceAtMost(0.5f)
-    }
-}
 
 private enum class Panel { ART, QUEUE, LYRICS }
 
@@ -198,8 +170,12 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // Where the sleeve ends, so the page behind it can be drawn at the same scale. Written on layout,
     // read in the draw phase; it only moves when the window does.
     var sleeveBottom by remember { mutableFloatStateOf(0f) }
+    // The player's own coordinates, which the sleeve is measured in. Not the window's: the sheet moves the
+    // whole player with a layer, and a layer moving counts as the sleeve moving, so measured against the
+    // window the sleeve's bottom rode up the screen with the sheet (a frame late, too). The page's blur,
+    // drawn inside the sheet, then sat a whole sheet's travel below the cover all the way up.
+    val player = remember { arrayOfNulls<androidx.compose.ui.layout.LayoutCoordinates>(1) }
     var sleeveHeight by remember { mutableFloatStateOf(0f) }
-    var sleepMenu by remember { mutableStateOf(false) }
     // The transport's way of asking the sleeve to change record; see SleeveSlide.
     val slide = remember { SleeveSlide() }
     // Where the page's colours are between records while one is moving; see PageShift.
@@ -226,7 +202,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     }
     // Read in the draw phase: nothing until the change above has begun, so the frame a panel first
     // appears on is the first frame of its fade rather than one at full strength.
-    val arrived = { if (panel != showing) 0f else arrival.value }
+    val arrived = FloatReader { if (panel != showing) 0f else arrival.value }
     // The lyrics keep a small copy of the cover in their header, so between the artwork and the lyrics
     // there is one cover and it travels, the way it does between the now playing bar and the sleeve.
     // Dissolving the sleeve into the blurred page instead is what read as a block of blur appearing at
@@ -236,8 +212,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     LaunchedEffect(sheet) {
         androidx.compose.runtime.snapshotFlow { sheet.panelCover }.collect { if (it != Rect.Zero) thumb = it }
     }
-    val flying = arrival.value < 1f && thumb != Rect.Zero && sleeveHeight > 0f &&
-        (panel == Panel.LYRICS && leaving == Panel.ART || panel == Panel.ART && leaving == Panel.LYRICS)
+    // Derived, so the change's own frames do not recompose the player: only the moment the flight
+    // starts and the moment it ends do.
+    val flying by remember {
+        androidx.compose.runtime.derivedStateOf {
+            arrival.value < 1f && thumb != Rect.Zero && sleeveHeight > 0f &&
+                (panel == Panel.LYRICS && leaving == Panel.ART || panel == Panel.ART && leaving == Panel.LYRICS)
+        }
+    }
     androidx.compose.runtime.DisposableEffect(flying) {
         sheet.panelFlight = flying
         onDispose { sheet.panelFlight = false }
@@ -249,16 +231,23 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     val coverUrl = vm.cover(state.current?.coverArt, CoverSize.FULL)
     // One picture for the sleeve and for the cover in flight (see SleeveArt).
     val sleeveArt = rememberSleeveArt(coverUrl)
+    // The moving cover (Settings, Look), over the still one while the sleeve is at rest (SleeveMotion.kt).
+    // Nothing of it exists while it is switched off: no lookup, no player, no surface, no touch watcher.
+    val motion = if (prefs.motionArtwork && prefs.thirdPartyLookups) remember { SleeveMotion(vm::motionView) } else null
+    if (motion != null) MotionDirector(vm, motion, sheet, onArtwork = panel == Panel.ART && showing == Panel.ART && !flying)
     // AMOLED black everywhere else, but the player keeps the cover's colours unless asked not to: in
     // black, the page under the sleeve was pure black and the picture looked cut off, where Apple's
     // carries the record's colour down the whole screen.
-    val black = prefs.amoled && !prefs.playerColours
+    val black = remember(prefs.amoled, prefs.playerColours) { dev.nori.music.ffi.playerBlack(prefs.amoled, prefs.playerColours) }
     val rowUrl = vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover)
     val tint = if (prefs.coverColors) rememberCoverTint(rowUrl, dark, black) else CoverTint(rowUrl, null)
     val found = tint.palette
     // The colours of the record on its way in, already worked out by the time it is asked for (the now
-    // playing bar measures both neighbours ahead; see warmCoverPalette).
-    val arriving = if (prefs.coverColors) rememberCoverPalette(shift.towards, dark, black) else null
+    // playing bar measures both neighbours ahead; see warmCoverPalette). Only as they were when the record
+    // set off: colours worked out while it was already on its way would be brought up at however far it
+    // had got, in one frame. Those come after it instead, the page cross-fading to them once it is in.
+    val arrivingNowMeasured = if (prefs.coverColors) rememberCoverPalette(shift.towards, dark, black) else null
+    val arriving = remember(shift.towards, prefs.coverColors, dark, black) { arrivingNowMeasured }
     val previousTintUrl = state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
     val nextTintUrl = state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover) }
     // Both neighbours' colours are worked out while nothing is happening, so that a record swiped to has
@@ -272,49 +261,73 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
         warmCoverPalette(warmContext, nextTintUrl, dark, black)
         warmCoverPalette(warmContext, previousTintUrl, dark, black)
     }
-    // The page's colours change with the song by cross-fading, not in one frame, and they hold the last
-    // song's colours while the new cover's are worked out - going to the plain page and then to the new
-    // colours was two changes where there should be one. A song that really has none (no artwork) gets
-    // the plain page once it has had a moment to find some.
+    // The page's colours change with the song by cross-fading, not in one frame. A song whose colours are
+    // not worked out yet keeps the last song's for a moment (the same grace the sleeve's picture has, so
+    // colours measured from the disk go straight from the one song's to the other's), and then the page
+    // fades to the theme's own plain page, no song's colour, under the sleeve's placeholder; when its
+    // colours come it fades from there to them. A song with no artwork stays on the plain page.
     var palette by remember { mutableStateOf(found) }
     var fadingFrom by remember { mutableStateOf<PagePalette?>(null) }
     val washFade = remember { androidx.compose.animation.core.Animatable(1f) }
+    // The plain page as a page's colours, to fade from: the theme's own look with no picture in its wash.
+    val baseTable = LocalLook.current.let { l -> remember(l) { (l as? FixedLook)?.table ?: IntArray(dev.nori.music.look.CoverLook.LEN) { l.argb(it) } } }
+    val neutral = remember(baseTable) { PagePalette(baseTable) }
+    val colourTurn = remember { CoverTurn(stage.colourWaitMs) }
+    // See below, where it is latched.
+    var held by remember { mutableStateOf<PagePalette?>(null) }
+    val arrivingNow by androidx.compose.runtime.rememberUpdatedState(arriving)
     LaunchedEffect(tint) {
-        // Still the last song's colours, which the song after it must not be given: the page keeps
-        // wearing what the record brought in until this song's own colours are really in hand.
+        // Still the last song's colours, which the song after it must not be given: colours worked out
+        // for a song skipped past are dropped.
         if (tint.url != rowUrl) return@LaunchedEffect
+        val now = android.os.SystemClock.uptimeMillis()
+        colourTurn.song(rowUrl, now, ready = found != null)
+        // A fade this change cut short is finished first, from where it had got to: starting the next
+        // one from its end would put the page there in one frame.
+        if (fadingFrom != null) {
+            if (!AppMotion.reduce && washFade.value < 1f) washFade.fadeByFrames(1f, stage.colourFadeMs * (1f - washFade.value))
+            fadingFrom = null
+        }
         if (found == palette) { shift.adopted = rowUrl; return@LaunchedEffect }
-        if (found == null) delay(1200)
+        // The grace, counted from the change of song.
+        if (found == null) delay(colourTurn.holdLeft(now))
         // A record that carried its colours in with it has them on screen already, so the page takes
         // them over underneath rather than fading to them a second time; anything else - a song tapped
-        // in the queue, the notification, the queue running on by itself - cross-fades.
-        // Or the page has this record's colours already, because the record handed them over when it
-        // landed (see PageShift.arrived). Fading from the record before it then would be the page going
-        // back to the old colour and coming forward again, which is the blink at the end of a change.
-        val carried = shift.adopted == rowUrl || shift.amount > 0.9f && shift.towards == rowUrl
-        fadingFrom = if (carried) null else palette
+        // in the queue, the notification, the queue running on by itself, colours that came after the
+        // record - cross-fades. Or the page has this record's colours already, because the record handed
+        // them over when it landed (see PageShift.arrived). Fading from the record before it then would
+        // be the page going back to the old colour and coming forward again, the blink at the end of a
+        // change. Only colours really on screen count: a record that came in with none carried none, and
+        // taking its colours over "underneath" then was the page changing in one frame.
+        val carried = found != null && (held == found ||
+            shift.amount > 0.9f && shift.towards == rowUrl && arrivingNow == found)
+        val from = if (carried) null else (palette ?: neutral)
+        val fades = from != null && !AppMotion.reduce
+        // Back to its start before the colours change under it, not after. Taking the fade over from one
+        // still running can wait a frame for it to let go, and on that frame the new colours were drawn
+        // at the old fade's strength over the old ones: the page changed, went back, and changed again.
+        if (fades) washFade.snapTo(0f)
+        fadingFrom = from
         palette = found
         // In the same breath as the colours themselves, so the sleeve lets go of them on a frame where
         // the page is already drawing them.
         shift.adopted = rowUrl
-        // As long as the record takes to slide across, so the page and the sleeve arrive together.
+        // As long as the record takes to slide across, so the page and the sleeve arrive together: a
+        // song that changes by itself slides its record in over the same stretch (see SleeveCarousel).
         // Theme colours (text, Play, heart) travel with the wash via mixPalette - snapping the theme
         // while only the wash faded left the controls jumping a frame ahead of the page.
-        if (fadingFrom != null && !AppMotion.reduce) {
-            washFade.snapTo(0f)
-            washFade.animateTo(1f, androidx.compose.animation.core.tween(420))
-        }
+        // Counted in frames: this runs on the frames that compose the new song, and timed by the clock
+        // a slow one of those carried the page most of the way to its new colour in one step.
+        if (fades) washFade.fadeByFrames(1f, stage.colourFadeMs.toFloat())
         fadingFrom = null
     }
 
-    // The colours of a record that has fully arrived, kept until the page itself is wearing them. The
-    // page used to stop drawing them the moment the sleeve let go of the record, which is one or two
-    // frames before it took them on: for those frames the page went back to the record before, and the
-    // record growing back into place swept its own soft bottom down over that - the frame of the
-    // previous cover that shows as the sleeve zooms in. Latched on a boolean, so it cannot be missed
-    // when two changes land in the same frame.
-    var held by remember { mutableStateOf<PagePalette?>(null) }
-    val arrivingNow by androidx.compose.runtime.rememberUpdatedState(arriving)
+    // The colours of a record that has fully arrived, kept until the page itself is wearing them (`held`,
+    // declared above). The page used to stop drawing them the moment the sleeve let go of the record,
+    // which is one or two frames before it took them on: for those frames the page went back to the
+    // record before, and the record growing back into place swept its own soft bottom down over that -
+    // the frame of the previous cover that shows as the sleeve zooms in. Latched on a boolean, so it
+    // cannot be missed when two changes land in the same frame.
     LaunchedEffect(shift) {
         androidx.compose.runtime.snapshotFlow { shift.amount >= 0.999f }.collect { full ->
             if (full) arrivingNow?.let { held = it }
@@ -341,30 +354,55 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
     // Theme follows the same progress as the wash: with the sleeve while it scrolls, then with the
     // post-skip fade when the song changes without a swipe. A hard light/dark cut on the buttons used
     // to fire near the end of a white↔colour cross-fade and look like a snap.
-    val fadeT = washFade.value
-    val slideT = shift.amount
+    //
+    // Two looks worked out by nori-look, and how far between them the page is, read where each colour
+    // is drawn: a fade or a drag redraws what shows the colours and recomposes nothing. It used to mix
+    // a palette and build a whole new colour scheme here on every frame, which recomposed the player.
+    val live = remember {
+        LiveLook { mode ->
+            when (mode) {
+                MIX_FADE -> washFade.value
+                MIX_SLIDE -> shift.amount.let { if (it > 0.001f) it else 0f }
+                else -> 1f
+            }
+        }
+    }
+    val baseLook = LocalLook.current
+    // The sleeve's placeholder and its sheen are in the theme's own colours, never the song's.
+    androidx.compose.runtime.SideEffect { if (sleeveArt.neutral !== baseLook) sleeveArt.neutral = baseLook }
     val heldWash = held?.takeIf { it != palette }
-    val themePalette = when {
-        heldWash != null -> heldWash
-        fadingFrom != null && palette != null -> mixPalette(fadingFrom!!, palette!!, fadeT)
-        arriving != null && palette != null && arriving != palette && slideT > 0.001f ->
-            mixPalette(palette!!, arriving, slideT)
-        else -> palette
+    // The plain page (no palette) is the theme's own look, and the page fades to it and from it like to
+    // and from any song's colours: the text, the buttons and the wash all at once.
+    val settledLook = palette?.look ?: baseTable
+    val fromLook = fadingFrom?.look
+    val arrivingLook = arriving?.takeIf { it != palette }?.look
+    androidx.compose.runtime.SideEffect {
+        when {
+            heldWash != null -> live.set(null, heldWash.look, MIX_NONE)
+            fromLook != null -> live.set(fromLook, settledLook, MIX_FADE)
+            arrivingLook != null -> live.set(settledLook, arrivingLook, MIX_SLIDE)
+            else -> live.set(null, settledLook, MIX_NONE)
+        }
     }
 
-    TintedTheme(themePalette) {
+    TintedTheme(palette) {
+      androidx.compose.runtime.CompositionLocalProvider(LocalLook provides live) {
         val scheme = MaterialTheme.colorScheme
-        if (LocalPlayerShown.current) SystemBarIcons(scheme.background)
+        if (LocalPlayerShown.current) SystemBarIcons(live)
         Box(
             // Pull down from anywhere on the artwork page and the whole player follows the finger down;
             // the lyrics and queue need a vertical drag to scroll, so there only the handle does.
-            Modifier.fillMaxSize().dragsSheet(sheet, enabled = panel == Panel.ART),
+            Modifier.fillMaxSize().onGloballyPositioned { player[0] = it }
+                .then(if (motion != null) Modifier.watchTouches(motion) else Modifier)
+                .dragsSheet(sheet, enabled = panel == Panel.ART),
         ) {
             // The page is the cover itself, enlarged and smoothed, lined up with the sleeve. No seam
             // gradient over it: the sleeve carries its own dissolve at its bottom edge, and a gradient
             // anchored to the top of the screen only laid a flat slab over the wash above the sleeve.
-            val wash: androidx.compose.ui.graphics.drawscope.DrawScope.(PagePalette?) -> Unit = { p ->
-                if (p != null) {
+            // Built once per page and sleeve place (drawWithCache), then drawn as it is.
+            val page = scheme.background
+            fun Modifier.wash(p: PagePalette?): Modifier = drawWithCache {
+                if (p == null) onDrawBehind { drawRect(page) } else {
                     // Lyrics and queue have no sleeve on screen, and a player opened straight into
                     // one of them has never measured it: use where it would be, so those panels get
                     // the same picture behind them rather than one stretched row from the very top.
@@ -374,31 +412,28 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // whole above the sleeve's soft band; only in that band does it give way to this,
                     // and the band does not move (see rubOutBottom). The copy used to shrink with the
                     // record, and the page's colours moving about was what caught the eye.
-                    drawSleeveWash(p, bottom, resting, size.height)
-                } else drawRect(scheme.background)
+                    sleeveWash(p, bottom, resting)
+                }
             }
             // While the colours change, the old page stays underneath and the new one fades in over it.
             // The page does not travel with the record: it is where the record is going, not a second
             // thing sliding about behind it.
-            Box(Modifier.matchParentSize().drawBehind { wash(fadingFrom ?: palette) })
-            if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.drawBehind { wash(palette) })
+            Box(Modifier.matchParentSize().wash(fadingFrom ?: palette))
+            if (fadingFrom != null) Box(Modifier.matchParentSize().graphicsLayer { alpha = washFade.value }.wash(palette))
             // The arriving record's page, brought up as the record itself crosses. Only while there is
             // something to bring up: with no colours worked out yet this would be the plain page sliding
             // in, which is worse than the page simply waiting.
             val over = held?.takeIf { it != palette }
-            if (over != null) Box(Modifier.matchParentSize().drawBehind { wash(over) })
+            if (over != null) Box(Modifier.matchParentSize().wash(over))
             else if (arriving != null && arriving != palette) Box(
-                Modifier.matchParentSize().graphicsLayer { alpha = shift.amount }.drawBehind { wash(arriving) },
+                Modifier.matchParentSize().graphicsLayer { alpha = shift.amount }.wash(arriving),
             )
-            if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, palette, sleeveHeight > 0f)
+            if (panel == Panel.ART) FlyingCover(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW), sleeveArt, sleeveHeight > 0f)
             // Put away from the lyrics, the cover still travels - from the header's thumbnail to the one
             // in the now playing bar. Without it the lyrics simply went down behind the bar and a cover
             // appeared there out of nothing.
             else if (panel == Panel.LYRICS) FlyingThumb(sheet, vm.cover(state.current?.coverArt, CoverSize.ROW))
-            if (flying) PanelFlight(
-                sleeveArt, thumb, sleeveBottom, sleeveHeight, toThumb = panel == Panel.LYRICS,
-                palette = palette, page = scheme.background,
-            ) { arrival.value }
+            if (flying) PanelFlight(sleeveArt, thumb, sleeveBottom, sleeveHeight, toThumb = panel == Panel.LYRICS) { arrival.value }
             // Artwork, lyrics and queue dissolve into each other rather than cutting. The fade is on the
             // panel itself and not on the whole screen: the transport is the same in all three and is
             // shared across the change, and fading the content it sits in dimmed it half-way. Fading only
@@ -418,11 +453,13 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
             ) { page ->
             // 1 for the panel that is leaving - it has the transition's own fade on top of it - and the
             // arrival for the one coming in, read in the draw phase so a dissolve recomposes nothing.
-            val panelFade: () -> Float = { if (page == panel) arrived() else 1f }
+            val panelFade = FloatReader { if (page == panel) arrived.read() else 1f }
             // The seek bar, the transport, the volume and the icons are in every panel but not at the same
             // height. Shared, only one copy of each is drawn during the dissolve, and it moves from where it
             // was to where it goes; dissolved like the rest, both copies showed and the controls doubled.
             @Composable fun kept(key: String) = Modifier.sharedElement(rememberSharedContentState(key), this@AnimatedContent)
+            // The page's text colour, read while the transport draws.
+            val ink = androidx.compose.ui.graphics.ColorProducer { live.color(CoverLook.ON) }
             Column(Modifier.fillMaxSize().navigationBarsPadding()) {
                 // The artwork bleeds to all three edges like the sleeve it is - up under the status bar
                 // as well, which is the whole point: Apple's has no top edge, and giving it one drew a
@@ -467,19 +504,24 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             // What is drawn, not what the column was told: the wash lines up with the
                             // picture, and the picture runs on under the title.
                             val drawn = it.size.width / SLEEVE
-                            sleeveBottom = it.positionInRoot().y + drawn
+                            val top = player[0]?.takeIf { p -> p.isAttached }?.localPositionOf(it, Offset.Zero)?.y
+                                ?: it.positionInRoot().y
+                            sleeveBottom = top + drawn
                             sleeveHeight = drawn
                         },
                 ) {
                     // While the sheet moves, the cover on screen is FlyingCover's; this one takes over
                     // the moment the sheet arrives, in exactly the same place.
                     Box(Modifier.graphicsLayer { alpha = if (!sheet.panelFlight && (sheet.progress.value >= 1f || sheet.miniCover == Rect.Zero)) 1f else 0f }) {
+                        val previousSong = state.queue.getOrNull(state.previousIndex)
+                        val nextSong = state.queue.getOrNull(state.nextIndex)
                         Artwork(
                             vm, sleeveArt, coverUrl,
-                            state.queue.getOrNull(state.previousIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
-                            state.queue.getOrNull(state.nextIndex)?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            previousSong?.let { vm.cover(it.coverArt, CoverSize.FULL) },
+                            nextSong?.let { vm.cover(it.coverArt, CoverSize.FULL) },
                             previousTintUrl, nextTintUrl,
-                            slide, shift,
+                            Songs(state.current?.id, previousSong?.id, nextSong?.id),
+                            slide, shift, motion,
                         )
                     }
                 } else {
@@ -489,7 +531,7 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // and the queue cannot have (they need their own vertical drag to scroll).
                     Spacer(Modifier.fillMaxWidth().statusBarsPadding().height(22.dp).dragsSheet(sheet))
                     Box(
-                        Modifier.weight(1f).graphicsLayer { alpha = panelFade() }
+                        Modifier.weight(1f).graphicsLayer { alpha = panelFade.read() }
                             .then(if (page == Panel.QUEUE) Modifier.padding(horizontal = 26.dp) else Modifier),
                     ) {
                         if (page == Panel.QUEUE) Queue(vm) else LyricsView(vm, actions, state.playing)
@@ -506,14 +548,14 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                 // The lyrics view carries its own header - a thumbnail with the title, the favourite and
                 // the menu beside it, the way Apple's does - so this block would be the second copy of it.
                 if (page != Panel.LYRICS) Row(
-                    Modifier.fillMaxWidth().graphicsLayer { alpha = panelFade() }
+                    Modifier.fillMaxWidth().graphicsLayer { alpha = panelFade.read() }
                         .padding(start = PLAYER_GUTTER, end = PLAYER_GUTTER, top = 2.dp),
                     Arrangement.spacedBy(10.dp), Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
                         // Title and artist change with the record; a hard swap while the sleeve is still
                         // sliding reads as a pop. Cross-fade the block on the song id.
-                        val meta = playerTitleMeta(state.current, state.radio)
+                        val meta = remember(state.current, state.radio) { playerTitleMeta(state.current, state.radio) }
                         androidx.compose.animation.AnimatedContent(
                             targetState = meta,
                             transitionSpec = {
@@ -529,8 +571,8 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             label = "player title",
                         ) { m ->
                             Column {
-                                Text(
-                                    m.title,
+                                LookText(
+                                    m.title, { live.color(CoverLook.ON) },
                                     Modifier.readable(), style = MaterialTheme.typography.titleLarge,
                                     maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                                 )
@@ -540,21 +582,21 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                                 //
                                 // Apple holds these lines back from the title rather than colouring them: a
                                 // saturated accent here is the one thing that made the screen read as Material.
-                                Text(
-                                    m.artist,
+                                LookText(
+                                    m.artist, { live.color(CoverLook.ON_60) },
                                     Modifier.clickable(enabled = m.artistId != null) {
                                         m.artistId?.let(nav::artist)
                                     },
-                                    style = MaterialTheme.typography.titleMedium, color = scheme.onSurface.copy(alpha = 0.6f),
+                                    style = MaterialTheme.typography.titleMedium,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                                 )
                                 m.album.takeIf { it.isNotEmpty() }?.let { album ->
-                                    Text(
-                                        album,
+                                    LookText(
+                                        album, { live.color(CoverLook.ON_45) },
                                         Modifier.clickable(enabled = m.albumId != null) {
                                             m.albumId?.let(nav::album)
                                         },
-                                        style = MaterialTheme.typography.bodyMedium, color = scheme.onSurface.copy(alpha = 0.45f),
+                                        style = MaterialTheme.typography.bodyMedium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     )
                                 }
@@ -569,17 +611,16 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                             // "favourited" is a distinction the server makes and nobody else does.
                             TitleCircle(
                                 if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                                "Favourite", starred,
+                                say.favourite, starred,
                             ) { actions.star(s, !starred) }
-                            TitleCircle(Icons.Filled.MoreHoriz, "More", false) { playerMenu(s) }
+                            TitleCircle(Icons.Filled.MoreHoriz, say.more, false) { playerMenu(s) }
                         }
                     }
                 }
                 state.error?.let { Text(it, Modifier.padding(horizontal = PLAYER_GUTTER), color = scheme.error, style = MaterialTheme.typography.bodySmall) }
-                if (state.bridging) Text(
-                    "Playing downloads until you’re online",
+                if (state.bridging) LookText(
+                    remember { say.bridging }, { live.color(CoverLook.ON_55) },
                     Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 2.dp),
-                    color = scheme.onSurface.copy(alpha = 0.55f),
                     style = MaterialTheme.typography.bodySmall,
                 )
 
@@ -598,33 +639,35 @@ fun PlayerScreen(vm: PlayerViewModel, actions: ActionsViewModel) {
                     // within the first three seconds), so the sleeve and the sound agree.
                     IconButton(
                         {
-                            val rewinds = !prefs.previousAlwaysSkips && vm.positionMs > 3_000
+                            // The player's own rule (`queue_previous_restarts`), so the sleeve and the sound agree.
+                            val rewinds = dev.nori.music.ffi.queue.queuePreviousRestarts(vm.positionMs, state.previousIndex >= 0)
                             if (rewinds || !slide.ask(1)) vm.previous()
                         },
                         Modifier.size(72.dp),
-                    ) { Icon(Icons.Filled.FastRewind, "Previous", Modifier.size(55.dp)) }
+                    ) { LookIcon(Icons.Filled.FastRewind, say.previous, Modifier.size(55.dp), ink) }
                     IconButton(vm::toggle, Modifier.size(84.dp)) {
-                        PlayPauseGlyph(state.playing, state.buffering, 70.dp, 28.dp)
+                        PlayPauseGlyph(state.playing, state.buffering, 70.dp, 28.dp, ink)
                     }
-                    IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(55.dp)) }
+                    IconButton({ if (!slide.ask(-1)) vm.next() }, Modifier.size(72.dp)) { LookIcon(Icons.Filled.FastForward, say.next, Modifier.size(55.dp), ink) }
                 }
 
                 if (page == Panel.ART) Spacer(Modifier.weight(0.17f))
                 Box(kept("volume")) { VolumeRow(vm) }
 
                 Row(kept("icons").fillMaxWidth().padding(top = 2.dp, bottom = 4.dp), Arrangement.SpaceEvenly, Alignment.CenterVertically) {
-                    PanelButton(Icons.Filled.Lyrics, "Lyrics", page == Panel.LYRICS, nudge = (-1.5).dp) { choose(Panel.LYRICS) }
+                    PanelButton(Icons.Filled.Lyrics, say.lyrics, page == Panel.LYRICS, nudge = (-1.5).dp) { choose(Panel.LYRICS) }
                     // Apple's middle glyph is AirPlay, not a sleep timer: on this screen the thing worth
                     // one tap is where the sound is going. The sleep timer moved to the ⋯ on the title row,
                     // which is where a setting for the evening belongs.
                     OutputButton()
-                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, "Queue", page == Panel.QUEUE, size = 30.dp, nudge = 0.5.dp) { choose(Panel.QUEUE) }
+                    PanelButton(Icons.AutoMirrored.Filled.QueueMusic, say.queue, page == Panel.QUEUE, size = 30.dp, nudge = 0.5.dp) { choose(Panel.QUEUE) }
                 }
                 if (page == Panel.ART) Spacer(Modifier.weight(0.19f))
             }
             }
             }
         }
+      }
     }
 }
 
@@ -633,18 +676,10 @@ private data class PlayerTitleMeta(
     val artistId: String?, val albumId: String?,
 )
 
-private fun playerTitleMeta(song: dev.nori.music.ffi.Song?, radio: String?) = song?.let {
+private fun playerTitleMeta(song: dev.nori.music.ffi.model.Song?, radio: String?) = song?.let {
     PlayerTitleMeta(it.id, it.title, it.artist, it.album.orEmpty(), it.artistId, it.albumId)
-} ?: PlayerTitleMeta(null, radio ?: "Nothing playing", "", "", null, null)
+} ?: PlayerTitleMeta(null, say.playerIdle(radio), "", "", null, null)
 
-/**
- * Width over height of the player's sleeve. Album art is square - Apple's too - so theirs is the
- * square scaled up and cropped at the left and right edges to fill a taller box. Crop the region of
- * `w4` that spans where a full-width square would have ended and the flowers below that line are as
- * sharp as the ones above it, with a strip of red tape running across it unbroken: it is the picture,
- * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
- * and still reach down behind the title, which no square can do.
- */
 /**
  * Where the sound is going, and one tap to change it. The glyph says which kind of output is carrying
  * the music, the way Apple's AirPlay mark fills in when something is connected.
@@ -660,16 +695,17 @@ private fun OutputButton() {
     val settings: SettingsViewModel = viewModel()
     val output by settings.currentOutput.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val scheme = MaterialTheme.colorScheme
-    val elsewhere = output != dev.nori.music.playback.Outputs.SPEAKER
-    val icon = when {
-        output.startsWith("USB") -> Icons.Filled.Headphones
-        output.startsWith("Bluetooth") -> Icons.Filled.Bluetooth
-        output.startsWith("Wired") -> Icons.Filled.Headphones
-        else -> Icons.Filled.Cast
+    val look = LocalLook.current
+    // Which glyph, and whether the sound has gone elsewhere, are the core's (`output_look`).
+    val o = remember(output) { dev.nori.music.ffi.devices.outputLook(output) }
+    val icon = when (o.glyph) {
+        dev.nori.music.ffi.devices.OutputGlyph.HEADPHONES -> Icons.Filled.Headphones
+        dev.nori.music.ffi.devices.OutputGlyph.BLUETOOTH -> Icons.Filled.Bluetooth
+        dev.nori.music.ffi.devices.OutputGlyph.CAST -> Icons.Filled.Cast
     }
+    val description = remember(o) { say.outputDescription(o.port, o.name) }
     IconButton({ openOutputPicker(context, output) }) {
-        Icon(icon, "Output: $output", Modifier.size(27.dp), tint = if (elsewhere) scheme.primary else scheme.onSurfaceVariant)
+        LookIcon(icon, description, Modifier.size(27.dp)) { look.color(if (o.elsewhere) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
     }
 }
 
@@ -702,7 +738,7 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
             )
         }.isSuccess
     ) return
-    android.widget.Toast.makeText(context, "Playing through $output", android.widget.Toast.LENGTH_SHORT).show()
+    android.widget.Toast.makeText(context, dev.nori.music.ffi.devices.outputLook(output).let { say.playingThrough(say.outputLabel(it.port, it.name)) }, android.widget.Toast.LENGTH_SHORT).show()
 }
 
 /**
@@ -712,9 +748,23 @@ private fun openOutputPicker(context: android.content.Context, output: String) {
  */
 private val PLAYER_GUTTER = 33.dp
 
-/** How long the artwork, the lyrics and the queue take to dissolve into one another. */
-private const val PANEL_MS = 360
+/** How long the artwork, the lyrics and the queue take to dissolve into one another (the core's). */
+private val PANEL_MS: Int get() = stage.panelMs
 
+// Which clock the player's [LiveLook] is on: none (one look), the post-skip fade, or the sleeve's slide.
+private const val MIX_NONE = 0
+private const val MIX_FADE = 1
+private const val MIX_SLIDE = 2
+
+/**
+ * Width over height of the player's sleeve. Album art is square - Apple's too - so theirs is the
+ * square scaled up and cropped at the left and right edges to fill a taller box. Crop the region of
+ * `w4` that spans where a full-width square would have ended and the flowers below that line are as
+ * sharp as the ones above it, with a strip of red tape running across it unbroken: it is the picture,
+ * not the blur behind it. That is the whole trick, and it is why their sleeve can touch the top edge
+ * and still reach down behind the title, which no square can do. A phone's box: a desktop window
+ * lays its player out otherwise, so the ratio is the phone's layout and not the core's.
+ */
 private const val SLEEVE = 0.74f
 
 /**
@@ -723,21 +773,6 @@ private const val SLEEVE = 0.74f
  * blurred tail behind it.
  */
 private const val SLEEVE_UNDER_TEXT = 0.095f
-
-/** Drag it down, or tap it, to put the player away. */
-@Composable
-private fun Handle(modifier: Modifier, colour: Color, sheet: PlayerSheet) {
-    val onBack = sheet::close
-    Box(
-        modifier.fillMaxWidth().dragsSheet(sheet).padding(vertical = 10.dp),
-        Alignment.Center,
-    ) {
-        // Clickable inside the drag detector, not outside it, or the tap never arrives.
-        Box(Modifier.clickable(onClick = onBack).padding(8.dp)) {
-            Box(Modifier.width(38.dp).height(5.dp).background(colour, CircleShape))
-        }
-    }
-}
 
 /**
  * The artwork full-bleed: edge to edge, square corners, no shadow - the sleeve it is. Its bottom
@@ -750,7 +785,10 @@ private fun Artwork(
     previousUrl: String?, nextUrl: String?,
     /** The same two records at the size the colours are worked out from; see PageShift. */
     previousTint: String?, nextTint: String?,
+    songs: Songs,
     slide: SleeveSlide, shift: PageShift,
+    /** The moving cover, or null while it is switched off. */
+    motion: SleeveMotion?,
 ) {
     Box(Modifier.fillMaxWidth(), Alignment.TopCenter) {
         Box(
@@ -761,14 +799,14 @@ private fun Artwork(
             Modifier.fillMaxWidth().aspectRatio(SLEEVE),
         ) {
             SleeveCarousel(
-                art, currentUrl, previousUrl, nextUrl, previousTint, nextTint,
-                onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift,
+                art, currentUrl, previousUrl, nextUrl, previousTint, nextTint, songs,
+                onPrevious = vm::previousItem, onNext = vm::next, slide = slide, shift = shift, motion = motion,
             )
             // Just enough shade under the status bar for its icons to read on a pale cover; the same
             // amount the album page uses, and invisible against anything darker.
             Box(
-                Modifier.fillMaxWidth().fillMaxHeight(0.16f)
-                    .background(Brush.verticalGradient(0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent)),
+                Modifier.fillMaxWidth().fillMaxHeight(stage.statusShadeTo)
+                    .background(remember { Brush.verticalGradient(0f to Color.Black.copy(alpha = stage.statusShade), 1f to Color.Transparent) }),
             )
             // Nothing is drawn here to soften the sleeve's bottom. There is one blurred copy of the
             // cover on this screen - the page's - and it sits still behind everything at the sleeve's
@@ -790,33 +828,20 @@ private fun Artwork(
  * travel and change size with the record - a blur moving about the screen - and, with two records
  * side by side, a seam between two blurs.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.rubOutBottom(top: Float = size.height * (1f - MELT), bottom: Float = size.height, strength: Float = 1f) {
-    if (strength <= 0.002f || bottom <= top) return
-    fun stop(a: Float) = Color.Black.copy(alpha = a * strength)
-    drawRect(
-        Brush.verticalGradient(
-            // The melt's own easing, in stops: quick at first, then settling, and gone well before the
-            // record's bottom edge.
-            //
-            // Rubbing out fades the record; it does not blur it. A sharp line in the picture inside
-            // the band stays a sharp line, only fainter - and the old tail, 87 % at the middle and 98 %
-            // at three quarters, left the bottom half of the band drawn at a tenth or so. That is the
-            // hard edge a framed sleeve shows: Amnesiac's red book ends on a thin black strip at 60 %
-            // of the band, and a tenth of red-against-black is still a line. The top of the melt, the
-            // part that reads as the fade, is as it was; the tail now finishes by 70 %, so what lies
-            // below is the page's blur alone.
-            0f to Color.Transparent,
-            0.12f to stop(0.31f),
-            0.25f to stop(0.60f),
-            0.40f to stop(0.86f),
-            0.55f to stop(0.97f),
-            0.70f to stop(1f),
-            1f to stop(1f),
-            startY = top, endY = bottom,
-        ),
-        topLeft = Offset(0f, top), size = Size(size.width, bottom - top),
-        blendMode = androidx.compose.ui.graphics.BlendMode.DstOut,
-    )
+private fun rubOutBrush(top: Float, bottom: Float): Brush =
+    // The melt's own easing, in stops, and why its tail finishes by 70 %: nori_look::sleeve::RUB_OUT.
+    alphaGradient(stage.rubOut, Color.Black, top, bottom)
+
+/** Rubs the band from [top] to [bottom] out of what [content] drew; the brush is made once per place. */
+private fun Modifier.rubOutBottom(band: androidx.compose.ui.draw.CacheDrawScope.() -> Pair<Float, Float>): Modifier = drawWithCache {
+    val (top, bottom) = band()
+    val brush = if (bottom > top) rubOutBrush(top, bottom) else null
+    val at = Offset(0f, top)
+    val area = Size(size.width, bottom - top)
+    onDrawWithContent {
+        drawContent()
+        if (brush != null) drawRect(brush, topLeft = at, size = area, blendMode = androidx.compose.ui.graphics.BlendMode.DstOut)
+    }
 }
 
 /**
@@ -833,6 +858,7 @@ private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
     val side = with(density) { to.height.toDp() }
     val fromRadius = with(density) { 7.dp.toPx() }
     val toRadius = with(density) { 9.dp.toPx() }
+    val shapes = remember { CornerShapes() }
     Box(Modifier.fillMaxSize()) {
         Box(
             Modifier.requiredSize(side).align(Alignment.TopStart)
@@ -845,7 +871,7 @@ private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
                     scaleX = k; scaleY = k
                     translationX = mix(from.left, to.left)
                     translationY = mix(from.top, to.top)
-                    shape = RoundedCornerShape(mix(fromRadius, toRadius) / k)
+                    shape = shapes.of(mix(fromRadius, toRadius) / k)
                     clip = true
                 },
         ) { Cover(url, side, radius = 0.dp) }
@@ -864,62 +890,146 @@ private fun FlyingThumb(sheet: PlayerSheet, url: String?) {
 @Composable
 private fun PanelFlight(
     art: SleeveArt, thumb: Rect, sleeveBottom: Float, sleeveHeight: Float, toThumb: Boolean,
-    /** The page's colours, so the record arrives with the same soft bottom the sleeve has. */
-    palette: PagePalette?, page: Color,
-    progress: () -> Float,
+    progress: FloatReader,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val side = with(density) { sleeveHeight.toDp() }
     val thumbRadius = with(density) { 9.dp.toPx() }
     val sleeveRadius = with(density) { 2.dp.toPx() }
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        // The sleeve's soft bottom stays where the sleeve's is (see rubOutBottom): the record flying
-        // through those rows goes soft there and is whole everywhere else.
-        Modifier.fillMaxSize()
-            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-            .drawWithContent { drawContent(); rubOutBottom(sleeveBottom - sleeveHeight * MELT, sleeveBottom) },
-    ) {
+    val shapes = remember { CornerShapes() }
+    // 0 at the sleeve, 1 at the thumbnail, whichever way the change is going.
+    val away = FloatReader { progress.read().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it } }
+    // How much of the sleeve's own dressing the cover still has: all of it in the sleeve, none by the
+    // time it is under half way to the thumbnail.
+    val dressed = FloatReader { smooth(1f - away.read(), 0.55f, 1f) }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
-        Box(
-            Modifier.requiredSize(side).align(Alignment.TopStart)
-                .graphicsLayer {
-                    // 0 at the sleeve, 1 at the thumbnail, whichever way the change is going.
-                    val t = progress().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
-                    val eased = t * t * (3f - 2f * t)
-                    fun mix(a: Float, b: Float) = a + (b - a) * eased
-                    val k = (mix(sleeveHeight, thumb.height) / sleeveHeight).coerceAtLeast(0.01f)
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
-                    scaleX = k; scaleY = k
-                    // The sleeve is the square cropped by the screen's edges, so it starts wider than the
-                    // screen and centred on it; layout has already put it there, which `overhang` takes
-                    // back out before the travel is applied.
-                    val overhang = (w - size.width) / 2f
-                    translationX = mix((w - sleeveHeight) / 2f, thumb.left) - overhang
-                    translationY = mix(sleeveBottom - sleeveHeight, thumb.top)
-                    shape = RoundedCornerShape(mix(sleeveRadius, thumbRadius) / k)
-                    clip = true
-                },
+        // The sleeve's soft bottom stays where the sleeve's is (see SoftSleeve): the record flying through
+        // those rows goes soft there and is whole everywhere else, and its blur leaves with the record and
+        // comes back as it lands. The cover never goes below the sleeve's bottom on the way (the thumbnail
+        // is in the header above it), so the layer stops there rather than at the screen's foot.
+        SoftSleeve(
+            Modifier.fillMaxWidth().height(with(density) { sleeveBottom.toDp() }),
+            sleeve = { sleeveBottom to sleeveHeight }, blur = dressed,
         ) {
-            SleeveImage(art, Modifier.fillMaxSize())
-            // The shade the status bar's icons need on a pale cover belongs to the sleeve, so it arrives
-            // with it rather than being there from the thumbnail on.
             Box(
-                Modifier.fillMaxSize().graphicsLayer {
-                    val t = progress().coerceIn(0f, 1f).let { if (toThumb) it else 1f - it }
-                    val near = (1f - t / 0.45f).coerceIn(0f, 1f)
-                    alpha = near * near * (3f - 2f * near)
-                }.drawBehind {
-                    drawRect(
-                        Brush.verticalGradient(
-                            0f to Color.Black.copy(alpha = 0.30f), 1f to Color.Transparent,
-                            startY = 0f, endY = size.height * 0.16f,
-                        ),
-                        size = androidx.compose.ui.geometry.Size(size.width, size.height * 0.16f),
-                    )
-                },
-            )
+                Modifier.requiredSize(side).align(Alignment.TopStart)
+                    .graphicsLayer {
+                        val t = away.read()
+                        val eased = t * t * (3f - 2f * t)
+                        fun mix(a: Float, b: Float) = a + (b - a) * eased
+                        val k = (mix(sleeveHeight, thumb.height) / sleeveHeight).coerceAtLeast(0.01f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                        scaleX = k; scaleY = k
+                        // The sleeve is the square cropped by the screen's edges, so it starts wider than
+                        // the screen and centred on it; layout has already put it there, which `overhang`
+                        // takes back out before the travel is applied.
+                        val overhang = (w - size.width) / 2f
+                        translationX = mix((w - sleeveHeight) / 2f, thumb.left) - overhang
+                        translationY = mix(sleeveBottom - sleeveHeight, thumb.top)
+                        shape = shapes.of(mix(sleeveRadius, thumbRadius) / k)
+                        clip = true
+                    },
+            ) {
+                SleeveImage(art, Modifier.fillMaxSize())
+                SleeveShade(dressed)
+            }
         }
     }
+}
+
+/**
+ * The sleeve's soft bottom round whatever [content] draws in it - the records at rest or in the hand, the
+ * cover flying up from the now playing bar, the cover shrinking into the lyrics. There is one of these
+ * wherever the sleeve is drawn, so its bottom is the same thing in all of them and nothing about it
+ * changes on the frame one hands over to the next.
+ *
+ * Two parts, both in [content]'s own layer, or the erase would take the page behind it too. Rubbing out
+ * only fades: a sharp line in the picture inside the band - a frame, a black strip - stays a sharp line,
+ * fainter. So a blurred copy of the content is faded in over it just above the band, and the band is
+ * rubbed out of both (see rubOutBottom): sharp, then soft, then the page's own blur, with no step
+ * between. The blurred copy is Android 12 and later; a switch in Appearance turns it off. [content] is
+ * composed a second time as that copy and told so, for anything that can only be drawn once.
+ *
+ * [sleeve] is the sleeve's bottom and height in this box's own pixels. [blur] is how much of the blurred
+ * copy is drawn, read in the draw phase: 1 for a sleeve at rest, less as the picture leaves it. Only the
+ * resting sleeve had the blur at first, so it vanished on the first frame of every move away from it and
+ * came back on the last frame of every move into it - when a record was put down, when the player
+ * opened, when the lyrics closed. Now it leaves and comes back with the move itself.
+ */
+@Composable
+private fun SoftSleeve(
+    modifier: Modifier,
+    sleeve: androidx.compose.ui.draw.CacheDrawScope.() -> Pair<Float, Float> = { size.height to size.height },
+    blur: FloatReader = FloatReader { 1f },
+    content: @Composable androidx.compose.foundation.layout.BoxScope.(blurred: Boolean) -> Unit,
+) {
+    val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
+        androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
+    val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
+    // A white, cream or black page has a wash in its own tint only (nori_look's wash), and the blurred band
+    // has to arrive at the same thing: blurred as it is, A Beautiful Lie's red lettering spread across its
+    // white bottom as a pink haze over a grey page. So on such a page the band keeps its light and dark
+    // but takes the page's tint - grey on white, cream on cream, whatever the page is, nothing fixed. A
+    // coloured page keeps the band's colours, as its wash does. Which it is, and the tint, are the look's
+    // (nori_look::dress); read in the draw phase.
+    val band = if (android.os.Build.VERSION.SDK_INT >= 31) remember(blurPx) { BandEffect(blurPx) } else null
+    val look = LocalLook.current
+    Box(
+        modifier
+            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+            .rubOutBottom { val (bottom, height) = sleeve(); (bottom - height * MELT) to bottom },
+    ) {
+        content(false)
+        if (soft && band != null) Box(
+            Modifier.fillMaxSize()
+                // At nought the layer is skipped whole, blur and all.
+                .graphicsLayer {
+                    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen
+                    alpha = blur.read().coerceIn(0f, 1f)
+                }
+                .drawWithCache {
+                    // Where the blurred copy shows: nowhere above the band's upper reach, all of it by the
+                    // time the rub-out is under way. Eased, so its own start is no line. One brush per
+                    // size and place, not one per frame.
+                    val (bottom, height) = sleeve()
+                    val top = bottom - height
+                    val mask = alphaGradient(stage.soft, Color.Black, top + height * stage.softFrom, top + height * stage.softTo)
+                    onDrawWithContent {
+                        drawContent()
+                        drawRect(mask, blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
+                    }
+                },
+        ) {
+            Box(Modifier.fillMaxSize().graphicsLayer { renderEffect = band.of(look) }) { content(true) }
+        }
+    }
+}
+
+/**
+ * The shade under the status bar, on a picture travelling into or out of the sleeve: just enough for the
+ * status bar's icons to read on a pale cover, as the sleeve has. It belongs to the sleeve, so it arrives
+ * with the picture - at [strength] - rather than being there from the thumbnail on, or missing until the
+ * sleeve takes over and then there in one frame.
+ */
+@Composable
+private fun SleeveShade(strength: FloatReader) {
+    Box(
+        Modifier.fillMaxSize().graphicsLayer { alpha = strength.read() }.drawWithCache {
+            val shade = Brush.verticalGradient(
+                0f to Color.Black.copy(alpha = stage.statusShade), 1f to Color.Transparent,
+                startY = 0f, endY = size.height * stage.statusShadeTo,
+            )
+            val area = androidx.compose.ui.geometry.Size(size.width, size.height * stage.statusShadeTo)
+            onDrawBehind { drawRect(shade, size = area) }
+        },
+    )
+}
+
+/** 0 up to [from], 1 from [to] on, and a smooth step in between. */
+private fun smooth(x: Float, from: Float, to: Float): Float {
+    val t = ((x - from) / (to - from)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
 }
 
 /**
@@ -943,70 +1053,82 @@ private fun PanelFlight(
  * flight shows the picture even before the large one has come out of the cache.
  */
 @Composable
-private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, palette: PagePalette?, measured: Boolean) {
+private fun FlyingCover(sheet: PlayerSheet, rowUrl: String?, art: SleeveArt, measured: Boolean) {
     val flying by remember { androidx.compose.runtime.derivedStateOf { sheet.progress.value < 1f } }
     if (!flying || !measured || sheet.miniCover == Rect.Zero) return
     val density = androidx.compose.ui.platform.LocalDensity.current
     val thumbRadius = with(density) { 7.dp.toPx() }
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        // The sleeve's soft bottom is there before the record arrives and stays when it has gone: the
-        // same rows of the sheet, rubbed out of whatever flies through them (see rubOutBottom).
-        Modifier.fillMaxSize()
-            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-            .drawWithContent { drawContent(); val h = size.width / SLEEVE; rubOutBottom(h * (1f - MELT), h) },
-    ) {
+    val shapes = remember { CornerShapes() }
+    // How much of the sleeve's own dressing - the blurred bottom, the shade under the status bar - the
+    // cover has on its way: none for the first half of the climb, all of it on arrival, where the sleeve
+    // takes over with its own. Without it both were missing for the whole flight and appeared on the frame
+    // the sleeve took over, and went on the first frame of a pull down.
+    val dressed = FloatReader { smooth(sheet.progress.value, 0.5f, 1f) }
+    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
         val w = constraints.maxWidth.toFloat()
         val h = w / SLEEVE
         val side = with(density) { h.toDp() }
-        Box(
-            Modifier.requiredSize(side).align(Alignment.TopStart)
-                .graphicsLayer {
-                    val t = sheet.progress.value.coerceIn(0f, 1f)
-                    val from = sheet.miniCover.translate(0f, -sheet.travel)
-                    fun mix(a: Float, b: Float) = a + (b - a) * t
-                    val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
-                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
-                    scaleX = k; scaleY = k
-                    // The square grows about its own middle and travels from the middle of the
-                    // thumbnail to the middle of the screen, which is where the sleeve's middle is.
-                    // Carrying its left edge instead - what this did - left it hanging in the top left
-                    // corner of the sheet for the whole climb, with the page showing down the right
-                    // hand side, and it arrived a little way off the sleeve it was handing over to.
-                    val drawn = size.width * k
-                    // Sideways it is most of the way over before it is half way up. The thumbnail sits
-                    // at the very left of the bar and the sheet under it is already the full width, so
-                    // a square that crosses at the same rate as it climbs spends the whole climb in the
-                    // corner with the page showing beside it. Easing only this axis keeps both ends
-                    // exact - the thumbnail at the start, the sleeve at the end - and has the record
-                    // under the middle of the screen by the time the sheet is half way, after which it
-                    // only grows.
-                    val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
-                    // The square is wider than the screen, and layout centres anything wider than the
-                    // room it was given: it is already sitting `overhang` to the left (a negative
-                    // number) before any of this moves it. Leaving that out put the record that far off
-                    // centre for the whole flight - its left side already cropped by the screen while
-                    // its right had a gap - and it jumped right by the same amount when the sleeve
-                    // took over at the end.
-                    val overhang = (w - size.width) / 2f
-                    translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f - overhang
-                    translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
-                    shape = RoundedCornerShape(thumbRadius * (1f - t) / k)
-                    clip = true
-                },
-        ) {
-            if (art.current == null) coil3.compose.AsyncImage(rowUrl, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-            SleeveImage(art, Modifier.fillMaxSize())
+        // The sleeve's soft bottom is there before the record arrives and stays when it has gone: the same
+        // rows of the sheet, rubbed out of whatever flies through them (see SoftSleeve). The cover never
+        // leaves the sleeve's rows on the way - it grows from the thumbnail near the sheet's top edge into
+        // the sleeve that starts there - so the layer is the sleeve's size, not the screen's.
+        SoftSleeve(Modifier.fillMaxWidth().height(side), blur = dressed) {
+            Box(
+                Modifier.requiredSize(side).align(Alignment.TopStart)
+                    .graphicsLayer {
+                        val t = sheet.progress.value.coerceIn(0f, 1f)
+                        val from = sheet.miniCover.translate(0f, -sheet.travel)
+                        fun mix(a: Float, b: Float) = a + (b - a) * t
+                        val k = (mix(from.height, h) / h).coerceAtLeast(0.01f)
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+                        scaleX = k; scaleY = k
+                        // The square grows about its own middle and travels from the middle of the
+                        // thumbnail to the middle of the screen, which is where the sleeve's middle is.
+                        // Carrying its left edge instead - what this did - left it hanging in the top left
+                        // corner of the sheet for the whole climb, with the page showing down the right
+                        // hand side, and it arrived a little way off the sleeve it was handing over to.
+                        val drawn = size.width * k
+                        // Sideways it is most of the way over before it is half way up. The thumbnail sits
+                        // at the very left of the bar and the sheet under it is already the full width, so
+                        // a square that crosses at the same rate as it climbs spends the whole climb in the
+                        // corner with the page showing beside it. Easing only this axis keeps both ends
+                        // exact - the thumbnail at the start, the sleeve at the end - and has the record
+                        // under the middle of the screen by the time the sheet is half way, after which it
+                        // only grows.
+                        val across = (t / 0.45f).coerceAtMost(1f).let { 1f - (1f - it) * (1f - it) }
+                        // The square is wider than the screen, and layout centres anything wider than the
+                        // room it was given: it is already sitting `overhang` to the left (a negative
+                        // number) before any of this moves it. Leaving that out put the record that far off
+                        // centre for the whole flight - its left side already cropped by the screen while
+                        // its right had a gap - and it jumped right by the same amount when the sleeve
+                        // took over at the end.
+                        val overhang = (w - size.width) / 2f
+                        translationX = from.center.x + (w / 2f - from.center.x) * across - drawn / 2f - overhang
+                        translationY = mix(from.center.y, size.height / 2f) - size.height * k / 2f
+                        shape = shapes.of(thumbRadius * (1f - t) / k)
+                        clip = true
+                    },
+            ) {
+                // The sleeve's placeholder, then the bar's small picture of this song over it while the
+                // large one is not there, then the sleeve's own picture.
+                Box(Modifier.fillMaxSize().drawBehind { drawRect(art.plate) })
+                if (art.current == null) Cover(rowUrl, 0.dp, Modifier.fillMaxSize(), radius = 0.dp, plate = false)
+                SleeveImage(art, Modifier.fillMaxSize(), plate = false)
+                SleeveShade(dressed)
+            }
         }
     }
 }
 
 /**
- * The sleeve's picture across songs. On a skip the old cover stays while the new one loads, and the
- * new one fades in over it; the sleeve used to go blank for as long as the server took to render the
- * next cover. But only briefly: a cover that has not come after [HOLD_MS] means the old picture is
- * now standing under the wrong title, so it fades out to the plate, whose sheen says the new one is on
- * its way, and the new one fades in from there. The very first picture fades in from the plate too,
- * unless it came straight from memory, where a fade would only be a delay.
+ * The sleeve's picture across songs. A picture at hand changes with the song, cross-fading over the
+ * last one. One that still has to be read or fetched gets a moment ([HOLD_MS], so a cover on the disk
+ * comes without the placeholder blinking in first); after that the last song's picture fades out to the
+ * placeholder - a plate in the theme's own surface colour, no song's colour, with the loading sheen over
+ * it - and the new one fades in from there when it comes. Never the last song's cover under the new
+ * song's title for longer than that moment, and never a picture that came back for a song skipped past
+ * (see [CoverTurn]). The very first picture fades in from the plate too, unless it came straight from
+ * memory, where a fade would only be a delay.
  *
  * One of these feeds both the sleeve and the cover in flight: two requests for the same picture in the
  * same frame each decoded their own bitmap, and the second was uploaded to the GPU on the frame the
@@ -1025,18 +1147,67 @@ private class SleeveArt {
     var shownUrl by mutableStateOf<String?>(null)
     /** The next picture goes straight in: a swipe has already slid it into place. */
     var snapNext = false
+    /**
+     * The cover of the song on the page, as the sleeve was last composed with it: what a record that
+     * slides in by itself shows while the sleeve underneath is still changing (see SleeveCarousel).
+     */
+    var cover: CoverImage? = null
+    /**
+     * The theme's own look, no song's colours in it: the placeholder under the picture is its surface and
+     * the sheen over the placeholder its ink, whatever song is playing. Read while drawing.
+     */
+    var neutral by mutableStateOf<Look>(FixedLook(IntArray(CoverLook.LEN)))
+    /** The placeholder's colour. */
+    val plate: Color get() = neutral.color(CoverLook.SURFACE_VARIANT)
+    /** Which song's picture is wanted, and when the placeholder is due. */
+    val turn = CoverTurn(HOLD_MS)
+    /**
+     * A record slid in for this address with no picture on it, or with its picture only part way in: the
+     * sleeve is at the plate for it already, and the old picture is not to come back while the player
+     * catches up with the change.
+     */
+    var clearedFor by mutableStateOf<String?>(null)
+    /** Where the next picture's fade starts: how far in the record that slid in had it; below 0 for no such record. */
+    var fadeFrom = -1f
+
+    /**
+     * A record has slid in over the sleeve for [url] without its whole picture ([level] of it, 0 for none):
+     * the sleeve under it becomes the plate at once, since the picture that was on it has slid away, and the
+     * new one carries on from [level] when the sleeve has it.
+     */
+    fun clearFor(url: String?, level: Float) {
+        current = null
+        previous = null
+        shownUrl = null
+        loading = level <= 0f
+        fadeFrom = level.coerceIn(0f, 1f)
+        clearedFor = url
+    }
 
     /** Lets the current picture go, fading it out to the plate. */
     suspend fun letGo() {
         val leaving = current ?: return
         previous = leaving; current = null
         if (AppMotion.reduce) previousAlpha.snapTo(0f)
-        else { previousAlpha.snapTo(1f); previousAlpha.animateTo(0f, androidx.compose.animation.core.tween(360)) }
+        else { previousAlpha.snapTo(1f); previousAlpha.animateTo(0f, androidx.compose.animation.core.tween(PLATE_OUT_MS)) }
         previous = null
     }
 }
 
-private const val HOLD_MS = 600L
+/** How long a song whose cover is not at hand keeps the last picture before the placeholder: nori-core's `stage`. */
+private val HOLD_MS: Long get() = stage.sleeveHoldMs
+
+/** The last picture fading out to the placeholder. */
+private const val PLATE_OUT_MS = 360
+
+/** A picture fading in over the placeholder. */
+private const val PICTURE_IN_MS = 320
+
+/** A picture fading in over the last song's. */
+private const val PICTURE_OVER_MS = 480
+
+/** How long the sleeve waits on a record slid in without a picture for the player to take the change. */
+private const val CLEARED_WAIT_MS = 1_500L
 
 /**
  * The sleeve as one record in a row of them: a sideways drag slides it and brings the next (or the
@@ -1051,17 +1222,21 @@ private const val HOLD_MS = 600L
 @Composable
 private fun SleeveCarousel(
     art: SleeveArt, currentUrl: String?, previousUrl: String?, nextUrl: String?,
-    previousTint: String?, nextTint: String?,
+    previousTint: String?, nextTint: String?, songs: Songs,
     onPrevious: () -> Unit, onNext: () -> Unit, slide: SleeveSlide, shift: PageShift,
+    motion: SleeveMotion?,
 ) {
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     // Where the record is, in pixels, written straight from the finger. It was an Animatable, snapped
     // to from a coroutine per pointer event; on a flick several of those were still queued when the
     // finger left, and they landed on top of the animation that had already started and dragged the
     // record back - the change that jerked instead of running through once.
-    var offset by remember { mutableFloatStateOf(0f) }
+    //
+    // Every write also moves the page's colours with it (see `sync` below), there and then: the page used
+    // to follow through a flow that made a list and boxed the offset on every frame of a drag.
+    val offsetBox = remember { OffsetBox() }
+    var offset by offsetBox
     // The one animation allowed to be running: a settle, or a record landing. A new gesture or a
     // button press takes it over.
     var moving by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -1084,12 +1259,10 @@ private fun SleeveCarousel(
     val density = androidx.compose.ui.platform.LocalDensity.current
     val gap = with(density) { 18.dp.toPx() }
     val radius = with(density) { 22.dp.toPx() }
-    @Composable fun neighbour(url: String?) = coil3.compose.rememberAsyncImagePainter(
-        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
-        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
-    )
-    val before = neighbour(previousUrl)
-    val after = neighbour(nextUrl)
+    val before = rememberCover(previousUrl, CoverSize.FULL)
+    val after = rememberCover(nextUrl, CoverSize.FULL)
+    val beforeFade = rememberPictureFade(before)
+    val afterFade = rememberPictureFade(after)
     // A pointerInput block keyed on Unit is created once and never replaced, so anything it closes over
     // is whatever it was on the first composition - back then there was no queue, so the addresses were
     // null. That is what left a record landing under a name the sleeve could never match: the picture
@@ -1098,12 +1271,13 @@ private fun SleeveCarousel(
     // these instead, which are read at the moment they are used.
     val hasBefore by androidx.compose.runtime.rememberUpdatedState(previousUrl != null)
     val hasAfter by androidx.compose.runtime.rememberUpdatedState(nextUrl != null)
-    // The painters too: a coil painter is rebuilt when its request changes, so the one a gesture caught
-    // on the first composition is a dead painter with no picture in it - which is why a record could
-    // land with nothing to draw, and the cover of the song being left stayed in the middle until the
-    // sleeve caught up.
+    // The covers too: one is made per address, so the one a gesture caught on the first composition is
+    // a cover of nothing, with no picture in it - which is why a record could land with nothing to draw,
+    // and the cover of the song being left stayed in the middle until the sleeve caught up.
     val afterNow by androidx.compose.runtime.rememberUpdatedState(after)
     val beforeNow by androidx.compose.runtime.rememberUpdatedState(before)
+    val afterFadeNow by androidx.compose.runtime.rememberUpdatedState(afterFade)
+    val beforeFadeNow by androidx.compose.runtime.rememberUpdatedState(beforeFade)
     val nextUrlNow by androidx.compose.runtime.rememberUpdatedState(nextUrl)
     val previousUrlNow by androidx.compose.runtime.rememberUpdatedState(previousUrl)
     val currentUrlNow by androidx.compose.runtime.rememberUpdatedState(currentUrl)
@@ -1126,7 +1300,66 @@ private fun SleeveCarousel(
         kotlinx.coroutines.withTimeoutOrNull(1_500) { androidx.compose.runtime.snapshotFlow { art.shownUrl }.first { it == url } }
         landed = null; landedUrl = null
     }
-    val plateColour = MaterialTheme.colorScheme.surfaceVariant
+    // A song that changes by itself - the end of one, gapless, a crossfade, an AutoMix switch, a skip
+    // from the notification - changes record the way a skip does: the record it left goes out one side
+    // and the new one comes in from the other, lifted, and settles into the sleeve. It used to dissolve
+    // in place, which next to a skip read as the player snapping. The song on the page only moves when
+    // the ear does (for a mix, where the incoming song becomes the louder), so the slide starts there.
+    //
+    // Decided while composing, so the first frame the new song is drawn on already has its record off
+    // the edge and the one it left in the middle: an effect would run after that frame, and the new
+    // cover would sit in the middle for it, then jump out and slide back in. Only a step to the song
+    // either side (the one left is now the neighbour, so its picture is already there) and only with
+    // both pictures in hand; anything else - a new queue, a song tapped far down the list, a cover not
+    // loaded yet, reduced motion, the player out of sight - changes as it did.
+    val passing = remember { Passing() }
+    var askedId by remember { mutableStateOf<String?>(null) }
+    val onScreen = LocalPlayerShown.current
+    val incoming = art.cover?.takeIf { it.url == currentUrl }?.painter
+    val go = when {
+        songs.current == null || passing.id == null || songs.current == passing.id -> 0
+        AppMotion.reduce || !onScreen || holding || moving?.isActive == true || landedUrl != null || songs.current == askedId -> 0
+        incoming == null -> 0
+        songs.previous == passing.id && before.image != null -> 1
+        songs.next == passing.id && after.image != null -> -1
+        else -> 0
+    }
+    /** Where a record sliding in by itself is, in records: 1 a whole record to the right, 0 in place. */
+    val natural = remember(songs.current) { Animatable(go.toFloat()) }
+    val naturalUrl = remember(songs.current) { currentUrl.takeIf { go != 0 } }
+    val naturalPicture = remember(songs.current) { incoming.takeIf { go != 0 } }
+    /** Which side the record left goes out to: the `go` this song's slide started with. */
+    val naturalGo = remember(songs.current) { go }
+    androidx.compose.runtime.SideEffect {
+        if (passing.id != songs.current) { passing.id = songs.current; askedId = null }
+    }
+    // The record that came in is drawn from its own picture until the sleeve underneath has finished
+    // changing to it (its dissolve runs out of sight meanwhile), then the sleeve takes over in the same
+    // place with the same picture.
+    val naturalHere by remember(natural, naturalUrl) {
+        androidx.compose.runtime.derivedStateOf { naturalUrl != null && (natural.value != 0f || art.shownUrl != naturalUrl) }
+    }
+    val naturalNow by androidx.compose.runtime.rememberUpdatedState(natural)
+    val nextIdNow by androidx.compose.runtime.rememberUpdatedState(songs.next)
+    val previousIdNow by androidx.compose.runtime.rememberUpdatedState(songs.previous)
+    LaunchedEffect(natural) {
+        if (natural.value == 0f) return@LaunchedEffect
+        // The same lift, slide and settle as a press on the transport (see the buttons' `run` below).
+        launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 1200f, visibilityThreshold = 0.001f)) }
+        settleByFrames(natural, BUTTON_STIFFNESS)
+        lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = 600f, visibilityThreshold = 0.001f))
+    }
+
+    // The moving cover plays only on a record at rest: none held, lifted, sliding (a skip or a song changing by itself) or waiting to land.
+    if (motion != null) LaunchedEffect(motion) {
+        androidx.compose.runtime.snapshotFlow { !holding && offset == 0f && lift.value == 0f && landedUrl == null && !naturalHere }
+            .collect { motion.resting = it }
+    }
+    // The plate a record waits on: the same placeholder as the sleeve's, the theme's own surface. It
+    // used to be the page's, which is the colour of the song being left - a record for the next song
+    // arriving in the last one's colour.
+    val plate = Modifier.drawBehind { drawRect(art.plate) }
+    val shapes = remember { CornerShapes() }
     androidx.compose.foundation.layout.BoxWithConstraints(Modifier.fillMaxSize()) {
     val widthPx = constraints.maxWidth.toFloat()
     val heightPx = constraints.maxHeight.toFloat()
@@ -1137,32 +1370,49 @@ private fun SleeveCarousel(
     // held at the arriving record until the player has it - otherwise the page fell back to the old
     // song's colour for those frames and then changed again.
     val travel = heightPx * liftedScale(if (AppMotion.reduce) 0f else 1f, widthPx, heightPx) + gap
-    LaunchedEffect(shift, travel) {
-        androidx.compose.runtime.snapshotFlow { listOf(offset, committed, currentUrlNow, shift.adopted) }.collect { (o, waiting, showing, taken) ->
-            // Held from the moment a record is sent until the page is drawing its colours, and taken
-            // from the record's own position the rest of the time.
-            // Let go of the record a swipe sent the moment the player is on it and the page is wearing
-            // its colours. Kept, it made every later change look like that record arriving again: a song
-            // that ends by itself moves the player off what was committed, which read as a record still
-            // on its way in, and the page went back to its colours and stayed there.
-            if (committedTint != null && waiting == showing && taken == committedTint) {
-                committed = null
-                committedTint = null
-            }
-            if (committedTint != null && (waiting != showing || taken != committedTint)) {
-                shift.towards = committedTint
-                shift.amount = 1f
-                shift.arrived = committedTint
-            } else {
-                shift.arrived = null
-                val at = o as? Float ?: 0f
-                shift.towards = if (at < 0f) nextTintNow else if (at > 0f) previousTintNow else null
-                shift.amount = (kotlin.math.abs(at) / travel).coerceIn(0f, 1f)
-            }
+    val travelNow by androidx.compose.runtime.rememberUpdatedState(travel)
+    fun sync(at: Float) {
+        val waiting = committed
+        val showing = currentUrlNow
+        val taken = shift.adopted
+        // Held from the moment a record is sent until the page is drawing its colours, and taken
+        // from the record's own position the rest of the time.
+        // Let go of the record a swipe sent the moment the player is on it and the page is wearing
+        // its colours. Kept, it made every later change look like that record arriving again: a song
+        // that ends by itself moves the player off what was committed, which read as a record still
+        // on its way in, and the page went back to its colours and stayed there.
+        if (committedTint != null && waiting == showing && taken == committedTint) {
+            committed = null
+            committedTint = null
         }
+        if (committedTint != null && (waiting != showing || taken != committedTint)) {
+            shift.towards = committedTint
+            shift.amount = 1f
+            shift.arrived = committedTint
+        } else {
+            shift.arrived = null
+            shift.towards = if (at < 0f) nextTintNow else if (at > 0f) previousTintNow else null
+            shift.amount = (kotlin.math.abs(at) / travelNow).coerceIn(0f, 1f)
+        }
+    }
+    offsetBox.onSet = FloatSink { sync(it) }
+    LaunchedEffect(shift, travel) {
+        // The rest of what the page's colours depend on changes once a song, not once a frame.
+        androidx.compose.runtime.snapshotFlow { Triple(committed, currentUrlNow, shift.adopted) }.collect { sync(offset) }
     }
     androidx.compose.runtime.DisposableEffect(shift) {
         onDispose { shift.towards = null; shift.amount = 0f; shift.arrived = null }
+    }
+
+    /**
+     * A record still sliding in by itself is taken over where it is, by a finger or a press: its place
+     * goes into [offset], so what moves it next starts from where it can be seen.
+     */
+    suspend fun takeOver() {
+        val n = naturalNow.value
+        if (n == 0f) return
+        naturalNow.snapTo(0f)
+        offset += n * (heightPx * liftedScale(lift.value, widthPx, heightPx) + gap)
     }
 
     /**
@@ -1199,6 +1449,7 @@ private fun SleeveCarousel(
         // the record after it showing beside it. Two records with the same picture still slide.
         if (stale) {
             committed = null
+            askedId = if (go < 0) nextIdNow else previousIdNow
             if (go < 0) onNextNow() else onPreviousNow()
             lift.animateTo(0f, spring(dampingRatio = 1f, stiffness = liftDown, visibilityThreshold = 0.001f))
             return
@@ -1221,11 +1472,19 @@ private fun SleeveCarousel(
          * has, so the drag carries on from the record it can see instead of jumping.
          */
         fun arrive(rest: Float) {
-            // Only hold the picture over if it is really there: as a bare plate it is a grey square, and
-            // the sleeve's own cross-fade is the better answer.
-            val picture = (painter.state.value as? coil3.compose.AsyncImagePainter.State.Success)?.painter
-            landed = picture
-            landedUrl = url.takeIf { picture != null }
+            // Only hold the picture over if it is really there, whole: as a bare plate it is a grey square,
+            // and a picture still fading in over its plate would come up to full strength in one frame.
+            val picture = painter.painter
+            val level = if (picture == null) 0f else (if (go < 0) afterFadeNow else beforeFadeNow).value
+            val whole = picture != null && level >= 1f
+            landed = picture.takeIf { whole }
+            landedUrl = url.takeIf { whole }
+            // Otherwise the record that came in is a plate, or a picture part way in, and the sleeve going
+            // back under it has to be the same: not the picture of the song just left, which has slid off
+            // the other side. That was the same cover twice in a row - out one side, back in the middle
+            // for the length of the load. The sleeve goes to the plate at once and fades this song's
+            // picture in from where the record had it when it comes (SleeveArt.clearFor).
+            if (!whole && url != art.shownUrl) art.clearFor(url, level)
             // What the player has been asked for, whether or not there was a picture to hold over. The
             // next change waits for this, not for the picture: a cover that failed to load used to let
             // the one after it start against a queue that had not moved yet.
@@ -1233,8 +1492,9 @@ private fun SleeveCarousel(
             committedTint = if (go < 0) nextTintNow else previousTintNow
             // Unless the sleeve already shows this picture (the next song of the same album): then no
             // picture is coming, and a snap left waiting here would cut the fade of the next real change.
-            art.snapNext = url != art.shownUrl
+            art.snapNext = whole && url != art.shownUrl
             offset = rest
+            askedId = if (go < 0) nextIdNow else previousIdNow
             if (go < 0) onNextNow() else onPreviousNow()
         }
 
@@ -1308,6 +1568,7 @@ private fun SleeveCarousel(
                 presses++
                 moving = scope.launch {
                     running?.cancelAndJoin()
+                    takeOver()
                     // No bounce in the lift, and quicker than the slide. A record that is still being
                     // picked up is still shrinking, and the gap the next one waits in shrinks with it;
                     // a lift that sprang past its mark pulled the arriving record past the middle and
@@ -1331,14 +1592,12 @@ private fun SleeveCarousel(
                 holding = false
                 val o = offset
                 val w = size.width.toFloat()
-                val go = when {
-                    o < 0f && hasAfter && (v < -FLICK_PX || o < -w * TURN) -> -1
-                    o > 0f && hasBefore && (v > FLICK_PX || o > w * TURN) -> 1
-                    else -> 0
-                }
+                // Past a third of the way or flicked (swipeTurn, shared with the bar).
+                val go = swipeTurn(o, v, w, hasBefore, hasAfter, bar = false)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
+                    takeOver()
                     if (go == 0) {
                         launch { lift.animateTo(0f, down) }
                         androidx.compose.animation.core.animate(offset, 0f, v, spring(dampingRatio = 1f, stiffness = 520f, visibilityThreshold = 1f)) { value, _ -> offset = value }
@@ -1356,6 +1615,7 @@ private fun SleeveCarousel(
                     // the song on its way out if it had all but arrived (see land).
                     gesture++
                     moving?.cancel()
+                    scope.launch { takeOver() }
                     if (!AppMotion.reduce) scope.launch { lift.animateTo(1f, spring(dampingRatio = 1f, stiffness = 420f, visibilityThreshold = 0.001f)) }
                 },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
@@ -1367,7 +1627,7 @@ private fun SleeveCarousel(
                 val next = offset + d
                 // Towards a record that is not there it gives a little and no more.
                 val allowed = (next > 0f && hasBefore) || (next < 0f && hasAfter)
-                offset = if (allowed) next.coerceIn(-w, w) else (offset + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)
+                offset = if (allowed) next.coerceIn(-w, w) else (offset + d * GIVE).coerceIn(-w * GIVE_LIMIT, w * GIVE_LIMIT)
             }
         },
     ) {
@@ -1376,16 +1636,16 @@ private fun SleeveCarousel(
         // Each record is the cover's whole square, as tall as the sleeve and so wider than the screen: at
         // rest the screen's edges crop it to exactly the sleeve, and lifted it shrinks until all of it is
         // on screen - the sides the sleeve hides come into view as the record is picked up.
-        fun Modifier.record(dx: (Float, Float) -> Float, fade: (Float) -> Float) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
+        fun Modifier.record(dx: RecordDx, fade: RecordFade) = align(Alignment.Center).requiredSize(sideDp).graphicsLayer {
             val l = lift.value
             val s = liftedScale(l, widthPx, size.height)
             scaleX = s; scaleY = s
             val span = size.width * s + gap
-            val o = offset
-            translationX = dx(o, span)
-            alpha = fade((kotlin.math.abs(o) / span).coerceIn(0f, 1f))
+            val o = offset + natural.value * span
+            translationX = dx.at(o, span)
+            alpha = fade.at(o, (kotlin.math.abs(o) / span).coerceIn(0f, 1f))
             if (l > 0f) {
-                shape = RoundedCornerShape(radius * l / s)
+                shape = shapes.of(radius * l / s)
                 clip = true
                 // No shadow. A shadow is drawn from the layer's outline, which is the whole record -
                 // including the last rows, which are rubbed out so that the record can dissolve into
@@ -1396,114 +1656,138 @@ private fun SleeveCarousel(
                 // rounded; it does not need one.
             }
         }
-        val o0 = { offset }
         // Each neighbour waits just off its edge and is drawn only while it is being pulled in, coming up
         // from a little dimmer as it arrives. One whose picture has not arrived is still a record - the
         // same square, the same corners - with the sheen the rest of the app uses while it waits, rather
         // than a flat grey card: the covers are fetched ahead (PlayerViewModel) but a cold queue, or a
         // slow server, can still be reached before they land.
-        val afterHere = after.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
-        val beforeHere = before.state.collectAsState().value is coil3.compose.AsyncImagePainter.State.Success
-        val sheen = MaterialTheme.colorScheme.onSurface
+        // Until the picture has faded all the way in over it, so the sheen goes away under a whole picture.
+        val afterHere by remember(afterFade) { androidx.compose.runtime.derivedStateOf { afterFade.value >= 1f } }
+        val beforeHere by remember(beforeFade) { androidx.compose.runtime.derivedStateOf { beforeFade.value >= 1f } }
+        // A neighbour only shows while a finger pulls it in; waiting for its picture it shimmers then and
+        // only then. With nothing either side, or a picture that never comes, a sheen on the unseen
+        // record ran for ever - and redrew the whole app every frame, on every screen, the player being
+        // composed underneath them all.
+        val afterShown by remember { androidx.compose.runtime.derivedStateOf { offsetBox.state.floatValue < 0f } }
+        val beforeShown by remember { androidx.compose.runtime.derivedStateOf { offsetBox.state.floatValue > 0f } }
 
         /** The records themselves. */
         @Composable
-        fun androidx.compose.foundation.layout.BoxScope.records() {
+        fun androidx.compose.foundation.layout.BoxScope.records(blurred: Boolean) {
             // Not while a record that has landed is held over it: the two sit in the same place, and
             // the one on top is the whole record.
-            if (landedUrl == null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f })) {
+            if (landedUrl == null && !naturalHere) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f })) {
                 SleeveImage(art, Modifier.fillMaxSize())
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { f -> if (o0() < 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!afterHere, sheen)) {
-                androidx.compose.foundation.Image(after, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            if (landedUrl == null && naturalHere) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f }).then(plate)) {
+                naturalPicture?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
-            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { f -> if (o0() > 0f) 0.55f + 0.45f * f else 0f }).background(plateColour).loadingSheen(!beforeHere, sheen)) {
-                androidx.compose.foundation.Image(before, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+            // The sheen under the picture, which fades in over it when it comes (rememberPictureFade).
+            Box(Modifier.fillMaxSize().record({ o, span -> o + span }, { o, f -> if (o < 0f) 0.55f + 0.45f * f else 0f }).then(plate)) {
+                PlateSheen(art, !afterHere && afterShown)
+                after.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = afterFade.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
+            Box(Modifier.fillMaxSize().record({ o, span -> o - span }, { o, f -> if (o > 0f) 0.55f + 0.45f * f else 0f }).then(plate)) {
+                PlateSheen(art, !beforeHere && beforeShown)
+                before.painter?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = beforeFade.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+            }
+            // The moving cover, in the same square as the still one and cropped by the same edges, so the
+            // fade between them shows no shift; it moves with the record, too. The sharp copy only: a
+            // surface is drawn once, so the blurred band at the sleeve's foot stays the still cover's, which
+            // is also what the page's wash is made of. When the song changes by itself it goes out with the
+            // record it was playing on, fading as it goes: that record is the neighbour by then, and the
+            // video used to vanish on the slide's first frame, leaving the still cover in its place.
+            // Composed here, after the records, whatever happens to them, so its surface is never made
+            // again in the middle of a move.
+            if (!blurred && motion != null && motion.present && landedUrl == null) Box(
+                Modifier.fillMaxSize().record(
+                    { o, span -> if (naturalHere) o - naturalGo * span else o },
+                    { o, f ->
+                        when {
+                            !naturalHere -> 1f - 0.35f * f
+                            naturalGo > 0 -> if (o > 0f) 0.55f + 0.45f * f else 0f
+                            else -> if (o < 0f) 0.55f + 0.45f * f else 0f
+                        }
+                    },
+                ),
+            ) { MotionCover(motion) }
             // It is the record that is showing, so it moves with the record: held still in the middle it
             // covered the next change from on top, which is the "cover stuck over the animation".
-            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { f -> 1f - 0.35f * f }).background(plateColour)) {
+            if (landedUrl != null) Box(Modifier.fillMaxSize().record({ o, _ -> o }, { _, f -> 1f - 0.35f * f }).then(plate)) {
                 landed?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
             }
         }
 
-        // All the records in one layer, and the sleeve's soft bottom rubbed out of that layer once: the
-        // band is the sleeve's, and a record lifted, sliding or growing back is whole above it and soft
-        // inside it. A layer of its own, or the erase would take the page behind it too.
+        // All the records in one layer, and the sleeve's soft bottom made of that layer once (SoftSleeve):
+        // the band is the sleeve's, and a record lifted, sliding or growing back is whole above it and soft
+        // inside it.
         //
-        // Rubbing out only fades: a sharp line in the picture inside the band - a frame, a black strip -
-        // stays a sharp line, fainter. So before the band starts, a blurred copy of the same records is
-        // faded in over them, and it is that copy the band melts away: sharp, then soft, then the page's
-        // own blur, with no step between. Inside the same layer, so it moves with the records and the
-        // erase takes it with them. Android 12 and later; a switch in Appearance turns it off.
-        val soft = android.os.Build.VERSION.SDK_INT >= 31 &&
-            androidx.lifecycle.viewmodel.compose.viewModel<dev.nori.music.app.vm.SettingsViewModel>().prefs.collectAsStateWithLifecycle().value.softSleeve
-        val blurPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
-        // A white, cream or black page has a wash in its own tint only (CoverColors.washOf), and the
-        // blurred band has to arrive at the same thing: blurred as it is, A Beautiful Lie's red
-        // lettering spread across its white bottom as a pink haze over a grey page. So on such a page
-        // the band keeps its light and dark but takes the page's tint - grey on white, cream on cream,
-        // whatever the page is, nothing fixed. A coloured page keeps the band's colours, as its wash does.
-        val pageBg = MaterialTheme.colorScheme.background
-        val tintTo = remember(pageBg) {
-            val hsl = FloatArray(3).also { androidx.core.graphics.ColorUtils.colorToHSL(pageBg.toArgb(), it) }
-            pageBg.takeIf { hsl[2] > 0.85f || hsl[2] < 0.08f }
-        }
-        val bandEffect = remember(blurPx, tintTo) {
-            if (android.os.Build.VERSION.SDK_INT < 31) null else {
-                val blur = android.graphics.RenderEffect.createBlurEffect(blurPx, blurPx, android.graphics.Shader.TileMode.CLAMP)
-                if (tintTo == null) blur else {
-                    // Luminance, then scaled by the page's colour relative to its brightest channel: grey
-                    // for a white page, the same shading warmed for a cream one.
-                    val top = maxOf(tintTo.red, tintTo.green, tintTo.blue).coerceAtLeast(0.01f)
-                    val kr = tintTo.red / top; val kg = tintTo.green / top; val kb = tintTo.blue / top
-                    val m = android.graphics.ColorMatrix(floatArrayOf(
-                        0.2126f * kr, 0.7152f * kr, 0.0722f * kr, 0f, 0f,
-                        0.2126f * kg, 0.7152f * kg, 0.0722f * kg, 0f, 0f,
-                        0.2126f * kb, 0.7152f * kb, 0.0722f * kb, 0f, 0f,
-                        0f, 0f, 0f, 1f, 0f,
-                    ))
-                    android.graphics.RenderEffect.createColorFilterEffect(android.graphics.ColorMatrixColorFilter(m), blur)
-                }
-            }?.asComposeRenderEffect()
-        }
-        Box(
-            Modifier.fillMaxSize()
-                .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                .drawWithContent { drawContent(); rubOutBottom() },
-        ) {
-            records()
-            if (soft) Box(
-                Modifier.fillMaxSize()
-                    .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-                    .drawWithContent {
-                        drawContent()
-                        // Where the blurred copy shows: nowhere above the band's upper reach, all of it
-                        // by the time the rub-out is under way. Eased, so its own start is no line.
-                        val h = size.height
-                        drawRect(
-                            Brush.verticalGradient(
-                                0f to Color.Transparent,
-                                0.3f to Color.Black.copy(alpha = 0.10f),
-                                0.6f to Color.Black.copy(alpha = 0.50f),
-                                0.85f to Color.Black.copy(alpha = 0.92f),
-                                1f to Color.Black,
-                                startY = h * (1f - MELT * 2.2f), endY = h * (1f - MELT * 0.55f),
-                            ),
-                            blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
-                        )
-                    },
-            ) {
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        renderEffect = bandEffect
-                    },
-                ) { records() }
-            }
-        }
+        // The blurred half of that bottom goes as the record is picked up and comes back as it settles, on
+        // the lift's own spring. A record in the hand is a card, and a card has no blur at its foot: at full
+        // strength the blurred copy, which starts well above the band, smeared the lower part of the lifted
+        // record and hazed round its rounded corners - a blur that came and went as the record shrank and
+        // grew under it. Now the zoom out takes the blur with it and the zoom in brings it back, one move.
+        SoftSleeve(Modifier.fillMaxSize(), blur = FloatReader { smooth(1f - lift.value, 0f, 1f) }) { blurred -> records(blurred) }
     }
 }
 }
+
+/**
+ * The soft band's blur, and on a white, cream or black page the page's tint over it: the band's
+ * luminance scaled per channel by the page's colour relative to its brightest channel (grey for white,
+ * the same shading warmed for cream). Made once per tint and kept; a page cross-fading between a tinted
+ * page and a coloured one mixes the two matrices rather than switching in one frame.
+ */
+@androidx.annotation.RequiresApi(31)
+private class BandEffect(blurPx: Float) {
+    private val blur = android.graphics.RenderEffect.createBlurEffect(blurPx, blurPx, android.graphics.Shader.TileMode.CLAMP)
+    private val plain = blur.asComposeRenderEffect()
+    private val made = androidx.collection.MutableLongObjectMap<androidx.compose.ui.graphics.RenderEffect>()
+
+    fun of(look: Look): androidx.compose.ui.graphics.RenderEffect {
+        val s = Float.fromBits(look.argb(CoverLook.BAND_TINT))
+        if (s <= 0f) return plain
+        val kr = Float.fromBits(look.argb(CoverLook.BAND_KR))
+        val kg = Float.fromBits(look.argb(CoverLook.BAND_KG))
+        val kb = Float.fromBits(look.argb(CoverLook.BAND_KB))
+        // Kept by the tint to a 1/256th, which is finer than the blurred band can show.
+        fun q(x: Float) = (x * 256f).toLong().coerceIn(0, 1023)
+        val key = (q(s) shl 30) or (q(kr) shl 20) or (q(kg) shl 10) or q(kb)
+        return made[key] ?: run {
+            // The matrix is nori-look's (`sleeve::band_matrix`), asked once per tint.
+            val m = android.graphics.ColorMatrix(dev.nori.music.ffi.bandMatrix(s, kr, kg, kb).toFloatArray())
+            android.graphics.RenderEffect.createColorFilterEffect(android.graphics.ColorMatrixColorFilter(m), blur).asComposeRenderEffect()
+        }.also { made[key] = it }
+    }
+}
+
+/** Takes a Float where it is written, without boxing it. */
+internal fun interface FloatSink { fun put(v: Float) }
+
+/** The sleeve's offset: a float state that also tells [onSet] each time it is written. */
+@Stable
+internal class OffsetBox {
+    val state = androidx.compose.runtime.mutableFloatStateOf(0f)
+    var onSet: FloatSink? = null
+    @Suppress("NOTHING_TO_INLINE")
+    inline operator fun getValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>): Float = state.floatValue
+    @Suppress("NOTHING_TO_INLINE")
+    inline operator fun setValue(thisRef: Any?, property: kotlin.reflect.KProperty<*>, value: Float) {
+        state.floatValue = value
+        onSet?.put(value)
+    }
+}
+
+/** A record's sideways place for an offset and a span, and its brightness at an offset for how far across it is. */
+private fun interface RecordDx { fun at(offset: Float, span: Float): Float }
+private fun interface RecordFade { fun at(offset: Float, across: Float): Float }
+
+/** The songs on the page and either side of it, by id: the sleeve tells a song that changed by itself from its own skips by them. */
+@androidx.compose.runtime.Immutable
+internal data class Songs(val current: String?, val previous: String?, val next: String?)
+
+/** The song the sleeve was last composed with; written after each composition, read by the next. */
+private class Passing { var id: String? = null }
 
 /**
  * How far the page's colour has travelled towards the record coming in, and which record that is.
@@ -1548,11 +1832,61 @@ internal class SleeveSlide {
     fun ask(go: Int): Boolean = run?.invoke(go) ?: false
 }
 
+/**
+ * Brings [a] to rest at 0 as a critically damped spring of [stiffness] would, a frame at a time, with no
+ * frame counted as longer than [MAX_STEP_S]. A song that changes by itself starts its slide on the
+ * frames that compose the whole new song, and the first of those can take a tenth of a second or more:
+ * a spring timed by the clock had done most of its travel by the next frame, and the record jumped most
+ * of the way in. Counted like this, a slow frame slows the slide down instead of skipping it.
+ */
+internal suspend fun settleByFrames(a: Animatable<Float, androidx.compose.animation.core.AnimationVector1D>, stiffness: Float) {
+    val from = a.value
+    val w = kotlin.math.sqrt(stiffness)
+    var t = 0f
+    var last = androidx.compose.runtime.withFrameNanos { it }
+    while (true) {
+        val now = androidx.compose.runtime.withFrameNanos { it }
+        t += ((now - last) / 1e9f).coerceAtMost(MAX_STEP_S)
+        last = now
+        val x = from * (1f + w * t) * kotlin.math.exp(-w * t)
+        if (kotlin.math.abs(x) < 0.001f) break
+        a.snapTo(x)
+    }
+    a.snapTo(0f)
+}
+
+/** The longest a frame counts for in [settleByFrames]: two frames at sixty a second. */
+private const val MAX_STEP_S = 0.033f
+
 /** A record sent across by a button rather than a thumb: the same move, a little quicker. */
 private const val BUTTON_STIFFNESS = 950f
 
-/** How much of the screen's width a held record takes. */
+/** How much of the screen's width a record held by a finger takes: it lifts off the page, smaller. */
 private const val LIFTED_WIDTH = 0.86f
+
+/** A slow drag changes the record past this share of the width; the same share arms a row's swipe. */
+internal const val TURN = 0.3f
+/** A release faster than this, in pixels a second, changes the record whatever the distance: on the player's sleeve... */
+private const val FLICK_PX_S = 1_000f
+/** ...and on the now playing bar, a small strip under the thumb, where a flick is shorter and slower. */
+private const val BAR_FLICK_PX_S = 900f
+/** Towards a record that is not there a drag gives this much of the finger's travel, and no more than [GIVE_LIMIT] of the width. */
+internal const val GIVE = 0.2f
+internal const val GIVE_LIMIT = 0.06f
+
+/**
+ * Where a sideways drag on a row of records goes when the finger lifts at [offset] pixels (negative:
+ * towards the next) with [velocity] pixels a second, on a row [width] wide: -1 to the next record, 1 to
+ * the one before, 0 back where it was. Past [TURN] of the width, or flicked; never towards a record that
+ * is not there. [bar] is the now playing bar, which takes a slower flick than the sleeve. How a touch
+ * feels is the platform's own, and this is a few comparisons Compose makes on the release itself.
+ */
+internal fun swipeTurn(offset: Float, velocity: Float, width: Float, hasBefore: Boolean, hasAfter: Boolean, bar: Boolean): Int {
+    val flick = if (bar) BAR_FLICK_PX_S else FLICK_PX_S
+    return if (offset < 0f && hasAfter && (velocity < -flick || offset < -width * TURN)) -1
+    else if (offset > 0f && hasBefore && (velocity > flick || offset > width * TURN)) 1
+    else 0
+}
 
 /** The scale of a record [side] tall at lift [l], on a sleeve [width] wide: 1 at rest, the whole square at 86 % of the width held. */
 private fun liftedScale(l: Float, width: Float, side: Float): Float {
@@ -1563,64 +1897,125 @@ private fun liftedScale(l: Float, width: Float, side: Float): Float {
     return 1f - (1f - held) * l.coerceIn(0f, 1f)
 }
 
-/** Past this share of the width a slow drag changes the record. */
-private const val TURN = 0.3f
-
-/** A release faster than this, in pixels a second, changes the record whatever the distance. */
-private const val FLICK_PX = 1000f
 
 @Composable
 private fun rememberSleeveArt(url: String?): SleeveArt {
-    val context = LocalContext.current
     val art = remember { SleeveArt() }
-    val painter = coil3.compose.rememberAsyncImagePainter(
-        remember(url) { coil3.request.ImageRequest.Builder(context).data(url).size(CoverSize.FULL).build() },
-        filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
-    )
-    val state by painter.state.collectAsState()
-    LaunchedEffect(state) {
-        when (val st = state) {
-            is coil3.compose.AsyncImagePainter.State.Success -> if (st.painter !== art.current) {
+    val cover = rememberCover(url, CoverSize.FULL)
+    art.cover = cover
+    val picture = cover.painter
+    // Run again when a record slides in for another song without its picture (see clearFor), and not when
+    // the song it slid in for arrives and takes that over: this song's own fade is not to be cut short.
+    val elsewhere = art.clearedFor?.takeIf { it != url }
+    LaunchedEffect(cover, cover.state, picture, elsewhere) {
+        val now = android.os.SystemClock.uptimeMillis()
+        val cleared = art.clearedFor
+        if (cleared != null && cleared != url) {
+            // A record slid in for a song the player has not moved to yet: the plate stays for it. Should
+            // the player never get there, the picture of the song it is still on comes back, faded in.
+            delay(CLEARED_WAIT_MS)
+            art.fadeFrom = 0f
+            art.clearedFor = null
+            return@LaunchedEffect
+        }
+        // The song it slid in for is here: taken once, so a later change of song is not held up by it.
+        if (cleared != null) art.clearedFor = null
+        art.turn.song(url, now, ready = picture != null, cleared = cleared != null)
+        when {
+            picture != null -> if (picture !== art.current) {
+                // Only this song's picture: one for a song skipped past never gets here (each cover is
+                // its own request, let go of with its song), and the turn says so as well.
+                if (!art.turn.arrived(url)) return@LaunchedEffect
                 art.loading = false
                 val swiped = art.snapNext.also { art.snapNext = false }
-                val instant = swiped || art.current == null && art.previous == null && st.result.dataSource == coil3.decode.DataSource.MEMORY_CACHE
+                val from = art.fadeFrom.also { art.fadeFrom = -1f }
+                val instant = swiped || from < 0f && art.current == null && art.previous == null && cover.fromMemory
                 // The picture on screen stays underneath at full strength while the new one covers it; one
                 // already fading out to the plate carries on from where it is.
                 art.current?.let { art.previous = it; art.previousAlpha.snapTo(1f) }
-                art.current = st.painter
+                art.current = picture
                 if (instant || AppMotion.reduce) art.fade.snapTo(1f)
-                else { art.fade.snapTo(0f); art.fade.animateTo(1f, androidx.compose.animation.core.tween(if (art.previous == null) 320 else 480)) }
+                else {
+                    // A record that slid in with the picture part way in hands the sleeve that much of it.
+                    val start = from.coerceAtLeast(0f)
+                    art.fade.snapTo(start)
+                    val ms = if (art.previous == null) PICTURE_IN_MS else PICTURE_OVER_MS
+                    art.fade.animateTo(1f, androidx.compose.animation.core.tween((ms * (1f - start)).toInt().coerceAtLeast(1)))
+                }
                 art.previous = null
                 // Last, once the picture is really the one on screen. Said before the swap - and there
                 // is a suspension between the two - this let the record held over the sleeve be taken
                 // away while the sleeve underneath was still showing the cover before it, which is the
                 // frame of the previous cover that appeared as the record grew back.
                 art.shownUrl = url
+            } else if (art.shownUrl != url) {
+                // This picture's fade was cut short (the effect ran again for the same song: a record slid
+                // in for another one and was not taken up, the cover's state moved): it finishes from where
+                // it got to. Left there, the picture stayed faint over the plate for the rest of the song.
+                art.loading = false
+                if (AppMotion.reduce) art.fade.snapTo(1f)
+                else art.fade.animateTo(1f, androidx.compose.animation.core.tween(((1f - art.fade.value) * PICTURE_IN_MS).toInt().coerceAtLeast(1)))
+                art.previous = null
+                art.shownUrl = url
             }
-            is coil3.compose.AsyncImagePainter.State.Loading -> {
+            cover.state == CoverImage.LOADING -> {
                 if (art.current == null) art.loading = true
-                else { delay(HOLD_MS); art.loading = true; art.letGo() }
+                else {
+                    // The grace, counted from the change of song rather than from this run of the effect.
+                    delay(art.turn.holdLeft(now))
+                    art.loading = true
+                    art.letGo()
+                }
             }
             // Nothing to show for this song: back to the plate rather than keep the last cover.
-            is coil3.compose.AsyncImagePainter.State.Error -> { art.loading = false; art.letGo() }
-            else -> {}
+            else -> { art.loading = false; art.letGo() }
         }
     }
     return art
 }
 
+/** The sleeve's picture over its placeholder; [plate] false leaves the placeholder to the caller. */
 @Composable
-private fun SleeveImage(art: SleeveArt, modifier: Modifier) {
-    Box(modifier.loadingSheen(art.loading, MaterialTheme.colorScheme.onSurface)) {
+private fun SleeveImage(art: SleeveArt, modifier: Modifier, plate: Boolean = true) {
+    // The sheen outlives the load by the picture's fade and is drawn under it, so it goes away behind a
+    // picture that already covers it instead of vanishing from on top of one that has only begun to come.
+    var sheen by remember { mutableStateOf(art.loading) }
+    LaunchedEffect(art.loading) { if (!art.loading) delay(PICTURE_IN_MS.toLong()); sheen = art.loading }
+    Box(if (plate) modifier.drawBehind { drawRect(art.plate) } else modifier) {
+        PlateSheen(art, sheen)
         art.previous?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = art.previousAlpha.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
         art.current?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize().graphicsLayer { alpha = art.fade.value }, contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
     }
 }
 
+/** The loading sheen over a placeholder, in the theme's own ink rather than the song's. */
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.PlateSheen(art: SleeveArt, active: Boolean) {
+    if (!active) return
+    androidx.compose.runtime.CompositionLocalProvider(LocalLook provides art.neutral) {
+        Box(Modifier.matchParentSize().loadingSheen(true))
+    }
+}
+
+/**
+ * How far a neighbour record's picture has faded in over its plate: whole at once for one that was in
+ * memory when the record was made, over [PICTURE_IN_MS] for one that came while it waited - a record
+ * being pulled in never swaps its plate for its picture in one frame.
+ */
+@Composable
+private fun rememberPictureFade(cover: CoverImage): Animatable<Float, androidx.compose.animation.core.AnimationVector1D> {
+    val a = remember(cover) { Animatable(if (cover.image != null) 1f else 0f) }
+    val here = cover.image != null
+    LaunchedEffect(cover, here) {
+        if (!here || a.value >= 1f) return@LaunchedEffect
+        if (AppMotion.reduce) a.snapTo(1f) else a.animateTo(1f, androidx.compose.animation.core.tween(PICTURE_IN_MS))
+    }
+    return a
+}
+
 /** A title-row circle: translucent fill, light glyph, 48 dp across with a 44 dp hit region or better. */
 @Composable
 internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
-    val scheme = MaterialTheme.colorScheme
     // These two sit on the sleeve's own melting bottom, not on the page: whatever the page colour is,
     // what is behind them is a piece of the record, and it can be any brightness at all. A disc tinted
     // from the page came out lighter than the page on a bright record and carried a white glyph on top
@@ -1628,13 +2023,8 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
     //
     // Disc strength tracks page lightness continuously (same as Play): a boolean onSurface cut flipped
     // black↔white midway through a swipe onto paper, and a white disc on a white wash had no contrast.
-    val paper = ((scheme.background.luminance() - 0.40f) / 0.40f).coerceIn(0f, 1f)
-    val disc = Color.Black.copy(alpha = 0.40f + 0.28f * paper)
-    val ink = if (selected) {
-        androidx.compose.ui.graphics.lerp(scheme.primary, Color.White, paper)
-    } else {
-        Color.White
-    }
+    // Both are the look's (nori_look::dress), read while drawing: a page changing colour redraws them.
+    val look = LocalLook.current
     val plain = reduceMotion()
     val scale = remember { androidx.compose.animation.core.Animatable(1f) }
     var ready by remember { mutableStateOf(false) }
@@ -1648,12 +2038,18 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
         scale.animateTo(1.22f, androidx.compose.animation.core.spring(dampingRatio = 0.42f, stiffness = 900f))
         scale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 600f))
     }
-    Surface(
-        onClick = onClick, shape = CircleShape,
-        color = disc, contentColor = ink,
-        modifier = Modifier.size(42.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value },
-    ) {
-        Box(Modifier.fillMaxSize(), Alignment.Center) { Icon(icon, label, Modifier.size(25.dp)) }
+    // Material's Surface, laid out the same way, with its plate drawn rather than composed.
+    androidx.compose.runtime.CompositionLocalProvider(LocalContentColor provides Color.White) {
+        Box(
+            Modifier.size(42.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+                .minimumInteractiveComponentSize()
+                .drawBehind { drawCircle(look.color(CoverLook.DISC)) }
+                .clip(CircleShape)
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick),
+            Alignment.Center,
+        ) {
+            LookIcon(icon, label, Modifier.size(25.dp)) { if (selected) look.color(CoverLook.DISC_INK_SELECTED) else Color.White }
+        }
     }
 }
 
@@ -1663,32 +2059,29 @@ internal fun TitleCircle(icon: ImageVector, label: String, selected: Boolean, on
  */
 @Composable
 private fun VolumeRow(vm: PlayerViewModel) {
-    val scheme = MaterialTheme.colorScheme
+    val look = LocalLook.current
     // Pushed by the system the moment it changes - no polling, nothing ticking while the screen is open.
     val system by vm.volume.collectAsStateWithLifecycle()
     var dragging by remember { mutableStateOf(false) }
-    var level by remember { mutableFloatStateOf(vm.volumeFraction()) }
-    // What is drawn. A change from outside - the volume keys, another app - eases over; a drag is followed exactly.
-    val shown = remember { androidx.compose.animation.core.Animatable(level) }
+    // What is drawn. A change from outside - the volume keys, another app - eases over; a drag is
+    // followed exactly, written straight from the finger rather than snapped to from a coroutine per
+    // pointer event.
+    val shown = remember { mutableFloatStateOf(vm.volumeFraction()) }
     val plain = reduceMotion()
-    val scope = rememberCoroutineScope()
     LaunchedEffect(system, dragging) {
         if (dragging) return@LaunchedEffect
-        level = system
-        if (plain) shown.snapTo(system)
-        else shown.animateTo(system, androidx.compose.animation.core.tween(180))
+        if (plain) shown.floatValue = system
+        else androidx.compose.animation.core.animate(shown.floatValue, system, animationSpec = androidx.compose.animation.core.tween(180)) { v, _ -> shown.floatValue = v }
     }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 52.dp, vertical = 2.dp),
         Arrangement.spacedBy(12.dp), Alignment.CenterVertically,
     ) {
-        Icon(Icons.AutoMirrored.Filled.VolumeDown, null, Modifier.size(16.dp), tint = scheme.onSurfaceVariant)
-        val track = scheme.onSurface.copy(alpha = 0.22f)
-        val filled = scheme.onSurface.copy(alpha = 0.85f)
+        LookIcon(Icons.AutoMirrored.Filled.VolumeDown, null, Modifier.size(16.dp)) { look.color(CoverLook.ON_VARIANT) }
         val pick: (Float, Float) -> Unit = { x, w ->
             val f = (x / w).coerceIn(0f, 1f)
-            level = f; vm.setVolumeFraction(f)
-            scope.launch { shown.snapTo(f) }
+            vm.setVolumeFraction(f)
+            shown.floatValue = f
         }
         Box(
             Modifier.weight(1f).height(34.dp)
@@ -1701,17 +2094,20 @@ private fun VolumeRow(vm: PlayerViewModel) {
                 }
                 .pointerInput(Unit) { detectTapGestures { pick(it.x, size.width.toFloat()) } }
                 .drawBehind {
+                    val track = look.color(CoverLook.ON_22)
+                    val filled = look.color(CoverLook.ON_85)
                     val h = 7.dp.toPx()
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
+                    val at = shown.floatValue
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
-                    drawRoundRect(filled, Offset(0f, y), Size(size.width * shown.value, h), r)
+                    drawRoundRect(filled, Offset(0f, y), Size(size.width * at, h), r)
                     // No knob unless a finger is on it: Apple's volume slider is a filled bar and
                     // nothing else, and a permanent white circle is the most Material thing on the screen.
-                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * shown.value, size.height / 2f))
+                    if (dragging) drawCircle(filled, h * 1.15f, Offset(size.width * at, size.height / 2f))
                 },
         )
-        Icon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp), tint = scheme.onSurfaceVariant)
+        LookIcon(Icons.AutoMirrored.Filled.VolumeUp, null, Modifier.size(20.dp)) { look.color(CoverLook.ON_VARIANT) }
     }
 }
 
@@ -1720,13 +2116,15 @@ private fun VolumeRow(vm: PlayerViewModel) {
  * read, then walks slowly sideways and comes back round, the way the title does in Apple's player.
  * A line that fits is left alone - the modifier only animates while the text overflows.
  *
- * On the full player it runs for as long as you are looking at it, and only then: the player stays
- * composed behind the rest of the app (see LocalPlayerShown), and a title quietly walking about down
- * there would hold a frame clock awake for nothing. The now playing bar passes a small [iterations]
- * instead, because that bar is on screen for as long as the app is - see MiniPlayer.
+ * It reads itself out [iterations] times when the song comes on or the player comes into view, then
+ * settles at its start with the soft edge. A walking line is a new frame of the whole screen every
+ * vsync - the blurred sleeve and wash behind it included - and one left walking for as long as the
+ * player was open held a 120 Hz phone at fifty frames a second and two thirds of a core. Only while
+ * the player is on screen: it stays composed behind the rest of the app (see LocalPlayerShown). 0
+ * holds the line still, soft edge and all, so a row can stop walking without changing how it looks.
  */
 @Composable
-internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
+internal fun Modifier.readable(iterations: Int = READ_OUT): Modifier {
     if (!LocalPlayerShown.current) return this
     // What the line needs and what it has. The first size is this element's own - the width the row
     // gives the title - and the second is the text's, measured inside the marquee, which lays it out
@@ -1742,16 +2140,17 @@ internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
             // 20 dp instead, both while it walks and once it has settled back at the start.
             if (!over) Modifier else Modifier
                 .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
-                .drawWithContent {
-                    drawContent()
+                .drawWithCache {
+                    // Made once per size: the marquee redraws this every frame it walks.
                     val fade = 20.dp.toPx()
-                    drawRect(
-                        Brush.horizontalGradient(
-                            listOf(Color.Black, Color.Transparent),
-                            startX = size.width - fade, endX = size.width,
-                        ),
-                        blendMode = BlendMode.DstIn,
+                    val edge = Brush.horizontalGradient(
+                        listOf(Color.Black, Color.Transparent),
+                        startX = size.width - fade, endX = size.width,
                     )
+                    onDrawWithContent {
+                        drawContent()
+                        drawRect(edge, blendMode = BlendMode.DstIn)
+                    }
                 },
         )
         .basicMarquee(
@@ -1763,6 +2162,9 @@ internal fun Modifier.readable(iterations: Int = Int.MAX_VALUE): Modifier {
         )
         .onSizeChanged { needs = it.width }
 }
+
+/** How many times a line too long for its width reads itself out before it settles; see [readable]. */
+internal const val READ_OUT = 2
 
 @Composable
 private fun PanelButton(
@@ -1780,33 +2182,10 @@ private fun PanelButton(
     nudge: androidx.compose.ui.unit.Dp = 0.dp,
     onClick: () -> Unit,
 ) {
-    val scheme = MaterialTheme.colorScheme
+    val look = LocalLook.current
     IconButton(onClick) {
-        Icon(
-            icon, label,
-            Modifier.size(size).offset(x = nudge),
-            tint = if (on) scheme.primary else scheme.onSurfaceVariant,
-        )
+        LookIcon(icon, label, Modifier.size(size).offset(x = nudge)) { look.color(if (on) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
     }
-}
-
-/**
- * The only ticking thing in the app, and only while this screen is resumed and music is playing.
- *
- * [track] is whatever identifies the song on screen: paused, nothing ticks, so a skip would otherwise
- * leave the last song's time under the new song's title until someone pressed play.
- */
-@Composable
-private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track: Any? = null): Long {
-    var pos by remember { mutableLongStateOf(vm.positionMs) }
-    var resumed by remember { mutableStateOf(false) }
-    LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    val shown = LocalPlayerShown.current
-    LaunchedEffect(playing, resumed, shown, track) {
-        pos = vm.positionMs
-        while (playing && resumed && shown && isActive) { delay(everyMs); pos = vm.positionMs }
-    }
-    return pos
 }
 
 /**
@@ -1816,25 +2195,28 @@ private fun position(vm: PlayerViewModel, playing: Boolean, everyMs: Long, track
  * The bar shows one of three places. The finger, while it is down. The place a released scrub asked
  * for, until the player is really there (the connection watches the seek and says so through
  * [PlayerViewModel.pendingSeek]; a slow seek thus reads as one held place, never a snap-back and a
- * glide). Otherwise the music: read from the player every frame, so the bar moves at the speed of
- * the song rather than in once-a-second steps, and eased towards with a short time constant, so a
- * jump in the position - a new song, a mix handing over, a seek from the notification - slides the
- * bar there in a third of a second instead of teleporting it. The easing lags steady playback by
- * that same constant, which is invisible, and it never fights a scrub: the finger and a held seek
- * are drawn directly.
+ * glide). Otherwise the music, paced by nori-look ([SeekPace]): drawn where the song is while it plays,
+ * a pixel at a time, and gliding over a third of a second when the song's place jumps - a new song, a
+ * mix handing over, a seek from the notification, a queue replaced - while the times under it cross-fade.
+ * Nothing teleports.
  *
- * The frame loop runs only while this screen is resumed, the music plays and nothing is held; a
- * paused bar takes one reading and stops.
+ * The only ticking thing in the app, and only while this screen is on screen and resumed and the music
+ * plays; a paused bar settles and stops. Put away, it does nothing at all, and the song moves on without
+ * it: so the moment it is on screen again (the player opened, the app come back) it is set straight to
+ * the song's real place, on the first frame drawn, rather than gliding there from wherever it was left -
+ * which, opened in the middle of a song change, was the middle of the last song.
  */
 @Composable
 private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     val state by vm.state.collectAsStateWithLifecycle()
+    val look = LocalLook.current
     // Read through the gesture rather than keyed: a track that learns its real length mid-scrub
     // would otherwise restart the pointer detector under the finger.
     val d by rememberUpdatedState(durationMs.coerceAtLeast(1).toFloat())
-    var dragging by remember { mutableStateOf(false) }
-    var drag by remember { mutableFloatStateOf(0f) }
-    var held by remember { mutableStateOf<Long?>(null) }
+    val length by rememberUpdatedState(durationMs)
+    val dragging = remember { mutableStateOf(false) }
+    val drag = remember { mutableFloatStateOf(0f) }
+    val held = remember { mutableStateOf<Long?>(null) }
     // The watch clears the flow when the seek has landed or been given up. The collected state lags
     // the flow by a frame, so the flow's own value is what is checked: right after a release the
     // collected value is still the old null while the flow already holds the seek. Keyed on the hold
@@ -1842,48 +2224,65 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
     // crossfade) never enters the flow at all, and a hold waiting for that flow to change would wait
     // for ever - the bar stuck where the finger left it, whatever the song did.
     val watched by vm.pendingSeek.collectAsStateWithLifecycle()
-    LaunchedEffect(watched, held) { if (held != null && vm.pendingSeek.value == null) held = null }
+    LaunchedEffect(watched, held.value) { if (held.value != null && vm.pendingSeek.value == null) held.value = null }
 
-    val pos = position(vm, playing, 1000, Triple(state.current?.id, state.index, held))
-    val shown = when { dragging -> (drag * d).toLong(); held != null -> held!!; else -> pos }
-
-    val bar = remember { mutableFloatStateOf((vm.positionMs / d).coerceIn(0f, 1f)) }
-    val free = !dragging && held == null
+    val pace = remember { dev.nori.music.look.SeekPace() }
+    androidx.compose.runtime.DisposableEffect(pace) { onDispose { pace.close() } }
+    // What the pace says, as the draw phase reads it: written only when it changes.
+    val bar = remember { mutableFloatStateOf(0f) }
+    val times = remember { mutableLongStateOf(0L) }
+    val fadingFrom = remember { mutableLongStateOf(-1L) }
+    val fade = remember { mutableFloatStateOf(1f) }
+    val publish = remember(pace) {
+        {
+            val b = pace.bar
+            if (b != bar.floatValue) bar.floatValue = b
+            val t = pace.times
+            if (t != times.longValue) times.longValue = t
+            val from = pace.fadingFrom
+            if (from != fadingFrom.longValue) fadingFrom.longValue = from
+            val f = pace.fade
+            if (f != fade.floatValue) fade.floatValue = f
+        }
+    }
+    /** The bar's length on screen, in pixels, for how often it needs drawing. */
+    val barWidth = remember { mutableFloatStateOf(1000f) }
+    val free = !dragging.value && held.value == null
     var resumed by remember { mutableStateOf(false) }
     LifecycleResumeEffect(Unit) { resumed = true; onPauseOrDispose { resumed = false } }
-    val shownOnScreen = LocalPlayerShown.current
-    // Paused, the loop settles the bar and stops - nothing ticks over a paused song - so anything
-    // that can move a paused player must restart it: play, a skip, a rewind (`pos` is re-read on a
-    // skip and when a hold drops; while the music plays it ticks every second and is deliberately
-    // not a key, or the loop would be restarted and lose a frame each time). `playing` was not a
-    // key once, and a bar that had settled while paused stayed where it was for the rest of the
-    // song after play was pressed again.
-    LaunchedEffect(free, resumed, shownOnScreen, playing, if (playing) null else pos, state.current?.id, state.index) {
-        if (!free || !resumed || !shownOnScreen) return@LaunchedEffect
+    val live = resumed && LocalPlayerShown.current
+    // Coming on screen: straight to the song, in the frame being made - a side effect runs after this
+    // composition and before its frame is drawn, where an effect would start a frame later.
+    val wasLive = remember { booleanArrayOf(false) }
+    androidx.compose.runtime.SideEffect {
+        if (live && !wasLive[0]) { pace.sync(vm.positionMs, length); publish() }
+        wasLive[0] = live
+    }
+    // Paused, the loop settles the bar and stops - nothing ticks over a paused song - so anything that
+    // can move a paused player restarts it: play, a skip, a seek. While the music plays it keeps going,
+    // a step every frame through a glide and one a pixel or a second otherwise.
+    LaunchedEffect(free, live, playing, state.current?.id, state.index, durationMs, watched) {
+        if (!free || !live) return@LaunchedEffect
         var last = androidx.compose.runtime.withFrameNanos { it }
         while (isActive) {
-            val target = (vm.positionMs / d).coerceIn(0f, 1f)
             val now = androidx.compose.runtime.withFrameNanos { it }
-            val dt = (now - last) / 1e9f
+            val wait = pace.step(vm.positionMs, length, (now - last) / 1e9f, barWidth.floatValue, if (playing) 1f else 0f)
             last = now
-            val gap = target - bar.floatValue
-            // Exponential approach, 140 ms time constant: settled within a third of a second.
-            bar.floatValue = if (kotlin.math.abs(gap) < 0.0005f) target else bar.floatValue + gap * (1f - kotlin.math.exp(-dt / 0.14f))
-            if (!playing && bar.floatValue == target) break
+            publish()
+            if (wait < 0) break
+            if (wait > 0) kotlinx.coroutines.delay(wait.toLong())
         }
     }
 
-    val fraction: () -> Float = { if (dragging) drag else held?.let { (it / d).coerceIn(0f, 1f) } ?: bar.floatValue }
-    val track = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.22f)
-    val filled = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
     // Held, the bar thickens and the dot grows, the way Apple's does, so the scrub is felt as well as
     // seen. Animated both ways: nothing here changes size in one frame.
-    val thickness by animateFloatAsState(if (dragging) 11f else 7.3f, spring(0.9f, 420f), label = "seek")
-    val knob by animateFloatAsState(if (dragging) 1.5f else 0f, spring(0.9f, 420f), label = "knob")
+    val thickness = animateFloatAsState(if (dragging.value) 11f else 7.3f, spring(0.9f, 420f), label = "seek")
+    val knob = animateFloatAsState(if (dragging.value) 1.5f else 0f, spring(0.9f, 420f), label = "knob")
     Column(Modifier.padding(horizontal = PLAYER_GUTTER, vertical = 4.dp)) {
         Box(
             // The strip is wider than the hairline it draws: a thumb is not a mouse.
             Modifier.fillMaxWidth().height(34.dp)
+                .onSizeChanged { barWidth.floatValue = it.width.toFloat() }
                 .pointerInput(Unit) {
                     // Written out rather than assembled from the drag and tap detectors, because both
                     // let the gesture go: the pointer is claimed on touch-down and every move is
@@ -1892,66 +2291,143 @@ private fun SeekBar(vm: PlayerViewModel, playing: Boolean, durationMs: Long) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         down.consume()
-                        drag = (down.position.x / size.width).coerceIn(0f, 1f)
-                        dragging = true
+                        drag.floatValue = (down.position.x / size.width).coerceIn(0f, 1f)
+                        dragging.value = true
                         var seek = true
                         while (true) {
                             val change = awaitPointerEvent().changes.firstOrNull { it.id == down.id }
                             // The pointer vanished from the event: the window took it (a call, a
                             // system gesture). Leave the song where it was.
                             if (change == null) { seek = false; break }
-                            drag = (change.position.x / size.width).coerceIn(0f, 1f)
+                            drag.floatValue = (change.position.x / size.width).coerceIn(0f, 1f)
                             change.consume()
                             if (!change.pressed) break
                         }
                         // Apple seeks on release, not while the finger moves: one seek, at the end,
-                        // and the sound carries on undisturbed until then. The bar is seeded at the
-                        // finger so that when the hold drops there is nothing stale to slide from.
+                        // and the sound carries on undisturbed until then. The pace is set down at the
+                        // finger so that when the hold drops there is nothing stale to glide from.
                         if (seek) {
-                            val target = (drag * d).toLong()
-                            bar.floatValue = drag
-                            held = target
+                            val target = (drag.floatValue * d).toLong()
+                            pace.hold(drag.floatValue, target, length)
+                            publish()
+                            held.value = target
                             vm.seekTo(target)
                         }
-                        dragging = false
+                        dragging.value = false
                     }
                 }
                 .drawBehind {
-                    val h = thickness.dp.toPx()
+                    // Where the bar is, worked out here in the draw phase from primitives: no lambda
+                    // returning a boxed Float on every frame.
+                    val hold = held.value
+                    val f = if (dragging.value) drag.floatValue else if (hold != null) (hold / d).coerceIn(0f, 1f) else bar.floatValue
+                    val track = look.color(CoverLook.ON_22)
+                    val filled = look.color(CoverLook.ON_85)
+                    val h = thickness.value.dp.toPx()
                     val y = (size.height - h) / 2f
                     val r = CornerRadius(h / 2f, h / 2f)
                     drawRoundRect(track, Offset(0f, y), Size(size.width, h), r)
-                    val f = fraction()
                     drawRoundRect(filled, Offset(0f, y), Size(size.width * f, h), r)
-                    if (knob > 0.01f) drawCircle(filled, h * knob, Offset(size.width * f, size.height / 2f))
+                    val k = knob.value
+                    if (k > 0.01f) drawCircle(filled, h * k, Offset(size.width * f, size.height / 2f))
                 },
         )
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Text(duration(shown / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty the
-            // rest of the time, holding its space so the two times either side never move. It said
-            // "Mixing" through every crossfade as well, which is a word about the plumbing rather than
-            // about the music, and it flickered up between songs for no reason anyone could see.
-            // `pos` above ticks this once a second.
-            val centre = state.error ?: when {
-                state.sleepAtEndOfTrack -> "Sleep · end of track"
-                // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
-                // and subtracting one from the other gives a number about fifty years wide, which the
-                // coerce below then turned into a cheerful "1 min" for every timer ever set.
-                state.sleepAt > 0 -> "Sleep · ${((state.sleepAt - android.os.SystemClock.elapsedRealtime() + 59_999) / 60_000).coerceAtLeast(1)} min"
-                else -> ""
-            }
-            Text(
-                centre, Modifier.weight(1f).padding(horizontal = 8.dp),
+        val mixing = vm.mixing.collectAsStateWithLifecycle()
+        SeekTimes(times, fadingFrom, fade, dragging, drag, held, durationMs, state.error, state.sleepAtEndOfTrack, state.sleepAt, mixing)
+    }
+}
+
+/**
+ * The two times under the seek bar and whatever needs saying between them. Nothing here recomposes as
+ * the song plays: the times are read in the draw phase, each second's text made once (see [duration]).
+ * When the bar glides over a jump the times cross-fade, the old ones out where they stand and the new
+ * ones in, rather than changing in one frame.
+ */
+@Composable
+private fun SeekTimes(
+    times: androidx.compose.runtime.LongState, fadingFrom: androidx.compose.runtime.LongState, fade: androidx.compose.runtime.FloatState,
+    dragging: androidx.compose.runtime.State<Boolean>, drag: androidx.compose.runtime.FloatState, held: androidx.compose.runtime.State<Long?>,
+    durationMs: Long, error: String?, sleepAtEndOfTrack: Boolean, sleepAt: Long, mixing: androidx.compose.runtime.State<Boolean>,
+) {
+    val look = LocalLook.current
+    val quiet = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON_VARIANT) }
+    // Which place the times count from - the finger, a held seek, the music - is the core's (`seek_times`)
+    // and the pace's. Asked over JNI with primitives, in the draw phase: a second, or a scrub on every
+    // frame the finger moves, redraws the two times and recomposes nothing.
+    val now = {
+        if (dragging.value || held.value != null) CoverLook.seekTimes(dragging.value, drag.floatValue, held.value ?: -1L, 0L, durationMs)
+        else times.longValue
+    }
+    val gone = { if (dragging.value || held.value != null) -1L else fadingFrom.longValue }
+    val style = MaterialTheme.typography.labelSmall
+    val longest = (durationMs / 1000).coerceAtLeast(0)
+    // The new times come in as the old ones go; with nothing fading this is 1 and the old layer draws nothing.
+    val inAlpha = Modifier.graphicsLayer { alpha = if (gone() < 0) 1f else fade.floatValue }
+    val outAlpha = Modifier.graphicsLayer { alpha = 1f - fade.floatValue }
+    Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
+        Box {
+            LookTime({ gone().let { if (it < 0) "" else duration(it ushr 32) } }, duration(longest), quiet, style, end = false, modifier = outAlpha)
+            LookTime({ duration(now() ushr 32) }, duration(longest), quiet, style, end = false, modifier = inAlpha)
+        }
+        // The centre slot carries whatever needs saying: an error, or the sleep timer. Empty the
+        // rest of the time, holding its space so the two times either side never move.
+        // While a timer is set the times are read here, so it recomposes this once a second and
+        // keeps the minutes current; otherwise nothing here reads them. How the timer reads is
+        // nori-core's (`words_sleep`), asked only while one is set.
+        //
+        // elapsedRealtime, not wall clock: sleepAt is set from SystemClock (PlayerConnection),
+        // and subtracting one from the other gives a number about fifty years wide, which the
+        // rounding then turned into a cheerful "1 min" for every timer ever set.
+        if (sleepAt > 0) times.longValue
+        val centre = error ?: if (sleepAtEndOfTrack || sleepAt > 0) say.sleep(sleepAtEndOfTrack, if (sleepAt > 0) sleepAt - android.os.SystemClock.elapsedRealtime() else 0) else ""
+        val errorColour = MaterialTheme.colorScheme.error
+        Box(Modifier.weight(1f).padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+            LookText(
+                centre, if (error != null) androidx.compose.ui.graphics.ColorProducer { errorColour } else quiet,
+                Modifier.fillMaxWidth(),
                 style = MaterialTheme.typography.labelSmall,
-                color = if (state.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
-            Text("-" + duration((durationMs - shown).coerceAtLeast(0) / 1000), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // An error or the sleep timer has the slot to itself.
+            MixingLabel(mixing, free = centre.isEmpty(), quiet)
+        }
+        Box {
+            LookTime({ gone().let { if (it < 0) "" else durationLeft(it and 0xFFFF_FFFFL) } }, durationLeft(longest), quiet, style, end = true, modifier = outAlpha)
+            LookTime({ durationLeft(now() and 0xFFFF_FFFFL) }, durationLeft(longest), quiet, style, end = true, modifier = inAlpha)
         }
     }
 }
+
+/**
+ * "MIXING", between the times while an AutoMix or a crossfade is being heard, the way Apple's player says
+ * it. It fades in and out (counted in frames, like every fade on this page) where it stands, in a slot
+ * that is there either way, so the times beside it never move. Nothing of it exists between mixes: the
+ * word is only composed while it is shown or fading, and the flag it follows is pushed by the player when
+ * a mix starts and ends, so a song playing on its own costs no recomposition, no frame and no wakeup.
+ */
+@Composable
+private fun MixingLabel(mixing: androidx.compose.runtime.State<Boolean>, free: Boolean, colour: androidx.compose.ui.graphics.ColorProducer) {
+    val on = mixing.value && free
+    val shown = remember { Animatable(if (on) 1f else 0f) }
+    LaunchedEffect(on) {
+        val to = if (on) 1f else 0f
+        if (shown.value == to) return@LaunchedEffect
+        if (AppMotion.reduce) shown.snapTo(to) else shown.fadeByFrames(to, MIXING_FADE_MS)
+    }
+    // Read through a derived state, so the fade's frames redraw the word and recompose nothing.
+    val present by remember { androidx.compose.runtime.derivedStateOf { shown.value > 0f } }
+    if (!on && !present) return
+    val word = remember { say.mixing.uppercase() }
+    LookText(
+        word, colour, Modifier.graphicsLayer { alpha = fadeEase(shown.value) },
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = androidx.compose.ui.unit.TextUnit(1.4f, androidx.compose.ui.unit.TextUnitType.Sp), fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
+        maxLines = 1,
+    )
+}
+
+/** How long "MIXING" takes to come and go. */
+private const val MIXING_FADE_MS = 360f
 
 @Composable
 private fun Queue(vm: PlayerViewModel) {
@@ -1959,36 +2435,60 @@ private fun Queue(vm: PlayerViewModel) {
     val list = rememberLazyListState(initialFirstVisibleItemIndex = state.order.indexOf(state.index).coerceAtLeast(0))
     // Nothing is reordered until the finger lifts. The held row follows it, the rows it passes step out
     // of the way, and the gap travels with it - reordering live would change the keys under the gesture
-    // and cancel it, which is why a row could only ever be moved one place at a time.
-    var from by remember { mutableIntStateOf(-1) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
-    var rowHeight by remember { mutableFloatStateOf(0f) }
+    // and cancel it, which is why a row could only ever be moved one place at a time. All of it is read
+    // where the rows are drawn (QueueDrag), so a frame of the drag recomposes no row.
+    val drag = remember { QueueDrag() }
+    val undo = remember { QueueUndo<Song>() }
     val haptics = LocalHapticFeedback.current
-    val moved = if (from >= 0 && rowHeight > 0f) (dragOffset / rowHeight).roundToInt() else 0
-    val target = (from + moved).coerceIn(0, (state.queue.size - 1).coerceAtLeast(0))
+    val scope = rememberCoroutineScope()
+    val plain = reduceMotion()
+    val look = LocalLook.current
+    val quiet = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON_VARIANT) }
+    val accent = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ACCENT) }
+    val ink = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON) }
+    // A swipe's strip in the page's own colours: the player is dressed in the cover's, not the theme's.
+    val swipeColours = remember(look) {
+        SwipeColours({ look.color(CoverLook.VEIL_13) }, { look.color(CoverLook.ACCENT) }, { look.color(CoverLook.ON_VARIANT) }, { look.color(CoverLook.ON_PRIMARY) })
+    }
+    var listWidth by remember { mutableFloatStateOf(0f) }
 
+  Box(Modifier.fillMaxSize()) {
     // Shuffle and repeat live here, pinned above the list - not in the transport, and never scrolled
     // away (the list opens at the playing row, which used to hide them).
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) {
-            Caption("Playing next", Modifier.padding(top = 4.dp, bottom = 8.dp))
+            Caption(remember { say.upNext }, Modifier.padding(top = 4.dp, bottom = 8.dp))
             Row(Modifier, Arrangement.spacedBy(4.dp), Alignment.CenterVertically) {
-                val scheme = MaterialTheme.colorScheme
+                val shuffleOn = state.shuffle
+                val repeatOn = state.repeat != Repeat.OFF
                 IconButton(vm::toggleShuffle, Modifier.size(44.dp)) {
-                    Icon(Icons.Filled.Shuffle, "Shuffle", Modifier.size(22.dp), tint = if (state.shuffle) scheme.primary else scheme.onSurfaceVariant)
+                    LookIcon(Icons.Filled.Shuffle, say.shuffle, Modifier.size(22.dp)) { look.color(if (shuffleOn) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
                 }
                 IconButton(vm::cycleRepeat, Modifier.size(44.dp)) {
-                    Icon(
-                        if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, "Repeat",
-                        Modifier.size(22.dp), tint = if (state.repeat != Repeat.OFF) scheme.primary else scheme.onSurfaceVariant,
-                    )
+                    LookIcon(
+                        if (state.repeat == Repeat.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, say.repeat,
+                        Modifier.size(22.dp),
+                    ) { look.color(if (repeatOn) CoverLook.ACCENT else CoverLook.ON_VARIANT) }
                 }
             }
         }
     // In the order the songs will play, which under shuffle is not the order of the list itself. A drag
     // moves a song within the list, so reordering is offered only when the two are the same.
-    val order = state.order.takeIf { it.size == state.queue.size } ?: state.queue.indices.toList()
-    val reorderable = !state.shuffle
+    // Which order, whether a drag may reorder it and which rows a swipe leaves are the core's (`queue_rows`).
+    val rows = remember(state.order, state.queue.size, state.shuffle, state.index) {
+        dev.nori.music.ffi.queueRows(state.queue.size.toUInt(), state.shuffle, state.index)
+    }
+    val order = remember(rows) { rows.order.map { it.toInt() } }
+    val kept = remember(rows) { rows.kept.map { it.toInt() }.toSet() }
+    val keys = remember(state.queue) { queueKeys(state.queue.map { it.id }) }
+    val reorderable = rows.reorderable
+    val queueNow by rememberUpdatedState(state.queue)
+    drag.size = state.queue.size
+    // A drop has landed when the queue is no longer the one it was sent against. On that frame the rows
+    // are laid out where they were already drawn: their shifts go (before this frame is laid out) and
+    // they do not also slide there.
+    val landed = drag.landed(state.queue)
+    SideEffect { if (landed) drag.clear() }
     // The last row is cut off dead straight where the list ends, a few pixels above the song's title,
     // and those few pixels are the ones that flickered as a panel came or went: a row half drawn, over
     // a title arriving in the same place. It goes soft over the last stretch instead, the way the
@@ -1997,86 +2497,216 @@ private fun Queue(vm: PlayerViewModel) {
     val fadeOut = with(androidx.compose.ui.platform.LocalDensity.current) { 28.dp.toPx() }
     LazyColumn(
         Modifier.fillMaxSize().weight(1f)
+            .onSizeChanged { listWidth = it.width.toFloat() }
             .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
-            .drawWithContent {
-                drawContent()
-                drawRect(
-                    androidx.compose.ui.graphics.Brush.verticalGradient(
-                        listOf(androidx.compose.ui.graphics.Color.Black, androidx.compose.ui.graphics.Color.Transparent),
-                        startY = size.height - fadeOut, endY = size.height,
-                    ),
-                    // A pixel past each edge: the layer is clipped to whole pixels and a mask drawn to
-                    // the exact height leaves the last fractional row of it untouched.
-                    topLeft = Offset(-1f, size.height - fadeOut),
-                    size = androidx.compose.ui.geometry.Size(size.width + 2f, fadeOut + 2f),
-                    blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+            .drawWithCache {
+                // One brush per size, not one per frame of a scroll.
+                val mask = androidx.compose.ui.graphics.Brush.verticalGradient(
+                    listOf(androidx.compose.ui.graphics.Color.Black, androidx.compose.ui.graphics.Color.Transparent),
+                    startY = size.height - fadeOut, endY = size.height,
                 )
+                // A pixel past each edge: the layer is clipped to whole pixels and a mask drawn to
+                // the exact height leaves the last fractional row of it untouched.
+                val at = Offset(-1f, size.height - fadeOut)
+                val area = androidx.compose.ui.geometry.Size(size.width + 2f, fadeOut + 2f)
+                onDrawWithContent {
+                    drawContent()
+                    drawRect(mask, topLeft = at, size = area, blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
+                }
             },
         state = list,
     ) {
-        itemsIndexed(order, key = { _, i -> "$i-${state.queue[i].id}" }, contentType = { _, _ -> "song" }) { at, i ->
+        itemsIndexed(order, key = { _, i -> keys[i] }, contentType = { _, _ -> "song" }) { at, i ->
             val s = state.queue[i]
-            val held = at == from
-            val shift = when {
-                from < 0 -> 0f
-                held -> dragOffset
-                at in (from + 1)..target -> -rowHeight
-                at in target until from -> rowHeight
-                else -> 0f
+            val key = keys[i]
+            // Only the row picked up and put down recomposes; the drag itself is read in the layer below.
+            val held by remember(key) { derivedStateOf { drag.liftKey == key } }
+            val place by rememberUpdatedState(at)
+            val back = undo.returning?.takeIf { it.key == key }
+            // A row put back by the undo comes in from the side it left by, and does not fade as well.
+            val swipe = remember { SwipeState().apply { if (back != null && !plain && back.side != 0f) offset.floatValue = back.side * listWidth } }
+            LaunchedEffect(Unit) {
+                if (undo.returning?.key != key) return@LaunchedEffect
+                undo.arrived(key)
+                if (swipe.offset.floatValue != 0f) androidx.compose.animation.core.animate(
+                    swipe.offset.floatValue, 0f, animationSpec = spring(dampingRatio = 0.9f, stiffness = 420f),
+                ) { v, _ -> swipe.offset.floatValue = v }
             }
-            Row(
+            val take = RowSwipe(Icons.Filled.PlaylistRemove, say.remove) {
+                // Where the song is now: the list may have moved under a slow swipe.
+                val now = vm.state.value.queue
+                val index = queueKeys(now.map { it.id }).indexOf(key)
+                if (index >= 0) {
+                    undo.took(now[index], index, key, -1f)
+                    vm.remove(index)
+                }
+            }
+            Box(
                 Modifier.fillMaxWidth()
-                    .zIndex(if (held) 1f else 0f)
-                    .graphicsLayer { translationY = shift; if (held) { shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f } }
-                    .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
-                    .clickable { vm.skipTo(i) }
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
-                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    Text(
-                        s.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
-                        color = if (i == state.index) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    .animateItem(
+                        fadeInSpec = if (plain || back != null) null else tween(QUEUE_IN_MS),
+                        placementSpec = if (plain || landed) null else tween(QUEUE_MOVE_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                        fadeOutSpec = if (plain) null else tween(QUEUE_OUT_MS),
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Added by hand: plays before the rest of the queue carries on.
-                        if (i in state.queued) Icon(Icons.AutoMirrored.Filled.QueueMusic, "Added by you", Modifier.padding(end = 4.dp).size(14.dp), tint = MaterialTheme.colorScheme.primary)
-                        Text(s.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    .zIndex(if (held) 1f else 0f)
+                    .graphicsLayer {
+                        translationY = drag.shift(place)
+                        if (drag.liftKey == key) {
+                            val l = drag.lift.floatValue
+                            shadowElevation = 14f * l; scaleX = 1f + 0.02f * l; scaleY = 1f + 0.02f * l
+                        }
                     }
+                    .onGloballyPositioned { if (drag.rowHeight == 0f) drag.rowHeight = it.size.height.toFloat() },
+            ) {
+                // The song playing only gives a little and comes back: a swipe does not stop the music
+                // (the × does, on purpose). Leftwards only: rightwards from the edge is the back gesture's.
+                SwipeBackdrop(swipe, null, if (i in kept) null else take, Modifier.matchParentSize(), swipeColours, reveal = true, inset = 12.dp)
+                Row(
+                    Modifier.fillMaxWidth()
+                        .swipeable(swipe, null, if (i in kept) null else take, null, gone = true, resist = i in kept)
+                        .clickable { vm.skipTo(i) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        LookText(
+                            s.title, if (i == state.index) accent else ink,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Added by hand: plays before the rest of the queue carries on.
+                            if (i in state.queued) LookIcon(Icons.AutoMirrored.Filled.QueueMusic, say.addedByYou, Modifier.padding(end = 4.dp).size(14.dp), accent)
+                            LookText(s.artist, quiet, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    IconButton({ undo.took(s, i, key, 0f); vm.remove(i) }, Modifier.size(38.dp)) {
+                        LookIcon(Icons.Filled.Close, say.remove, Modifier.size(19.dp), quiet)
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        reorderable,
+                        enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
+                        exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
+                    ) { LookIcon(
+                        Icons.Filled.DragHandle, say.reorder,
+                        tint = { if (drag.liftKey == key) androidx.compose.ui.graphics.lerp(quiet(), accent(), drag.lift.floatValue) else quiet() },
+                        modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
+                            var lifting: kotlinx.coroutines.Job? = null
+                            fun lift(to: Float) {
+                                lifting?.cancel()
+                                lifting = scope.launch {
+                                    if (plain) drag.lift.floatValue = to
+                                    else androidx.compose.animation.core.animate(drag.lift.floatValue, to, animationSpec = tween(QUEUE_LIFT_MS)) { v, _ -> drag.lift.floatValue = v }
+                                    if (to == 0f && drag.liftKey == key) drag.liftKey = null
+                                }
+                            }
+                            // Let go: the row settles into the slot it is over, and only then is the move
+                            // sent; the rows stay drawn where they are until the queue has changed.
+                            fun drop(send: Boolean) {
+                                val from = drag.from
+                                if (from < 0) return
+                                val to = if (send) drag.target() else from
+                                val h = drag.rowHeight
+                                scope.launch {
+                                    val rest = (to - from) * h
+                                    if (plain) drag.offset.floatValue = rest
+                                    else androidx.compose.animation.core.animate(drag.offset.floatValue, rest, animationSpec = tween(QUEUE_DROP_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { v, _ -> drag.offset.floatValue = v }
+                                    lift(0f)
+                                    if (to == from || drag.from != from) { if (drag.from == from) drag.clear(); return@launch }
+                                    drag.landing = queueNow
+                                    vm.move(from, to)
+                                    // A move that never arrives does not hold the rows up for good.
+                                    kotlinx.coroutines.delay(QUEUE_LANDING_MS)
+                                    if (drag.landing != null && drag.from == from) drag.clear()
+                                }
+                            }
+                            detectDragGestures(
+                                onDragStart = {
+                                    drag.clear()
+                                    drag.from = place
+                                    drag.liftKey = key
+                                    lift(1f)
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDragEnd = { drop(send = true) },
+                                onDragCancel = { drop(send = false) },
+                            ) { change, d -> change.consume(); drag.offset.floatValue += d.y }
+                        },
+                    ) }
                 }
-                IconButton({ vm.remove(i) }, Modifier.size(38.dp)) {
-                    Icon(Icons.Filled.Close, "Remove", Modifier.size(19.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                androidx.compose.animation.AnimatedVisibility(
-                    reorderable,
-                    enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
-                    exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
-                ) { Icon(
-                    Icons.Filled.DragHandle, "Reorder",
-                    tint = if (held) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = {
-                                from = at; dragOffset = 0f
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            },
-                            onDragEnd = {
-                                // Worked out here, from the state as it is now: pointerInput(Unit) keeps
-                                // the block it was created with, so anything computed during composition
-                                // is frozen at its first value - which quietly meant "did not move".
-                                val h = rowHeight
-                                val size = vm.state.value.queue.size
-                                val to = if (h > 0f) (from + (dragOffset / h).roundToInt()).coerceIn(0, (size - 1).coerceAtLeast(0)) else from
-                                if (from >= 0 && to != from) vm.move(from, to)
-                                from = -1; dragOffset = 0f
-                            },
-                            onDragCancel = { from = -1; dragOffset = 0f },
-                        ) { change, drag -> change.consume(); dragOffset += drag.y }
-                    },
-                ) }
             }
         }
     }
+    }
+    UndoPill(undo, plain, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp)) { t ->
+        vm.restore(t.item, t.index)
+    }
+  }
+}
+
+/** How the queue's rows come, go and move: a row appearing, a row leaving (after a swipe it is already off the side), the rest closing up. */
+private const val QUEUE_IN_MS = 220
+private const val QUEUE_OUT_MS = 160
+private const val QUEUE_MOVE_MS = 260
+/** A held row lifting and settling, and a dropped row going into its slot. */
+private const val QUEUE_LIFT_MS = 150
+private const val QUEUE_DROP_MS = 140
+/** How long the rows wait for a move to reach the queue before they give it up. */
+private const val QUEUE_LANDING_MS = 1_000L
+/** How long the undo is offered for. */
+private const val UNDO_MS = 5_000L
+private const val UNDO_IN_MS = 240f
+private const val UNDO_OUT_MS = 170f
+
+/**
+ * "Removed “song” · Undo", a small pill over the foot of the queue for a few seconds after a song is taken
+ * out. It rises and fades in, and sinks and fades out showing what it said, taking no taps as it goes. A
+ * second song taken out while it is up replaces the words in place.
+ */
+@Composable
+private fun UndoPill(undo: QueueUndo<Song>, plain: Boolean, modifier: Modifier, restore: (QueueUndo.Taken<Song>) -> Unit) {
+    val now = undo.shown
+    val shown = remember { Animatable(0f) }
+    var last by remember { mutableStateOf(now) }
+    if (now != null) last = now
+    LaunchedEffect(now) {
+        val t = now ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(UNDO_MS)
+        undo.expire(t)
+    }
+    LaunchedEffect(now != null) {
+        val to = if (now != null) 1f else 0f
+        if (shown.value == to) return@LaunchedEffect
+        if (plain) shown.animateTo(to, tween(120, easing = androidx.compose.animation.core.LinearEasing))
+        else shown.fadeByFrames(to, if (to == 1f) UNDO_IN_MS else UNDO_OUT_MS)
+    }
+    val present by remember { derivedStateOf { shown.value > 0f } }
+    val t = last ?: return
+    if (now == null && !present) return
+    val look = LocalLook.current
+    val rise = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.toPx() }
+    Row(
+        modifier
+            .graphicsLayer {
+                val v = fadeEase(shown.value)
+                alpha = v
+                if (!plain) translationY = (1f - v) * rise
+            }
+            .clip(RoundedCornerShape(50))
+            // The pill takes every touch on it, as it fades out too: a tap meant for Undo a moment late
+            // must not fall through to the × of the row under it and take another song out.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Final).changes.forEach { it.consume() } } }
+            .drawBehind { drawRect(look.color(CoverLook.SURFACE_CONTAINER_HIGH)) }
+            .padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LookText(
+            say.queueRemoved(t.item.title), { look.color(CoverLook.ON) }, Modifier.widthIn(max = 220.dp),
+            style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        // Taps only while it is there to be read, not as it goes.
+        androidx.compose.material3.TextButton({ if (undo.shown === t) undo.undo()?.let(restore) }, enabled = now != null) {
+            LookText(say.undo, { look.color(CoverLook.ACCENT) }, style = MaterialTheme.typography.labelLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), maxLines = 1)
+        }
     }
 }

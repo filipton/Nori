@@ -1,22 +1,43 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/uniffi-bindgen"]
+members = ["crates/android", "crates/automix", "crates/cli", "crates/core", "crates/covers", "crates/db", "crates/devices", "crates/engine", "crates/http", "crates/library", "crates/look", "crates/lyrics", "crates/model", "crates/mpris", "crates/net", "crates/output-cpal", "crates/perf", "crates/player", "crates/queue", "crates/settings", "crates/settings-derive", "crates/testdir", "crates/transfers", "crates/uniffi-bindgen", "crates/uniffi-jni-runtime"]
 
 [workspace.package]
-version = "0.3.4"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-uniffi = "0.32"
+# The Kotlin bindings go through JNI (uniffi-bindgen-kotlin-jni), which is only on uniffi's main branch so
+# far. Every uniffi crate has to come from one revision, the JNI runtime included (crates/uniffi-jni-runtime
+# puts the app's two Android changes over it). Without default features uniffi's macros emit no scaffolding of
+# their own: crates/android generates the JNI one. A first build fetches this repository once; cargo keeps it.
+uniffi = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e", default-features = false }
+uniffi-bindgen-kotlin-jni = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e" }
+uniffi-bindgen-kotlin-jni-runtime = { git = "https://github.com/mozilla/uniffi-rs", rev = "aea52cbe269183afba665372c991420253cbe56e" }
 
 # Signalsmith Stretch is about ten times slower unoptimised; keep it fast in debug builds and tests too.
 [profile.dev.package.signalsmith-stretch]
 opt-level = 3
 
+# `cargo test` only (debug builds and the APK are untouched): the sound chain, AutoMix and the decoders
+# make minutes of music per test, and unoptimised they were most of the suite's time. Debug assertions
+# and overflow checks stay on.
+[profile.test.package.nori-player]
+opt-level = 2
+
+[profile.test.package.nori-engine]
+opt-level = 2
+
+[profile.test.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = "fat"
 codegen-units = 1
 opt-level = 3
-panic = "abort"
+# Unwind, not abort: a panic in the core reached through uniffi then comes out in Kotlin as an exception
+# the caller can catch (runCatching around a measure, a page read), instead of ending the app. It costs
+# unwind tables in the library, nothing per call.
+panic = "unwind"
 strip = true

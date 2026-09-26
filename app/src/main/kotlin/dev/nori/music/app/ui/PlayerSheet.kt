@@ -104,22 +104,9 @@ class PlayerSheet(private val scope: CoroutineScope) {
         scope.launch { progress.snapTo((progress.value - dy / travel).coerceIn(0f, 1f)) }
     }
 
-    /**
-     * The finger let go at [velocityY] pixels a second. A flick goes the way it was flicked; otherwise a
-     * drag that has come a little way - [COMMIT] of the travel - finishes the move it started, and a
-     * smaller one goes back. Deciding by the halfway point instead meant a pull down from the player had
-     * to cover half the screen before it would close.
-     */
+    /** The finger let go at [velocityY] pixels a second: the sheet settles where [sheetTarget] says. */
     fun release(velocityY: Float) {
-        val moved = progress.value - from
-        val target = when {
-            velocityY < -FLICK -> 1f
-            velocityY > FLICK -> 0f
-            moved > COMMIT -> 1f
-            moved < -COMMIT -> 0f
-            else -> from
-        }
-        settle(target, -velocityY / travel)
+        settle(sheetTarget(from, progress.value, velocityY), -velocityY / travel)
     }
 
     private fun settle(target: Float, velocity: Float, stiffness: Float = 420f) {
@@ -131,16 +118,6 @@ class PlayerSheet(private val scope: CoroutineScope) {
         }
     }
 
-    private companion object {
-        /** A release faster than this, in pixels a second, goes the way it was flicked. */
-        const val FLICK = 900f
-
-        /** How far a slow drag has to come, as a share of the travel, to finish rather than go back. */
-        const val COMMIT = 0.15f
-
-        /** How far the back gesture takes the sheet down before it is let go. */
-        const val BACK_TRAVEL = 0.2f
-    }
 }
 
 val LocalPlayerSheet = staticCompositionLocalOf<PlayerSheet> { error("no player sheet") }
@@ -171,3 +148,28 @@ internal fun Modifier.dragsSheet(sheet: PlayerSheet, enabled: Boolean = true): M
             sheet.dragBy(dy)
         }
     }
+
+/** How far the back gesture takes the player down before it is let go. */
+private const val BACK_TRAVEL = 0.2f
+/** The player sheet: a release faster than this, in pixels a second, goes the way it was flicked... */
+private const val SHEET_FLICK_PX_S = 900f
+/** ...and a slow drag that has come this share of the way finishes the move it started. */
+private const val SHEET_COMMIT = 0.15f
+
+/**
+ * Where the player sheet settles when the finger lifts: 1 open, 0 put away. [from] is the end it was
+ * nearer when the drag began, [progress] where it is now and [velocity] the finger's (down positive). A
+ * flick goes the way it was flicked; a drag that has come a little way finishes the move it started, and
+ * a smaller one goes back. Deciding by the halfway point instead meant a pull down from the player had to
+ * cover half the screen before it would close.
+ */
+private fun sheetTarget(from: Float, progress: Float, velocity: Float): Float {
+    val moved = progress - from
+    return when {
+        velocity < -SHEET_FLICK_PX_S -> 1f
+        velocity > SHEET_FLICK_PX_S -> 0f
+        moved > SHEET_COMMIT -> 1f
+        moved < -SHEET_COMMIT -> 0f
+        else -> from
+    }
+}

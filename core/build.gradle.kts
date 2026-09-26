@@ -18,8 +18,19 @@ plugins {
     alias(libs.plugins.android.library)
 }
 
-val rustTargets = (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",")
+// Which ABIs the Rust core is built for. Asked explicitly with -PrustTargets; otherwise a debug build is for the
+// emulator (x86_64) and a perf or release build for phones (arm64-v8a): building both every time doubled
+// each build for a chip nobody was going to run it on.
+val shipping = gradle.startParameter.taskNames.any { t -> listOf("release", "perf", "bundle").any { t.contains(it, ignoreCase = true) } }
+val rustTargets = (project.findProperty("rustTargets") as String? ?: if (shipping) "arm64-v8a" else "x86_64").split(",")
 val rustProfile = project.findProperty("rustProfile") as String? ?: "release"
+// Cargo features of the core. `neural-beats` builds in tract for "Better beat detection" (docs/research/analysis.md)
+// and the model's graph, without weights: with the switch on, the core fetches the weights from the model's
+// authors once (crates/core/src/beat_download.rs), and nothing of them is in the APK. The setting stays off by
+// default. Every build has it, release included (the owner's call, 2026-09-26): it makes the arm64 APK about 15.7 MB
+// bigger (the library 9.6 to 25.3 MB). `-PrustFeatures=` (empty) leaves it out of any build: no tract in the
+// library, and no setting shown.
+val rustFeatures = project.findProperty("rustFeatures") as String? ?: "neural-beats"
 val cargoRoot = rootProject.projectDir
 val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")
     ?: file("${System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk").listFiles()
@@ -49,6 +60,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
     @get:InputFile @get:PathSensitive(PathSensitivity.RELATIVE) abstract val cargoToml: RegularFileProperty
     @get:Input abstract val targets: ListProperty<String>
     @get:Input abstract val profile: Property<String>
+    @get:Input abstract val features: Property<String>
     @get:Input abstract val ndkDir: Property<String>
     @get:Internal abstract val workDir: DirectoryProperty
     @get:OutputDirectory abstract val outputDir: DirectoryProperty
@@ -60,8 +72,9 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
         out.mkdirs()
         val args = mutableListOf("cargo", "ndk")
         targets.get().forEach { args += listOf("-t", it) }
-        args += listOf("-o", out.absolutePath, "build", "-p", "norimusic")
+        args += listOf("-o", out.absolutePath, "build", "-p", "nori-android")
         if (profile.get() == "release") args += "--release"
+        if (features.get().isNotBlank()) args += listOf("--features", features.get())
         exec.exec {
             workingDir = workDir.get().asFile
             environment("ANDROID_NDK_HOME", ndkDir.get())
@@ -77,19 +90,12 @@ abstract class UniffiBindgenTask @Inject constructor(private val exec: ExecOpera
 
     @TaskAction
     fun run() {
-        val wd = workDir.get().asFile
+        // The JNI generator reads the crates' sources (src:), so nothing has to be built for the host first.
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
         exec.exec {
-            workingDir = wd
-            commandLine("cargo", "build", "-q", "-p", "norimusic")
-        }
-        exec.exec {
-            workingDir = wd
-            commandLine(
-                "cargo", "run", "-q", "-p", "uniffi-bindgen", "--",
-                "generate", "--library", "target/debug/libnorimusic.so",
-                "--language", "kotlin", "--no-format",
-                "--out-dir", outputDir.get().asFile.absolutePath,
-            )
+            workingDir = workDir.get().asFile
+            commandLine("cargo", "run", "-q", "-p", "uniffi-bindgen", "--", "bindings", "src:nori-android", out.absolutePath)
         }
     }
 }
@@ -101,6 +107,7 @@ val cargoNdkBuild = tasks.register<CargoNdkTask>("cargoNdkBuild") {
     cargoToml.set(File(cargoRoot, "Cargo.toml"))
     targets.set(rustTargets)
     profile.set(rustProfile)
+    features.set(rustFeatures)
     ndkDir.set(ndkDirPath)
     workDir.set(cargoRoot)
     outputDir.set(layout.buildDirectory.dir("rust/jniLibs"))
@@ -108,7 +115,7 @@ val cargoNdkBuild = tasks.register<CargoNdkTask>("cargoNdkBuild") {
 
 val uniffiBindgen = tasks.register<UniffiBindgenTask>("uniffiBindgen") {
     group = "rust"
-    description = "Generate Kotlin bindings with uniffi"
+    description = "Generate the Kotlin bindings with uniffi-bindgen-kotlin-jni"
     crates.set(File(cargoRoot, "crates"))
     workDir.set(cargoRoot)
     outputDir.set(layout.buildDirectory.dir("generated/uniffi"))
@@ -125,10 +132,11 @@ dependencies {
     api(libs.media3.exoplayer)
     api(libs.media3.session)
     implementation(libs.media3.datasource.okhttp)
+    // Moving covers are HLS (MotionPlayer); nothing of it is loaded while they are switched off.
+    implementation(libs.media3.exoplayer.hls)
     api(libs.okhttp)
     api(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.guava)
     implementation(libs.androidx.core.ktx)
-    implementation("${libs.jna.get()}@aar")
     testImplementation("junit:junit:4.13.2")
 }

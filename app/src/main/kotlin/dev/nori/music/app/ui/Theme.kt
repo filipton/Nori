@@ -13,18 +13,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.graphics.ColorUtils
-import dev.nori.music.settings.Prefs
-import dev.nori.music.settings.ThemeMode
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.settings.ThemeMode
 
 /**
  * Material You: the wallpaper's colours on Android 12+, otherwise a scheme grown from one accent colour.
  * AMOLED replaces every dark surface with true black, so those pixels are simply off.
  */
 @Composable
-fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
+fun NoriTheme(prefs: StoredPrefs, content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val dark = when (prefs.theme) { ThemeMode.SYSTEM -> isSystemInDarkTheme(); ThemeMode.DARK -> true; ThemeMode.LIGHT -> false }
+    val system = isSystemInDarkTheme()
+    // Light, dark or the phone's: the core's rule (nori_look::theme::is_dark), the same for every screen.
+    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.settings.themeIsDark(prefs.theme, system) }
     val dynamic = prefs.dynamicColor && Build.VERSION.SDK_INT >= 31
     val scheme = remember(dark, dynamic, prefs.accent, prefs.amoled) {
         val base = when {
@@ -34,25 +35,41 @@ fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
         }
         if (dark && prefs.amoled) base.black() else base
     }
-    val system = androidx.compose.ui.platform.LocalDensity.current
+    val systemDensity = androidx.compose.ui.platform.LocalDensity.current
     val widthDp = androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp
-    val scale = uiScale(prefs.uiScale, widthDp)
+    val scale = remember(prefs.uiScale, widthDp) { uiScale(prefs.uiScale, widthDp) }
     // The whole app's density, scaled once here: dp and sp both follow it, so every size keeps its
     // proportion to the screen. The system's font scale is left as it is - that one is the reader's.
-    val density = remember(system, scale) {
-        if (scale == 1f) system else androidx.compose.ui.unit.Density(system.density * scale, system.fontScale)
+    val density = remember(systemDensity, scale) {
+        if (scale == 1f) systemDensity else androidx.compose.ui.unit.Density(systemDensity.density * scale, systemDensity.fontScale)
     }
-    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density) {
+    // Everything dressed in the theme's own colours - the plates behind the buttons, the chrome, the
+    // status bar - worked out once per scheme in Rust (nori_look::dress) and only looked up after.
+    val look = remember(scheme) {
+        FixedLook(
+            dev.nori.music.look.CoverLook.plain(
+                intArrayOf(
+                    scheme.background.toArgb(), scheme.onSurface.toArgb(), scheme.onSurfaceVariant.toArgb(), scheme.primary.toArgb(),
+                    scheme.onPrimary.toArgb(), scheme.surfaceVariant.toArgb(), scheme.surfaceContainer.toArgb(),
+                    scheme.surfaceContainerHigh.toArgb(), scheme.secondaryContainer.toArgb(), scheme.outlineVariant.toArgb(),
+                ),
+            ),
+        )
+    }
+    androidx.compose.runtime.CompositionLocalProvider(androidx.compose.ui.platform.LocalDensity provides density, LocalLook provides look) {
         MaterialTheme(colorScheme = scheme, typography = NoriTypography, content = content)
     }
 }
 
+/** Every size in the app was measured as a share of the width of a phone this many dp wide. */
+private const val REFERENCE_WIDTH_DP = 411f
+
 /**
- * Every size in this app was measured against Apple's own screens as a share of the screen's width,
- * on a phone 411 dp wide. A phone whose display size makes it narrower in dp - one measured at 358 dp
- * - draws every one of those sizes a seventh larger, and the whole thing looks zoomed in. Automatic
- * lays the app out as if the screen were at least [REFERENCE_WIDTH_DP] wide, so the proportions hold;
- * it only ever shrinks, never enlarges past what the system asked for.
+ * How big the interface is drawn. A setting above 0 is a fixed factor. 0 is automatic: laid out as if
+ * the screen were at least [REFERENCE_WIDTH_DP] wide, so a phone set to a large display size (one
+ * measured at 358 dp draws everything a seventh larger) keeps the proportions; it only ever shrinks,
+ * never below three quarters, and never enlarges past what the system asked for. A phone's rule, about
+ * Android's display size: a desktop window has no such setting to undo.
  */
 fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
     setting > 0f -> setting
@@ -60,27 +77,27 @@ fun uiScale(setting: Float, screenWidthDp: Int): Float = when {
     else -> (screenWidthDp / REFERENCE_WIDTH_DP).coerceIn(0.75f, 1f)
 }
 
-private const val REFERENCE_WIDTH_DP = 411f
-
-/** A light or dark scheme from one colour: tones of the same hue, like Material's own generator but tiny. */
+/** A light or dark scheme from one colour: tones of the same hue, worked out in Rust (`nori_look::theme::seeded`). */
 private fun seeded(seed: Color, dark: Boolean): ColorScheme {
-    val hsl = FloatArray(3).also { ColorUtils.colorToHSL(seed.toArgb(), it) }
-    fun tone(l: Float, s: Float = hsl[1]) = Color(ColorUtils.HSLToColor(floatArrayOf(hsl[0], s.coerceIn(0f, 1f), l)))
+    val tones = dev.nori.music.look.CoverLook.tones(seed.toArgb(), dark)
+    val t = List(tones.size) { Color(tones[it]) }
     return if (dark) darkColorScheme(
-        primary = tone(0.80f), onPrimary = tone(0.20f), primaryContainer = tone(0.30f), onPrimaryContainer = tone(0.90f),
-        secondary = tone(0.78f, hsl[1] * 0.4f), secondaryContainer = tone(0.28f, hsl[1] * 0.4f), onSecondaryContainer = tone(0.90f, hsl[1] * 0.4f),
-        surface = tone(0.07f, hsl[1] * 0.12f), background = tone(0.07f, hsl[1] * 0.12f),
-        surfaceVariant = tone(0.22f, hsl[1] * 0.15f), onSurfaceVariant = tone(0.80f, hsl[1] * 0.15f),
+        primary = t[0], onPrimary = t[1], primaryContainer = t[2], onPrimaryContainer = t[3],
+        secondary = t[4], secondaryContainer = t[5], onSecondaryContainer = t[6],
+        surface = t[7], background = t[8], surfaceVariant = t[9], onSurfaceVariant = t[10],
     ) else lightColorScheme(
-        primary = tone(0.40f), onPrimary = Color.White, primaryContainer = tone(0.90f), onPrimaryContainer = tone(0.12f),
-        secondary = tone(0.40f, hsl[1] * 0.4f), secondaryContainer = tone(0.90f, hsl[1] * 0.4f), onSecondaryContainer = tone(0.12f, hsl[1] * 0.4f),
-        surface = tone(0.98f, hsl[1] * 0.2f), background = tone(0.98f, hsl[1] * 0.2f),
-        surfaceVariant = tone(0.90f, hsl[1] * 0.15f), onSurfaceVariant = tone(0.30f, hsl[1] * 0.15f),
+        primary = t[0], onPrimary = t[1], primaryContainer = t[2], onPrimaryContainer = t[3],
+        secondary = t[4], secondaryContainer = t[5], onSecondaryContainer = t[6],
+        surface = t[7], background = t[8], surfaceVariant = t[9], onSurfaceVariant = t[10],
     )
 }
 
-private fun ColorScheme.black() = copy(
-    background = Color.Black, surface = Color.Black, surfaceDim = Color.Black,
-    surfaceContainerLowest = Color.Black, surfaceContainerLow = Color(0xFF0A0A0A), surfaceContainer = Color(0xFF111111),
-    surfaceContainerHigh = Color(0xFF181818), surfaceContainerHighest = Color(0xFF202020),
-)
+/** AMOLED black: the dark surfaces nori_look puts in their place (`dress::AMOLED`), so those pixels are off. */
+private fun ColorScheme.black(): ColorScheme {
+    val a = dev.nori.music.look.CoverLook.amoled()
+    return copy(
+        background = Color(a[0]), surface = Color(a[1]), surfaceDim = Color(a[2]),
+        surfaceContainerLowest = Color(a[3]), surfaceContainerLow = Color(a[4]), surfaceContainer = Color(a[5]),
+        surfaceContainerHigh = Color(a[6]), surfaceContainerHighest = Color(a[7]),
+    )
+}

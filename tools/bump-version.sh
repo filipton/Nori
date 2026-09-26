@@ -42,7 +42,8 @@ edit("app/build.gradle.kts", [
 ])
 # The workspace version can lag behind the app's (it did at 0.3.1), so it is set outright.
 edit("Cargo.toml", [(r'(\[workspace\.package\][^\[]*?\nversion = )"[^"]+"', rf'\g<1>"{new}"')])
-members = ["norimusic", "uniffi-bindgen"]
+# Every workspace crate takes the workspace version, so each has an entry to move.
+members = [re.search(r'^name = "([^"]+)"', (p / "Cargo.toml").read_text(), re.M).group(1) for p in sorted((root / "crates").iterdir()) if (p / "Cargo.toml").exists()]
 edit("Cargo.lock", [(rf'(\[\[package\]\]\nname = "{re.escape(m)}"\nversion = )"[^"]+"', rf'\g<1>"{new}"') for m in members])
 edit("docs/features.md", [(rf'Nori {esc}\*\*', f'Nori {new}**')])
 EOF

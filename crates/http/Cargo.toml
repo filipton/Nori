@@ -1,0 +1,16 @@
+[package]
+name = "nori-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nori's HTTP for the desktop: the core's Transport and the engine's ByteSource over one ureq agent"
+
+[lib]
+name = "nori_http"
+
+[dependencies]
+nori-core = { path = "../core", default-features = false }
+nori-engine = { path = "../engine" }
+async-trait = "0.1"
+# rustls, no OpenSSL: one small TLS stack that builds the same everywhere.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }

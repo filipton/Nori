@@ -1,6 +1,9 @@
 package dev.nori.music.app.ui
 
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import androidx.compose.runtime.collectAsState
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
@@ -46,7 +49,8 @@ import androidx.navigation.compose.rememberNavController
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Song
+import dev.nori.music.settings.loggedIn
 
 /** Plain screens sit below the status bar; album, artist and playlist pages draw under it. */
 @Composable
@@ -66,28 +70,28 @@ class Nav(private val c: NavHostController, private val sheet: PlayerSheet) {
      * later; with it the header is there from the first frame and only the songs arrive. The last few
      * are kept, so going back and forward between albums does not lose them.
      */
-    private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.Album>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Album>?) = size > 8
+    private val albums = object : LinkedHashMap<String, dev.nori.music.ffi.model.Album>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Album>?) = size > 8
     }
-    private val artists = object : LinkedHashMap<String, dev.nori.music.ffi.Artist>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Artist>?) = size > 8
+    private val artists = object : LinkedHashMap<String, dev.nori.music.ffi.model.Artist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Artist>?) = size > 8
     }
-    private val playlists = object : LinkedHashMap<String, dev.nori.music.ffi.Playlist>() {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.Playlist>?) = size > 8
+    private val playlists = object : LinkedHashMap<String, dev.nori.music.ffi.model.Playlist>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, dev.nori.music.ffi.model.Playlist>?) = size > 8
     }
-    fun albumHint(id: String): dev.nori.music.ffi.Album? = albums[id]
-    fun artistHint(id: String): dev.nori.music.ffi.Artist? = artists[id]
-    fun playlistHint(id: String): dev.nori.music.ffi.Playlist? = playlists[id]
+    fun albumHint(id: String): dev.nori.music.ffi.model.Album? = albums[id]
+    fun artistHint(id: String): dev.nori.music.ffi.model.Artist? = artists[id]
+    fun playlistHint(id: String): dev.nori.music.ffi.model.Playlist? = playlists[id]
 
-    fun album(id: String, hint: dev.nori.music.ffi.Album? = null) {
+    fun album(id: String, hint: dev.nori.music.ffi.model.Album? = null) {
         if (hint != null) albums[id] = hint
         go("album/${Uri.encode(id)}")
     }
-    fun artist(id: String, hint: dev.nori.music.ffi.Artist? = null) {
+    fun artist(id: String, hint: dev.nori.music.ffi.model.Artist? = null) {
         if (hint != null) artists[id] = hint
         go("artist/${Uri.encode(id)}")
     }
-    fun playlist(id: String, hint: dev.nori.music.ffi.Playlist? = null) {
+    fun playlist(id: String, hint: dev.nori.music.ffi.model.Playlist? = null) {
         if (hint != null) playlists[id] = hint
         go("playlist/${Uri.encode(id)}")
     }
@@ -139,10 +143,10 @@ val LocalSongMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 val LocalPlayerMenu = staticCompositionLocalOf<(Song) -> Unit> { {} }
 
 private val tabs = listOf(
-    Tab("home", "Home", Icons.Filled.Home),
-    Tab("search", "Search", Icons.Filled.Search),
-    Tab("library", "Library", Icons.Filled.LibraryMusic),
-    Tab("settings", "Settings", Icons.Filled.Settings),
+    Tab("home", say.home, Icons.Filled.Home),
+    Tab("search", say.search, Icons.Filled.Search),
+    Tab("library", say.library, Icons.Filled.LibraryMusic),
+    Tab("settings", say.settings, Icons.Filled.Settings),
 )
 
 /**
@@ -194,7 +198,8 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
         val eqNotice by settings.eqNotice.collectAsStateWithLifecycle()
         LaunchedEffect(eqNotice) {
             val n = eqNotice ?: return@LaunchedEffect
-            val offer = n.action != "Undo"
+            // An offer waits for an answer; a curve already applied only offers to undo it.
+            val offer = n.source is dev.nori.music.playback.DeviceSound.Offer
             val result = snackbar.showSnackbar(
                 n.message, actionLabel = n.action, withDismissAction = offer,
                 duration = if (offer) androidx.compose.material3.SnackbarDuration.Long else androidx.compose.material3.SnackbarDuration.Short,
@@ -209,53 +214,13 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             }
         }
 
-        // The test bridge's handles, live for as long as the app is on screen. See TestHooks.
-        val player2 = player
-        androidx.compose.runtime.DisposableEffect(controller) {
-            dev.nori.music.app.TestHooks.open = { route -> if (route == "player") sheet.open() else nav.go(route) }
-            dev.nori.music.app.TestHooks.set = { name, value -> settings.setByName(name, value) }
-            dev.nori.music.app.TestHooks.play = { what -> actions.playByRef(what) }
-            dev.nori.music.app.TestHooks.login = { spec ->
-                val (url, user, pass) = spec.split("|").let { Triple(it[0], it.getOrElse(1) { "" }, it.getOrElse(2) { "" }) }
-                settings.login(settings.newProfile().copy(url = url, user = user, password = pass))
-            }
-            dev.nori.music.app.TestHooks.act = { what -> actions.testAction(what, player2) }
-            dev.nori.music.app.TestHooks.state = {
-                val st = player2.state.value
-                val p = settings.prefs.value
-                """{"route":"${if (sheet.isOpen) "player" else controller.currentBackStackEntry?.destination?.route}",""" +
-                    """"playing":${st.playing},"title":"${st.current?.title.orEmpty()}","artist":"${st.current?.artist.orEmpty()}",""" +
-                    """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
-                    // The next songs in the order they will play, and which of them were added by hand.
-                    st.order.drop(st.order.indexOf(st.index) + 1).take(8).let { up ->
-                        """"upNext":"${up.joinToString(" ") { st.queue[it].id }}","upNextQueued":"${up.joinToString(" ") { if (it in st.queued) "1" else "0" }}","shuffle":${st.shuffle},"""
-                    } +
-                    """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
-                    """"dspActive":${dev.nori.music.playback.Equalizer.active != null},"gainReductionDb":${dev.nori.music.playback.Equalizer.active?.gainReductionDb ?: 0f},""" +
-                    """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
-                    """"mixing":${dev.nori.music.playback.TransitionSink.mixing},""" +
-                    """"downloaded":${actions.downloads.value.done.size},"downloading":${actions.downloads.value.pending.size},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${actions.downloadStats.value.speedBps},"dlEta":${actions.downloadStats.value.etaSec ?: -1},""" +
-                    """"sinkBytes":${dev.nori.music.playback.BurstSink.bytesWritten},""" +
-                    dev.nori.music.Nori.get(context).dac.state.value.let { d ->
-                        """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
-                            """"dacBlocked":"${d.blockedBy.orEmpty()}","dacTrack":"${d.track.orEmpty()}","""
-                    } +
-                    (actions.lastLyrics ?: (player2.lyrics.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
-                        """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
-                            """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsSource":"${f.source}","""
-                    }.orEmpty() +
-                    // What the screen shows, mark included - not the snapshot the queue was painted with,
-                    // which is what a favourite toggled this session no longer agrees with.
-                    """"starred":${st.current?.let { actions.starMarks.value.effectiveStar(dev.nori.music.data.StarKind.SONG, it.id, it.starred) } ?: false},""" +
-                    """"notification":"${dev.nori.music.Nori.get(context).player.sessionButtons}",""" +
-                    """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
-            }
-            onDispose {
-                dev.nori.music.app.TestHooks.open = null
-                dev.nori.music.app.TestHooks.state = null
-                dev.nori.music.app.TestHooks.set = null
-                dev.nori.music.app.TestHooks.play = null
-            }
+        // The debug build's test bridge drives the app through this (src/debug TestDriver.kt); every
+        // other build has an empty one (src/noTest), so a release carries none of it.
+        dev.nori.music.app.TestDriver(controller, nav, sheet, settings, actions, player)
+
+        // The perf build's recorder starts a new stretch when the player goes up or away. See PerfHooks.
+        dev.nori.music.app.PerfHooks.recorder?.let { r ->
+            LaunchedEffect(sheet, r) { androidx.compose.runtime.snapshotFlow { sheet.isOpen }.collect(r::playerOpen) }
         }
 
         // Read from a snapshot observer, not in composition, so a request does not recompose the app.
@@ -275,6 +240,14 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             LocalPlayerMenu provides { menuSong = it; menuFromPlayer = true },
         ) {
             val route = controller.currentBackStackEntryAsState().value?.destination?.route
+            // The tab the page on screen belongs to, which is the one that stays lit, as Apple's does: a
+            // settings group, or an album opened from Home, is still inside that tab. Lit only on the tab
+            // roots themselves, the icon went out the moment anything was opened. There is one back stack
+            // and a tab tap rebuilds it from the start, so the page's tab is the last root shown.
+            var lastTab by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("home") }
+            val onTab = route?.takeIf { r -> tabs.any { it.route == r } }
+            LaunchedEffect(onTab) { if (onTab != null) lastTab = onTab }
+            val tabRoute = onTab ?: lastTab
             // This session's star changes, so every heart prefers them over the snapshot it painted with.
             val marks by actions.starMarks.collectAsStateWithLifecycle()
             // The chrome floats over the page rather than ending it: the page fills the window, its colour
@@ -283,6 +256,8 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             var chromeHeight by remember { mutableStateOf(0.dp) }
             var tabsHeight by remember { mutableStateOf(0.dp) }
             val density = androidx.compose.ui.platform.LocalDensity.current
+            // One look for both halves of the chrome, cross-fading once when the page under it changes.
+            val chromeLook = rememberChromeLook()
             // This replaced a Scaffold when the chrome started floating, and with it went the two things
             // Scaffold quietly provided: something that paints the app's background (every screen was
             // showing the window's default grey, lighter than our own cards) and a content colour for
@@ -324,6 +299,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                     page("smart/{id}") { SmartScreen(it.arguments!!.getString("id")!!, actions) }
                     page("smartEdit/{id}") { SmartEditScreen(it.arguments!!.getString("id")!!.let { i -> if (i == "new") "" else i }) }
                     page("stats") { StatsScreen() }
+                    page("perf") { dev.nori.music.app.PerfHooks.recorder?.Page() }
                     page("downloads") { DownloadsScreen(actions) }
                     page("folder/{id}") { FolderScreen(it.arguments!!.getString("id")!!, actions) }
                     page("decade/{year}") { SongsScreen(actions, it.arguments!!.getString("year")!!.toInt()) }
@@ -336,13 +312,13 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
                   // The now playing bar has a heart now, and it reads the stars the user has just
                   // changed from here like every other one. Outside this, it saw only the server's
                   // answer, so a tap on it changed nothing until the song came round again.
-                  CompositionLocalProvider(LocalStarMarks provides marks) { BottomChrome(player, actions, nav::player, tabsHeight) }
+                  CompositionLocalProvider(LocalStarMarks provides marks) { BottomChrome(player, actions, nav::player, tabsHeight, chromeLook) }
               }
               }
               PlayerLayer(sheet) { CompositionLocalProvider(LocalStarMarks provides marks) { PlayerScreen(player, actions) } }
               // The tab bar is over the player, not under it: as the player rises it slides down off the
               // screen instead of vanishing under the sheet in one frame. See BottomChrome.
-              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(route, tabs, nav::tab) { tabsHeight = it } }
+              Box(Modifier.align(Alignment.BottomCenter)) { TabBar(tabRoute, tabs, nav::tab, chromeLook) { tabsHeight = it } }
               // Top: less in the way of the now-playing bar; swipe or the X dismisses.
               SnackbarHost(
                   snackbar,
@@ -367,8 +343,9 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               }
             }
             SheetBack(sheet)
+            SelectionBack(actions, sheet, controller)
             }
-            menuSong?.let { SongMenu(it, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer }) }
+            SongMenu(menuSong, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer })
         }
         }
     }
@@ -391,6 +368,18 @@ private fun SheetBack(sheet: PlayerSheet) {
             throw e
         }
     }
+}
+
+/**
+ * Back while songs are selected lets go of them and stays on the page; registered after the NavHost's
+ * own, so it goes first. Not while the player is up: back puts the player away first. And any change of
+ * page - back, a tap, a tab, a link - ends the selection, so the bar never outlives the list it was for.
+ */
+@Composable
+private fun SelectionBack(actions: ActionsViewModel, sheet: PlayerSheet, controller: NavHostController) {
+    val selecting by remember(actions) { actions.selection.map { it.isNotEmpty() }.distinctUntilChanged() }.collectAsState(actions.selection.value.isNotEmpty())
+    androidx.activity.compose.BackHandler(selecting && !sheet.isOpen) { actions.backFromSelection() }
+    LaunchedEffect(controller, actions) { controller.currentBackStackEntryFlow.collect { actions.onPage(it.id) } }
 }
 
 /**

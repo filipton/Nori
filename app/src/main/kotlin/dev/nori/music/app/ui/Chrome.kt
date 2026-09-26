@@ -31,7 +31,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.draw.drawWithCache
+import dev.nori.music.look.CoverLook
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -80,21 +81,20 @@ import dev.nori.music.app.vm.PlayerViewModel
  * player holds the drag that opens the player, and moving the element a drag started on corrupts it.
  */
 @Composable
-fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp) {
-    val (slab, content, page, edge) = chromeColours()
+fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlayer: () -> Unit, tabsHeight: androidx.compose.ui.unit.Dp, look: Look) {
     // A soft wash under the chrome so the list fades out as it passes behind it. Apple gets this from
     // blurring what is behind the bars; one vertical gradient costs nothing and reads much the same.
+    // Made once per size and page colour, not on every draw.
     Column(
-        Modifier.drawBehind {
-            drawRect(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    0f to Color.Transparent, 0.45f to page.copy(alpha = 0.75f), 1f to page,
-                ),
+        Modifier.drawWithCache {
+            val fade = androidx.compose.ui.graphics.Brush.verticalGradient(
+                0f to Color.Transparent, 0.45f to look.color(CoverLook.CHROME_FADE), 1f to look.color(CoverLook.CHROME_PAGE),
             )
+            onDrawBehind { drawRect(fade) }
         },
     ) {
         SelectionBar(actions)
-        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, slab, content, edge) }
+        Box(Modifier.padding(horizontal = 10.dp)) { MiniPlayer(player, actions, onOpenPlayer, look) }
         Spacer(Modifier.height(tabsHeight))
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -106,9 +106,11 @@ fun BottomChrome(player: PlayerViewModel, actions: ActionsViewModel, onOpenPlaye
  * progress so nothing recomposes while it moves. Slid away, they are out of reach as well as sight.
  */
 @Composable
-fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
+fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, look: Look, onHeight: (androidx.compose.ui.unit.Dp) -> Unit) {
     val scheme = MaterialTheme.colorScheme
-    val (slab, content, _, edge) = chromeColours()
+    val slab = look.color(CoverLook.CHROME_SLAB)
+    val content = look.color(CoverLook.CHROME_CONTENT)
+    val edge = look.color(CoverLook.CHROME_EDGE)
     val search = tabs.firstOrNull { it.route == "search" }
     val rest = tabs.filter { it.route != "search" }
     val sheet = LocalPlayerSheet.current
@@ -149,41 +151,39 @@ fun TabBar(route: String?, tabs: List<Tab>, onTab: (String) -> Unit, onHeight: (
 }
 
 /**
- * The chrome's colours: the slab, what is written on it, and the page it fades into. Neutral, like
- * Apple's. Only a page that is *about* one cover - an album, an artist, the player - wears that cover's
- * colour; a bar tinted by whatever happens to be playing turns the whole app red on screens that have
- * nothing to do with the record.
+ * The chrome's look: the slab, what is written on it, and the page it fades into. Neutral, like Apple's.
+ * Only a page that is *about* one cover - an album, an artist - wears that cover's colour; a bar tinted
+ * by whatever happens to be playing turns the whole app red on screens that have nothing to do with the
+ * record. The colours themselves are the page's look (nori_look::dress): how far the slab is lifted off
+ * the page - more on a dark page, where AMOLED black left it nothing to lift off - and the cover's edge
+ * lent to it first, so it still belongs to the record.
+ *
+ * The bar changes with the page rather than switching over in the frame the page does: one cross-fade
+ * over the span the player's own colours travel in, shared by the bar and the tabs.
  */
 @Composable
-private fun chromeColours(): ChromeColours {
-    val scheme = MaterialTheme.colorScheme
-    val tint = currentPageTint()
-    val page = tint?.background ?: scheme.background
-    val content = tint?.onBackground ?: scheme.onSurface
-    // How far the slab is lifted off the page. One figure could not do both ends: a ninth of the text
-    // colour is plenty over white, and over a dark page - the AMOLED black most of all - it leaves the
-    // slab with nothing under it to lift, which is the bar that could not be told from the page at all.
-    // The theme is read off the page's own luminance rather than off prefs.theme, so a light cover on a
-    // dark page gets the treatment its own colour asks for.
-    val dark = page.luminance() < 0.5f
-    val lift = if (dark) 0.20f else 0.11f
-    // A tinted page lends the slab its cover's edge first, so it still belongs to the record, and the
-    // lift goes on top of that rather than instead of it.
-    val slab = content.copy(alpha = lift).over(tint?.let { blend(page, it.edge, 0.30f) } ?: page)
-    // The faint line Apple's floating bars carry along their top edge. It does most of the work in the
-    // light theme, where a shadow on a white page is barely there.
-    // The bar wears the record's colours too, so it has to change when the page does rather than
-    // switching over in the frame the song changes. The same span the player's own colours travel in.
-    val ease = androidx.compose.animation.core.tween<Color>(420)
-    val slabNow by androidx.compose.animation.animateColorAsState(slab, ease, label = "slab")
-    val contentNow by androidx.compose.animation.animateColorAsState(content, ease, label = "content")
-    val pageNow by androidx.compose.animation.animateColorAsState(page, ease, label = "page")
-    val edgeNow by androidx.compose.animation.animateColorAsState(content.copy(alpha = if (dark) 0.14f else 0.07f), ease, label = "edge")
-    return ChromeColours(slabNow, contentNow, pageNow, edgeNow)
+fun rememberChromeLook(): Look {
+    val base = LocalLook.current
+    val made = pagePalette.value?.look ?: (base as? FixedLook)?.table ?: IntArray(CoverLook.LEN) { base.argb(it) }
+    // Keyed on the colours, not the array: a look read out afresh is a new array with the same colours
+    // every time this composes, and keying the fade on that restarted it every frame - the fade's own
+    // state recomposing this, which made another array, sixty times a second on every screen.
+    val kept = remember { arrayOf(made) }
+    if (!kept[0].contentEquals(made)) kept[0] = made
+    val target = kept[0]
+    val t = remember { androidx.compose.animation.core.Animatable(1f) }
+    val live = remember { LiveLook { t.value }.also { it.set(null, target, 0) } }
+    var first by remember { mutableStateOf(true) }
+    LaunchedEffect(target) {
+        if (first) { first = false; return@LaunchedEffect }
+        // From wherever it has got to, so a page change mid-fade turns round instead of jumping.
+        val now = IntArray(CoverLook.LEN) { live.argb(it) }
+        t.snapTo(0f)
+        live.set(now, target, 0)
+        t.animateTo(1f, androidx.compose.animation.core.tween(420))
+    }
+    return live
 }
-
-/** The slab's colour, what is written on it, the page it fades into, and the hairline round its edge. */
-private data class ChromeColours(val slab: Color, val content: Color, val page: Color, val edge: Color)
 
 data class Tab(val route: String, val label: String, val icon: ImageVector)
 
@@ -221,52 +221,49 @@ private fun TabButton(tab: Tab, selected: Boolean, content: Color, onClick: () -
  * No progress bar on purpose: it would tick for as long as the app is open.
  */
 @Composable
-fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, slab: Color, content: Color, edge: Color) {
+fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Unit, look: Look) {
+    val slab = look.color(CoverLook.CHROME_SLAB)
+    val content = look.color(CoverLook.CHROME_CONTENT)
+    val edge = look.color(CoverLook.CHROME_EDGE)
     val state by vm.state.collectAsStateWithLifecycle()
     val title = state.current?.title ?: state.radio ?: return
     val settings: dev.nori.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) {
-        dev.nori.music.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
-        dev.nori.music.settings.ThemeMode.DARK -> true
-        dev.nori.music.settings.ThemeMode.LIGHT -> false
+        dev.nori.music.ffi.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
+        dev.nori.music.ffi.settings.ThemeMode.DARK -> true
+        dev.nori.music.ffi.settings.ThemeMode.LIGHT -> false
     }
-    // The bar wears the colour of what is playing, not of the page it happens to be sitting on: that is
-    // what ties it to the music while you browse somewhere else entirely. The palette is the same cached
-    // one the player and the album page use, so this costs a map lookup.
-    val palette = if (prefs.coverColors) {
-        rememberCoverPalette(vm.cover(state.current?.coverArt, CoverSize.ROW)?.takeUnless(::isProviderCover), dark, prefs.amoled)
-    } else null
-    // The colours of the songs either side, worked out before they are reached. Their covers are
+    // The colours of what is playing and of the songs either side, worked out before they are reached. Their covers are
     // already fetched ahead (PlayerViewModel); this is the other half of that, and it is what stops the
     // page wearing the last song's colour for a moment after a skip. It happens here rather than in the
     // player because the bar is on screen whenever something is playing, so a skip from the
     // notification or the lock screen is covered too.
     val context = androidx.compose.ui.platform.LocalContext.current
-    val around = remember(state.nextIndex, state.previousIndex, state.queue) {
-        listOfNotNull(
-            vm.cover(state.queue.getOrNull(state.nextIndex)?.coverArt, CoverSize.ROW),
-            vm.cover(state.queue.getOrNull(state.previousIndex)?.coverArt, CoverSize.ROW),
-        ).filterNot(::isProviderCover)
-    }
+    // Which songs either side is the core's (`covers_around`, the skips' own targets, shuffle included),
+    // worked out once per skip with the covers fetched ahead.
+    val near by vm.coversNear.collectAsStateWithLifecycle()
+    val around = remember(near) { near.mapNotNull { vm.cover(it, CoverSize.ROW) }.filterNot(::isProviderCover) }
     LaunchedEffect(around, dark, prefs.coverColors, prefs.amoled, prefs.playerColours) {
         if (!prefs.coverColors) return@LaunchedEffect
         for (url in around) {
-            warmCoverPalette(context, url, dark, prefs.amoled)
             // The full-screen player keeps the record's colours where the bar goes black, so that is a
-            // second set of colours for the same cover.
-            if (prefs.playerColours) warmCoverPalette(context, url, dark, false)
+            // second set of colours for the same cover, worked out from the same decode.
+            warmCoverPalette(context, url, dark, prefs.amoled, andPlain = prefs.playerColours)
         }
     }
     val scheme = MaterialTheme.colorScheme
     val sheet = LocalPlayerSheet.current
-    NowPlayingPalette(palette)
+    // Under the open player the bar is still composed and drawn, only covered: a title walking there
+    // redrew the whole screen every frame for nobody. Read through derivedStateOf so a drag of the sheet
+    // recomposes nothing here until it lands.
+    val covered by remember(sheet) { androidx.compose.runtime.derivedStateOf { sheet.progress.value >= 1f } }
     Surface(
         shape = CardShape, color = slab, contentColor = content,
         shadowElevation = 10.dp,
         border = androidx.compose.foundation.BorderStroke(androidx.compose.ui.unit.Dp.Hairline, edge),
         modifier = Modifier.fillMaxWidth()
-            .semantics { contentDescription = "Now playing bar" }
+            .semantics { contentDescription = say.nowPlayingBar }
             .onGloballyPositioned { sheet.miniTop = it.positionInRoot().y }
             // Up opens the player, following the finger the whole way; see PlayerSheet.
             .dragsSheet(sheet),
@@ -278,7 +275,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
             // What is playing slides aside for the next (or last) song, which comes in from the other
             // edge already showing; the buttons stay where they are. Radio has no neighbours.
             val song = state.current
-            val track: @Composable (dev.nori.music.ffi.Song?, Boolean) -> Unit = { s, real ->
+            val track: @Composable (dev.nori.music.ffi.model.Song?, Boolean) -> Unit = { s, real ->
                 Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 7.dp, bottom = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                     Cover(
                         vm.cover(s?.coverArt, CoverSize.ROW), 42.dp,
@@ -291,19 +288,19 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                     )
                     Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                         // A long title here reads itself out twice when the song comes on and then
-                        // settles back to the ellipsis. The full player scrolls its title for as long
-                        // as it is open; this bar is open for as long as the app is, and a line
-                        // walking there all afternoon is exactly the kind of thing the missing
-                        // progress bar above is missing for.
+                        // settles, as the full player's does (see readable). Only the row really
+                        // showing: the neighbours wait off either edge at alpha zero, and a long title
+                        // there walked after every change of song, a frame each time, on every page.
                         Text(
-                            s?.title ?: title, Modifier.readable(iterations = 2),
+                            s?.title ?: title, Modifier.readable(iterations = if (real && !covered) READ_OUT else 0),
                             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodyLarge,
                         )
+                        val error = if (real) state.error else null
                         Text(
-                            (if (real) state.error else null) ?: s?.artist ?: "Radio", maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            remember(error, s?.artist) { say.barLine(error, s?.artist) }, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (real && state.error != null) scheme.error else content.copy(alpha = 0.65f),
+                            color = if (real && state.error != null) scheme.error else look.color(CoverLook.CHROME_CONTENT_65),
                         )
                     }
                 }
@@ -314,6 +311,7 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
                 next = state.queue.getOrNull(state.nextIndex)?.takeIf { song != null },
                 same = { a, b -> a?.id == b?.id },
                 onPrevious = vm::previousItem, onNext = vm::next,
+                still = covered,
                 modifier = Modifier.weight(1f),
                 item = track,
             )
@@ -322,24 +320,14 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
             // for it because the title beside it is already allowed to run out of space gracefully.
             song?.let { s ->
                 val starred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, s.id, s.starred)
-                FavoriteHeart(starred, tint = content, muted = content.copy(alpha = 0.75f)) { actions.star(s, !starred) }
+                FavoriteHeart(starred, tint = content, muted = look.color(CoverLook.CHROME_CONTENT_75)) { actions.star(s, !starred) }
             }
             IconButton(vm::toggle) { PlayPauseGlyph(state.playing, state.buffering, 26.dp, 20.dp) }
-            IconButton(vm::next) { Icon(Icons.Filled.FastForward, "Next", Modifier.size(25.dp)) }
+            IconButton(vm::next) { Icon(Icons.Filled.FastForward, say.next, Modifier.size(25.dp)) }
         }
         }
     }
 }
-
-/**
- * The colours of the track that is playing, published once by the mini player so the tab bar under it
- * can wear the same tint. A plain holder rather than a CompositionLocal provider, because the two
- * composables are siblings: the bar is drawn after the player has worked its palette out.
- */
-private val nowPlaying = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
-
-@Composable
-fun nowPlayingPalette(): PagePalette? = nowPlaying.value
 
 private val pagePalette = androidx.compose.runtime.mutableStateOf<PagePalette?>(null)
 
@@ -359,26 +347,21 @@ fun PageTint(palette: PagePalette?) {
     }
 }
 
-@Composable
-private fun currentPageTint(): PagePalette? = pagePalette.value
-
-@Composable
-private fun NowPlayingPalette(palette: PagePalette?) {
-    androidx.compose.runtime.LaunchedEffect(palette) { nowPlaying.value = palette }
-}
-
 /**
  * A row of records, one showing: a sideways drag slides the showing one aside and brings its neighbour
  * in from the other edge, already drawn. Let go past a third of the way, or flicked, the neighbour
  * lands and [onNext] / [onPrevious] runs; it stays drawn in place of [current] until [current] is that
  * song too (the player answers a few frames later), so the old one never comes back for a frame.
- * [item]'s second argument is true for the one really showing. Nothing runs until a finger is down.
+ * [item]'s second argument is true for the one really showing. Nothing runs until a finger is down, or
+ * until [current] steps to a neighbour by itself, which slides the same way unless the row is [still]
+ * (out of sight).
  */
 @Composable
 internal fun <T> SwipeCarousel(
     current: T, previous: T?, next: T?, same: (T?, T?) -> Boolean,
     onPrevious: () -> Unit, onNext: () -> Unit,
     modifier: Modifier = Modifier,
+    still: Boolean = false,
     item: @Composable (T?, Boolean) -> Unit,
 ) {
     val scope = androidx.compose.runtime.rememberCoroutineScope()
@@ -403,6 +386,28 @@ internal fun <T> SwipeCarousel(
         }
         landed = NONE
     }
+    // A song that changes by itself (its end, a mix, the bar's own next button, the notification) comes
+    // in as a swipe brings it: the one it left goes out one side, the new one in from the other. As on
+    // the player's sleeve, decided while composing, so the new song is never drawn in place first; only
+    // for a step to a neighbour (the one left is then the neighbour, drawn where the slide starts).
+    val last = remember { Last<T>() }
+    val go = when {
+        !last.set || same(current, last.item) || current == null -> 0
+        AppMotion.reduce || still || landed !== NONE || moving?.isActive == true -> 0
+        same(previous, last.item) -> 1
+        same(next, last.item) -> -1
+        else -> 0
+    }
+    /** Where the row is while it slides by itself, in rows: 1 a whole row to the right, 0 in place. */
+    val natural = remember(current) { androidx.compose.animation.core.Animatable(go.toFloat()) }
+    val naturalNow by androidx.compose.runtime.rememberUpdatedState(natural)
+    androidx.compose.runtime.SideEffect {
+        if (!last.set || !same(current, last.item)) { last.item = current; last.set = true }
+    }
+    androidx.compose.runtime.LaunchedEffect(natural) {
+        // Counted in frames, as the sleeve's is: the new song's first frames can be slow ones.
+        if (natural.value != 0f) settleByFrames(natural, 560f)
+    }
     Box(
         modifier.clipToBounds().pointerInput(Unit) {
             val tracker = androidx.compose.ui.input.pointer.util.VelocityTracker()
@@ -410,11 +415,8 @@ internal fun <T> SwipeCarousel(
             val release: (Float) -> Unit = { v ->
                 val o = offset
                 val w = size.width.toFloat()
-                val go = when {
-                    o < 0f && hasAfter && (v < -900f || o < -w * 0.3f) -> -1
-                    o > 0f && hasBefore && (v > 900f || o > w * 0.3f) -> 1
-                    else -> 0
-                }
+                // The same gesture as the sleeve's, by the same rule (swipeTurn), with the bar's slower flick.
+                val go = swipeTurn(o, v, w, hasBefore, hasAfter, bar = true)
                 val running = moving
                 moving = scope.launch {
                     running?.cancelAndJoin()
@@ -443,7 +445,12 @@ internal fun <T> SwipeCarousel(
             // diagonal - which is the bar changing the song when it was asked to open.
             sidewaysDrag(
                 slop = 1.5f, ratio = 1.8f,
-                onDragStart = { tracker.resetTracking(); x = 0f; moving?.cancel() },
+                onDragStart = {
+                    tracker.resetTracking(); x = 0f; moving?.cancel()
+                    // A row still sliding in by itself is taken over where it is.
+                    val n = naturalNow.value
+                    if (n != 0f) { offset += n * size.width; scope.launch { naturalNow.snapTo(0f) } }
+                },
                 onDragEnd = { release(tracker.calculateVelocity().x) },
                 onDragCancel = { release(0f) },
             ) { change, d ->
@@ -452,16 +459,22 @@ internal fun <T> SwipeCarousel(
                 val w = size.width.toFloat()
                 val moved = offset + d
                 val allowed = (moved > 0f && hasBefore) || (moved < 0f && hasAfter)
-                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * 0.2f).coerceIn(-w * 0.06f, w * 0.06f)
+                offset = if (allowed) moved.coerceIn(-w, w) else (offset + d * GIVE).coerceIn(-w * GIVE_LIMIT, w * GIVE_LIMIT)
             }
         },
     ) {
         @Suppress("UNCHECKED_CAST")
         val showing = if (landed === NONE) current else landed as T?
-        Box(Modifier.graphicsLayer { translationX = offset }) { item(showing, landed === NONE) }
-        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
-        Box(Modifier.graphicsLayer { val o = offset; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
+        Box(Modifier.graphicsLayer { translationX = offset + natural.value * size.width }) { item(showing, landed === NONE) }
+        Box(Modifier.graphicsLayer { val o = offset + natural.value * size.width; alpha = if (o < 0f) 1f else 0f; translationX = o + size.width }) { item(next, false) }
+        Box(Modifier.graphicsLayer { val o = offset + natural.value * size.width; alpha = if (o > 0f) 1f else 0f; translationX = o - size.width }) { item(previous, false) }
     }
 }
 
 private val NONE = Any()
+
+/** What a row of records was last composed with; written after each composition, read by the next. */
+private class Last<T> {
+    var item: T? = null
+    var set = false
+}

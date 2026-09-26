@@ -1,0 +1,8 @@
+{"type":"Syllable","metadata":{"songwriters":["Someone"],"duration":238000},
+      "lrc":"[00:12.34]Quiet night\n[00:16.00]Again",
+      "content":[
+        {"timestamp":12340,"endtime":15000,"oppositeTurn":false,"background":true,
+         "text":[{"text":"Qui","part":true,"timestamp":12340,"endtime":12800},{"text":"et","part":false,"timestamp":12800,"endtime":13100},{"text":"night","part":false,"timestamp":13100,"endtime":14000}],
+         "backgroundText":[{"text":"la","part":false,"timestamp":14100,"endtime":14900}]},
+        {"timestamp":16000,"endtime":18000,"text":[{"text":"Again","part":false,"timestamp":16000,"endtime":18000}],"backgroundText":[]}
+      ]}

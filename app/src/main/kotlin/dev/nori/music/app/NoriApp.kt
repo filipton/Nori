@@ -1,33 +1,33 @@
 package dev.nori.music.app
 
 import android.app.Application
-import coil3.ImageLoader
-import coil3.PlatformContext
-import coil3.SingletonImageLoader
-import coil3.disk.DiskCache
-import coil3.disk.directory
-import coil3.memory.MemoryCache
-import coil3.network.okhttp.OkHttpNetworkFetcherFactory
-import coil3.request.crossfade
-import coil3.request.allowRgb565
 import dev.nori.music.Nori
-import okio.Path.Companion.toOkioPath
 
-class NoriApp : Application(), SingletonImageLoader.Factory {
+class NoriApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        dev.nori.music.app.ui.Say.use(resources)
+        dev.nori.music.net.Failures.use(resources)
         // Loading the native core and opening SQLite overlaps with the activity being created instead of preceding it.
         val nori = Nori.get(this)
-        Thread { nori.warmUp() }.start()
+        // Then the AutoEQ list, if the core says it is due (one request on Wi-Fi, once a month at most).
+        Thread { nori.warmUp(); forgetCoil(); kotlinx.coroutines.runBlocking { nori.keepAutoEqList() } }.start()
     }
 
-    /** Cover art shares the API's connection pool; its URLs are stable, so the disk cache needs no custom keys. */
-    override fun newImageLoader(context: PlatformContext): ImageLoader = ImageLoader.Builder(context)
-        .components { add(OkHttpNetworkFetcherFactory(callFactory = { Nori.get(this@NoriApp).http.callFactory })) }
-        .memoryCache { MemoryCache.Builder().maxSizePercent(context, 0.15).build() }
-        .diskCache { DiskCache.Builder().directory(cacheDir.resolve("covers").toOkioPath()).maxSizeBytes(256L * 1024 * 1024).build() }
-        .crossfade(false)
-        // Covers have no alpha: 16-bit bitmaps halve decode memory, so twice as many stay in the memory cache.
-        .allowRgb565(true)
-        .build()
+    /** A new locale changes the words, read again from the resources (fractions follow it by themselves: "12,4 MB"). */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        dev.nori.music.app.ui.Say.use(resources)
+        dev.nori.music.net.Failures.use(resources)
+    }
+
+    /**
+     * Covers were kept by Coil, in its own format, before the core fetched and kept them
+     * (dev.nori.music.data.CoverLoader, in a directory of its own): nothing reads that directory now, so
+     * it goes, once.
+     */
+    private fun forgetCoil() {
+        val old = cacheDir.resolve("covers")
+        if (old.exists()) old.deleteRecursively()
+    }
 }

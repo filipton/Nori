@@ -1,0 +1,30 @@
+[package]
+name = "nori-covers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Nori's cover art for clients without an image loader: fetched through the core, kept on disk and in memory, decoded straight to the size drawn"
+
+[lib]
+name = "nori_covers"
+
+[dependencies]
+# The platform's one GET (Transport), the covers' addresses and which of them are never kept.
+nori-core = { path = "../core", default-features = false }
+parking_lot = "0.12"
+md-5 = "0.11"
+# The fastest pure-Rust JPEG decoder at full size (SIMD IDCT and colour conversion on x86 and NEON).
+zune-jpeg = "0.5"
+zune-core = "0.5"
+# Only for pictures at least twice the size drawn: its IDCT decodes straight to 1/2, 1/4 or 1/8 of the
+# size, which skips most of the work zune-jpeg would do at full size. Without rayon: no threads of its own.
+jpeg-decoder = { version = "0.3", default-features = false }
+png = "0.18"
+image-webp = "0.2"
+# Only the decoder: its default color_quant is for writing GIFs.
+gif = { version = "0.14", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+nori-testdir = { path = "../testdir" }
+# The transport the loader tests stand in for the network with.
+async-trait = "0.1"

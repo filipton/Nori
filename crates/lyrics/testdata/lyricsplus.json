@@ -1,0 +1,9 @@
+{"type":"Word","metadata":{"source":"Apple","agents":{"v1":{"type":"person","alias":"v1"}}},
+      "lyrics":[
+        {"time":12345,"duration":3333,"text":"Paper boats drift","syllabus":[
+          {"time":12345,"duration":555,"text":"Pa"},{"time":12900,"duration":300,"text":"per "},
+          {"time":13200,"duration":400,"text":"boats "},{"time":13600,"duration":500,"text":"drift"},
+          {"time":14200,"duration":600,"text":"(hey)","isBackground":true}],"element":{"key":"L1","singer":"v1"}},
+        {"time":16000,"duration":2000,"text":"紙の舟","syllabus":[{"time":16000,"duration":500,"text":"紙"},{"time":16500,"duration":0,"text":"の"},{"time":16500,"duration":1000,"text":"舟"}]},
+        {"time":19000,"duration":1500,"text":"Whole line","syllabus":[{"time":19000,"duration":0,"text":"Whole line"}]}
+      ]}

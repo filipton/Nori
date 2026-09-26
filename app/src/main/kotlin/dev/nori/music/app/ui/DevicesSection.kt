@@ -28,7 +28,6 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -55,18 +54,18 @@ fun DevicesSection(vm: SettingsViewModel) {
     val rows by vm.deviceRows.collectAsStateWithLifecycle()
     val p by vm.prefs.collectAsStateWithLifecycle()
     var picking by remember { mutableStateOf<String?>(null) }
-    rows.firstOrNull { it.output == picking }?.let { d -> DeviceSheet(vm, d) { picking = null } }
+    NoriSheet(rows.firstOrNull { it.output == picking }, { picking = null }, skipPartiallyExpanded = false) { d -> DeviceSheet(vm, d) { picking = null } }
 
-    SectionTitle("Devices")
+    SectionTitle(say.devices)
     AnimatedRows(rows, { it.output }) { d -> DeviceItem(d) { vm.clearAssignError(); picking = d.output } }
     Toggle(
-        "Apply AutoEQ automatically",
-        "Headphones with a known AutoEQ curve get it as soon as they connect, instead of being asked.",
+        say.autoeqAuto,
+        say.autoeqAutoDetail,
         p.autoEqAuto,
     ) { on -> vm.update { it.copy(autoEqAuto = on) } }
     AnimatedVisibility(!p.profilePerOutput, enter = fadeIn(tween(motion())) + expandVertically(tween(motion())), exit = fadeOut(tween(motion())) + shrinkVertically(tween(motion()))) {
         Text(
-            "Devices keep their sound only while Settings, then Sound, then Remember sound per device is on.",
+            say.devicesNote,
             Modifier.padding(horizontal = Space.gutter, vertical = 6.dp),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
         )
@@ -89,7 +88,8 @@ private fun DeviceItem(d: DeviceRow, onClick: () -> Unit) {
                 Row {
                     d.kind?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant) }
                     AnimatedVisibility(d.current, enter = fadeIn(tween(motion())) + expandHorizontally(tween(motion())), exit = fadeOut(tween(motion())) + shrinkHorizontally(tween(motion()))) {
-                        Text(if (d.kind != null) " · Playing now" else "Playing now", style = MaterialTheme.typography.bodySmall, color = scheme.primary)
+                        val playing = remember(d.kind != null) { say.devicePlayingNow(d.kind != null) }
+                        Text(playing, style = MaterialTheme.typography.bodySmall, color = scheme.primary)
                     }
                 }
             }
@@ -142,7 +142,7 @@ internal fun <T> AnimatedRows(items: List<T>, key: (T) -> String, content: @Comp
     }
 }
 
-/** What one device gets: nothing chosen, flat, left alone, a saved profile, or a curve from AutoEQ. */
+/** What one device gets: nothing chosen, flat, left alone, a saved profile, or a curve from AutoEQ. The inside of a [NoriSheet]. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit) {
@@ -151,68 +151,72 @@ private fun DeviceSheet(vm: SettingsViewModel, d: DeviceRow, onDone: () -> Unit)
     val eq by vm.autoEq.collectAsStateWithLifecycle()
     val busy by vm.assigning.collectAsStateWithLifecycle()
     val error by vm.assignError.collectAsStateWithLifecycle()
-    val suggested by produceState(emptyList<dev.nori.music.ffi.AutoEqEntry>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
+    val suggested by produceState(emptyList<dev.nori.music.app.vm.AutoEqHit>(), d.output, eq.count) { value = vm.autoEqFor(d.output) }
     var query by remember { mutableStateOf("") }
-    val curves = if (query.trim().length >= 2 && eq.query == query) eq.hits else suggested
+    // Which profiles it offers and whether it can be forgotten are the core's (device_sheet); what it says, Say's.
+    val sheet = remember(d.output, d.current, profiles) {
+        dev.nori.music.ffi.devices.deviceSheet(d.output, d.current, profiles.map { it.name })
+    }
+    val intro = remember(d.kind) { say.deviceIntro(d.kind) }
+    val automatic = remember(p.autoEqAuto) { say.deviceAutomatic(p.autoEqAuto) }
+    val curves = if (!eq.tooShort && eq.query == query) eq.hits else suggested
     val pick = { c: DeviceSound.Choice -> vm.assignDevice(d.output, c, onDone) }
     val ms = motion()
 
-    ModalBottomSheet(onDismissRequest = onDone) {
-        LazyColumn(Modifier.navigationBarsPadding()) {
-            item("head") {
-                Column(Modifier.padding(bottom = 4.dp)) {
-                    LargeTitle(d.name)
-                    Text(
-                        "What music played through ${if (d.kind == null) "this" else "this ${d.kind} device"} sounds like. It switches by itself whenever the device connects.",
-                        Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+    LazyColumn(Modifier.navigationBarsPadding()) {
+        item("head") {
+            Column(Modifier.padding(bottom = 4.dp)) {
+                LargeTitle(d.name)
+                Text(
+                    intro,
+                    Modifier.padding(horizontal = Space.gutter), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        item("auto") {
+            Option(
+                say.automatic,
+                automatic,
+                d.choice == DeviceSound.Choice.Automatic,
+            ) { pick(DeviceSound.Choice.Automatic) }
+        }
+        item("flat") { Option(say.flat, say.flatDetail, d.choice == DeviceSound.Choice.Flat) { pick(DeviceSound.Choice.Flat) } }
+        item("quiet") { Option(say.leaveAsIs, say.leaveAsIsDetail, d.choice == DeviceSound.Choice.Quiet) { pick(DeviceSound.Choice.Quiet) } }
+        items(sheet.profiles, key = { "p:$it" }) { name ->
+            Option(name, say.savedProfile, d.choice == DeviceSound.Choice.Profile(name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(name)) }
+        }
+        item("curves") { SectionHeader(say.autoeqCurves) }
+        if (eq.count == 0) item("download") {
+            Column(Modifier.padding(horizontal = Space.gutter)) {
+                Text(
+                    say.autoeqDownloadHint,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(Modifier.padding(vertical = 10.dp).heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PillButton(say.downloadTheList, null, vm::downloadAutoEqIndex, prominent = true, enabled = !eq.busy)
+                    AnimatedVisibility(eq.busy, enter = fadeIn(tween(ms)), exit = fadeOut(tween(ms))) { LoadingDots(Modifier.padding(start = 14.dp)) }
                 }
             }
-            item("auto") {
-                Option(
-                    "Automatic",
-                    if (p.autoEqAuto) "Uses a matching AutoEQ curve when one is known" else "Offers a matching AutoEQ curve when one is known",
-                    d.choice == DeviceSound.Choice.Automatic,
-                ) { pick(DeviceSound.Choice.Automatic) }
-            }
-            item("flat") { Option("Flat", "The equalizer off on this device", d.choice == DeviceSound.Choice.Flat) { pick(DeviceSound.Choice.Flat) } }
-            item("quiet") { Option("Leave as is", "Nothing switches and nothing is offered", d.choice == DeviceSound.Choice.Quiet) { pick(DeviceSound.Choice.Quiet) } }
-            items(profiles.filter { it.name != DeviceSound.FLAT }, key = { "p:" + it.name }) { prof ->
-                Option(prof.name, "Saved profile", d.choice == DeviceSound.Choice.Profile(prof.name), Modifier.animateItem()) { pick(DeviceSound.Choice.Profile(prof.name)) }
-            }
-            item("curves") { SectionHeader("AutoEQ curves") }
-            if (eq.count == 0) item("download") {
-                Column(Modifier.padding(horizontal = Space.gutter)) {
-                    Text(
-                        "Download the AutoEQ list once (850 kB from github.com) to pick a curve by headphone name, for example the IEMs you plug into this DAC.",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(Modifier.padding(vertical = 10.dp).heightIn(min = 42.dp), verticalAlignment = Alignment.CenterVertically) {
-                        PillButton("Download the list", null, vm::downloadAutoEqIndex, prominent = true, enabled = !eq.busy)
-                        AnimatedVisibility(eq.busy, enter = fadeIn(tween(ms)), exit = fadeOut(tween(ms))) { LoadingDots(Modifier.padding(start = 14.dp)) }
-                    }
+        } else item("search") {
+            SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, eq.searchWords, Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
+        }
+        items(curves, key = { "c:" + it.entry.path }) { e ->
+            Option(e.entry.name, e.short, false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e.entry)) }
+        }
+        item("status") {
+            Column {
+                AnimatedVisibility(busy == d.output, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
+                    Box(Modifier.fillMaxWidth().padding(12.dp), Alignment.Center) { LoadingDots() }
                 }
-            } else item("search") {
-                SearchField(query, { q -> query = q; vm.searchAutoEq(q) }, "Search ${eq.count} headphones", Modifier.padding(horizontal = Space.gutter, vertical = 6.dp))
-            }
-            items(curves, key = { "c:" + it.path }) { e ->
-                Option(e.name, "${e.source} · ${e.form}", false, Modifier.animateItem()) { pick(DeviceSound.Choice.Curve(e)) }
-            }
-            item("status") {
-                Column {
-                    AnimatedVisibility(busy == d.output, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
-                        Box(Modifier.fillMaxWidth().padding(12.dp), Alignment.Center) { LoadingDots() }
-                    }
-                    AnimatedVisibility(error != null || eq.error != null, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
-                        Text(error ?: eq.error.orEmpty(), Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                    }
+                AnimatedVisibility(error != null || eq.error != null, enter = fadeIn(tween(ms)) + expandVertically(tween(ms)), exit = fadeOut(tween(ms)) + shrinkVertically(tween(ms))) {
+                    Text(error ?: eq.error.orEmpty(), Modifier.padding(horizontal = Space.gutter, vertical = 8.dp), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            if (!d.current && d.output != dev.nori.music.playback.Outputs.SPEAKER) item("forget") {
-                Column(Modifier.padding(top = 12.dp)) {
-                    Hairline()
-                    ActionRow("Forget this device", Icons.Outlined.Delete, { vm.forgetDevice(d.output); onDone() }, divider = false)
-                }
+        }
+        if (sheet.canForget) item("forget") {
+            Column(Modifier.padding(top = 12.dp)) {
+                Hairline()
+                ActionRow(say.forgetDevice, Icons.Outlined.Delete, { vm.forgetDevice(d.output); onDone() }, divider = false)
             }
         }
     }
@@ -228,7 +232,7 @@ private fun Option(title: String, subtitle: String?, selected: Boolean, modifier
                 if (!subtitle.isNullOrEmpty()) Text(subtitle, style = MaterialTheme.typography.bodySmall, color = scheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             AnimatedVisibility(selected, enter = fadeIn(tween(motion())), exit = fadeOut(tween(motion()))) {
-                Icon(Icons.Filled.Check, "Chosen", Modifier.size(20.dp), tint = scheme.primary)
+                Icon(Icons.Filled.Check, say.chosen, Modifier.size(20.dp), tint = scheme.primary)
             }
         }
         Hairline()

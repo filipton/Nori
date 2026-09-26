@@ -13,8 +13,8 @@ android {
         applicationId = "dev.nori.music"
         minSdk = 26
         targetSdk = 36
-        versionName = "0.3.4"
-        versionCode = 304
+        versionName = "0.4.0"
+        versionCode = 400
         ndk { abiFilters += (project.findProperty("rustTargets") as String? ?: "arm64-v8a,x86_64").split(",") }
         // What About can say about this build beyond a version number: the commit it was cut from, and
         // the versions of what it is built on - the Rust crates read from Cargo.lock, the Android ones
@@ -32,7 +32,7 @@ android {
             .joinToString(";") { "$it=${locked(it)}" }
         val catalog = rootProject.file("gradle/libs.versions.toml").takeIf { it.exists() }?.readText().orEmpty()
         fun cat(key: String): String = Regex("(?m)^" + Regex.escape(key) + "\\s*=\\s*\"([^\"]+)\"").find(catalog)?.groupValues?.get(1) ?: ""
-        val android = listOf("media3", "composeBom", "coil", "okhttp").joinToString(";") { "$it=${cat(it)}" }
+        val android = listOf("media3", "composeBom", "okhttp").joinToString(";") { "$it=${cat(it)}" }
         buildConfigField("String", "CORE_VERSIONS", "\"$rust;$android\"")
     }
 
@@ -64,6 +64,32 @@ android {
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
+        // A release build with the recorder in it, for measuring on a real phone without adb
+        // (docs/perf-build.md). Minified and not debuggable like a release, so what it measures is what
+        // a release costs; installed beside the normal app under its own id and name.
+        create("perf") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".perf"
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+        }
+    }
+
+    // The benchmarks: run over adb in a debug build (TestBridge), from the Performance page in a perf build.
+    sourceSets {
+        getByName("debug").kotlin.srcDir("src/bench/kotlin")
+        getByName("perf").kotlin.srcDir("src/bench/kotlin")
+        // The test bridge (TestBridge over adb, what it drives) is the debug build's alone (src/debug); the
+        // release and perf builds get its empty twin, so they carry none of it. The perf build's self test
+        // drives the app by itself and needs none of the bridge.
+        getByName("release").kotlin.srcDir("src/noTest/kotlin")
+        getByName("perf").kotlin.srcDir("src/noTest/kotlin")
+        // The self test's plain logic (no Android in it): built into the perf build, and tested on the JVM
+        // with the unit tests, which AGP runs for the debug build only.
+        getByName("perf").kotlin.srcDir("src/perf/logic")
+        getByName("test").kotlin.srcDir("src/perf/logic")
+        getByName("test").kotlin.srcDir("src/testPerf/kotlin")
     }
 
     compileOptions {
@@ -93,7 +119,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons)
-    implementation(libs.coil.compose)
-    implementation(libs.coil.okhttp)
-    implementation(libs.androidx.palette)
+    // The perf build's self test: its plain logic is tested on the JVM (src/testPerf).
+    testImplementation("junit:junit:4.13.2")
 }

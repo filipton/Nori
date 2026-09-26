@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyItemScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -22,7 +23,6 @@ import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -31,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,21 +54,22 @@ import dev.nori.music.app.vm.Load
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.PlaylistViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.ffi.Album
-import dev.nori.music.ffi.AlbumDetail
-import dev.nori.music.ffi.Artist
-import dev.nori.music.ffi.PlaylistDetail
-import dev.nori.music.ffi.Song
-import dev.nori.music.settings.Prefs
+import dev.nori.music.ffi.model.Album
+import dev.nori.music.ffi.library.AlbumDetail
+import dev.nori.music.ffi.model.Artist
+import dev.nori.music.ffi.library.PlaylistDetail
+import dev.nori.music.ffi.model.OriginKind
+import dev.nori.music.ffi.model.PageOrigin
+import dev.nori.music.ffi.model.Song
 
 @Composable
 private fun Header(title: String, subtitle: String, coverUrl: String?, actions: @Composable () -> Unit = {}) {
     val nav = LocalNav.current
     var fullscreen by remember { mutableStateOf(false) }
-    if (fullscreen && coverUrl != null) androidx.compose.ui.window.Dialog({ fullscreen = false }) { Cover(coverUrl, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }) }
+    NoriDialog(coverUrl?.takeIf { fullscreen }, { fullscreen = false }, scrim = 0.8f) { url -> Cover(url, 0.dp, Modifier.fillMaxWidth().clickable { fullscreen = false }) }
     Column {
         Row(Modifier.padding(end = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
+            IconButton(nav::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, say.back) }
             Column(Modifier.weight(1f)) {
                 Text(title, style = MaterialTheme.typography.headlineSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Caption(subtitle, Modifier.padding(top = 2.dp))
@@ -85,27 +87,44 @@ private fun Header(title: String, subtitle: String, coverUrl: String?, actions: 
  */
 @Composable
 private fun FilterField(count: Int, filter: String, onFilter: (String) -> Unit) {
-    if (count <= 12 && filter.isEmpty()) return
-    SearchField(filter, onFilter, "Filter", Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
+    val filtering = filter.isNotEmpty()
+    if (!remember(count, filtering) { dev.nori.music.ffi.library.filterOffered(count.toUInt(), filtering) }) return
+    SearchField(filter, onFilter, say.filter, Modifier.padding(horizontal = Space.gutter, vertical = 4.dp))
 }
 
-/** The row of buttons the screens without a hero still use. */
+/** The row of buttons the screens without a hero still use; [from] the page [songs] are the list of. */
 @Composable
-private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel) {
+private fun PlayButtons(songs: List<Song>, actions: ActionsViewModel, from: PageOrigin? = null) {
     val player: PlayerViewModel = viewModel()
     val shuffling by player.state.collectAsStateWithLifecycle()
     Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 8.dp), Arrangement.spacedBy(10.dp)) {
-        PillButton("Play", Icons.Filled.PlayArrow, { actions.play(songs) }, Modifier.weight(1f), prominent = true, enabled = songs.isNotEmpty())
+        PillButton(say.play, Icons.Filled.PlayArrow, { actions.play(songs, from = from) }, Modifier.weight(1f), prominent = true, enabled = songs.isNotEmpty())
         PillButton(
-            "Shuffle", Icons.Filled.Shuffle, { actions.shuffle(songs) }, Modifier.weight(1f),
+            say.shuffle, Icons.Filled.Shuffle, { actions.shuffle(songs, from) }, Modifier.weight(1f),
             prominent = shuffling.shuffle, enabled = songs.isNotEmpty(),
         )
-        IconButton({ actions.enqueue(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, "Add all to queue") }
-        IconButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Download, "Download all") }
+        IconButton({ actions.enqueue(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, say.addAllToQueue) }
+        IconButton({ actions.download(songs) }, enabled = songs.isNotEmpty()) { Icon(Icons.Filled.Download, say.downloadAll) }
     }
 }
 
-private fun List<Song>.matching(q: String) = if (q.isBlank()) this else filter { it.title.contains(q, true) || it.artist.contains(q, true) }
+/**
+ * The places in [songs] a filter keeps, by title or artist in either case (nori-core's `TextIndex`); null
+ * with no filter, for all of them. The index takes the list's text once, and only when a filter is first
+ * typed; each keystroke then sends the filter.
+ */
+@Composable
+private fun rememberMatching(songs: List<Song>, q: String): List<UInt>? {
+    val index = remember(songs) { lazy { dev.nori.music.ffi.library.TextIndex(songs.map { listOf(it.title, it.artist) }) } }
+    return remember(index, q) { if (q.isBlank()) null else index.value.view(q).rows }
+}
+
+/**
+ * An item of a page's body that may join it after the page is drawn (an artist's biography and top songs
+ * come after the page itself): it arrives with the body, and fades in where it joins if it is late.
+ */
+private fun LazyItemScope.late(arrival: State<Float>): Modifier =
+    (if (AppMotion.reduce) Modifier.animateItem(null, null, null) else Modifier.animateItem()).arriving(arrival)
 
 @Composable
 private fun playingId(): String? {
@@ -120,11 +139,9 @@ private fun selectedIds(actions: ActionsViewModel): Set<String> {
     return remember(selection) { selection.mapTo(HashSet()) { it.id } }
 }
 
-private fun quality(songs: List<Song>): String? {
-    val s = songs.firstOrNull() ?: return null
-    val lossless = s.suffix.lowercase() in setOf("flac", "alac", "wav", "aiff", "ape", "wv", "dsf", "dff")
-    return listOfNotNull(s.suffix.uppercase().ifEmpty { null }, if (lossless && s.bitDepth > 0u) "${s.bitDepth}/${s.samplingRate.toInt() / 1000.0}" else s.bitRate.takeIf { it > 0u }?.let { "$it kbps" }).joinToString(" ").ifEmpty { null }
-}
+/** An artist's releases by kind, as the core grouped them when the artist was read (`pages::release_groups`). */
+private fun groupsOf(d: dev.nori.music.ffi.library.ArtistDetail): List<Pair<String, List<Album>>> =
+    d.groups.map { g -> say.releaseShelf(g) to g.albums.map { d.albums[it.toInt()] } }
 
 
 /**
@@ -134,117 +151,136 @@ private fun quality(songs: List<Song>): String? {
  */
 @Composable
 internal fun downloadEntry(songs: List<Song>, done: Set<String>, actions: ActionsViewModel): Pair<String, () -> Unit> {
-    val missing = songs.filterNot { it.id in done }
-    return when {
-        songs.isEmpty() -> "Download" to { actions.download(songs) }
-        missing.isEmpty() -> "Remove downloads" to { actions.undownload(songs) }
-        missing.size == songs.size -> "Download" to { actions.download(songs) }
-        else -> "Download the other ${missing.size}" to { actions.download(missing) }
+    val missing = remember(songs, done) { songs.filterNot { it.id in done } }
+    // What it does is the core's (`menus::download_entry`); what it says, Say's.
+    val act = remember(songs.size, missing.size) { dev.nori.music.ffi.library.downloadEntry(songs.size.toUInt(), missing.size.toUInt()) }
+    val label = remember(act, missing.size) { say.downloadEntry(act, missing.size) }
+    return label to when (act) {
+        dev.nori.music.ffi.library.DownloadAct.ALL -> { { actions.download(songs) } }
+        dev.nori.music.ffi.library.DownloadAct.MISSING -> { { actions.download(missing) } }
+        dev.nori.music.ffi.library.DownloadAct.REMOVE -> { { actions.undownload(songs) } }
     }
 }
+
+/** The offer on a provider's album or playlist page (the core's `library_offer`), under the hero. */
+@Composable
+private fun LibraryOffer(id: String, external: Boolean, actions: ActionsViewModel) {
+    val offer = remember(id, external) { dev.nori.music.ffi.library.libraryOffer(id, external)?.let(say::libraryOffer) } ?: return
+    TextButton({ actions.addToLibrary(id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) { Text(offer) }
+}
+
+/**
+ * A page's own queue before its songs are read, from what it shows (a queue started from it carries
+ * [from]), so a page opened on the queue playing answers for it at once. Once read, the page comes with
+ * its queue (`AlbumDetail.queue`, and the like), the same one.
+ */
+@Composable
+private fun rememberPageQueue(from: PageOrigin, read: dev.nori.music.ffi.library.PageQueue?): dev.nori.music.ffi.library.PageQueue =
+    read ?: remember(from) { dev.nori.music.ffi.library.PageQueue(from) }
+
+@Composable
+private fun rememberOrigin(kind: OriginKind, id: String): PageOrigin = remember(kind, id) { PageOrigin(kind, id) }
+
+/** Makes a playlist a favourite on this phone, or not (the core's `pins_toggled`). */
+private fun SettingsViewModel.pin(id: String, on: Boolean) =
+    update { it.copy(pinnedPlaylists = dev.nori.music.ffi.library.pinsToggled(it.pinnedPlaylists, id, on)) }
+
+/**
+ * The ⋯ of a hero page, in a slot of its own 46 dp that is there from the first frame: it fades in when
+ * the page's detail lands, so the Play pill beside it never shifts.
+ */
+@Composable
+private fun LateMore(shown: Boolean, entries: @Composable () -> List<Pair<String, () -> Unit>>) {
+    Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
+        androidx.compose.animation.AnimatedVisibility(
+            visible = shown,
+            enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
+            exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
+        ) { MoreCircle(entries()) }
+    }
+}
+
+/** Why a hero page's detail did not come, under the hero. */
+@Composable
+private fun LoadFailed(message: String) = Text(
+    message,
+    Modifier.fillMaxWidth().padding(Space.gutter),
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+)
+
+/*
+ * Album, artist and playlist pages each have one drawing path, from whatever is known of the page so far.
+ * What the row that opened it already knew (Nav's hint: cover, title, counts) is enough for the hero to be
+ * there from the first frame of the slide (PageMotion), with Play and ⋯ held in their places and the
+ * songs rising in under it (Arrive) when the server answers - docs/motion.md items 16 and 17. A page
+ * opened with no hint (a deep link, "Go to album" from a song) waits behind LoadBox, which fades the same
+ * page in over its loader once the detail is there.
+ */
 
 @Composable
 fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = viewModel()) {
     LaunchedEffect(id) { vm.open(id) }
     val load by vm.ui.collectAsStateWithLifecycle()
+    val hint = LocalNav.current.albumHint(id)
+    if (hint == null) {
+        LoadBox(load) { d -> AlbumPage(d.album, d, null, actions, vm) }
+        return
+    }
+    val detail = (load as? Load.Ready)?.data
+    AlbumPage(detail?.album ?: hint, detail, (load as? Load.Failed)?.message, actions, vm)
+}
+
+/** An album's page: [detail] null while the songs are on the wire, [failed] when they did not come. */
+@Composable
+private fun AlbumPage(album: Album, detail: AlbumDetail?, failed: String?, actions: ActionsViewModel, vm: AlbumViewModel) {
     val done = actions.downloads.collectAsState().value.doneIds
     val selected = selectedIds(actions)
     val menu = LocalSongMenu.current
     val nav = LocalNav.current
     val playing = playingId()
-    // What the row that opened this page already knew: enough for the hero to be there from the first
-    // frame of the slide (PageMotion). Without it the page arrives as a bare card and fills in when
-    // the server answers - see docs/motion.md item 16. A deep link or "Go to album" from a song has
-    // no hint, so those still wait behind LoadBox.
-    val hint = nav.albumHint(id)
-    val detail = (load as? Load.Ready)?.data
-    val album = detail?.album ?: hint
-    if (album == null) {
-        LoadBox(load) { d -> AlbumBody(d, actions, vm, done, selected, menu, playing, nav) }
-        return
-    }
-    val discs = remember(detail) {
-        detail?.songs?.groupBy { it.discNumber.toInt().coerceAtLeast(1) }?.toSortedMap().orEmpty()
-    }
-    // This page's own queue: its songs, plus a song of this record some other queue carried along.
-    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val arrival = rememberArrival(detail != null)
+    // The album's own caption once it is read; until then what the row that opened it knew.
+    val caption = remember(detail, album) { detail?.let(say::albumCaption) ?: say.albumHintCaption(album.year.toInt(), album.songCount.toInt(), album.duration.toLong()) }
+    // A queue started here - its Play, Shuffle or a row - is the album's; its song played from anywhere else is not.
+    val from = rememberOrigin(OriginKind.ALBUM, album.id)
+    val queue = rememberPageQueue(from, detail?.queue)
     HeroPage(
         coverUrl = vm.cover(album.coverArt, CoverSize.FULL),
         title = album.name,
         subtitle = album.artist,
-        caption = if (detail != null) listOfNotNull(
-            album.year.takeIf { it > 0u }?.toString(), "${detail.songs.size} songs",
-            duration(detail.songs.sumOf { it.duration.toLong() }), quality(detail.songs),
-            "explicit".takeIf { album.explicitStatus == "explicit" },
-        ).joinToString(" · ") else listOfNotNull(
-            album.year.takeIf { it > 0u }?.toString(),
-            album.songCount.takeIf { it > 0u }?.let { "$it songs" },
-            album.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
-        ).joinToString(" · "),
+        caption = caption,
         onSubtitle = album.artistId?.let { a ->
             { nav.artist(a, Artist(a, album.artist, album.coverArt, null, 0u, false, false)) }
         },
         // Play and shuffle wait for the songs: pressing them with an empty list would queue nothing.
         // The row itself is reserved ([awaitingPlay]) so the page does not reflow when they land.
-        awaitingPlay = detail == null && load !is Load.Failed,
-        onPlay = detail?.let { d -> { actions.play(d.songs) } },
-        onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
-        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == album.id } == true },
+        awaitingPlay = detail == null && failed == null,
+        onPlay = detail?.let { d -> { actions.play(d.songs, from = from) } },
+        onShuffle = detail?.let { d -> { actions.shuffle(d.songs, from) } },
+        queue = queue,
         actions = {
             val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, album.id, album.starred)
             FavoriteCircle(albumStarred) { actions.starAlbum(album.id, !albumStarred); Unit }
-            // Fixed 46 dp slot: More fades in when the songs land so the Play pill never shifts.
-            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = detail != null,
-                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
-                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
-                ) {
-                    MoreCircle(listOf("Add to queue" to { actions.enqueue(detail!!.songs) }, downloadEntry(detail!!.songs, done, actions)))
-                }
-            }
+            LateMore(detail != null) { listOf(say.addToQueue to { actions.enqueue(detail!!.songs) }, downloadEntry(detail!!.songs, done, actions)) }
         },
     ) {
         when {
-            detail != null -> item(key = "body") {
-                Arrive {
-                    Column {
-                        if (album.isExternal || album.id.startsWith("pl-")) {
-                            TextButton({ actions.addToLibrary(album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                                Text("Add the whole ${if (album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(album.id) ?: "provider"})")
-                            }
-                        }
-                        discs.forEach { (disc, tracks) ->
-                            if (discs.size > 1) {
-                                val title = detail.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-                            }
-                            val (onRight, onLeft) = actions.swipes
-                            tracks.forEachIndexed { i, s ->
-                                SongRow(
-                                    s, null,
-                                    onClick = { actions.tap(detail.songs, detail.songs.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) },
-                                    onMenu = { menu(s) },
-                                    number = s.track.toInt(), playing = s.id == playing, downloaded = s.id in done,
-                                    selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
-                                    swipeRight = rowSwipe(onRight, s, actions),
-                                    swipeLeft = rowSwipe(onLeft, s, actions),
-                                    divider = i < tracks.lastIndex,
-                                    showArtist = !s.artist.equals(album.artist, ignoreCase = true),
-                                )
-                            }
-                        }
-                    }
+            detail != null -> {
+                item(key = "offer", contentType = "offer") { Box(Modifier.arriving(arrival)) { LibraryOffer(album.id, album.isExternal, actions) } }
+                // An album is short enough to scroll and its running order is the point of it, so the songs
+                // stay exactly as the record has them, grouped by disc (as the core laid them out,
+                // `pages::album_discs`) and never narrowed. A row each: only the ones on screen are composed.
+                detail.discs.forEachIndexed { n, disc ->
+                    // Only an album of several discs heads them (the core leaves the one disc's empty).
+                    if (disc.headed) item(key = "disc-$n", contentType = "disc") { SectionTitle(remember(disc) { say.discHeading(disc) }, Modifier.arriving(arrival)) }
+                    songRows(
+                        detail.songs, actions, playing, done, selected, menu,
+                        numbered = true, rows = disc.songs, lines = disc.lines, arrival = arrival, from = from,
+                    )
                 }
             }
-            load is Load.Failed -> item(key = "fail") {
-                Text(
-                    (load as Load.Failed).message,
-                    Modifier.fillMaxWidth().padding(Space.gutter),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                )
-            }
+            failed != null -> item(key = "fail") { LoadFailed(failed) }
             // The hero is already the page; a spinner under it would be a second thing to look at
             // while the songs are on a short wire. Empty until they land.
             else -> Unit
@@ -253,232 +289,106 @@ fun AlbumScreen(id: String, actions: ActionsViewModel, vm: AlbumViewModel = view
 }
 
 @Composable
-private fun AlbumBody(
-    d: AlbumDetail,
-    actions: ActionsViewModel,
-    vm: AlbumViewModel,
-    done: Set<String>,
-    selected: Set<String>,
-    menu: (Song) -> Unit,
-    playing: String?,
-    nav: Nav,
-) {
-    // An album is short enough to scroll and its running order is the point of it, so the songs
-    // stay exactly as the record has them, grouped by disc and never narrowed.
-    val discs = remember(d) { d.songs.groupBy { it.discNumber.toInt().coerceAtLeast(1) }.toSortedMap() }
-    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
-    HeroPage(
-        coverUrl = vm.cover(d.album.coverArt, CoverSize.FULL),
-        title = d.album.name,
-        subtitle = d.album.artist,
-        caption = listOfNotNull(
-            d.album.year.takeIf { it > 0u }?.toString(), "${d.songs.size} songs",
-            duration(d.songs.sumOf { it.duration.toLong() }), quality(d.songs),
-            "explicit".takeIf { d.album.explicitStatus == "explicit" },
-        ).joinToString(" · "),
-        onSubtitle = d.album.artistId?.let { a ->
-            { nav.artist(a, Artist(a, d.album.artist, d.album.coverArt, null, 0u, false, false)) }
-        },
-        onPlay = { actions.play(d.songs) },
-        onShuffle = { actions.shuffle(d.songs) },
-        playingHere = { s -> s.current?.let { c -> c.id in songIds || c.albumId == d.album.id } == true },
-        actions = {
-            val albumStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ALBUM, d.album.id, d.album.starred)
-            FavoriteCircle(albumStarred) { actions.starAlbum(d.album.id, !albumStarred); Unit }
-            MoreCircle(listOf("Add to queue" to { actions.enqueue(d.songs) }, downloadEntry(d.songs, done, actions)))
-        },
-    ) {
-        if (d.album.isExternal || d.album.id.startsWith("pl-")) item(key = "header") {
-            TextButton({ actions.addToLibrary(d.album.id, isAlbum = true) }, Modifier.padding(horizontal = 12.dp)) {
-                Text("Add the whole ${if (d.album.id.startsWith("pl-")) "playlist" else "album"} to the library (${providerOf(d.album.id) ?: "provider"})")
-            }
-        }
-        discs.forEach { (disc, tracks) ->
-            if (discs.size > 1) item(key = "disc$disc") {
-                val title = d.discTitles.firstOrNull { it.disc.toInt() == disc }?.title
-                SectionTitle(if (title.isNullOrBlank()) "Disc $disc" else "Disc $disc · $title")
-            }
-            songRows(tracks, actions, playing, done, selected, menu, numbered = true, keyPrefix = "d$disc-", context = d.songs, pageArtist = d.album.artist)
-        }
-    }
-}
-
-private val releaseOrder = listOf("Album", "EP", "Single", "Live", "Compilation", "Soundtrack", "Remix", "Other")
-
-private fun Album.group(): String = when {
-    releaseTypes.isEmpty() -> if (isCompilation) "Compilation" else "Album"
-    else -> releaseTypes.firstOrNull { t -> releaseOrder.any { it.equals(t, true) } && !t.equals("Album", true) }?.replaceFirstChar(Char::uppercase) ?: releaseTypes.first().replaceFirstChar(Char::uppercase)
-}
-
-@Composable
 fun ArtistScreen(id: String, actions: ActionsViewModel, vm: ArtistViewModel = viewModel()) {
     LaunchedEffect(id) { vm.open(id) }
     val load by vm.ui.collectAsStateWithLifecycle()
+    val uri = LocalUriHandler.current
+    var leaving by remember { mutableStateOf<String?>(null) }
+    NoriDialog(leaving, { leaving = null }) { url ->
+        AlertCard(title = { Text(say.openInBrowser) }, text = { Text(url) },
+            confirmButton = { TextButton({ runCatching { uri.openUri(url) }; leaving = null }) { Text(say.open) } }, dismissButton = { TextButton({ leaving = null }) { Text(say.cancel) } })
+    }
+    val hint = LocalNav.current.artistHint(id)
+    if (hint == null) {
+        LoadBox(load) { ready -> ArtistPage(ready.detail.artist, ready, null, actions, vm) { leaving = it } }
+        return
+    }
+    val ui = (load as? Load.Ready)?.data
+    ArtistPage(ui?.detail?.artist ?: hint, ui, (load as? Load.Failed)?.message, actions, vm) { leaving = it }
+}
+
+/** An artist's page: [ui] null while the detail is on the wire, [failed] when it did not come. */
+@Composable
+private fun ArtistPage(artist: Artist, ui: ArtistUi?, failed: String?, actions: ActionsViewModel, vm: ArtistViewModel, leave: (String) -> Unit) {
     val done = actions.downloads.collectAsState().value.doneIds
     val selected = selectedIds(actions)
     val menu = LocalSongMenu.current
     val nav = LocalNav.current
     val playing = playingId()
-    val uri = LocalUriHandler.current
-    var leaving by remember { mutableStateOf<String?>(null) }
-    leaving?.let { url ->
-        AlertDialog({ leaving = null }, title = { Text("Open in browser?") }, text = { Text(url) },
-            confirmButton = { TextButton({ runCatching { uri.openUri(url) }; leaving = null }) { Text("Open") } }, dismissButton = { TextButton({ leaving = null }) { Text("Cancel") } })
-    }
-    val hint = nav.artistHint(id)
-    val ui = (load as? Load.Ready)?.data
-    val artist = ui?.detail?.artist ?: hint
-    if (artist == null) {
-        LoadBox(load) { ready -> ArtistBody(ready, actions, vm, done, selected, menu, playing, nav) { leaving = it } }
-        return
-    }
-    val groups = remember(ui?.detail) {
-        ui?.detail?.albums?.sortedByDescending { it.year }?.groupBy { it.group() }
-            ?.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } })
-            .orEmpty()
-    }
-    // An artist's page has no song list of its own - the queue is every album's songs - so what
-    // makes it the page playing is a song of one of its albums sounding.
-    val albumIds = remember(ui?.detail) { ui?.detail?.albums?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val arrival = rememberArrival(ui != null)
+    val groups = remember(ui?.detail) { ui?.detail?.let(::groupsOf).orEmpty() }
+    val similar = remember(ui?.info) { ui?.info?.similar?.let { dev.nori.music.ffi.library.similarArtists(it) }.orEmpty() }
+    val topFrom = rememberOrigin(OriginKind.ARTIST_TOP, artist.id)
     HeroPage(
         coverUrl = vm.cover(artist.coverArt, CoverSize.FULL),
         title = artist.name,
-        caption = if (ui != null) "${ui.detail.albums.size} releases"
-            else artist.albumCount.takeIf { it > 0u }?.let { "$it releases" }.orEmpty(),
-        onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.albums) } },
-        onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.albums, shuffle = true) } },
-        awaitingPlay = ui == null && load !is Load.Failed,
-        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
+        caption = remember(ui?.detail, artist.albumCount) {
+            if (ui != null) say.releases(ui.detail.albums.size)
+            else artist.albumCount.takeIf { it > 0u }?.let { say.releases(it.toInt()) }.orEmpty()
+        },
+        onPlay = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id) } },
+        onShuffle = ui?.let { ready -> { actions.playArtist(ready.detail.artist.id, shuffle = true) } },
+        awaitingPlay = ui == null && failed == null,
+        // Only a queue this page's Play or Shuffle started (all the artist's songs), not any song by them.
+        queue = rememberPageQueue(rememberOrigin(OriginKind.ARTIST, artist.id), ui?.detail?.queue),
         actions = {
             val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, artist.id, artist.starred)
             FavoriteCircle(artistStarred) { actions.starArtist(artist.id, !artistStarred); Unit }
-            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = ui != null,
-                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
-                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
-                ) {
-                    MoreCircle(
-                        listOf(
-                            "Add to queue" to { actions.queueArtist(ui!!.detail.albums) },
-                            "Download everything" to { actions.downloadArtist(ui!!.detail.albums) },
-                        ),
-                    )
-                }
+            LateMore(ui != null) {
+                listOf(
+                    say.addToQueue to { actions.queueArtist(ui!!.detail.artist.id) },
+                    say.downloadEverything to { actions.downloadArtist(ui!!.detail.artist.id) },
+                )
             }
         },
     ) {
         when {
-            ui != null -> item(key = "body") {
-                Arrive {
-                    Column {
-                        ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                        Row(Modifier.padding(horizontal = 12.dp)) {
-                            ui.info?.lastFmUrl?.let { u -> TextButton({ leaving = u }) { Text("last.fm") } }
-                            ui.info?.musicBrainzId?.let { m -> TextButton({ leaving = "https://musicbrainz.org/artist/$m" }) { Text("MusicBrainz") } }
-                        }
-                        groups.forEach { (group, albums) ->
-                            SectionTitle(if (group.endsWith("s")) group else "${group}s")
+            ui != null -> {
+                ui.info?.biography?.let { bio ->
+                    item(key = "bio", contentType = "bio") {
+                        Text(
+                            remember(bio) { dev.nori.music.ffi.library.biography(bio) }, late(arrival).padding(horizontal = Space.gutter),
+                            maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (ui.info?.lastFmUrl != null || ui.info?.musicBrainzId != null) item(key = "links", contentType = "links") {
+                    Row(late(arrival).padding(horizontal = 12.dp)) {
+                        ui.info?.lastFmUrl?.let { u -> TextButton({ leave(u) }) { Text("last.fm") } }
+                        ui.info?.musicBrainzId?.let { m -> TextButton({ leave(dev.nori.music.ffi.library.musicbrainzArtistUrl(m)) }) { Text("MusicBrainz") } }
+                    }
+                }
+                groups.forEachIndexed { n, (group, albums) ->
+                    item(key = "group-$n", contentType = "shelf") {
+                        Column(late(arrival)) {
+                            SectionTitle(group)
                             LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
                             }
                         }
-                        if (ui.top.isNotEmpty()) {
-                            SectionTitle("Top songs")
-                            val (onRight, onLeft) = actions.swipes
-                            ui.top.forEachIndexed { i, s ->
-                                SongRow(
-                                    s, vm.cover(s.coverArt, CoverSize.ROW),
-                                    onClick = { actions.tap(ui.top, i) }, onMenu = { menu(s) },
-                                    playing = s.id == playing, downloaded = s.id in done,
-                                    selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
-                                    swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
-                                    divider = i < ui.top.lastIndex,
-                                )
-                            }
-                        }
-                        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
-                            SectionTitle("Similar artists")
-                            LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                items(similar, key = { it.id }) { a ->
-                                    Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
-                                }
+                    }
+                }
+                if (ui.top.isNotEmpty()) {
+                    item(key = "top", contentType = "title") { SectionTitle(say.topSongs, late(arrival)) }
+                    // The top songs are a list of their own: played from a row they are not the page's Play.
+                    songRows(
+                        ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top", appear = true,
+                        arrival = arrival, from = topFrom,
+                    )
+                }
+                if (similar.isNotEmpty()) item(key = "similar", contentType = "similar") {
+                    Column(late(arrival)) {
+                        SectionTitle(say.similarArtists)
+                        LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            items(similar, key = { it.id }) { a ->
+                                Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
                             }
                         }
                     }
                 }
             }
-            load is Load.Failed -> item(key = "fail") {
-                Text(
-                    (load as Load.Failed).message,
-                    Modifier.fillMaxWidth().padding(Space.gutter),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                )
-            }
+            failed != null -> item(key = "fail") { LoadFailed(failed) }
             else -> Unit
-        }
-    }
-}
-
-@Composable
-private fun ArtistBody(
-    ui: ArtistUi,
-    actions: ActionsViewModel,
-    vm: ArtistViewModel,
-    done: Set<String>,
-    selected: Set<String>,
-    menu: (Song) -> Unit,
-    playing: String?,
-    nav: Nav,
-    leave: (String) -> Unit,
-) {
-    val groups = remember(ui.detail) { ui.detail.albums.sortedByDescending { it.year }.groupBy { it.group() }.toSortedMap(compareBy { g -> releaseOrder.indexOf(g).let { if (it < 0) 99 else it } }) }
-    val albumIds = remember(ui.detail) { ui.detail.albums.mapTo(HashSet()) { it.id } }
-    HeroPage(
-        coverUrl = vm.cover(ui.detail.artist.coverArt, CoverSize.FULL),
-        title = ui.detail.artist.name,
-        caption = "${ui.detail.albums.size} releases",
-        onPlay = { actions.playArtist(ui.detail.albums) },
-        onShuffle = { actions.playArtist(ui.detail.albums, shuffle = true) },
-        playingHere = { s -> s.current?.albumId?.let(albumIds::contains) == true },
-        actions = {
-            val artistStarred = LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.ARTIST, ui.detail.artist.id, ui.detail.artist.starred)
-            FavoriteCircle(artistStarred) { actions.starArtist(ui.detail.artist.id, !artistStarred); Unit }
-            MoreCircle(
-                listOf(
-                    "Add to queue" to { actions.queueArtist(ui.detail.albums) },
-                    "Download everything" to { actions.downloadArtist(ui.detail.albums) },
-                ),
-            )
-        },
-    ) {
-        item(key = "header") {
-            ui.info?.biography?.let { Text(it.substringBefore("<a "), Modifier.padding(horizontal = Space.gutter), maxLines = 4, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-            Row(Modifier.padding(horizontal = 12.dp)) {
-                ui.info?.lastFmUrl?.let { u -> TextButton({ leave(u) }) { Text("last.fm") } }
-                ui.info?.musicBrainzId?.let { m -> TextButton({ leave("https://musicbrainz.org/artist/$m") }) { Text("MusicBrainz") } }
-            }
-        }
-        groups.forEach { (group, albums) ->
-            item(key = "g-$group") {
-                SectionTitle(if (group.endsWith("s")) group else "${group}s")
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(albums, key = { it.id }) { a -> AlbumCard(a, vm.cover(a.coverArt, CoverSize.CARD), 120.dp, { nav.album(a.id, a) }) }
-                }
-            }
-        }
-        if (ui.top.isNotEmpty()) item(key = "top") { SectionTitle("Top songs") }
-        songRows(ui.top, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, keyPrefix = "top-")
-        ui.info?.similar?.filter { it.id.isNotEmpty() }?.takeIf { it.isNotEmpty() }?.let { similar ->
-            item(key = "similar") {
-                SectionTitle("Similar artists")
-                LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(similar, key = { it.id }) { a ->
-                        Text(a.name, Modifier.clickable { nav.artist(a.id, a) }.padding(8.dp), color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-            }
         }
     }
 }
@@ -487,41 +397,53 @@ private fun ArtistBody(
 fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel = viewModel()) {
     LaunchedEffect(id) { vm.open(id) }
     val load by vm.ui.collectAsStateWithLifecycle()
+    var filter by remember { mutableStateOf("") }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val detail = (load as? Load.Ready)?.data
+    val exportM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("audio/x-mpegurl")) { uri ->
+        if (uri != null && detail != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(detail.playlist.name, detail.songs).toByteArray()) } }
+    }
+    val export = { name: String -> exportM3u.launch(dev.nori.music.ffi.library.m3uFileName(name)) }
+    val hint = LocalNav.current.playlistHint(id)
+    if (hint == null) {
+        LoadBox(load) { d -> PlaylistPage(id, d.playlist, d, null, actions, vm, filter, { filter = it }, export) }
+        return
+    }
+    PlaylistPage(id, detail?.playlist ?: hint, detail, (load as? Load.Failed)?.message, actions, vm, filter, { filter = it }, export)
+}
+
+/** A playlist's page: [detail] null while the songs are on the wire, [failed] when they did not come. */
+@Composable
+private fun PlaylistPage(
+    id: String,
+    playlist: dev.nori.music.ffi.model.Playlist,
+    detail: PlaylistDetail?,
+    failed: String?,
+    actions: ActionsViewModel,
+    vm: PlaylistViewModel,
+    filter: String,
+    onFilter: (String) -> Unit,
+    export: (playlistName: String) -> Unit,
+) {
     val settings: SettingsViewModel = viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val done = actions.downloads.collectAsState().value.doneIds
     val selected = selectedIds(actions)
     val menu = LocalSongMenu.current
     val playing = playingId()
-    var filter by remember { mutableStateOf("") }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val nav = LocalNav.current
-    val detail = (load as? Load.Ready)?.data
-    val hint = nav.playlistHint(id)
-    val playlist = detail?.playlist ?: hint
-    val exportM3u = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("audio/x-mpegurl")) { uri ->
-        if (uri != null && detail != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(actions.exportM3u(detail.playlist.name, detail.songs).toByteArray()) } }
-    }
-    if (playlist == null) {
-        LoadBox(load) { d -> PlaylistBody(d, id, actions, vm, settings, prefs, done, selected, menu, playing, filter, { filter = it }, { exportM3u.launch("${d.playlist.name}.m3u8") }) }
-        return
-    }
-    val shown = remember(detail, filter) { detail?.songs?.matching(filter).orEmpty() }
-    // This playlist's own queue: its songs, whatever order they are being played in.
-    val songIds = remember(detail) { detail?.songs?.mapTo(HashSet()) { it.id } ?: emptySet() }
+    val arrival = rememberArrival(detail != null)
+    val shown = rememberMatching(detail?.songs.orEmpty(), filter)
+    val from = rememberOrigin(OriginKind.PLAYLIST, id)
     HeroPage(
         coverUrl = vm.cover(playlist.coverArt, CoverSize.FULL),
         title = playlist.name,
         subtitle = playlist.comment?.ifEmpty { null },
-        caption = if (detail != null) "${detail.songs.size} songs · ${duration(detail.songs.sumOf { it.duration.toLong() })}"
-            else listOfNotNull(
-                playlist.songCount.takeIf { it > 0u }?.let { "$it songs" },
-                playlist.duration.takeIf { it > 0u }?.let { duration(it.toLong()) },
-            ).joinToString(" · "),
-        onPlay = detail?.let { d -> { actions.play(d.songs) } },
-        onShuffle = detail?.let { d -> { actions.shuffle(d.songs) } },
-        awaitingPlay = detail == null && load !is Load.Failed,
-        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
+        caption = remember(detail, playlist) { detail?.let { say.listCaption(it.songs.size, it.seconds.toLong(), true) } ?: say.albumHintCaption(0, playlist.songCount.toInt(), playlist.duration.toLong()) },
+        onPlay = detail?.let { d -> { actions.play(d.songs, from = from) } },
+        onShuffle = detail?.let { d -> { actions.shuffle(d.songs, from) } },
+        awaitingPlay = detail == null && failed == null,
+        // Its own queue only: a song it shares with another playlist playing from there leaves it alone.
+        queue = rememberPageQueue(from, detail?.queue),
         actions = {
             val pinned = id in prefs.pinnedPlaylists
             // A favourite, drawn and named as every other favourite in the app is: a heart, filled
@@ -529,97 +451,28 @@ fun PlaylistScreen(id: String, actions: ActionsViewModel, vm: PlaylistViewModel 
             // from the page whether this playlist was on the home page or not. The server has no
             // way to star a playlist, so it is kept on this phone, and the home page's shelf of
             // them reads it.
-            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
-            Box(Modifier.size(46.dp), contentAlignment = Alignment.Center) {
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = detail != null,
-                    enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 220)),
-                    exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(if (AppMotion.reduce) 0 else 120)),
-                ) {
-                    MoreCircle(
-                        listOf(
-                            "Add to queue" to { actions.enqueue(detail!!.songs) },
-                            downloadEntry(detail!!.songs, done, actions),
-                            "Export M3U" to { exportM3u.launch("${playlist.name}.m3u8") },
-                        ),
-                    )
-                }
+            FavoriteCircle(pinned) { settings.pin(id, !pinned); Unit }
+            LateMore(detail != null) {
+                listOf(
+                    say.addToQueue to { actions.enqueue(detail!!.songs) },
+                    downloadEntry(detail!!.songs, done, actions),
+                    say.exportPlaylistFile to { export(playlist.name) },
+                )
             }
         },
     ) {
         when {
-            detail != null -> item(key = "body") {
-                Arrive {
-                    Column {
-                        FilterField(detail.songs.size, filter) { filter = it }
-                        val (onRight, onLeft) = actions.swipes
-                        shown.forEachIndexed { i, s ->
-                            SongRow(
-                                s, vm.cover(s.coverArt, CoverSize.ROW),
-                                onClick = { actions.tap(detail.songs, detail.songs.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) },
-                                onMenu = { menu(s) },
-                                playing = s.id == playing, downloaded = s.id in done,
-                                selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
-                                swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
-                                divider = i < shown.lastIndex,
-                            )
-                        }
-                    }
-                }
-            }
-            load is Load.Failed -> item(key = "fail") {
-                Text(
-                    (load as Load.Failed).message,
-                    Modifier.fillMaxWidth().padding(Space.gutter),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            detail != null -> {
+                item(key = "filter", contentType = "filter") { Box(Modifier.arriving(arrival)) { FilterField(detail.songs.size, filter, onFilter) } }
+                // A row each: a playlist of a thousand songs composes the dozen on screen, not all of them.
+                songRows(
+                    detail.songs, actions, playing, done, selected, menu,
+                    cover = { vm.cover(it.coverArt, CoverSize.ROW) }, rows = shown, arrival = arrival, from = from,
                 )
             }
+            failed != null -> item(key = "fail") { LoadFailed(failed) }
             else -> Unit
         }
-    }
-}
-
-@Composable
-private fun PlaylistBody(
-    d: PlaylistDetail,
-    id: String,
-    actions: ActionsViewModel,
-    vm: PlaylistViewModel,
-    settings: SettingsViewModel,
-    prefs: Prefs,
-    done: Set<String>,
-    selected: Set<String>,
-    menu: (Song) -> Unit,
-    playing: String?,
-    filter: String,
-    onFilter: (String) -> Unit,
-    onExport: () -> Unit,
-) {
-    val shown = remember(d, filter) { d.songs.matching(filter) }
-    val songIds = remember(d) { d.songs.mapTo(HashSet()) { it.id } }
-    HeroPage(
-        coverUrl = vm.cover(d.playlist.coverArt, CoverSize.FULL),
-        title = d.playlist.name,
-        subtitle = d.playlist.comment?.ifEmpty { null },
-        caption = "${d.songs.size} songs · ${duration(d.songs.sumOf { it.duration.toLong() })}",
-        onPlay = { actions.play(d.songs) },
-        onShuffle = { actions.shuffle(d.songs) },
-        playingHere = { s -> s.current?.id?.let(songIds::contains) == true },
-        actions = {
-            val pinned = id in prefs.pinnedPlaylists
-            FavoriteCircle(pinned) { settings.update { it.copy(pinnedPlaylists = if (pinned) it.pinnedPlaylists - id else it.pinnedPlaylists + id) }; Unit }
-            MoreCircle(
-                listOf(
-                    "Add to queue" to { actions.enqueue(d.songs) },
-                    downloadEntry(d.songs, done, actions),
-                    "Export M3U" to onExport,
-                ),
-            )
-        },
-    ) {
-        item(key = "header") { FilterField(d.songs.size, filter) { onFilter(it) } }
-        songRows(shown, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
     }
 }
 
@@ -631,10 +484,11 @@ fun GenreScreen(name: String, actions: ActionsViewModel, vm: GenreViewModel = vi
     val selected = selectedIds(actions)
     val menu = LocalSongMenu.current
     val playing = playingId()
+    val from = rememberOrigin(OriginKind.GENRE, name)
     LoadBox(load) { list ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item(key = "header") { Header(name, "${list.size} songs", null); PlayButtons(list, actions) }
-            songRows(list, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+            item(key = "header") { Header(name, remember(list.size) { say.songs(list.size) }, null); PlayButtons(list, actions, from) }
+            songRows(list, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, from = from)
         }
     }
 }
@@ -649,11 +503,18 @@ fun FolderScreen(id: String, actions: ActionsViewModel, vm: FolderViewModel = vi
     val menu = LocalSongMenu.current
     val nav = LocalNav.current
     val playing = playingId()
+    val from = rememberOrigin(OriginKind.FOLDER, id)
     LoadBox(load) { d ->
         LazyColumn(contentPadding = PaddingValues(bottom = LocalChromeInset.current)) {
-            item(key = "header") { Header(d.name.ifEmpty { "Folder" }, "${d.folders.size} folders · ${d.songs.size} songs", null); if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions) }
-            items(d.folders, key = { "f" + it.id }) { f -> Text("📁  ${f.name}", Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
-            songRows(d.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) })
+            item(key = "header") {
+                Header(
+                    remember(d.name) { say.folderTitle(d.name) },
+                    remember(d) { say.folderCaption(d.folders.size, d.songs.size) }, null,
+                )
+                if (d.songs.isNotEmpty()) PlayButtons(d.songs, actions, from)
+            }
+            items(d.folders, key = { "f" + it.id }) { f -> Text(remember(f.name) { say.folderRow(f.name) }, Modifier.fillMaxWidth().clickable { nav.folder(f.id) }.padding(horizontal = 16.dp, vertical = 14.dp)) }
+            songRows(d.songs, actions, playing, done, selected, menu, cover = { vm.cover(it.coverArt, CoverSize.ROW) }, from = from)
         }
     }
 }

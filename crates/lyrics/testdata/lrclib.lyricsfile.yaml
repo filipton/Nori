@@ -1,0 +1,31 @@
+version: '1.0'
+
+metadata:
+  title: 'Song Title'
+  artist: 'Artist Name'
+  duration_ms: 245000
+
+lines:
+  - text: 'A synchronized lyric line'
+    start_ms: 12000
+    end_ms: 15500
+    words:
+      - text: 'A '
+        start_ms: 12000
+        end_ms: 12800
+      - text: 'synchronized '
+        start_ms: 12800
+        end_ms: 14000
+      - text: 'lyric '
+        start_ms: 14000
+        end_ms: 14800
+      - text: 'line'
+        start_ms: 14800
+  - text: "Zażółć gęślą"
+    start_ms: 16000
+    words: [{text: 'Zażółć ', start_ms: 16000, end_ms: 16900}, {text: gęślą, start_ms: 16900, end_ms: 17500}]
+  - text: 'Just a line'
+    start_ms: 18000
+
+plain: |
+  A synchronized lyric line

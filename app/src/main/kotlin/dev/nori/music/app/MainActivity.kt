@@ -15,6 +15,7 @@ import dev.nori.music.downloads.ACTION_OPEN_DOWNLOADS
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import dev.nori.music.app.ui.App
+import dev.nori.music.settings.loggedIn
 
 class MainActivity : ComponentActivity() {
     private var started = false
@@ -44,6 +45,10 @@ class MainActivity : ComponentActivity() {
     private fun routeOf(intent: Intent?): String? = if (intent?.action == ACTION_OPEN_DOWNLOADS) "downloads" else null
 
     override fun onStart() {
+        // Before the screen draws again: the song may have changed while it was away (see catchUp), and the
+        // first frame is to show the song playing now. Until that frame is out, Android shows the last one
+        // drawn before the app went; from it, the page cross-fades to the new song as it would on screen.
+        Nori.get(this).player.catchUp()
         super.onStart()
         // Binding starts the playback service, which builds a player on this thread. Let the first frame out first.
         window.decorView.post { Looper.myQueue().addIdleHandler { if (started && Nori.get(this).settings.value.loggedIn) { Nori.get(this).player.connect(); pickAddress() }; false } }

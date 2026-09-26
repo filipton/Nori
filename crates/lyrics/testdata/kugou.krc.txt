@@ -1,0 +1,12 @@
+[id:$00000000]
+[ar:Radiohead]
+[ti:Creep]
+[by:]
+[hash:0]
+[total:238000]
+[offset:0]
+[language:eyJjb250ZW50IjpbXSwidmVyc2lvbiI6MX0=]
+[0,2500]<0,800,0>Radiohead <800,300,0>- <1100,1400,0>Creep
+[2500,2000]<0,1000,0>作词：<1000,1000,0>Thom Yorke
+[22000,3450]<0,420,0>When <420,300,0>you <720,500,0>were <1220,2230,0>here
+[26000,1500]<0,500,0>我<500,0,0>爱<500,1000,0>你

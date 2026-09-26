@@ -1,0 +1,24 @@
+[package]
+name = "nori-model"
+version.workspace = true
+edition.workspace = true
+
+# The shapes every part of the core shares: the library's records as the server sends them and the app
+# stores them, the core's error, and its log.
+[lib]
+name = "nori_model"
+
+[features]
+# The uniffi records the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+# The core's error says what the database said.
+rusqlite = { version = "0.40", features = ["bundled", "functions"] }
+thiserror = "2"
+# The player's own records (the equalizer's bands, AutoMix's analyses, the audio policy), described
+# again here for uniffi.
+nori-player = { path = "../player" }

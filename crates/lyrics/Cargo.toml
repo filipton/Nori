@@ -1,0 +1,46 @@
+[package]
+name = "nori-lyrics"
+version.workspace = true
+edition.workspace = true
+
+# Lyrics: the server's and the lyrics services' read into one shape with every word timed, the services
+# asked together and ranked, and the lyrics page's clock.
+[lib]
+name = "nori_lyrics"
+
+[features]
+# The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
+# crate without them.
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-settings/ffi", "nori-net/ffi"]
+
+[dependencies]
+uniffi = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+parking_lot = "0.12"
+# LRCLIB's word-timed lyrics come as a lyricsfile, which is YAML. Pure Rust; without its default feature
+# it leaves out encoding_rs, which only matters for YAML that is not UTF-8.
+yaml-rust2 = { version = "0.13", default-features = false }
+# Apple-style TTML (Unison, BiniLyrics, BetterLyrics). A read-only XML tree, no dependencies of its own.
+roxmltree = "0.21"
+# KuGou's KRC is zlib-compressed. Pure Rust inflate, already linked for PNG covers.
+miniz_oxide = "0.9"
+# The services are asked together, as one future: no thread, no runtime.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+nori-model = { path = "../model" }
+# Which services to ask, in what order, is the settings'.
+nori-settings = { path = "../settings" }
+nori-look = { path = "../look" }
+# The services are asked through the core's Transport.
+nori-net = { path = "../net" }
+# The vocal activity curve timed lyrics are checked against (sync.rs), from the AutoMix analysis.
+nori-player = { path = "../player" }
+
+[dev-dependencies]
+# The tests' fake transport implements the async Transport trait.
+async-trait = "0.1"
+# Synthetic songs with a sung line at known times, for the sync check.
+nori-player = { path = "../player", features = ["synth"] }
+# sync_tune.rs, run by hand against a real server: its requests (already in the tree through nori-http).
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+rustfft = "6"

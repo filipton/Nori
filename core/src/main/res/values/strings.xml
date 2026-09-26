@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The words the core module says outside the screens: the download notifications, the media session's
+     buttons, the player's errors. Numbers are written by dev.nori.music.text.Fmt. -->
+<resources>
+    <!-- The download notification while a batch runs. -->
+    <string name="notice_waiting">Waiting for a network</string>
+    <string name="notice_downloading_named">Downloading “%1$s”</string>
+    <string name="notice_downloading_one">Downloading 1 song</string>
+    <string name="notice_downloading_of">Downloading: %1$d of %2$d</string>
+    <string name="notice_album">“%1$s”</string>
+    <string name="notice_complete">Downloads complete</string>
+    <string name="notice_cancel">Cancel</string>
+
+    <!-- How a batch went. -->
+    <plurals name="summary_failed">
+        <item quantity="one">%d song couldn’t be downloaded</item>
+        <item quantity="other">%d songs couldn’t be downloaded</item>
+    </plurals>
+    <string name="summary_album">“%1$s” downloaded</string>
+    <plurals name="summary_downloaded">
+        <item quantity="one">%d song downloaded</item>
+        <item quantity="other">%d songs downloaded</item>
+    </plurals>
+    <string name="summary_some_failed">%1$d downloaded · tap to see what failed</string>
+    <string name="summary_try_again">Tap to try again</string>
+
+    <!-- The downloads screen's lines. -->
+    <string name="downloads_active">%1$d downloading</string>
+    <string name="downloads_waiting">%1$d waiting</string>
+    <string name="downloads_failed">%1$d failed</string>
+    <string name="downloads_nothing">Nothing downloading</string>
+    <string name="eta_seconds">%1$d s left</string>
+    <string name="eta_clock">%1$s left</string>
+
+    <!-- The player. -->
+    <string name="playback_error_network">The server could not be reached</string>
+    <string name="playback_error_output">The audio output would not open</string>
+    <string name="playback_error_other">This song would not play</string>
+    <string name="radio_artist">Radio</string>
+    <!-- A USB DAC that gives no name of its own. -->
+    <string name="dac_unnamed">USB DAC</string>
+    <string name="session_add_favourite">Add to favourites</string>
+    <string name="session_remove_favourite">Remove from favourites</string>
+    <string name="session_shuffle_on">Shuffle on</string>
+    <string name="session_shuffle_off">Shuffle off</string>
+
+    <!-- A failure of the server or the network, by its kind (dev.nori.music.net.Failures). -->
+    <string name="error_metered">This server is set to Wi-Fi only</string>
+    <string name="error_unknown_host">Server not found. Check the address.</string>
+    <string name="error_connect">Nothing is answering at that address. Is the port right, and is the server running?</string>
+    <string name="error_timeout">The server did not answer in time.</string>
+    <string name="error_tls">The server\'s certificate was not accepted. If it is self-signed, turn on \"Accept self-signed certificate\"; if it needs a client certificate, import one.</string>
+    <string name="error_cleartext">Cleartext HTTP was refused; use https://</string>
+    <string name="error_http">HTTP %1$d</string>
+    <string name="error_wrong_login">Wrong user name or password.</string>
+    <string name="error_token_auth">This server does not support token authentication.</string>
+    <string name="error_not_allowed">This user is not allowed to do that.</string>
+    <string name="error_not_subsonic">That address answered, but not like a Subsonic server. Check the URL (and any reverse-proxy path).</string>
+    <string name="error_bad_response">bad response: %1$s</string>
+    <string name="error_database">database: %1$s</string>
+    <string name="error_no_filters">that preset had no filters in it</string>
+
+    <!-- The car's browse tree (Android Auto). -->
+    <string name="car_root">nori</string>
+    <string name="car_recently_played">Recently played</string>
+    <string name="car_recently_added">Recently added</string>
+    <string name="car_most_played">Most played</string>
+    <string name="car_playlists">Playlists</string>
+    <string name="car_favourites">Favourites</string>
+    <string name="car_random">Random</string>
+    <string name="car_downloads">Downloads</string>
+    <string name="car_playlist_songs">%1$d songs</string>
+</resources>

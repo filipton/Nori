@@ -2,9 +2,12 @@ package dev.nori.music.app.vm
 
 import android.app.Application
 import android.media.AudioManager
-import dev.nori.music.ffi.Lyrics
+import dev.nori.music.ffi.model.Lyrics
 import dev.nori.music.data.FoundLyrics
-import dev.nori.music.data.LyricsSource
+import dev.nori.music.data.followSong
+import dev.nori.music.data.sameAs
+import dev.nori.music.ffi.settings.LyricsOrigin
+import dev.nori.music.net.said
 import dev.nori.music.playback.PlayerState
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.awaitClose
@@ -17,8 +20,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.flow.onStart
+
+/** Two answers that show the same thing: the same lyrics read again are not new ones. */
+internal fun sameLyrics(a: Load<FoundLyrics>, b: Load<FoundLyrics>): Boolean =
+    a == b || (a is Load.Ready && b is Load.Ready && a.data.sameAs(b.data))
 
 class PlayerViewModel(app: Application) : NoriViewModel(app) {
     private val player = nori.player
@@ -26,27 +31,108 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     /** Where a seek asked to go, while it is still being watched into place; the seek bar holds this. */
     val pendingSeek: StateFlow<Long?> = player.pendingSeek
 
+    /** A mix is being heard (see [dev.nori.music.playback.PlayerConnection.mixing]): the seek row says so. */
+    val mixing: StateFlow<Boolean> = player.mixing
+
     /** Just the id, so a list can highlight its playing row without observing the whole player. */
     val currentId: StateFlow<String?> = state.map { it.current?.id }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * Whether the queue is the one [page] started (nori-queue `playlist_from`): its Play or Shuffle, or a
+     * row of its list, and any edit since. Asked when [PlayerState.origin] moves, not on every event.
+     */
+    fun playsFrom(page: dev.nori.music.ffi.library.PageQueue): Boolean = dev.nori.music.ffi.queue.playlistFrom(page)
 
     /** Just the play/pause flag, for the same reason: the marked row's bars move only while it sounds. */
     val sounding: StateFlow<Boolean> = state.map { it.playing }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    private val lyricsKept = dev.nori.music.data.SongAnswers<Load<FoundLyrics>>()
+
     /**
-     * Lyrics of whatever is playing; fetched only while a lyrics view is collecting. Each song starts
-     * from Loading, so the view shows its loader and then the new words, instead of holding the last
-     * song's lyrics on screen while the next ones are fetched.
+     * Lyrics of whatever is heard (the page's song, [PlayerState.current]); fetched only while a lyrics
+     * view is collecting. Each song starts from Loading, so the view shows its loader and then the new
+     * words, instead of holding the last song's lyrics on screen while the next ones are fetched.
+     *
+     * Every answer names the song it is for, and the view shows it only under that song
+     * ([dev.nori.music.data.ForSong.of]): the last answer outlives the collecting, and the panel opened
+     * again after the song had changed used to be handed the old song's words first - under the new
+     * title, with the new song's playhead, so nothing lit and nothing scrolled. Because of that tag the
+     * last answer is kept when the panel stops watching: under the same song it is the right one, and
+     * the panel opened again shows it at once instead of the loader and a lookup all over again.
+     *
+     * The answers of the last few songs are kept too ([lyricsKept]): a song come back to - the panel
+     * reopened after the upstream stopped, or the song heard for a moment again around a skip - starts
+     * from its words, and is not looked up again once its lookup had finished. The same words read again
+     * are not handed on as new ones ([sameLyrics]), which faded them out and in and reset their clock.
+     */
+    val lyrics: StateFlow<dev.nori.music.data.ForSong<Load<FoundLyrics>>> = state.map { it.current }
+        .followSong(
+            id = { it.id },
+            loading = Load.Loading,
+            none = { Load.Ready(FoundLyrics(dev.nori.music.ffi.library.lyricsNone(), LyricsOrigin.SERVER)) },
+            failed = { Load.Failed(it.said ?: it.javaClass.simpleName) },
+            answers = lyricsKept,
+            same = ::sameLyrics,
+            keep = { it is Load.Ready && it.data.lyrics.lines.isNotEmpty() },
+        ) { song -> (dev.nori.music.app.testLyrics(song) ?: nori.library.lyricsFor(song)).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), dev.nori.music.data.ForSong(null, Load.Loading))
+
+    /**
+     * The moving cover of the album playing (Settings, Look): an HLS address, or null when it has none,
+     * when the switch is off, or on mobile data while it is kept to Wi-Fi. Found by the core
+     * (`motion_video`, which remembers every answer) only while the player collects this, which is while
+     * it is open, and once per album: the next song of the same record carries on with the video it has.
+     * A new album starts from null, so the last one's video steps back at once rather than playing on
+     * under the new cover. Switched off, nothing is asked at all.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val lyrics: StateFlow<Load<FoundLyrics>> = state.map { it.current }.distinctUntilChanged { a, b -> a?.id == b?.id }
-        .flatMapLatest { song ->
-            val p = nori.settings.value
-            val found = if (song == null) flowOf(FoundLyrics(Lyrics(synced = false, wordTimed = false, lines = emptyList()), LyricsSource.SERVER))
-            else nori.library.lyricsFor(song, p.thirdPartyLookups && p.lyricsLrclib)
-            found.map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) }
-                .onStart { emit(Load.Loading) }
-                .catch { emit(Load.Failed(it.message ?: it.javaClass.simpleName)) }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), Load.Loading)
+    val motionVideo: StateFlow<String?> = kotlinx.coroutines.flow.combine(
+        state.map { it.current }.distinctUntilChanged { a, b -> a?.albumId == b?.albumId && a?.album == b?.album && a?.artist == b?.artist },
+        nori.settings.prefs.map { (it.thirdPartyLookups && it.motionArtwork) to it.motionArtworkWifiOnly }.distinctUntilChanged(),
+    ) { song, rule -> song to rule.first }
+        .flatMapLatest { (song, on) ->
+            if (song == null || !on) flowOf<String?>(null)
+            else kotlinx.coroutines.flow.flow<String?> {
+                emit(null)
+                emit(kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { nori.client.motionVideo(song, nori.http.metered) })
+            }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * The player behind the moving cover. The object is only made when the screen first hands it a
+     * surface, and its ExoPlayer only when it first plays; with the switch off neither ever is.
+     */
+    private val motionLazy = lazy {
+        nori.motionPlayer { gone -> viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) { nori.client.motionForget(gone) } }
+    }
+    private val motion by motionLazy
+
+    /** The moving cover whose first frame is on its surface; the screen fades it in after this. */
+    val motionReady: StateFlow<String?> get() = motion.ready
+
+    /** The moving cover's surface arrived on screen ([shown]) or left it. */
+    fun motionView(view: android.view.TextureView, shown: Boolean) {
+        if (shown) motion.show(view) else if (motionLazy.isInitialized()) motion.hide(view)
+    }
+
+    fun motionPlay(url: String) = motion.play(url)
+
+    fun motionPause() {
+        if (motionLazy.isInitialized()) motion.pause()
+    }
+
+    fun motionRelease() {
+        if (motionLazy.isInitialized()) motion.release()
+    }
+
+    override fun onCleared() {
+        motionRelease()
+        super.onCleared()
+    }
+
+    private val _coversNear = kotlinx.coroutines.flow.MutableStateFlow<List<String>>(emptyList())
+    /** The playing song's cover and those a skip either way lands on, for the bar to work their colours out ahead. */
+    val coversNear: StateFlow<List<String>> = _coversNear
 
     init {
         // The artwork either side of what is playing, fetched before it is asked for. A skip used to
@@ -54,33 +140,39 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
         // seconds. Same sizes and requests as the player and the rows, so a warmed cover is a cache hit.
         // How far ahead is the user's (Settings, "Covers fetched ahead"); already-cached ones cost a
         // memory lookup and nothing else.
+        // Which positions, in which order, is the core's (`covers_around`, over the queue it keeps, which
+        // also names the covers either side whose colours the bar works out ahead); it is asked once, only
+        // when the queue, the playing song or a skip's target moves, not on every play/pause or buffering change.
         viewModelScope.launch {
-            kotlinx.coroutines.flow.combine(state, nori.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead ->
-                // Both neighbours first, as a skip would reach them (shuffle included), and then outwards
-                // in both directions a step at a time. Backwards as well as forwards: going back through
-                // a queue is as ordinary as going on, and with only the one song behind warmed, the
-                // second swipe back always waited on the server.
-                val out = ArrayList<Int>()
-                out += s.previousIndex
-                out += s.nextIndex
-                for (d in 2..ahead) { out += s.index + d; out += s.index - d }
-                out.take(if (ahead == 0) 1 else ahead * 2)
-                    .distinct().filter { it != s.index }.mapNotNull { s.queue.getOrNull(it)?.coverArt }
-            }.distinctUntilChanged()
-                .collect { arts ->
-                    val context = getApplication<Application>()
-                    val loader = coil3.SingletonImageLoader.get(context)
-                    arts.filterNot { it.startsWith("ext-") || it.startsWith("pl-") }.forEach { art ->
-                        for (size in intArrayOf(320, 800)) {
-                            loader.enqueue(coil3.request.ImageRequest.Builder(context).data(nori.library.coverUrl(art, size)).size(size).build())
-                        }
+            kotlinx.coroutines.flow.combine(state, nori.settings.prefs.map { it.coversAhead }.distinctUntilChanged()) { s, ahead -> s to ahead }
+                .distinctUntilChanged { (a, x), (b, y) ->
+                    a.queue === b.queue && a.index == b.index && a.previousIndex == b.previousIndex && a.nextIndex == b.nextIndex && x == y
+                }
+                .map { (s, ahead) -> dev.nori.music.ffi.coversAround(s.index, s.previousIndex, s.nextIndex, ahead) }
+                .distinctUntilChanged()
+                .collect { around ->
+                    _coversNear.value = around.near
+                    // The covers a skip lands on (either side of the song playing) into memory, decoded: a
+                    // skip lands on a picture that is already there. The ones further out onto the disk
+                    // only, as the server sent them: decoded they held a megabyte or two each, ten either
+                    // way with "Covers fetched ahead" at 10, and a skip that far is a disk read away.
+                    val loader = dev.nori.music.data.CoverLoader.get(getApplication<Application>())
+                    for (want in around.wants) {
+                        val url = nori.library.coverUrl(want.id, want.size.toInt()) ?: continue
+                        if (want.id in around.near) loader.prefetch(url) else loader.warm(url)
                     }
                 }
         }
     }
 
+
     /** Pull, do not push: the UI reads this on its own clock while the seek bar is on screen. */
     val positionMs: Long get() = player.positionMs
+    /** The player's own place, unshaped: for the test bridge's traces. */
+    val playerPositionMs: Long get() = player.playerPositionMs
+
+    /** [positionMs] while the song playing is still [songId]; null once the player has left it. */
+    fun positionIn(songId: String?): Long? = dev.nori.music.data.playheadFor(songId, state.value.current?.id) { player.positionMs }
 
     fun connect() = player.connect()
     fun toggle() = player.toggle()
@@ -90,8 +182,8 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
     fun seekTo(ms: Long) = player.seekTo(ms)
     fun skipTo(index: Int) = player.skipTo(index)
     fun remove(index: Int) = player.remove(index)
+    fun restore(song: dev.nori.music.ffi.model.Song, index: Int) = player.restore(song, index)
     fun move(from: Int, to: Int) = player.move(from, to)
-    fun clearQueue() = player.clear()
     fun toggleShuffle() = player.setShuffle(!state.value.shuffle)
     fun cycleRepeat() = player.cycleRepeat()
     fun sleep(minutes: Int, endOfTrack: Boolean = false, songs: Int = 0) = player.sleep(minutes, endOfTrack, songs)

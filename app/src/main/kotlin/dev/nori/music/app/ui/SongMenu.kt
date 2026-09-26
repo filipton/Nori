@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -35,16 +36,13 @@ import androidx.compose.material.icons.filled.LibraryAdd
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Radio
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -57,9 +55,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import dev.nori.music.app.vm.ActionsViewModel
-import dev.nori.music.ffi.Artist
-import dev.nori.music.ffi.Playlist
-import dev.nori.music.ffi.Song
+import dev.nori.music.ffi.model.Artist
+import dev.nori.music.ffi.model.Playlist
+import dev.nori.music.ffi.model.Song
 
 /**
  * One line of a sheet. The icon is what keeps a column of these from reading as a wall of text, so
@@ -84,7 +82,8 @@ private fun Item(text: String, icon: ImageVector? = null, onClick: () -> Unit) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SongMenu(
-    song: Song,
+    /** The song the menu is for; null closes it (it slides away showing the last one). */
+    song: Song?,
     actions: ActionsViewModel,
     onDismiss: () -> Unit,
     /**
@@ -95,30 +94,30 @@ fun SongMenu(
     player: dev.nori.music.app.vm.PlayerViewModel? = null,
 ) {
     val nav = LocalNav.current
-    val downloads by actions.downloads.collectAsState()
-    var picking by remember { mutableStateOf(false) }
-    var details by remember { mutableStateOf(false) }
-    var sleeping by remember { mutableStateOf(false) }
-    // Declared above the branches below so that the rarely-used half of the menu is still open when
-    // one comes back from the playlist picker or the details dialog having second-guessed a tap.
-    var more by remember { mutableStateOf(false) }
-    if (sleeping && player != null) { SleepMenu(player) { sleeping = false; onDismiss() }; return }
-    if (details) { TrackInfo(song) { details = false; onDismiss() }; return }
-    if (picking) { PlaylistPicker(listOf(song), actions) { picking = false; onDismiss() }; return }
+    // Which of the menu's stages is up, fresh each time the menu opens. The sheet slides down as the
+    // sleep choices, the details or the playlist picker come up over it, and each of those leaves with
+    // the menu when it is done.
+    val open = song != null
+    var picking by remember(open) { mutableStateOf(false) }
+    var details by remember(open) { mutableStateOf(false) }
+    var sleeping by remember(open) { mutableStateOf(false) }
+    NoriSheet(player?.takeIf { open && sleeping }, onDismiss) { p -> SleepChoices(p, onDismiss) }
+    NoriDialog(song?.takeIf { details }, onDismiss) { s -> TrackInfo(s, onDismiss) }
+    NoriDialog(song?.takeIf { picking }, onDismiss) { s -> PlaylistPicker(listOf(s), actions, onDismiss) }
 
     // A sheet with a half-open stage swallows the first back gesture to collapse itself, which reads
     // as the menu refusing to close. There is only ever one stage here, so back always dismisses.
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    NoriSheet(song?.takeIf { !picking && !details && !sleeping }, onDismiss) { song ->
+        val downloads by actions.downloads.collectAsState()
+        var more by remember { mutableStateOf(false) }
         Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
             // The track leads the sheet, the way the row it came from looked.
             Row(Modifier.fillMaxWidth().padding(horizontal = Space.gutter, vertical = 4.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Cover(actions.cover(song.coverArt, CoverSize.ROW), 52.dp, radius = 8.dp)
                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
                     Text(song.title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    Text("${song.artist} · ${song.album}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                    if (song.suffix.isNotEmpty()) Caption(
-                        listOfNotNull(song.suffix.uppercase(), song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }).joinToString(" · "),
-                    )
+                    Text(remember(song) { say.songLine(song.artist, song.album) }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                    if (song.suffix.isNotEmpty()) Caption(remember(song) { say.songFormat(song) })
                 }
             }
             Hairline(startIndent = Space.gutter)
@@ -132,29 +131,37 @@ fun SongMenu(
             // top of the app, so that it outlives the row or the player that asked for it.
             val marks by actions.starMarks.collectAsState()
             val starred = marks.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
-            Item(
-                if (starred) "Remove from favourites" else "Add to favourites",
-                if (starred) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-            ) { actions.star(song, !starred); onDismiss() }
-            Item("Play next", Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
-            Item("Add to queue", Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
-            Item("Add to playlist…", Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
-            if (song.id in downloads.doneIds) Item("Remove download", Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
-            else if (song.id in downloads.pendingIds) Item("Stop download", Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
-            else Item("Download", Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
-            song.albumId?.let { id -> Item("Go to album", Icons.Filled.Album) { nav.album(id); onDismiss() } }
-            if (song.artists.size > 1) song.artists.filter { it.id.isNotEmpty() }.forEach { a ->
-                Item("Go to ${a.name}", Icons.Filled.Person) {
-                    nav.artist(a.id, Artist(a.id, a.name, null, null, 0u, false, false)); onDismiss()
-                }
+            val download = when (song.id) {
+                in downloads.doneIds -> dev.nori.music.ffi.library.SongDownload.DONE
+                in downloads.pendingIds -> dev.nori.music.ffi.library.SongDownload.PENDING
+                else -> dev.nori.music.ffi.library.SongDownload.NONE
             }
-            else song.artistId?.let { id ->
-                Item("Go to artist", Icons.Filled.Person) {
-                    nav.artist(id, Artist(id, song.artist, song.coverArt, null, 0u, false, false)); onDismiss()
+            // What the menu offers and in what order is the core's (`menus::song_menu`); the words are this
+            // app's (`Say.songAction`), made once when the menu opens. This draws each line with its icon.
+            val items = remember(song, starred, download, player != null) { dev.nori.music.ffi.library.songMenu(song, starred, download, player != null) }
+            val labels = remember(items) { items.map { say.songAction(it.action) } }
+            @Composable fun line(i: dev.nori.music.ffi.library.SongMenuItem, label: String) = when (val a = i.action) {
+                is dev.nori.music.ffi.library.SongAction.Favourite -> Item(label, if (a.on) Icons.Filled.FavoriteBorder else Icons.Filled.Favorite) { actions.star(song, a.on); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.PlayNext -> Item(label, Icons.AutoMirrored.Filled.PlaylistPlay) { actions.playNext(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.AddToQueue -> Item(label, Icons.AutoMirrored.Filled.QueueMusic) { actions.enqueue(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.AddToPlaylist -> Item(label, Icons.AutoMirrored.Filled.PlaylistAdd) { picking = true }
+                dev.nori.music.ffi.library.SongAction.RemoveDownload -> Item(label, Icons.Filled.Delete) { actions.removeDownloads(listOf(song.id)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.StopDownload -> Item(label, Icons.Filled.Close) { actions.cancelDownloads(listOf(song)); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Download -> Item(label, Icons.Filled.Download) { actions.download(listOf(song)); onDismiss() }
+                is dev.nori.music.ffi.library.SongAction.GoToAlbum -> Item(label, Icons.Filled.Album) { nav.album(a.id); onDismiss() }
+                // The song's own cover stands in for a lone artist's until their page has one.
+                is dev.nori.music.ffi.library.SongAction.GoToArtist -> Item(label, Icons.Filled.Person) {
+                    nav.artist(a.id, Artist(a.id, a.name, song.coverArt.takeIf { song.artists.size <= 1 }, null, 0u, false, false)); onDismiss()
                 }
+                is dev.nori.music.ffi.library.SongAction.AddToLibrary -> Item(label, Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.SleepTimer -> Item(label, Icons.Filled.Bedtime) { sleeping = true }
+                dev.nori.music.ffi.library.SongAction.StartRadio -> Item(label, Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.InstantMix -> Item(label, Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.ExcludeFromMixes -> Item(label, Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Share -> Item(label, Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
+                dev.nori.music.ffi.library.SongAction.Details -> Item(label, Icons.Filled.Info) { details = true }
             }
-            if (song.isExternal) Item("Add to library (${providerOf(song.id) ?: "provider"})", Icons.Filled.LibraryAdd) { actions.addToLibrary(song.id, isAlbum = false); onDismiss() }
-            player?.let { Item("Sleep timer…", Icons.Filled.Bedtime) { sleeping = true } }
+            items.forEachIndexed { n, it -> if (!it.more) line(it, labels[n]) }
             Hairline(startIndent = Space.gutter)
             val turn by animateFloatAsState(if (more) 180f else 0f, label = "more")
             Row(
@@ -162,7 +169,7 @@ fun SongMenu(
                 verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
                 Icon(Icons.Filled.MoreHoriz, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("More", Modifier.weight(1f).padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
+                Text(say.more, Modifier.weight(1f).padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
                 // The chevron turns over rather than swapping for its opposite, so the row says which
                 // way it is about to move before it moves.
                 Icon(
@@ -171,32 +178,23 @@ fun SongMenu(
                 )
             }
             AnimatedVisibility(more, enter = fadeIn() + expandVertically(), exit = fadeOut() + shrinkVertically()) {
-                Column {
-                    Item("Start radio from this song", Icons.Filled.Radio) { actions.startRadio(song); onDismiss() }
-                    if (!song.isExternal) Item("Instant mix", Icons.Filled.AutoAwesome) { actions.instantMix(song); onDismiss() }
-                    if (!song.isExternal) Item("Exclude from mixes", Icons.Filled.Block) { actions.excludeFromMixes(song); onDismiss() }
-                    if (!song.isExternal) Item("Share link", Icons.Filled.IosShare) { actions.share(song.id); onDismiss() }
-                    Item("Details", Icons.Filled.Info) { details = true }
-                }
+                Column { items.forEachIndexed { n, it -> if (it.more) line(it, labels[n]) } }
             }
         }
     }
 }
 
 /** The sleep choices on their own sheet, so the song's menu is not buried under eleven of them. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SleepMenu(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () -> Unit) {
+private fun SleepChoices(player: dev.nori.music.app.vm.PlayerViewModel, onDone: () -> Unit) {
     val state by player.state.collectAsState()
-    ModalBottomSheet(onDismissRequest = onDone, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
-            SectionTitle("Sleep timer")
-            val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
-            if (running) Item("Off") { player.sleep(0); onDone() }
-            for (m in listOf(15, 30, 45, 60)) Item("$m minutes") { player.sleep(m); onDone() }
-            Item("End of track") { player.sleep(0, endOfTrack = true); onDone() }
-            for (n in listOf(2, 3, 5, 10)) Item("After $n songs") { player.sleep(0, songs = n); onDone() }
-        }
+    Column(Modifier.verticalScroll(rememberScrollState()).navigationBarsPadding()) {
+        SectionTitle(say.sleepTimer)
+        val running = state.sleepAt > 0 || state.sleepAtEndOfTrack
+        // The choices are the core's (`menus::sleep_choices`); "Off" is all zeros.
+        val choices = remember(running) { dev.nori.music.ffi.library.sleepChoices(running) }
+        val words = remember(choices) { choices.map(say::sleepChoice) }
+        choices.forEachIndexed { n, c -> Item(words[n]) { player.sleep(c.minutes.toInt(), c.endOfTrack, c.songs.toInt()); onDone() } }
     }
 }
 
@@ -205,38 +203,28 @@ fun PlaylistPicker(songs: List<Song>, actions: ActionsViewModel, onDone: () -> U
     var playlists by remember { mutableStateOf<List<Playlist>?>(null) }
     var name by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { playlists = actions.playlists() }
-    AlertDialog(
-        onDismissRequest = onDone,
-        title = { Text("Add to playlist") },
+    AlertCard(
+        title = { Text(say.addToPlaylist) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                OutlinedTextField(name, { name = it }, label = { Text("New playlist") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(name, { name = it }, label = { Text(say.newPlaylist) }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 playlists?.forEach { p -> Text(p.name, Modifier.fillMaxWidth().clickable { actions.addToPlaylist(p, songs); onDone() }.padding(vertical = 12.dp)) }
             }
         },
-        confirmButton = { TextButton({ actions.addToNewPlaylist(name.trim(), songs); onDone() }, enabled = name.isNotBlank()) { Text("Create") } },
-        dismissButton = { TextButton(onDone) { Text("Cancel") } },
+        confirmButton = { TextButton({ actions.addToNewPlaylist(name.trim(), songs); onDone() }, enabled = name.isNotBlank()) { Text(say.create) } },
+        dismissButton = { TextButton(onDone) { Text(say.cancel) } },
     )
 }
 
 /** Everything the server said about one file. */
 @Composable
 fun TrackInfo(song: Song, onDone: () -> Unit) {
-    val rows = listOfNotNull(
-        "Title" to song.title, "Artist" to song.artists.joinToString(", ") { it.name }.ifEmpty { song.artist }, "Album" to song.album,
-        "Track" to listOfNotNull(song.discNumber.takeIf { it > 0u }?.let { "disc $it" }, song.track.takeIf { it > 0u }?.let { "track $it" }).joinToString(", "),
-        "Year" to song.year.takeIf { it > 0u }?.toString(), "Genre" to song.genre, "Duration" to duration(song.duration.toLong()),
-        "Format" to listOfNotNull(song.suffix.uppercase().ifEmpty { null }, song.contentType.ifEmpty { null }).joinToString(" · "),
-        "Quality" to listOfNotNull(song.bitRate.takeIf { it > 0u }?.let { "$it kbps" }, song.samplingRate.takeIf { it > 0u }?.let { "${it.toInt() / 1000.0} kHz" }, song.bitDepth.takeIf { it > 0u }?.let { "$it bit" }, song.channelCount.takeIf { it > 0u }?.let { "$it ch" }).joinToString(" · "),
-        "Size" to song.size.takeIf { it > 0u }?.let { "%.1f MB".format(it.toDouble() / 1_048_576) },
-        "ReplayGain" to song.replayGain?.let { g -> listOfNotNull(g.trackGain?.let { "track %+.2f dB".format(it) }, g.albumGain?.let { "album %+.2f dB".format(it) }, g.trackPeak?.let { "peak %.3f".format(it) }).joinToString(" · ") },
-        "BPM" to song.bpm.takeIf { it > 0u }?.toString(), "Plays (server)" to song.playCount.takeIf { it > 0u }?.toString(), "Last played" to song.played?.take(16)?.replace('T', ' '),
-        "Added" to song.created?.take(10), "Path" to song.path, "MusicBrainz" to song.musicBrainzId, "Comment" to song.comment, "Id" to song.id,
-    ).filter { !it.second.isNullOrBlank() }
-    AlertDialog(
-        onDismissRequest = onDone, title = { Text("Details") },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { (k, v) -> Text(k, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(v!!, Modifier.padding(bottom = 8.dp)) } } },
-        confirmButton = { TextButton(onDone) { Text("Close") } },
+    // Which rows there are, in what order and how each reads is nori-core's (`fmt::track_info`).
+    val rows = remember(song) { say.trackInfo(song) }
+    AlertCard(
+        title = { Text(say.details) },
+        text = { Column(Modifier.verticalScroll(rememberScrollState())) { rows.forEach { (label, value) -> Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant); Text(value, Modifier.padding(bottom = 8.dp)) } } },
+        confirmButton = { TextButton(onDone) { Text(say.close) } },
     )
 }
 
@@ -244,18 +232,53 @@ fun TrackInfo(song: Song, onDone: () -> Unit) {
 @Composable
 fun SelectionBar(actions: ActionsViewModel) {
     val selection by actions.selection.collectAsState()
-    if (selection.isEmpty()) return
+    // Above the early return, so the picker can leave after the selection it cleared is gone.
     var picking by remember { mutableStateOf(false) }
-    if (picking) PlaylistPicker(selection, actions) { picking = false; actions.clearSelection() }
-    androidx.compose.material3.Surface(tonalElevation = 6.dp) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("${selection.size} selected", Modifier.weight(1f).padding(start = 8.dp))
-            TextButton({ actions.play(selection); actions.clearSelection() }) { Text("Play") }
-            TextButton({ actions.playNext(selection); actions.clearSelection() }) { Text("Next") }
-            TextButton({ actions.enqueue(selection); actions.clearSelection() }) { Text("Queue") }
-            TextButton({ picking = true }) { Text("Playlist") }
-            TextButton({ actions.download(selection); actions.clearSelection() }) { Text("Get") }
-            IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, "Clear selection") }
+    NoriDialog(selection.takeIf { picking && it.isNotEmpty() }, { picking = false }) { songs ->
+        PlaylistPicker(songs, actions) { picking = false; actions.clearSelection() }
+    }
+    LaunchedEffect(selection.isEmpty()) { if (selection.isEmpty()) picking = false }
+    // Rises in and out on the app's clock (NoriBar), never on one frame; while it leaves it shows the
+    // selection it had.
+    NoriBar(selection.takeIf { it.isNotEmpty() }) { songs ->
+        androidx.compose.material3.Surface(tonalElevation = 6.dp) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                SelectedCount(songs.size, Modifier.weight(1f).padding(start = 8.dp))
+                BarAction(say.play) { actions.play(songs); actions.clearSelection() }
+                BarAction(say.next) { actions.playNext(songs); actions.clearSelection() }
+                BarAction(say.queue) { actions.enqueue(songs); actions.clearSelection() }
+                BarAction(say.playlist) { picking = true }
+                BarAction(say.get) { actions.download(songs); actions.clearSelection() }
+                IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, say.clearSelection) }
+            }
         }
+    }
+}
+
+/**
+ * One of the selection bar's text buttons: Material's, with its padding and its 58 dp least width taken
+ * in (a set least width stands in for the default), so the five and the ✕ leave the count room on a
+ * phone 360 dp wide.
+ */
+@Composable
+private fun BarAction(label: String, onClick: () -> Unit) =
+    TextButton(onClick, Modifier.widthIn(min = 40.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
+        Text(label, maxLines = 1, softWrap = false)
+    }
+
+/**
+ * "3 selected" on one line, or the count alone where that does not fit: the bar's buttons come first,
+ * and the words were squeezed into a column one letter wide.
+ */
+@Composable
+private fun SelectedCount(n: Int, modifier: Modifier) {
+    val full = remember(n) { say.selected(n) }
+    val short = remember(n) { say.selectedShort(n) }
+    val style = androidx.compose.material3.LocalTextStyle.current
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
+        val room = constraints.maxWidth
+        val fits = remember(full, style, room) { measurer.measure(full, style, maxLines = 1, softWrap = false).size.width <= room }
+        Text(if (fits) full else short, maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
 }
