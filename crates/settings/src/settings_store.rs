@@ -80,8 +80,11 @@ pub fn settings_open(db_path: String) -> nori_model::Result<StoredPrefs> {
     if raw.is_empty() {
         write(&mut c, &prefs)?;
     }
-    *KEPT.write() = Some(Kept { db: Arc::new(Mutex::new(c)), prefs: prefs.clone() });
+    let mut k = KEPT.write();
+    *k = Some(Kept { db: Arc::new(Mutex::new(c)), prefs: prefs.clone() });
     changed(&prefs);
+    drop(k);
+    nori_automix::planner::settings_from(|| with_prefs(StoredPrefs::transition_prefs));
     Ok(prefs)
 }
 
@@ -181,7 +184,7 @@ pub fn settings_put(prefs: StoredPrefs) -> u32 {
 /// The kept settings replaced by what `make` makes of them, and written as [`settings_put`] writes
 /// them. Returns what the player has to apply again, or none when nothing changed.
 fn edit(make: impl FnOnce(&StoredPrefs) -> StoredPrefs) -> Option<u32> {
-    let (db, effect, prefs) = {
+    let (db, effect) = {
         let mut k = KEPT.write();
         let k = k.as_mut()?;
         let prefs = make(&k.prefs);
@@ -189,10 +192,12 @@ fn edit(make: impl FnOnce(&StoredPrefs) -> StoredPrefs) -> Option<u32> {
             return None;
         }
         let effect = effects(&k.prefs, &prefs);
-        k.prefs = prefs.clone();
-        (k.db.clone(), effect, prefs)
+        // Told under the lock: two changes on two threads reach what follows them in the order they were
+        // kept, never the older one last.
+        changed(&prefs);
+        k.prefs = prefs;
+        (k.db.clone(), effect)
     };
-    changed(&prefs);
     let change = CHANGES.fetch_add(1, Ordering::SeqCst) + 1;
     background::run(move || {
         // A newer change is queued behind this one and writes everything anyway.

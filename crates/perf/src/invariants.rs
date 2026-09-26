@@ -9,6 +9,10 @@
 //!
 //! - an output that holds music plays it: while playing, the frames it presented move on within
 //!   [`STILL_MS`] (an offloaded track that does not is starved: the S22's silent offload);
+//! - an output is given music while it plays: presenting nothing new and given nothing new for
+//!   [`STARVED_MS`] is the music stopped while the player says it plays (the S22's silence after next was
+//!   pressed fast and long). Either break quotes the engine's own account of where it stood at its last
+//!   wake (the song, what it reads and waits for, the transition engine, every loader);
 //! - one press of a skip moves one song;
 //! - the song on the screen is the one heard, give or take [`DIFFER_MS`];
 //! - the lyrics shown are the song heard's;
@@ -25,6 +29,9 @@ use std::sync::{Mutex, MutexGuard};
 
 /// Playing, an output that presents nothing new for longer than this has stopped.
 pub const STILL_MS: i64 = 2_000;
+/// Playing, an output that presents nothing new and is given nothing new for longer than this was left
+/// without music: longer than [`STILL_MS`], so a song's first bytes a moment late are not a break.
+pub const STARVED_MS: i64 = 5_000;
 /// The screen may trail the ear by this much at a song change.
 pub const DIFFER_MS: i64 = 1_000;
 /// Presses closer together than this are one run of skips.
@@ -70,8 +77,18 @@ pub struct Moving {
 struct Progress {
     song: Option<usize>,
     presented: u64,
+    /// When the count of what it presented last moved.
     since_ms: i64,
+    written: u64,
+    /// When it was last given anything new.
+    fed_ms: i64,
     said: bool,
+}
+
+impl Progress {
+    fn new(m: &Moving) -> Progress {
+        Progress { song: m.song, presented: m.presented, since_ms: m.now_ms, written: m.written, fed_ms: m.now_ms, said: false }
+    }
 }
 
 /// A run of skips: the song it started from, the presses since and when the last was.
@@ -100,38 +117,56 @@ pub struct Watch {
 }
 
 impl Watch {
-    /// An output's reading, under `key` ("engine", "track"): playing, its count of what it
-    /// presented must move while it holds music written and not presented.
+    /// An output's reading, under `key` ("engine", "track"): playing, its count of what it presented must
+    /// move while it holds music written and not presented ("stalled"), and it must be given music to
+    /// play: presenting nothing new for [`STARVED_MS`] while nothing new is written to it either is the
+    /// music stopped with the player saying it plays ("starved": the engine gave the output nothing, or
+    /// the output took nothing more; a device whose count stopped past what it was given falls here too).
     pub fn output(&mut self, key: &str, m: &Moving) -> Option<Break> {
         let i = match self.outputs.iter().position(|(k, _)| k == key) {
             Some(i) => i,
             None => {
-                self.outputs.push((key.to_string(), Progress { song: m.song, presented: m.presented, since_ms: m.now_ms, said: false }));
+                self.outputs.push((key.to_string(), Progress::new(m)));
                 return None;
             }
         };
         let p = &mut self.outputs[i].1;
-        if !m.playing || m.song != p.song || m.presented < p.presented {
-            *p = Progress { song: m.song, presented: m.presented, since_ms: m.now_ms, said: false };
+        if !m.playing || m.song != p.song || m.presented < p.presented || m.written < p.written {
+            *p = Progress::new(m);
             return None;
         }
+        if m.written > p.written {
+            p.written = m.written;
+            p.fed_ms = m.now_ms;
+        }
         if m.presented > p.presented {
-            *p = Progress { song: m.song, presented: m.presented, since_ms: m.now_ms, said: false };
+            *p = Progress { presented: m.presented, since_ms: m.now_ms, said: false, ..*p };
             return None;
         }
         let still = m.now_ms - p.since_ms;
-        // Nothing written ahead is an output with nothing to play (a song's bytes awaited): not this one's.
-        if still <= STILL_MS || p.said || m.written <= m.presented {
+        let unfed = m.now_ms - p.fed_ms;
+        if p.said {
             return None;
         }
-        p.said = true;
         let ms = |n: u64| n as i128 * 1000 / m.rate.max(1) as i128;
-        let held = ms(m.written - m.presented);
-        let (kind, what) = if m.offloaded { ("offload-starved", "the offloaded track") } else { ("stalled", "the output") };
-        Some(Break::new(
-            kind,
-            format!("{key}: playing, but {what} presented nothing new for {still} ms, with {held} ms written and not presented (at {} ms of {} ms written)", ms(m.presented), ms(m.written)),
-        ))
+        let what = if m.offloaded { "the offloaded track" } else { "the output" };
+        if still > STILL_MS && m.written > m.presented {
+            p.said = true;
+            let held = ms(m.written - m.presented);
+            let kind = if m.offloaded { "offload-starved" } else { "stalled" };
+            return Some(Break::new(
+                kind,
+                format!("{key}: playing, but {what} presented nothing new for {still} ms, with {held} ms written and not presented (at {} ms of {} ms written)", ms(m.presented), ms(m.written)),
+            ));
+        }
+        if still > STARVED_MS && unfed > STARVED_MS {
+            p.said = true;
+            return Some(Break::new(
+                "starved",
+                format!("{key}: playing, but {what} presented nothing new for {still} ms and was given nothing new for {unfed} ms (at {} ms presented of {} ms written)", ms(m.presented), ms(m.written)),
+            ));
+        }
+        None
     }
 
     /// The song heard changed to `id` (the player service's word).
@@ -282,6 +317,8 @@ static ON: AtomicBool = AtomicBool::new(false);
 static WATCH: Mutex<Option<Watch>> = Mutex::new(None);
 static BREAKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static ENGINE: Mutex<Option<PerfEngineSeen>> = Mutex::new(None);
+/// The engine's own words for where it stood at its last wake, and when (wall ms).
+static ENGINE_STATE: Mutex<(i64, String)> = Mutex::new((0, String::new()));
 /// The self test's volume on every output, as f32 bits: 1 unless it is running quietly.
 /// When the player service last started or ended, wall ms; `i64::MIN` for never.
 static ENGINE_SINCE: AtomicI64 = AtomicI64::new(i64::MIN);
@@ -349,10 +386,17 @@ pub struct PerfEngineSeen {
     pub in_output_ms: i64,
 }
 
-/// The engine's thread woke (nori-engine's watch hook, through the Android library).
-pub fn engine_seen(now_ms: i64, playing: bool, offloaded: bool, index: Option<usize>, position_ms: i64, in_output_ms: i64) {
+/// The engine's thread woke (nori-engine's watch hook, through the Android library); `state` is where it
+/// stands in its own words, kept to be quoted by a break of the output it feeds.
+pub fn engine_seen(now_ms: i64, playing: bool, offloaded: bool, index: Option<usize>, position_ms: i64, in_output_ms: i64, state: &str) {
     let t = wall_ms();
     *lock(&ENGINE) = Some(PerfEngineSeen { wall_ms: t, playing, offloaded, index: index.map_or(-1, |i| i as i64), position_ms, in_output_ms });
+    {
+        let mut kept = lock(&ENGINE_STATE);
+        kept.0 = t;
+        kept.1.clear();
+        kept.1.push_str(state);
+    }
     // The CPU's output is watched where it is written (the track's own writer, which reads the device);
     // the engine's word counts for the offloaded one, whose play head only the engine reads.
     if !offloaded {
@@ -361,7 +405,18 @@ pub fn engine_seen(now_ms: i64, playing: bool, offloaded: bool, index: Option<us
     let pos = position_ms.max(0) as u64;
     let m = Moving { now_ms, playing, offloaded, song: index, written: pos + in_output_ms.max(0) as u64, presented: pos, rate: 1000 };
     let b = with(|w| w.output("engine", &m));
-    said(t, b);
+    said(t, b.map(|b| with_engine(b, t)));
+}
+
+/// A break of an output, with the engine's own account of where it stood at its last wake.
+fn with_engine(mut b: Break, now: i64) -> Break {
+    let kept = lock(&ENGINE_STATE);
+    if kept.1.is_empty() {
+        b.detail.push_str("; the engine has said nothing yet");
+    } else {
+        b.detail.push_str(&format!("; the engine at its last wake, {} ms before: {}", now - kept.0, kept.1));
+    }
+    b
 }
 
 /// The last thing the engine's thread saw; none before it woke with the watch on.
@@ -375,7 +430,8 @@ pub fn perf_engine_seen() -> Option<PerfEngineSeen> {
 pub fn track_seen(now_ms: i64, playing: bool, written: u64, presented: u64, rate: u32) {
     let m = Moving { now_ms, playing, offloaded: false, song: None, written, presented, rate };
     let b = with(|w| w.output("track", &m));
-    said(wall_ms(), b);
+    let t = wall_ms();
+    said(t, b.map(|b| with_engine(b, t)));
 }
 
 /// The player service arrived on song `id`.
@@ -524,10 +580,42 @@ mod tests {
     }
 
     #[test]
+    fn an_output_given_nothing_to_play_while_playing_is_a_break_once() {
+        let mut w = Watch::default();
+        w.output("track", &at(0, 5000, 5000));
+        assert_eq!(w.output("track", &at(4000, 5000, 5000)), None, "a song's first bytes a moment late");
+        let b = w.output("track", &at(5100, 5000, 5000)).expect("given nothing for 5.1 s");
+        assert_eq!(b.kind, "starved");
+        assert_eq!(b.detail, "track: playing, but the output presented nothing new for 5100 ms and was given nothing new for 5100 ms (at 5000 ms presented of 5000 ms written)");
+        assert_eq!(w.output("track", &at(9000, 5000, 5000)), None, "said once");
+        // What the phone's track did: counted as holding a tenth of a second, never started, the device's
+        // count standing past what it was given since the flush.
+        let mut w = Watch::default();
+        w.output("track", &at(0, 90_000, 100));
+        assert_eq!(w.output("track", &at(3000, 90_000, 100)), None);
+        assert_eq!(w.output("track", &at(5500, 90_000, 100)).map(|b| b.kind), Some("starved"));
+        // Given music now and then, playing nothing of it: the stall is the output's.
+        let mut w = Watch::default();
+        w.output("track", &at(0, 0, 100));
+        assert_eq!(w.output("track", &at(2500, 0, 200)).map(|b| b.kind), Some("stalled"));
+    }
+
+    #[test]
+    fn a_stall_of_the_track_quotes_where_the_engine_last_stood() {
+        let state = "Playing; playing on 16 (s16) at 51 ms; reading 16 (s16) at 11000 ms; transition engine passing; loaders: s16: 0..90 of 90 bytes";
+        engine_seen(0, true, false, Some(16), 51, 100, state);
+        track_seen(0, true, 4410, 90_000, 44_100);
+        track_seen(6_000, true, 4410, 90_000, 44_100);
+        let breaks = perf_invariant_breaks();
+        let line = breaks.iter().find(|l| l.contains("starved: track:")).unwrap_or_else(|| panic!("a starved track: {breaks:?}"));
+        assert!(line.contains("; the engine at its last wake, ") && line.ends_with(state), "{line}");
+    }
+
+    #[test]
     fn standing_still_is_fine_paused_after_a_flush_and_with_nothing_written_ahead() {
         let mut w = Watch::default();
         w.output("track", &at(0, 5000, 5000));
-        assert_eq!(w.output("track", &at(9000, 5000, 5000)), None, "everything written was played: waiting for music");
+        assert_eq!(w.output("track", &at(4500, 5000, 5000)), None, "everything written was played: waiting for music");
         let paused = Moving { playing: false, ..at(10_000, 5000, 9000) };
         assert_eq!(w.output("track", &paused), None);
         assert_eq!(w.output("track", &at(11_000, 5000, 9000)), None, "the pause started the count again");

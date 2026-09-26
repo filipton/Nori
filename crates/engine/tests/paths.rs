@@ -318,6 +318,8 @@ struct Chip {
     seed: u64,
     /// Times the track was flushed.
     flushes: u32,
+    /// Every frame it played, whichever track.
+    played: u64,
 }
 
 #[derive(Clone, Default)]
@@ -328,6 +330,7 @@ impl Chip {
     fn play_frames(&mut self, frames: u64) -> u64 {
         let to = (self.head + frames).min(self.written);
         let played = to - self.head;
+        self.played += played;
         let mut n = played;
         self.head = to;
         while n > 0 {
@@ -2196,11 +2199,13 @@ fn equalizer_on_a_phone(jittery: bool, before: Before) {
     let notes = fake.notes();
     assert!(s.index == Some(song) && s.state == State::Playing, "{s:?}");
     // Where the CPU took over, as the perf report has it: where the chip was, not where the engine last
-    // looked at it, nor the end of what was written.
+    // looked at it, nor the end of what was written. The chip played on while the CPU opened the song
+    // ahead of it, and handed over there.
     let left = notes.iter().find(|n| n.starts_with("offload: left at ")).cloned().unwrap_or_default();
     assert!(left.contains("chip said") && left.contains("written"), "the handoff noted: {notes:?}");
     let left_ms: i64 = left["offload: left at ".len()..].split(' ').next().and_then(|n| n.parse().ok()).unwrap_or(-1);
-    assert!((left_ms - chip_ms).abs() <= 50, "the CPU took {song} over from {left_ms} ms, the chip was at {chip_ms} ms: {notes:?}");
+    let lead = nori_engine::REMAKE_LEAD_MS;
+    assert!((left_ms - chip_ms - lead).abs() <= 50, "the CPU took {song} over from {left_ms} ms, the chip was at {chip_ms} ms {lead} ms before: {notes:?}");
     // The status runs on from there with what the CPU played (as of the engine's last wake, a moment
     // behind the card).
     assert!(s.position_ms <= left_ms + cpu_ms + 50 && s.position_ms >= left_ms + cpu_ms - 300, "from {left_ms} ms, {cpu_ms} ms played: {s:?}");
@@ -2243,6 +2248,49 @@ fn the_equalizer_switched_on_after_a_pause_on_a_phone_s_chip_hands_the_song_to_t
 fn the_equalizer_switched_on_right_after_a_skip_on_a_phone_s_chip_hands_the_song_to_the_cpu_where_the_chip_was() {
     equalizer_on_a_phone(true, Before::Skipped);
     equalizer_on_a_phone(false, Before::Skipped);
+}
+
+/// Offload given up and taken up again, again and again, while a phone's chip plays (the equalizer on and
+/// off): each time the chip plays on while the CPU opens the song where the ear will be, fades out, and
+/// the CPU comes in from silence where it stopped. Between the two the music never stops for longer
+/// than the platform takes to start a track, and the place runs on.
+#[test]
+fn offload_given_up_on_a_phone_hands_the_song_to_the_cpu_behind_a_dip_with_no_gap() {
+    let d = dir();
+    let Some((rig, fake)) = two_on_a_phone(&d, 30, true, true) else { return };
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    let head = || fake.0.lock().played;
+    assert!(rig.time.until(Duration::from_secs(40), || head() >= 3 * 44_100), "on the chip");
+    let eq = Sound { bands: vec![Band { kind: 0, freq: 1000.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..Sound::default() };
+    for round in 0..3 {
+        let (t0, chip0, cpu0, calls0, seen) = (rig.time.clock.now_ns(), head(), rig.card.heard.lock().len(), fake.0.lock().calls.len(), rig.events.lock().len());
+        assert!(rig.engine.status().offloaded, "round {round}: on the chip");
+        rig.engine.set_settings(Settings { sound: eq.clone(), ..offload() });
+        rig.run(1_000);
+        let s = rig.engine.status();
+        assert!(!s.offloaded && s.index == Some(0), "round {round}: the CPU took over: {s:?}");
+        // Every frame of the time went to the ear, from the chip and then the CPU.
+        let (chip, cpu) = (head() - chip0, (rig.card.heard.lock().len() - cpu0) as u64 / 2);
+        let due = ((rig.time.clock.now_ns() - t0) as u128 * 44_100 / 1_000_000_000) as u64;
+        let gap_ms = due.saturating_sub(chip + cpu) * 1000 / 44_100;
+        assert!(gap_ms <= 5, "round {round}: {gap_ms} ms of silence between the chip ({chip} frames) and the CPU ({cpu})");
+        // The chip faded out before it was let go, over the dip.
+        let calls = fake.0.lock().calls[calls0..].to_vec();
+        let close = calls.iter().position(|c| *c == Call::Close).expect("the chip's track let go");
+        let fade: Vec<f32> = calls[..close].iter().filter_map(|c| if let Call::Volume(v) = c { Some(*v) } else { None }).collect();
+        assert!(fade.len() >= 2 && fade.windows(2).all(|w| w[1] <= w[0]) && fade.last() == Some(&0.0), "round {round}: faded out: {fade:?}");
+        // And the CPU came in from silence: its first millisecond far quieter than what follows.
+        let heard = rig.card.heard.lock()[cpu0..].to_vec();
+        let loud = |s: &[f32]| s.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!(loud(&heard[..88]) * 4.0 < loud(&heard[4_410..4_498]), "round {round}: faded in");
+        let places: Vec<i64> = rig.events.lock()[seen..].iter().filter_map(|e| if let Event::Position { ms, .. } = e { Some(*ms) } else { None }).collect();
+        assert!(places.windows(2).all(|w| w[1] >= w[0] - 20 && w[1] - w[0] <= 250), "round {round}: the place runs on: {places:?}");
+        // Back to the chip for the next round.
+        rig.engine.set_settings(offload());
+        assert!(rig.time.until(Duration::from_secs(10), || rig.engine.status().offloaded), "round {round}: back on the chip");
+        rig.run(1_000);
+    }
+    rig.engine.stop();
 }
 
 /// A server that says no length (a song transcoded as it is sent, in chunks) and sends the first

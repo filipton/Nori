@@ -22,17 +22,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import dev.nori.music.settings.SwipeAction
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import dev.nori.music.ffi.queue.ShufflePlan
 import dev.nori.music.ffi.queue.TapPlan
-import dev.nori.music.ffi.queue.TestRef
 import dev.nori.music.ffi.queue.shufflePlan
 import dev.nori.music.ffi.queue.tapPlan
-import dev.nori.music.ffi.queue.testRef
 import dev.nori.music.app.ui.say
 
 /** Everything that can be done to a song, album or playlist from any screen. One instance per activity. */
@@ -47,20 +44,24 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     // A process started in the background could not restart the download service; with a screen up it can.
     init { nori.downloads.resume() }
 
-    private fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
+    internal fun attempt(done: String?, block: suspend () -> Unit) = viewModelScope.launch {
         try { block(); done?.let { _messages.send(it) } } catch (e: Exception) { _messages.send(e.said ?: say.saidFailed) }
     }
 
     // ---- selection mode: long-press a song anywhere, then act on the whole selection ----
 
-    private val _selection = MutableStateFlow<List<Song>>(emptyList())
-    val selection: StateFlow<List<Song>> = _selection
-    fun toggleSelected(song: Song) = _selection.update { s -> if (s.any { it.id == song.id }) s.filterNot { it.id == song.id } else s + song }
-    fun clearSelection() { _selection.value = emptyList() }
+    private val picked = Selection<Song> { it.id }
+    val selection: StateFlow<List<Song>> = picked.items
+    fun toggleSelected(song: Song) = picked.toggle(song)
+    fun clearSelection() = picked.clear()
+    /** Back while songs are selected lets go of them and goes no further (see [Selection.back]). */
+    fun backFromSelection(): Boolean = picked.back()
+    /** The page on screen is now [key] (a back stack entry): a selection does not outlive its page. */
+    fun onPage(key: String) = picked.onPage(key)
 
     /** What a plain tap on row [index] of [songs] does: the core's answer from the settings (`tap_plan`). */
     fun tap(songs: List<Song>, index: Int) {
-        when (tapPlan(_selection.value.isNotEmpty())) {
+        when (tapPlan(picked.items.value.isNotEmpty())) {
             TapPlan.SELECT -> toggleSelected(songs[index])
             TapPlan.PLAY_LIST -> nori.player.play(songs, index)
             TapPlan.PLAY_ONE -> nori.player.play(listOf(songs[index]))
@@ -78,113 +79,6 @@ class ActionsViewModel(app: Application) : NoriViewModel(app) {
     fun downloadArtist(artistId: String) = attempt(null) { download(nori.library.artistSongs(artistId)) }
 
     fun play(songs: List<Song>, index: Int = 0) = nori.player.play(songs, index)
-
-    /**
-     * For the debug test bridge: one-word actions a check needs to drive, so a script never has to find
-     * a button on screen. "download <ref>", "star <ref>", "pause", "resume", "next", "previous".
-     */
-    fun testAction(what: String, player: dev.nori.music.app.vm.PlayerViewModel) = attempt(null) {
-        val verb = what.substringBefore(' ')
-        val ref = what.substringAfter(' ', "")
-        val songs = songsOf(testRef(ref))
-        when (verb) {
-            // Lyrics load only while the lyrics panel is watching them, which a headless check is not:
-            // this asks for them the same way the panel does and parks the answer for the state dump.
-            "lyrics" -> {
-                val song = songs.firstOrNull() ?: nori.player.state.value.current ?: return@attempt
-                // The flow emits the server's answer first and the LRCLIB fallback second; the last one
-                // is the one the screen would end up showing.
-                lastLyrics = nori.library.lyricsFor(song).last()
-            }
-            "seek" -> nori.player.seekTo(ref.toLongOrNull() ?: 0L)
-            // "fakelyrics <ms>": every song's lyrics come timed by the line at once and then, <ms> later,
-            // the same words timed word by word, as a slower and finer service replaces a fast one in the
-            // lyrics race. "fakelyrics off" goes back to the real lookup.
-            // "tracelyrics on|off": the lyrics panel logs each reading it takes and the moment it shows (tag norilyrics).
-            "tracelyrics" -> { dev.nori.music.app.TestHooks.traceLyrics = ref == "on"; dev.nori.music.playback.tracePositions = ref == "on" }
-            // "fakelyrics <ms>,<shift>" starts every line <shift> ms later, to put a word mid-fill at a given moment.
-            "fakelyrics" -> dev.nori.music.app.TestHooks.lyrics = if (ref == "off") null else ref.substringBefore(',').toLongOrNull()?.let { slow ->
-                val shift = ref.substringAfter(',', "0").toLongOrNull() ?: 0L
-                { song -> fakeLyrics(song, slow, shift) }
-            }
-            // "dac <name>@44100/16,96000/24" pretends a USB DAC with those bit-perfect modes is attached;
-            // "dac off" hands the app back to the real audio system. See DacSource.mock.
-            "dac" -> {
-                val off = ref.isEmpty() || ref == "off"
-                nori.dac.testSource(if (off) null else dev.nori.music.playback.DacSource.mock(ref))
-                nori.outputs.testUsb(if (off) null else ref.substringBefore('@').ifEmpty { "Mock DAC" })
-            }
-            "download" -> download(songs)
-            // Everything not yet downloaded is dropped; finished downloads stay.
-            "canceldownloads" -> cancelAllDownloads()
-            "star" -> songs.firstOrNull()?.let { star(it, !it.starred) }
-            // "notification favourite" / "notification shuffle": the session command the notification's button sends.
-            "notification" -> nori.player.pressSessionButton(if (ref == "shuffle") dev.nori.music.playback.PlaybackService.CMD_SHUFFLE else dev.nori.music.playback.PlaybackService.CMD_FAVOURITE)
-            "pause" -> player.toggle()
-            "resume" -> player.toggle()
-            "next" -> player.next()
-            "previous" -> player.previous()
-            // What the equalizer screen sends while it is open: the shallow buffer for live
-            // tweaking, then back. For the checks that the deep buffer returns afterwards.
-            "tuning" -> nori.player.setTuning(ref == "on")
-            "enqueue" -> enqueue(songs)
-            "playnext" -> playNext(songs)
-            "shuffle" -> player.toggleShuffle()
-            // "newplaylist <name>|<ref>": the checks create one, look for it on the server, then delete it.
-            "newplaylist" -> {
-                val name = ref.substringBefore('|')
-                val pick = ref.substringAfter('|', "")
-                val tracks = (testRef(pick) as? TestRef.Search)?.let { songsOf(it) }.orEmpty()
-                nori.library.createPlaylist(name, tracks.map { it.id })
-            }
-        }
-    }
-
-    /** Made-up lyrics for [song] (see "fakelyrics"): a line every four seconds, by the line, then by the word after [slowMs]. */
-    private fun fakeLyrics(song: Song, slowMs: Long, shiftMs: Long = 0): kotlinx.coroutines.flow.Flow<dev.nori.music.data.FoundLyrics> = kotlinx.coroutines.flow.flow {
-        val words = listOf("Somewhere", "the", "night", "is", "turning", "slowly", "over", "the", "water", "tonight", "and", "we")
-        val total = (song.duration.toLong() * 1000).coerceAtLeast(60_000)
-        fun lines(timed: Boolean) = (0 until (total / 4000).toInt()).map { i ->
-            val start = 2000L + shiftMs + i * 4000L
-            val n = 3 + i % 4
-            val picked = List(n) { words[(i * 5 + it) % words.size] }
-            val text = picked.joinToString(" ")
-            var at = 0
-            val timedWords = if (!timed) emptyList() else picked.mapIndexed { k, w ->
-                val from = at; at += w.length + 1
-                dev.nori.music.ffi.model.LyricWord(start + k * 3000L / n, start + (k + 1) * 3000L / n, from.toUInt(), (from + w.length).toUInt())
-            }
-            dev.nori.music.ffi.model.LyricLine(start, start + 3500, text, timedWords, null, false, "", emptyList(), 0u)
-        }
-        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, false, lines(false), 0uL), dev.nori.music.ffi.settings.LyricsOrigin.LRCLIB))
-        kotlinx.coroutines.delay(slowMs)
-        emit(dev.nori.music.data.FoundLyrics(dev.nori.music.ffi.model.Lyrics(true, true, lines(true), 0uL), dev.nori.music.ffi.settings.LyricsOrigin.BETTER_LYRICS))
-    }
-
-    /** The last lyrics the test bridge asked for, so the state dump can report what arrived. */
-    @Volatile var lastLyrics: dev.nori.music.data.FoundLyrics? = null
-        private set
-
-    /** The songs a test bridge reference names (see the core's `test_ref`). */
-    /**
-     * What a test reference plays. Never a provider song: asking the server for an `ext-` item makes
-     * octo-fiesta fetch it, so the test tools pass over them, even inside an album that mixes them in.
-     */
-    private suspend fun songsOf(ref: TestRef): List<Song> = when (ref) {
-        is TestRef.Album -> nori.library.album(ref.id).first().songs.filterNot { it.id.startsWith("ext-") }
-        is TestRef.Song -> listOfNotNull(nori.library.song(ref.id)).filterNot { it.id.startsWith("ext-") }
-        is TestRef.Search -> nori.library.search(ref.text).songs.filterNot { it.id.startsWith("ext-") }.take(1)
-        // Straight from what is already on the device: the only way to start playback with the
-        // network off, and therefore the only honest test of offline playback.
-        is TestRef.Downloaded -> withContext(Dispatchers.IO) { nori.downloads.state.value.done }.drop(ref.index.toInt()).take(1)
-        TestRef.Nothing -> emptyList()
-    }
-
-    /** For the debug test bridge: "song:<id>", "album:<id>", "search:<text>" (first song hit) or "downloaded:<n>". */
-    fun playByRef(ref: String) = attempt(null) {
-        val songs = songsOf(testRef(ref))
-        if (songs.isNotEmpty()) nori.player.play(songs, 0)
-    }
 
     /** Spreads artists and albums apart (in the core) unless the user prefers a plain random order. */
     fun shuffle(songs: List<Song>) {

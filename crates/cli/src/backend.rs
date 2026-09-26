@@ -27,7 +27,7 @@ use nori_core::{AlbumDetail, ArtistDetail, Core, PlaylistDetail, ServerConfig, S
 use nori_covers::loader::{Config as CoverConfig, Loader};
 use nori_covers::memory::Image;
 use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
-use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, OpenError, State, Store};
+use nori_engine::{AudioOutput, Body, ByteSource, Config, Engine, Event, OpenError, State, Status, Store};
 use nori_http::Http;
 use nori_look::cover::CoverColours;
 use nori_output_cpal::{CpalOutput, Volume};
@@ -157,9 +157,11 @@ impl ByteSource for Audio {
     }
 }
 
-/// The desktop's media controls drive the engine, and read what plays from it and the core's queue.
-struct Desktop {
-    engine: Arc<Engine>,
+/// The desktop's media controls drive the engine, and read what plays from it and from `song`: the
+/// song the engine's status names (the core's queue, or the script's own list).
+pub struct Desktop {
+    pub engine: Arc<Engine>,
+    pub song: Box<dyn Fn(&Status) -> Option<Song> + Send + Sync>,
 }
 
 impl nori_mpris::Controls for Desktop {
@@ -183,7 +185,7 @@ impl nori_mpris::Controls for Desktop {
     }
     fn now(&self) -> nori_mpris::Now {
         let s = self.engine.status();
-        let song = s.id.clone().and_then(nori_core::queue::queue_song).unwrap_or_default();
+        let song = (self.song)(&s).unwrap_or_default();
         nori_mpris::Now {
             playing: s.state == State::Playing,
             loaded: s.state == State::Paused,
@@ -393,14 +395,14 @@ impl Session {
         let app = CoreApp::new().measuring(Measurer::new(core.clone(), client.clone(), store.clone())).per_device(core.clone()).bridging();
         let library = CoreLibrary { client: client.clone(), bytes: audio, metered: false, store: Some(store.clone()) };
         let tx = o.tx.clone();
-        let engine = Engine::start(library, app, CoreQueue, output, Config { memory_mb: 256, settings: settings(&prefs), ..Config::default() }, move |e| {
+        let engine = Engine::start(library, app, CoreQueue, output, None, Config { memory_mb: 256, settings: settings(&prefs), ..Config::default() }, move |e| {
             let _ = tx.send(Msg::Engine(e));
         });
         let engine = Arc::new(engine);
         let covers = o.images.then(|| Arc::new(Loader::new(CoverConfig::new(o.data.join("covers")), o.http.clone())));
         let mpris = if o.mpris {
             let name = format!("nori.instance{}", std::process::id());
-            nori_mpris::Mpris::start(&name, Arc::new(Desktop { engine: engine.clone() })).ok()
+            nori_mpris::Mpris::start(&name, Arc::new(Desktop { engine: engine.clone(), song: Box::new(|s| s.id.clone().and_then(nori_core::queue::queue_song)) })).ok()
         } else {
             None
         };
@@ -804,12 +806,12 @@ impl Session {
     /// settings say), the history recorded, the queue refilled at its end.
     pub fn followed(&self, e: &Event) {
         use nori_core::scrobble::{scrobble_playing, scrobble_track, TrackChange};
-        let now = monotonic_ms();
+        let (now, wall) = (monotonic_ms(), nori_core::db::now_ms());
         let playing = self.engine.status_with(|s| s.state == State::Playing);
         let send = match e {
-            Event::Song { id, .. } => Some(scrobble_track(Some(id.clone()), TrackChange::Moved, playing, now, wall_ms(), tz_offset_ms())),
-            Event::Looped { id, .. } => Some(scrobble_track(Some(id.clone()), TrackChange::Looped, playing, now, wall_ms(), tz_offset_ms())),
-            Event::State(State::Ended) => Some(scrobble_track(None, TrackChange::Ended, false, now, wall_ms(), tz_offset_ms())),
+            Event::Song { id, .. } => Some(scrobble_track(Some(id.clone()), TrackChange::Moved, playing, now, wall, tz_offset_ms(wall))),
+            Event::Looped { id, .. } => Some(scrobble_track(Some(id.clone()), TrackChange::Looped, playing, now, wall, tz_offset_ms(wall))),
+            Event::State(State::Ended) => Some(scrobble_track(None, TrackChange::Ended, false, now, wall, tz_offset_ms(wall))),
             Event::State(s) => {
                 scrobble_playing(*s == State::Playing, now);
                 None
@@ -1121,22 +1123,9 @@ fn monotonic_ms() -> i64 {
     START.get_or_init(std::time::Instant::now).elapsed().as_millis() as i64
 }
 
-fn wall_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
-}
-
-/// The local time zone's offset from UTC now, ms.
-fn tz_offset_ms() -> i32 {
-    #[cfg(unix)]
-    // SAFETY: localtime_r writes into the struct handed to it.
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if !libc::localtime_r(&now, &mut tm).is_null() {
-            return (tm.tm_gmtoff * 1000) as i32;
-        }
-    }
-    0
+/// The local time zone's offset from UTC at wall time `wall_ms`, ms.
+fn tz_offset_ms(wall_ms: i64) -> i32 {
+    (nori_core::library::local_offset_s(wall_ms / 1000) * 1000) as i32
 }
 
 /// The database file, as the runner opened it.

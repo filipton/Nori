@@ -160,6 +160,14 @@ impl<L: Library> Sources<L> {
         self.loaders.clear();
     }
 
+    /// Every loader kept, by song, in words ([`Loader::words`]), for a perf report's invariant break.
+    pub fn words(&self) -> String {
+        if self.loaders.is_empty() {
+            return "no loaders".into();
+        }
+        self.loaders.iter().map(|(id, l)| format!("{id}: {}", l.words())).collect::<Vec<_>>().join("; ")
+    }
+
     /// The loader of `id`, if its bytes are being kept.
     pub fn loading(&self, id: &str) -> Option<&Arc<Loader>> {
         self.loaders.iter().find(|(i, _)| i == id).map(|(_, l)| l)

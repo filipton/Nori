@@ -1,6 +1,9 @@
 package dev.nori.music.app.ui
 
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import androidx.compose.runtime.collectAsState
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
@@ -210,62 +213,9 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
             }
         }
 
-        // The test bridge's handles, live for as long as the app is on screen. See TestHooks.
-        val player2 = player
-        androidx.compose.runtime.DisposableEffect(controller) {
-            dev.nori.music.app.TestHooks.open = { route -> if (route == "player") sheet.open() else nav.go(route) }
-            dev.nori.music.app.TestHooks.set = { name, value -> settings.setByName(name, value) }
-            dev.nori.music.app.TestHooks.play = { what -> actions.playByRef(what) }
-            dev.nori.music.app.TestHooks.login = { spec ->
-                val (url, user, pass) = spec.split("|").let { Triple(it[0], it.getOrElse(1) { "" }, it.getOrElse(2) { "" }) }
-                settings.login(settings.newProfile().copy(url = url, user = user, password = pass))
-            }
-            dev.nori.music.app.TestHooks.act = { what -> actions.testAction(what, player2) }
-            dev.nori.music.app.TestHooks.state = {
-                val st = player2.state.value
-                val p = settings.prefs.value
-                """{"route":"${if (sheet.isOpen) "player" else controller.currentBackStackEntry?.destination?.route}",""" +
-                    """"playing":${st.playing},"title":"${st.current?.title.orEmpty().replace("\"", "'")}","artist":"${st.current?.artist.orEmpty().replace("\"", "'")}",""" +
-                    """"positionMs":${player2.positionMs},"durationMs":${st.durationMs},"queue":${st.queue.size},"index":${st.index},""" +
-                    // The next songs in the order they will play, and which of them were added by hand.
-                    st.order.drop(st.order.indexOf(st.index) + 1).take(8).let { up ->
-                        """"upNext":"${up.joinToString(" ") { st.queue[it].id }}","upNextQueued":"${up.joinToString(" ") { if (it in st.queued) "1" else "0" }}","shuffle":${st.shuffle},"""
-                    } +
-                    """"error":"${st.error.orEmpty()}","bridging":${st.bridging},"parkedId":"${dev.nori.music.ffi.queue.playlistBridgeState().parked.orEmpty()}","songId":"${dev.nori.music.ffi.queue.playlistBridgeState().current.orEmpty()}","eq":${p.eqEnabled},"limiter":${p.limiter},"hiRes":${p.hiRes},""" +
-                    """"dspActive":${dev.nori.music.playback.Equalizer.inChain},"gainReductionDb":${dev.nori.music.playback.Equalizer.meterDb},""" +
-                    """"output":"${settings.currentOutput.value}","offload":${p.offload},"offloadWanted":${dev.nori.music.playback.PlaybackService.offloadWanted},"autoMix":${p.autoMix},"amoled":${p.amoled},""" +
-                    // The player answers from its own engine and output.
-                    dev.nori.music.playback.PlaybackService.rustPlayer.let { r ->
-                        """"engine":"rust","mixing":${r?.mixing ?: false},"offloaded":${r?.offloaded ?: false},"""
-                    } +
-                    """"downloaded":${actions.downloads.value.doneCount},"downloading":${actions.downloads.value.pendingCount},"dlActive":${actions.downloadMarks.value.values.count { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }},"dlProgress":"${actions.downloadMarks.value.values.filter { it.phase == dev.nori.music.downloads.DownloadPhase.DOWNLOADING }.joinToString(" ") { "%.2f".format(it.progress.value) }}","dlSpeed":${dev.nori.music.ffi.transfers.downloadSpeedEta()[0]},"dlEta":${dev.nori.music.ffi.transfers.downloadSpeedEta()[1]},""" +
-                    """"sinkBytes":${dev.nori.music.playback.PlaybackService.rustPlayer?.bytesWritten ?: 0},""" +
-                    // Moving covers: how many video players exist (nought whenever the switch is off) and
-                    // the video the open player found for this album, if any.
-                    """"motionPlayers":${dev.nori.music.playback.MotionPlayer.live},"motionVideo":"${player2.motionVideo.value.orEmpty()}",""" +
-                    // Everything the app's Java side has allocated since it started, for allocation checks.
-                    """"allocBytes":${android.os.Debug.getRuntimeStat("art.gc.bytes-allocated") ?: -1},""" +
-                    dev.nori.music.Nori.get(context).dac.state.value.let { d ->
-                        """"dac":"${d.device.orEmpty()}","bitPerfect":${d.bitPerfect},"dacModes":${d.modes.size},""" +
-                            """"dacBlocked":"${d.blockedBy?.let { dev.nori.music.app.vm.dacBlockWords(context.resources, it) }.orEmpty()}","dacTrack":"${d.track?.let { dev.nori.music.app.vm.dacTrackWords(context.resources, it) }.orEmpty()}","""
-                    } +
-                    (actions.lastLyrics ?: (player2.lyrics.value.value as? dev.nori.music.app.vm.Load.Ready)?.data)?.let { f ->
-                        """"lyricLines":${f.lyrics.lines.size},"lyricsSynced":${f.lyrics.synced},""" +
-                            """"lyricsWordTimed":${f.lyrics.wordTimed},"lyricsWordLines":${f.lyrics.lines.count { it.words.isNotEmpty() }},"lyricsSource":"${f.source}","""
-                    }.orEmpty() +
-                    // What the screen shows, mark included - not the snapshot the queue was painted with,
-                    // which is what a favourite toggled this session no longer agrees with.
-                    """"starred":${st.current?.let { actions.starMarks.value.effectiveStar(dev.nori.music.data.StarKind.SONG, it.id, it.starred) } ?: false},""" +
-                    """"notification":"${dev.nori.music.Nori.get(context).player.sessionButtons}",""" +
-                    """"loggedIn":${p.loggedIn},"server":"${p.server?.url.orEmpty()}","loginError":"${settings.login.value.error.orEmpty().replace("\"", "'")}"}"""
-            }
-            onDispose {
-                dev.nori.music.app.TestHooks.open = null
-                dev.nori.music.app.TestHooks.state = null
-                dev.nori.music.app.TestHooks.set = null
-                dev.nori.music.app.TestHooks.play = null
-            }
-        }
+        // The debug build's test bridge drives the app through this (src/debug TestDriver.kt); every
+        // other build has an empty one (src/noTest), so a release carries none of it.
+        dev.nori.music.app.TestDriver(controller, nav, sheet, settings, actions, player)
 
         // The perf build's recorder starts a new stretch when the player goes up or away. See PerfHooks.
         dev.nori.music.app.PerfHooks.recorder?.let { r ->
@@ -392,6 +342,7 @@ fun App(launchRoute: androidx.compose.runtime.MutableState<String?>? = null) {
               }
             }
             SheetBack(sheet)
+            SelectionBack(actions, sheet, controller)
             }
             SongMenu(menuSong, actions, onDismiss = { menuSong = null }, player = player.takeIf { menuFromPlayer })
         }
@@ -416,6 +367,18 @@ private fun SheetBack(sheet: PlayerSheet) {
             throw e
         }
     }
+}
+
+/**
+ * Back while songs are selected lets go of them and stays on the page; registered after the NavHost's
+ * own, so it goes first. Not while the player is up: back puts the player away first. And any change of
+ * page - back, a tap, a tab, a link - ends the selection, so the bar never outlives the list it was for.
+ */
+@Composable
+private fun SelectionBack(actions: ActionsViewModel, sheet: PlayerSheet, controller: NavHostController) {
+    val selecting by remember(actions) { actions.selection.map { it.isNotEmpty() }.distinctUntilChanged() }.collectAsState(actions.selection.value.isNotEmpty())
+    androidx.activity.compose.BackHandler(selecting && !sheet.isOpen) { actions.backFromSelection() }
+    LaunchedEffect(controller, actions) { controller.currentBackStackEntryFlow.collect { actions.onPage(it.id) } }
 }
 
 /**

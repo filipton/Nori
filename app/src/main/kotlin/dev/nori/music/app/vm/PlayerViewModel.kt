@@ -68,7 +68,7 @@ class PlayerViewModel(app: Application) : NoriViewModel(app) {
             answers = lyricsKept,
             same = ::sameLyrics,
             keep = { it is Load.Ready && it.data.lyrics.lines.isNotEmpty() },
-        ) { song -> (dev.nori.music.app.TestHooks.lyrics?.invoke(song) ?: nori.library.lyricsFor(song)).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
+        ) { song -> (dev.nori.music.app.testLyrics(song) ?: nori.library.lyricsFor(song)).map<FoundLyrics, Load<FoundLyrics>> { Load.Ready(it) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), dev.nori.music.data.ForSong(null, Load.Loading))
 
     /**

@@ -1238,9 +1238,10 @@ pub fn note_core(kind: &str, line: &str) {
     timeline().push(t, kind, line.chars().take(600).collect());
 }
 
-/// An invariant that did not hold (invariants.rs), on the timeline of the stretch under way.
+/// An invariant that did not hold (invariants.rs), on the timeline of the stretch under way: longer than
+/// other events, since a stall quotes the engine's whole account of where it stood.
 pub(crate) fn note_invariant(wall_ms: i64, line: &str) {
-    timeline().push(wall_ms, "invariant", line.chars().take(600).collect());
+    timeline().push(wall_ms, "invariant", line.chars().take(2_000).collect());
 }
 
 /// Something the output said of itself (the equalizer screen's shallow track: how deep, and why), on the

@@ -139,6 +139,12 @@ pub struct ShallowDepth {
 
 /// The ring's room beyond the sink's deep buffer: the resampler's rounding and a device's first pull.
 const SLACK_US: i64 = 2_000_000;
+/// A flush is told to the device ([`AudioOutput::flush`]) once this much of the music that follows it
+/// is in the ring, or at the end of the engine's turn if that comes first: a device with a buffer of
+/// seconds empties it when told, and starts again from what the ring has then. Told at once, it found
+/// the ring empty and waited a tick for the music (and a phone's track waits for a quarter of a second
+/// of it before it starts).
+const TELL_FLUSH_US: i64 = 300_000;
 
 /// Shared between the engine's thread (the only writer) and the device's (the only reader).
 pub(crate) struct Ring {
@@ -364,6 +370,11 @@ pub(crate) struct RingTrack {
     opened_float: bool,
     /// The device is kept shallow ([`AudioOutput::shallow`]), as last told.
     shallow: bool,
+    /// A flush the device has not been told of yet ([`TELL_FLUSH_US`]), the frames written since it,
+    /// and a fade asked for meanwhile, which the device takes with the flush.
+    untold: bool,
+    since_flush: u64,
+    held_ramp: Option<(Option<f32>, f32, i64)>,
 }
 
 impl RingTrack {
@@ -394,6 +405,9 @@ impl RingTrack {
             float_on: false,
             opened_float: false,
             shallow: false,
+            untold: false,
+            since_flush: 0,
+            held_ramp: None,
         }
     }
 
@@ -414,6 +428,24 @@ impl RingTrack {
         self.marks.clear();
         self.from = (0, 0.0);
         self.written = (0, 0.0);
+        self.untold = false;
+        self.held_ramp = None;
+    }
+
+    /// The device is told of the flush now, and takes the fade asked for since with it.
+    fn tell_flush(&mut self) {
+        if !std::mem::take(&mut self.untold) {
+            return;
+        }
+        self.output.flush();
+        if let Some((from, target, ms)) = self.held_ramp.take() {
+            self.ramp_now(from, target, ms);
+        }
+    }
+
+    /// The end of the engine's turn: a flush not told yet is told now, with whatever came after it.
+    pub(crate) fn told(&mut self) {
+        self.tell_flush();
     }
 
     /// High quality output on or off: from the device's next opening, which the next song brings when it
@@ -462,6 +494,19 @@ impl RingTrack {
     /// A volume fade from `from` (or wherever the volume is) to `target` over `ms`: run by the device
     /// when it says it does fades itself, otherwise by the device thread from its next pull.
     pub(crate) fn ramp(&mut self, from: Option<f32>, target: f32, ms: i64) {
+        if self.untold && self.ring.is_some() {
+            // The device still plays what it held before the flush: the fade is for the music after it,
+            // and goes with the flush. A level to start from is taken at once.
+            if let Some(v) = from {
+                self.ramp_now(Some(v), v, 0);
+            }
+            self.held_ramp = Some((None, target, ms));
+            return;
+        }
+        self.ramp_now(from, target, ms);
+    }
+
+    fn ramp_now(&mut self, from: Option<f32>, target: f32, ms: i64) {
         if let Some(r) = &self.ring {
             if !self.output.ramp(from, target, ms) {
                 r.ramp(from, target, ms);
@@ -595,6 +640,12 @@ impl Track for RingTrack {
         r.write.store(w + frames, Ordering::Release);
         self.written.0 += frames;
         self.written.1 += media;
+        if self.untold {
+            self.since_flush += frames;
+            if self.since_flush as i64 >= d.rate as i64 * TELL_FLUSH_US / 1_000_000 {
+                self.tell_flush();
+            }
+        }
         // Stretches at the same pace are one: at one times speed, with no resampling, the whole song
         // is a single mark.
         let pace = |from: (u64, f64), to: (u64, f64)| (to.1 - from.1) / (to.0 - from.0).max(1) as f64;
@@ -622,7 +673,9 @@ impl Track for RingTrack {
             r.discard.store(w, Ordering::Release);
             r.ended.store(false, Ordering::Release);
             self.base = w;
-            self.output.flush();
+            // Told once the music after it is there to start from.
+            self.untold = true;
+            self.since_flush = 0;
         }
         self.marks.clear();
         self.from = (0, 0.0);

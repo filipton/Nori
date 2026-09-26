@@ -107,7 +107,7 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
 fn watch() {
     nori_engine::watch::install(nori_engine::watch::Hook {
         wanted: nori_perf::invariants::on,
-        seen: |s| nori_perf::invariants::engine_seen(s.now_ms, s.playing, s.offloaded, s.index, s.position_ms, s.in_output_ms),
+        seen: |s| nori_perf::invariants::engine_seen(s.now_ms, s.playing, s.offloaded, s.index, s.position_ms, s.in_output_ms, &s.state),
     });
 }
 

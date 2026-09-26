@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -237,16 +238,47 @@ fun SelectionBar(actions: ActionsViewModel) {
         PlaylistPicker(songs, actions) { picking = false; actions.clearSelection() }
     }
     LaunchedEffect(selection.isEmpty()) { if (selection.isEmpty()) picking = false }
-    if (selection.isEmpty()) return
-    androidx.compose.material3.Surface(tonalElevation = 6.dp) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text(remember(selection.size) { say.selected(selection.size) }, Modifier.weight(1f).padding(start = 8.dp))
-            TextButton({ actions.play(selection); actions.clearSelection() }) { Text(say.play) }
-            TextButton({ actions.playNext(selection); actions.clearSelection() }) { Text(say.next) }
-            TextButton({ actions.enqueue(selection); actions.clearSelection() }) { Text(say.queue) }
-            TextButton({ picking = true }) { Text(say.playlist) }
-            TextButton({ actions.download(selection); actions.clearSelection() }) { Text(say.get) }
-            IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, say.clearSelection) }
+    // Rises in and out on the app's clock (NoriBar), never on one frame; while it leaves it shows the
+    // selection it had.
+    NoriBar(selection.takeIf { it.isNotEmpty() }) { songs ->
+        androidx.compose.material3.Surface(tonalElevation = 6.dp) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                SelectedCount(songs.size, Modifier.weight(1f).padding(start = 8.dp))
+                BarAction(say.play) { actions.play(songs); actions.clearSelection() }
+                BarAction(say.next) { actions.playNext(songs); actions.clearSelection() }
+                BarAction(say.queue) { actions.enqueue(songs); actions.clearSelection() }
+                BarAction(say.playlist) { picking = true }
+                BarAction(say.get) { actions.download(songs); actions.clearSelection() }
+                IconButton(actions::clearSelection) { Icon(androidx.compose.material.icons.Icons.Filled.Close, say.clearSelection) }
+            }
         }
+    }
+}
+
+/**
+ * One of the selection bar's text buttons: Material's, with its padding and its 58 dp least width taken
+ * in (a set least width stands in for the default), so the five and the ✕ leave the count room on a
+ * phone 360 dp wide.
+ */
+@Composable
+private fun BarAction(label: String, onClick: () -> Unit) =
+    TextButton(onClick, Modifier.widthIn(min = 40.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
+        Text(label, maxLines = 1, softWrap = false)
+    }
+
+/**
+ * "3 selected" on one line, or the count alone where that does not fit: the bar's buttons come first,
+ * and the words were squeezed into a column one letter wide.
+ */
+@Composable
+private fun SelectedCount(n: Int, modifier: Modifier) {
+    val full = remember(n) { say.selected(n) }
+    val short = remember(n) { say.selectedShort(n) }
+    val style = androidx.compose.material3.LocalTextStyle.current
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
+    androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
+        val room = constraints.maxWidth
+        val fits = remember(full, style, room) { measurer.measure(full, style, maxLines = 1, softWrap = false).size.width <= room }
+        Text(if (fits) full else short, maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
     }
 }

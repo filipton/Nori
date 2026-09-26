@@ -1303,6 +1303,29 @@ pub fn servers_activate(list: ServerList, profile: SavedServer) -> ServerList {
     ServerList { servers, active_server_id: id }
 }
 
+/// The profile a login keeps: the form as filled in, under the id of a saved profile for the same address
+/// and user when there is one, so that logging in to a server again (the add-server form, the test bridge)
+/// takes up that profile, its library and downloads with it, instead of saving a copy with none. The saved
+/// one keeps what the form does not ask (the music folder, the second address's bitrate cap) and its name
+/// when the form's is empty. A profile already saved (edited in place) is left as it is.
+pub fn servers_login(list: &ServerList, profile: SavedServer) -> SavedServer {
+    if list.servers.iter().any(|s| s.id == profile.id) {
+        return profile;
+    }
+    let address = |url: &str| url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let same = |s: &&SavedServer| address(&s.url) == address(&profile.url) && s.user.trim().eq_ignore_ascii_case(profile.user.trim());
+    match list.servers.iter().find(same) {
+        Some(saved) => SavedServer {
+            id: saved.id.clone(),
+            name: if profile.name.trim().is_empty() { saved.name.clone() } else { profile.name },
+            music_folder_id: saved.music_folder_id.clone(),
+            alt_max_bit_rate: saved.alt_max_bit_rate,
+            ..profile
+        },
+        None => profile,
+    }
+}
+
 /// A saved profile changed in place; which one is in use does not change.
 pub fn servers_update(list: ServerList, profile: SavedServer) -> ServerList {
     let servers = list.servers.into_iter().map(|s| if s.id == profile.id { profile.clone() } else { s }).collect();
@@ -1382,6 +1405,11 @@ pub fn eq_bypass_reason(hi_res: bool, bit_perfect: bool) -> Option<EqBypass> {
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn servers_activated(list: ServerList, profile: SavedServer) -> ServerList {
     servers_activate(list, profile)
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn server_for_login(list: ServerList, profile: SavedServer) -> SavedServer {
+    servers_login(&list, profile)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -1829,6 +1857,26 @@ mod tests {
         assert_eq!(id.len(), 8);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(new_server_id(), new_server_id());
+    }
+
+    #[test]
+    fn a_login_to_a_server_already_saved_takes_up_its_profile() {
+        let saved = SavedServer { id: "a1".into(), name: "Home".into(), url: "http://10.0.2.2:4534/".into(), user: "admin".into(), password: "old".into(), music_folder_id: "3".into(), ..SavedServer::default() };
+        let other = SavedServer { id: "b2".into(), url: "http://10.0.2.2:4534".into(), user: "guest".into(), ..SavedServer::default() };
+        let list = ServerList { servers: vec![saved.clone(), other], active_server_id: "b2".into() };
+        let form = SavedServer { id: new_server_id(), url: " HTTP://10.0.2.2:4534 ".into(), user: "Admin".into(), password: "new".into(), ..SavedServer::default() };
+        let kept = servers_login(&list, form.clone());
+        assert_eq!((kept.id.as_str(), kept.password.as_str(), kept.name.as_str(), kept.music_folder_id.as_str()), ("a1", "new", "Home", "3"), "{kept:?}");
+        let l = servers_activate(list.clone(), kept);
+        assert_eq!((l.servers.len(), l.active_server_id.as_str()), (2, "a1"), "activated, not copied");
+        // Another user of the same server, or another server, is a profile of its own.
+        let stranger = SavedServer { user: "someone".into(), ..form.clone() };
+        assert_eq!(servers_login(&list, stranger.clone()), stranger);
+        let elsewhere = SavedServer { url: "https://music.example".into(), ..form.clone() };
+        assert_eq!(servers_login(&list, elsewhere.clone()), elsewhere);
+        // A saved profile edited keeps its own id, whatever the others are.
+        let edited = SavedServer { id: "b2".into(), ..form };
+        assert_eq!(servers_login(&list, edited.clone()), edited);
     }
 
     #[test]

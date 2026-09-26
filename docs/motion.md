@@ -223,6 +223,13 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   the detail is on the wire; album / artist / playlist pass it from the hint path. Body content
   under the hero fades and rises once via `Arrive` (300 ms). Player title block cross-fades on
   song id (220 / 160 ms).
+- Later (a thousand-song playlist stuttered as it opened): the body was one lazy item holding every row,
+  so opening a long page composed and measured all of them inside the slide. Each row is now an item
+  of its own (`songRows`), and the rise is one clock per page (`rememberArrival`) that each item reads in
+  its draw phase (`Modifier.arriving`): the rows on screen still fade and rise as one block (320 ms,
+  36 dp), a row scrolled to mid-run joins where the block is, and none is animated after. An artist's
+  biography, links and top songs, which come after the page, fade in where they join (`animateItem`).
+  `tools/open-bench.sh` counts the frames of opening a page ten times (docs/testing.md).
 - Left: page content that is composed late mid-slide (Compose Navigation), player sheet contents
   that are already on the rising surface, Cover picture fade-in, loaders, lyrics, downloads,
   switches, seek / volume - already eased or intentional snaps under `reduceMotion`.
@@ -337,6 +344,48 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   `window_animation_scale`, `transition_animation_scale`), record opening and closing: no frame where a
   dialog, scrim or sheet is fully there after nothing, or gone after fully there.
 - Status: **done**
+
+### 23. The selection bar — `SongMenu.kt` `SelectionBar`, `Overlays.kt` `NoriBar`; `App.kt` `SelectionBack`
+
+- Was: `if (selection.isEmpty()) return` - the bar over the mini player appeared and vanished on one
+  frame, and the mini player under it jumped by its height. Back while selecting popped the page and left
+  the bar up on the page underneath; its "1 selected" was squeezed into a column one letter wide.
+- Now: `NoriBar` opens the bar's height and fades it in on AppMotion (240 ms in, 170 ms out on the
+  `Settle` ease; reduced motion: 120 ms linear), the bar rising from behind the mini player, which moves up
+  with it; leaving, it shows the selection it had and takes no taps. Back with a selection clears it and
+  stays on the page (not while the player is up); any change of page ends the selection
+  (`Selection.onPage`, SelectionTest). The count is one line: "3 selected", or "3" where that does not fit.
+- Check: all three animation scales at 0; long-press a row on an album page, record: the bar rises over
+  several frames. Tap ✕: it sinks. Long-press again, press back: the bar sinks and the album stays. Long-
+  press again, tap the Home tab: Home arrives and the bar sinks. On a 360 dp wide screen the count is one line.
+- Status: **done** (not yet checked on the device)
+
+### 24. A skip to a song whose cover is not loaded — `PlayerScreen.kt` `SleeveArt`, `rememberSleeveArt`, the page's colours; `CoverTurn.kt`
+
+- Was: the owner saw "the same cover twice in a row". A record for a song whose cover was not in memory
+  slid in as a plate (in the page's colour, the last song's), and on landing the sleeve under it went back
+  to the last song's picture, which stayed for 600 ms (`sleeve_hold_ms`) before fading to the plate; the
+  new one then snapped in. The page kept the last song's colours for 1.2 s (`colour_wait_ms`), snapped its
+  text and buttons to the plain look while only the wash faded, and snapped from the plain page to the new
+  colours when they came (a fade from "no colours" was no fade).
+- Now: `CoverTurn` decides per cover address: a picture at hand shows with the change; one not at hand
+  keeps what is on screen for a grace of 180 ms (`sleeve_hold_ms`, `colour_wait_ms` in nori-core's
+  `stage`), so a cover read from the disk arrives without a placeholder blink, and then the last picture
+  fades out (360 ms) to the placeholder: a plate in the theme's own surface colour with the loading sheen
+  in the theme's ink, no song's colour. The picture fades in over it (320 ms), or over the last picture if
+  it came inside the grace (480 ms). A picture for a song skipped past is dropped. A record that slid in
+  without its whole picture leaves the sleeve at the plate at once (`SleeveArt.clearFor`; the old picture
+  has slid away, there is nothing to hold), and the sleeve carries on the record's own fade when the
+  picture comes. Neighbour records fade their picture in over the plate (320 ms) instead of swapping it.
+  The page: after the same grace it fades (420 ms, by frames) to the plain page, and from there to the new
+  colours, text and buttons with the wash; a fade cut short by the next change finishes from where it is.
+  Colours measured while a record is already on its way are not brought up mid-slide; the page fades to
+  them once the record is in.
+- Check: with the network slow or a cold cover cache, on the player: tap next; swipe; tap next five times
+  quickly. No frame shows the last song's cover in the middle after a record has landed; the plate is
+  grey, not the last song's colour; the picture and the colours come in as fades. With the cover on the
+  disk (played before, app restarted): no plate shows at all.
+- Status: **doing** (not yet checked frame by frame on a device)
 
 ## Decisions and traps
 

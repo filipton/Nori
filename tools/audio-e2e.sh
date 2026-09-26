@@ -71,8 +71,10 @@ if want crossfade; then section "a crossfade on the device"
   "$app" do "playnext $other" >/dev/null
   wait_for durationMs ">30000" 10 >/dev/null
   leaving=$(field title); dur=$(field durationMs)
-  "$app" do "seek $((dur - 14000))" >/dev/null
-  check "the mix is heard as the song ends" wait_for mixing True 30
+  # 30 s before the end: a song with a long outro plans its mix up to about 20 s early, and a seek past
+  # the planned start rightly goes straight on to the next song, with no mix to see.
+  "$app" do "seek $((dur - 30000))" >/dev/null
+  check "the mix is heard as the song ends" wait_for mixing True 45
   check "the next song plays out of it" wait_for title "!$leaving" 30
   check "with the track sounding throughout" sounds 5
   "$app" set crossfadeSec 0 >/dev/null

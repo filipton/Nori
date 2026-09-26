@@ -14,9 +14,7 @@ import dev.nori.music.ffi.model.MusicFolder
 import dev.nori.music.settings.Band
 import dev.nori.music.settings.HomeRow
 import dev.nori.music.ffi.devices.ChoiceKind
-import dev.nori.music.ffi.devices.SpecKind
 import dev.nori.music.ffi.devices.deviceRows
-import dev.nori.music.ffi.devices.deviceSpec
 import dev.nori.music.ffi.settings.eqPresets
 import dev.nori.music.ffi.settings.SoundTool
 import dev.nori.music.ffi.settings.EqLevel
@@ -144,9 +142,10 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
         folders = folders,
     )
 
-    /** A row's setting changed: its name and the value picked, which the core reads and applies. */
-    fun set(name: String, value: String) {
-        settingSet(name, value)?.let(::apply)
+    /** A row's setting changed: its name and the value picked, which the core reads and applies; false for a name or value it does not take. */
+    fun set(name: String, value: String): Boolean {
+        apply(settingSet(name, value) ?: return false)
+        return true
     }
 
     /**
@@ -275,61 +274,6 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     /** The equalizer screen is open: the player answers a moved slider at once instead of seconds later. */
     fun setTuning(on: Boolean) = nori.player.setTuning(on)
-
-    /**
-     * Flips one setting by name, for the debug test bridge. Only the switches a check needs; anything
-     * else returns false so a typo in a script fails loudly instead of silently doing nothing.
-     */
-    fun setByName(name: String, value: String): Boolean {
-        if (testDevice(name, value)) return true
-        // Not a setting: the one button on that screen a check needs, so a run can start from a phone
-        // that has measured nothing and see the measuring happen.
-        if (name == "clearAnalyses") { clearAnalyses(); return true }
-        // The "Streamed music" button: a check that needs a song to be fetched cannot have it cached.
-        if (name == "clearStreamCache") { clearStreamCache(); return true }
-        // The "Lyrics" button under Storage, without its question.
-        if (name == "clearLyricsCache") { clearLyrics(); return true }
-        // Which names exist, how each value reads and the ranges are the core's (settings::set_by_name),
-        // the same the settings screen's rows use and the settings are loaded with.
-        apply(settingSet(name, value) ?: return false)
-        return true
-    }
-
-    /**
-     * The device-sound half of the test bridge: `set deviceSound "<output>=flat|auto|quiet|profile:<name>|curve:<search>"`,
-     * `set saveProfile <name>`, `set deleteProfile <name>`, `set forgetDevice <output>`, `set autoEqIndex 1`,
-     * `set eqNotice apply|undo` (presses the snackbar's button, whichever notice is up).
-     */
-    private fun testDevice(name: String, value: String): Boolean {
-        when (name) {
-            "deviceSound" -> viewModelScope.launch {
-                val spec = deviceSpec(value)
-                val choice = when (spec.kind) {
-                    SpecKind.FLAT -> DeviceSound.Choice.Flat
-                    SpecKind.QUIET -> DeviceSound.Choice.Quiet
-                    SpecKind.PROFILE -> DeviceSound.Choice.Profile(spec.arg)
-                    SpecKind.CURVE -> withContext(Dispatchers.IO) { nori.core.autoeqSearch(spec.arg, 1u) }.firstOrNull()?.let { DeviceSound.Choice.Curve(it) } ?: return@launch
-                    SpecKind.AUTOMATIC -> DeviceSound.Choice.Automatic
-                }
-                assignDevice(spec.output, choice)
-            }
-            "saveProfile" -> saveProfile(value)
-            "deleteProfile" -> deleteProfile(value)
-            "forgetDevice" -> forgetDevice(value)
-            "autoEqIndex" -> downloadAutoEqIndex()
-            "eqNotice" -> devices.lastNotice?.let { n ->
-                viewModelScope.launch {
-                    when (n) {
-                        is DeviceSound.Offer -> if (value == "apply") devices.accept(n)
-                        is DeviceSound.Applied -> if (value == "undo") devices.undo(n)
-                    }
-                    devices.consume(n)
-                }
-            }
-            else -> return false
-        }
-        return true
-    }
 
     /** The built-in curves, straight from the core so the numbers live in one place. */
     val presets: List<NamedPreset> by lazy { eqPresets() }

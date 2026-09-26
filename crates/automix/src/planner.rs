@@ -45,10 +45,23 @@ pub fn transitions_off() -> bool {
     PLANNER.lock().transitions_off
 }
 
+/// Where the settings are kept (nori-settings' store): the planner reads the transition settings from it
+/// each time it plans, so a plan is always made with the settings as they are, whatever order the
+/// [`settings_changed`] calls of two changes made at once on two threads arrived in.
+static SETTINGS: OnceLock<fn() -> Option<TransitionPrefs>> = OnceLock::new();
+
+/// The settings store says where the planner reads the transition settings from (see [`SETTINGS`]).
+pub fn settings_from(read: fn() -> Option<TransitionPrefs>) {
+    let _ = SETTINGS.set(read);
+}
+
 /// The settings changed: the planner takes the transition settings from them (`StoredPrefs::transition_prefs`
 /// in nori-settings). A plan already made is asked for again by the platform when it hears of the change.
 pub fn settings_changed(prefs: TransitionPrefs) {
-    let mut p = PLANNER.lock();
+    take(&mut PLANNER.lock(), prefs);
+}
+
+fn take(p: &mut Planner, prefs: TransitionPrefs) {
     if p.prefs != Some(prefs) {
         p.prefs = Some(prefs);
         p.generation += 1;
@@ -73,7 +86,12 @@ pub fn transition_window(window: Vec<nori_model::WindowSong>, shuffling: bool) {
 
 /// The engine's question: how to mix out of `outgoing_id`, if at all.
 pub fn plan_for(outgoing_id: &str) -> Option<Plan> {
+    // Read before the planner is locked: the store tells the planner of a change under its own lock.
+    let kept = SETTINGS.get().and_then(|read| read());
     let mut p = PLANNER.lock();
+    if let Some(kept) = kept {
+        take(&mut p, kept);
+    }
     let prefs = p.prefs?;
     let generation = p.generation;
     if p.none.as_ref().is_some_and(|(id, g, _)| *g == generation && id == outgoing_id) {
@@ -187,9 +205,10 @@ pub const EXTERNAL_PREFIX: &str = "ext-";
 /// Whether `song_id` should be measured as it plays, and its length in ms (0 unknown) so the measurement
 /// is sized up front. Asked once per song, when its first buffer arrives.
 pub fn wants_analysis(song_id: &str) -> Option<u64> {
+    let kept = SETTINGS.get().and_then(|read| read());
     let (auto_mix, duration) = {
         let p = PLANNER.lock();
-        (p.prefs.is_some_and(|x| x.auto_mix), p.window.iter().find(|s| s.id == song_id).map_or(0, |s| s.duration_ms.max(0) as u64))
+        (kept.or(p.prefs).is_some_and(|x| x.auto_mix),p.window.iter().find(|s| s.id == song_id).map_or(0, |s| s.duration_ms.max(0) as u64))
     };
     if !auto_mix || song_id.starts_with(RADIO_PREFIX) || song_id.starts_with(EXTERNAL_PREFIX) {
         return None;

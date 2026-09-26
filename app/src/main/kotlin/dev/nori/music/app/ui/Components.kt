@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.draw.drawBehind
@@ -37,7 +38,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Favorite
@@ -438,15 +439,23 @@ fun PlayingBars(tint: Color, modifier: Modifier = Modifier) {
 /** What the bars stand at while the music is paused: a shape, not a flat line. */
 private val RESTING = floatArrayOf(0.35f, 0.8f, 0.5f, 0.65f)
 
-/** A song list wired to the configured tap, swipe and selection behaviour; every screen that lists songs uses this. */
+/**
+ * A song list wired to the configured tap, swipe and selection behaviour; every screen that lists songs uses
+ * this. Each row is an item of its own, so only the rows on screen are composed, however long the list:
+ * a thousand-song playlist costs a page the same few rows a ten-song album does.
+ */
 fun LazyListScope.songRows(
     songs: List<Song>, actions: ActionsViewModel, playingId: String?, downloaded: Set<String>, selected: Set<String>, menu: (Song) -> Unit,
     numbered: Boolean = false, cover: (Song) -> String? = { null }, keyPrefix: String = "",
-    /** The list a tap plays from, when [songs] is only a slice of it (one disc of an album, a filtered view). */
-    context: List<Song> = songs,
     /**
-     * Each row's second line where the page words them itself: an album's, which leaves the album's own
-     * artist off its tracks (the core's `DiscGroup.lines`). Otherwise each song's own.
+     * Which of [songs] are listed, in order, as places in it: one disc of an album, a filtered view. All of
+     * them when null. A tap plays the whole of [songs] from the row's own place.
+     */
+    rows: List<UInt>? = null,
+    /**
+     * Each listed row's second line where the page words them itself: an album's, which leaves the album's
+     * own artist off its tracks (the core's `DiscGroup.lines`), by the row's place in [rows]. Otherwise each
+     * song's own.
      */
     lines: List<String>? = null,
     /**
@@ -454,17 +463,38 @@ fun LazyListScope.songRows(
      * them - a favourite unstarred, a mix drawn again - instead of the rows below jumping up in one frame.
      */
     animated: Boolean = false,
+    /** Rows that fade in when they join a list already drawn (an artist's top songs, read after the page), keyed by place. */
+    appear: Boolean = false,
+    /** The page's arrival ([rememberArrival]), read in each row's draw phase: the rows on screen rise in as one block. */
+    arrival: State<Float>? = null,
 ) {
     val (onRight, onLeft) = actions.swipes
-    itemsIndexed(songs, key = { i, s -> if (animated) "$keyPrefix${s.id}" else "$keyPrefix$i-${s.id}" }, contentType = { _, _ -> "song" }) { i, s ->
+    val count = rows?.size ?: songs.size
+    items(
+        count,
+        key = { k ->
+            val at = rows?.get(k)?.toInt() ?: k
+            if (animated) keyPrefix + songs[at].id else "$keyPrefix$at-${songs[at].id}"
+        },
+        contentType = { "song" },
+    ) { k ->
+        val at = rows?.get(k)?.toInt() ?: k
+        val s = songs[at]
+        val moving = animated || appear
+        val modifier = when {
+            !moving -> Modifier
+            AppMotion.reduce -> Modifier.animateItem(null, null, null)
+            else -> Modifier.animateItem()
+        }
         SongRow(
-            s, if (numbered) null else cover(s), onClick = { if (context === songs) actions.tap(songs, i) else actions.tap(context, context.indexOfFirst { it.id == s.id }.coerceAtLeast(0)) }, onMenu = { menu(s) },
-            modifier = if (!animated) Modifier else if (AppMotion.reduce) Modifier.animateItem(null, null, null) else Modifier.animateItem(),
+            s, if (numbered) null else remember(s) { cover(s) },
+            onClick = { actions.tap(songs, at) }, onMenu = { menu(s) },
+            modifier = if (arrival != null) modifier.arriving(arrival) else modifier,
             number = if (numbered) s.track.toInt() else null, playing = s.id == playingId, downloaded = s.id in downloaded,
-            selected = s.id in selected, onLongClick = { actions.toggleSelected(s) }, 
+            selected = s.id in selected, onLongClick = { actions.toggleSelected(s) },
             swipeRight = rowSwipe(onRight, s, actions), swipeLeft = rowSwipe(onLeft, s, actions),
-            divider = i < songs.lastIndex,
-            line = lines?.getOrNull(i) ?: s.line,
+            divider = k < count - 1,
+            line = lines?.getOrNull(k) ?: s.line,
         )
     }
 }
@@ -476,12 +506,15 @@ internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel
     // What it does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once. What
     // it says is one of Say's words, read once per locale: a row allocates no text.
     val act = SwipeActs.of(action.ordinal, starred) ?: return null
-    val label = say.rowSwipe(act)
-    return when (act) {
-        dev.nori.music.ffi.library.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, label) { actions.enqueue(listOf(song)) }
-        dev.nori.music.ffi.library.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, label) { actions.playNext(listOf(song)) }
-        dev.nori.music.ffi.library.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, label) { actions.download(listOf(song)) }
-        is dev.nori.music.ffi.library.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, label) { actions.star(song, act.on) }
+    // Made once per row and answer: a new one on every pass would make the row compose again with it.
+    return remember(act, song, actions) {
+        val label = say.rowSwipe(act)
+        when (act) {
+            dev.nori.music.ffi.library.RowSwipeAct.Queue -> RowSwipe(Icons.AutoMirrored.Filled.QueueMusic, label) { actions.enqueue(listOf(song)) }
+            dev.nori.music.ffi.library.RowSwipeAct.PlayNext -> RowSwipe(Icons.AutoMirrored.Filled.PlaylistPlay, label) { actions.playNext(listOf(song)) }
+            dev.nori.music.ffi.library.RowSwipeAct.Download -> RowSwipe(Icons.Filled.Download, label) { actions.download(listOf(song)) }
+            is dev.nori.music.ffi.library.RowSwipeAct.Favourite -> RowSwipe(if (act.on) Icons.Filled.Favorite else Icons.Filled.HeartBroken, label) { actions.star(song, act.on) }
+        }
     }
 }
 
@@ -547,27 +580,40 @@ fun AlbumCard(album: Album, coverUrl: String?, size: Dp, onClick: () -> Unit, mo
 fun SectionTitle(text: String, modifier: Modifier = Modifier) = SectionHeader(text, modifier)
 
 /**
- * Content that was not on the page at first (songs under a hero hint) fades and rises once.
- * [AnimatedVisibility] from a remembered false→true is deliberate: LazyList `animateItem` only
- * eases items added to an already-drawn list, and a bulk fill-in still read as a one-frame pop.
+ * Content that was not on the page at first (the songs under a hero hint) fades and rises once, as one
+ * block. The body of a page is many lazy items - a row each, so a long list composes only what is on
+ * screen - and they share this one clock, started when [ready] turns true: each item reads it in its draw
+ * phase ([arriving]), so the run redraws the rows on screen and recomposes none of them, and a row
+ * composed later (scrolled to mid-run) joins wherever the block is. Once run it stays at 1: rows scrolled
+ * to afterwards are simply there.
  */
 @Composable
-fun Arrive(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    var shown by remember { mutableStateOf(AppMotion.reduce) }
-    LaunchedEffect(Unit) { shown = true }
-    androidx.compose.animation.AnimatedVisibility(
-        visible = shown,
-        modifier = modifier,
-        enter = if (AppMotion.reduce) {
-            androidx.compose.animation.fadeIn(androidx.compose.animation.core.snap())
-        } else {
-            androidx.compose.animation.fadeIn(tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing)) +
-                androidx.compose.animation.slideInVertically(
-                    tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-                ) { (it * 0.06f).toInt() }
-        },
-        exit = androidx.compose.animation.ExitTransition.None,
-    ) { content() }
+fun rememberArrival(ready: Boolean): State<Float> {
+    // With movement reduced there is no run: the body is simply there on its first frame.
+    val progress = remember { Animatable(if (AppMotion.reduce) 1f else 0f) }
+    LaunchedEffect(ready) {
+        if (!ready || progress.value >= 1f) return@LaunchedEffect
+        if (AppMotion.reduce) progress.snapTo(1f)
+        else progress.animateTo(1f, tween(ARRIVE_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+    }
+    return progress.asState()
+}
+
+/** How long a page's body takes to arrive, ms. */
+private const val ARRIVE_MS = 320
+
+/** How far a page's body rises as it arrives: what the old whole-body slide (6 % of its height) was for an album. */
+private val ARRIVE_RISE = 36.dp
+
+/**
+ * One item of a page's arriving body ([rememberArrival]), read in the draw phase. The alpha is applied to
+ * each thing drawn rather than through a layer of its own, so a row costs no offscreen buffer while it fades.
+ */
+fun Modifier.arriving(arrival: State<Float>): Modifier = graphicsLayer {
+    val t = arrival.value
+    alpha = t
+    translationY = (1f - t) * ARRIVE_RISE.toPx()
+    compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
 }
 
 @Composable

@@ -26,12 +26,11 @@ val rustTargets = (project.findProperty("rustTargets") as String? ?: if (shippin
 val rustProfile = project.findProperty("rustProfile") as String? ?: "release"
 // Cargo features of the core. `neural-beats` builds in tract for "Better beat detection" (docs/research/analysis.md)
 // and the model's graph, without weights: with the switch on, the core fetches the weights from the model's
-// authors once (crates/core/src/beat_download.rs), and nothing of them is in the APK. It stays off by default. The
-// debug and perf builds have it; a release build leaves it out unless asked (-PrustFeatures=neural-beats): it
-// makes the arm64 perf APK 15.7 MB bigger (the library 9.6 to 25.3 MB). `-PrustFeatures=` (empty) leaves it out of
-// any build: no tract in the library, and no setting shown.
-val releasing = gradle.startParameter.taskNames.any { t -> listOf("release", "bundle").any { t.contains(it, ignoreCase = true) } }
-val rustFeatures = project.findProperty("rustFeatures") as String? ?: if (releasing) "" else "neural-beats"
+// authors once (crates/core/src/beat_download.rs), and nothing of them is in the APK. The setting stays off by
+// default. Every build has it, release included (the owner's call, 2026-09-26): it makes the arm64 APK about 15.7 MB
+// bigger (the library 9.6 to 25.3 MB). `-PrustFeatures=` (empty) leaves it out of any build: no tract in the
+// library, and no setting shown.
+val rustFeatures = project.findProperty("rustFeatures") as String? ?: "neural-beats"
 val cargoRoot = rootProject.projectDir
 val ndkDirPath: String = System.getenv("ANDROID_NDK_HOME")
     ?: file("${System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "${System.getProperty("user.home")}/Android/Sdk"}/ndk").listFiles()

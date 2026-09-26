@@ -652,6 +652,31 @@ impl Stream {
         }
     }
 
+    /// Nothing before `ms` of the song is handed out: the first buffer, decoded while opening and not
+    /// handed out yet, loses what comes before, and what is decoded after it is dropped up to there, as
+    /// after a seek. False once a buffer has been handed out, or for a song read as packets.
+    fn skip_ahead(&mut self, ms: i64) -> bool {
+        if !self.primed || self.coded.is_some() {
+            return false;
+        }
+        let rate = self.format.rate as i64;
+        let to = ms * rate / 1000;
+        self.skip_to = self.skip_to.max(to);
+        let frame = (self.format.channels * self.format.encoding.width()).max(1);
+        let n = (self.buf.len() / frame) as i64;
+        let Some(end) = self.frame else { return true };
+        let first = end - n;
+        if end <= to {
+            // All of it comes before: the next buffer is decoded, and dropped up to there.
+            self.buf.clear();
+            self.primed = false;
+        } else if first < to {
+            self.buf.drain(..(to - first) as usize * frame);
+            self.at_us = to * 1_000_000 / rate;
+        }
+        true
+    }
+
     fn fill(&mut self) -> bool {
         if std::mem::take(&mut self.primed) {
             return true;
@@ -1061,5 +1086,12 @@ impl Reading for Demuxed {
 
     fn bits(&self) -> u32 {
         self.stream().map_or(0, |s| s.bits)
+    }
+
+    fn skip_to_ms(&mut self, ms: i64) -> bool {
+        match &mut self.state {
+            State::Open(s) => s.skip_ahead(ms),
+            _ => false,
+        }
     }
 }

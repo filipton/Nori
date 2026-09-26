@@ -641,6 +641,12 @@ pub trait Reading {
     fn bits(&self) -> u32 {
         0
     }
+    /// A reading opened ahead of the ear (the music made again with a new sound) is started later than
+    /// planned: what comes before `ms` of the song is decoded and dropped, as a seek drops it. Only
+    /// before its first buffer is handed out; false when it cannot, and the song is opened again there.
+    fn skip_to_ms(&mut self, _ms: i64) -> bool {
+        false
+    }
 }
 
 /// The songs a queue names, as a platform opens them.
@@ -835,6 +841,10 @@ pub struct Player<S: Songs, T: Track, A: App, Q: Queue> {
     stop_after: Option<usize>,
     /// The last turn stopped at its budget of buffers with the output still taking them.
     hungry: bool,
+    /// Nothing is read on from the song being read while set: the same song is being opened elsewhere
+    /// in it (the music about to be made again), and two readers of one song's bytes pull its fetch back
+    /// and forth. The output plays what it holds meanwhile; the one setting it keeps that enough.
+    pub read_held: bool,
     /// Where the stream the output's clock is in starts: a new one of the same song is a repeat loop.
     heard_period: Option<i64>,
     /// Times the song playing started again by itself (repeat one), counted as the ear reaches it.
@@ -886,6 +896,7 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             stopped: None,
             stop_after: None,
             hungry: false,
+            read_held: false,
             heard_period: None,
             loops: 0,
             bridge: false,
@@ -1062,12 +1073,27 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// Queue index `i` from `from_ms`, without touching whether it plays. A song that arriving on skips
     /// (an explicit one) gives way to the first after it that does not.
     pub fn jump(&mut self, i: usize, from_ms: i64) {
+        self.jump_opened(i, from_ms, None);
+    }
+
+    /// [`Player::jump`], with song `i` opened already from `opened.2` ms (`opened.1`, ahead of time, so
+    /// that nothing waits for it here): taken when it is that song, and read from `from_ms`, dropping what
+    /// comes before, when the ear got further meanwhile; opened again otherwise.
+    pub fn jump_from(&mut self, i: usize, from_ms: i64, opened: (String, S::Reading, i64)) {
+        self.jump_opened(i, from_ms, Some(opened));
+    }
+
+    fn jump_opened(&mut self, i: usize, from_ms: i64, opened: Option<(String, S::Reading, i64)>) {
         self.stopped = None;
         self.resound = false;
         self.stop_after = None;
         let i = self.playable(i);
         let id = self.id_at(i);
-        let r = match self.tracks.open(&id, from_ms) {
+        let r = match opened.filter(|o| o.0 == id).and_then(|(_, r, at)| taken_from(r, at, from_ms)) {
+            Some((r, from)) => Ok((r, from)),
+            None => self.tracks.open(&id, from_ms).map(|r| (r, from_ms)),
+        };
+        let (r, from_ms) = match r {
             Ok(r) => r,
             Err(why) => return self.fail(i, PlaybackError::Other, why),
         };
@@ -1304,6 +1330,25 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
         self.rebuild_sink();
     }
 
+    /// [`Player::resound`], with the song `id` opened ahead of the ear from `from_ms` (`r`), while the
+    /// output played on: nothing waits for the song to open here, the moment the output is emptied. It
+    /// is read from where the ear has got to, which the one making it again timed to be `from_ms` or a
+    /// little past it; the song is opened again there instead when the ear is on another song, or short
+    /// of `from_ms` by more than a moment.
+    pub fn resound_from(&mut self, id: String, r: S::Reading, from_ms: i64) {
+        if self.current.is_none() {
+            return;
+        }
+        if !self.playing {
+            self.resound = true;
+            return;
+        }
+        self.follow_clock();
+        self.chain.swap_pending = false;
+        self.chain.deep_at_next_pause = false;
+        self.rebuild_sink_from(Some((id, r, from_ms)));
+    }
+
     /// Speed and pitch, which the sink's stage hears live.
     pub fn set_speed(&mut self, speed: f32, pitch: f32) {
         self.speed = (speed, pitch);
@@ -1327,6 +1372,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// The output as a stop and a prepare make it again: the engine reset, a new chain for the
     /// settings as they are now, and the song read again from where it is.
     fn rebuild_sink(&mut self) {
+        self.rebuild_sink_from(None);
+    }
+
+    /// [`Player::rebuild_sink`], the song the ear is on read from `opened` when it was opened ahead for
+    /// it ([`Player::resound_from`]).
+    fn rebuild_sink_from(&mut self, opened: Option<(String, S::Reading, i64)>) {
         self.resound = false;
         // From where the ear is: inside a held ending, the song before the one the player moved on to.
         let ear = self.ear();
@@ -1342,11 +1393,17 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
                 self.sync_queue();
             }
             let offset = self.fresh_offset();
-            let r = match self.tracks.open(&self.id_at(i), at_ms.max(0)) {
+            let id = self.id_at(i);
+            let ready = opened.filter(|o| o.0 == id).and_then(|(_, r, from)| taken_from(r, from, at_ms.max(0)));
+            let r = match ready {
+                Some(r) => Ok(r),
+                None => self.tracks.open(&id, at_ms.max(0)).map(|r| (r, at_ms.max(0))),
+            };
+            let (r, at_ms) = match r {
                 Ok(r) => r,
                 Err(why) => return self.fail(i, PlaybackError::Other, why),
             };
-            self.begin(i, at_ms.max(0), offset, r);
+            self.begin(i, at_ms, offset, r);
             if let Some(f) = self.reading.as_ref().map(|r| r.r.format()) {
                 self.app.log(&format!("AudioTrack {} Hz buffer={}", f.rate, f.bytes(capacity)));
             }
@@ -1566,6 +1623,16 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// The song the ear is on and the place in it, ms. While an ending is held for a mix (or the mix is
     /// made and not heard yet) the player has been told that ending has played, and is on the next song
     /// already: the ear is still in the ending.
+    /// [`Player::ear`], the place read from the output's clock now.
+    pub fn ear_now(&mut self) -> Option<(usize, i64)> {
+        if self.playing && self.current.is_some() {
+            // The last turn may have been a burst ago.
+            self.follow_clock();
+        }
+        self.ear()
+    }
+
+    /// [`Player::ear`] as of the last turn.
     pub fn ear(&mut self) -> Option<(usize, i64)> {
         let current = self.current?;
         if self.engine.heard().id.is_some() {
@@ -1612,6 +1679,57 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
     /// once rather than when the output runs low.
     pub fn hungry(&self) -> bool {
         self.hungry
+    }
+
+    /// Where the player stands, in words, for a perf report's invariant break: the song it is on and where,
+    /// the song being read and whether it waits for its bytes, the one opening, the next one opened, a
+    /// failure waiting to be raised, and the transition engine's own account.
+    pub fn words(&self) -> String {
+        let id = |i: usize| self.queue.read(|q| q.ids().get(i).cloned()).unwrap_or_else(|| "?".into());
+        let mut w = format!("{} on {}", if self.playing { "playing" } else { "paused" }, self.current.map_or("nothing".into(), |i| format!("{i} ({})", id(i))));
+        if self.position_us != POSITION_NOT_SET {
+            w.push_str(&format!(" at {} ms", self.position_ms()));
+        }
+        match &self.reading {
+            Some(r) => {
+                w.push_str(&format!("; reading {} ({}) at {} ms", r.index, id(r.index), r.r.at_us() / 1000));
+                if r.ended {
+                    w.push_str(", read to its end");
+                }
+                if r.waiting {
+                    w.push_str(", waiting for its bytes");
+                }
+                if r.left() {
+                    w.push_str(", a buffer in hand");
+                }
+            }
+            None => w.push_str("; reading nothing"),
+        }
+        if let Some(o) = &self.opening {
+            w.push_str(&format!("; opening {} ({}) from {} ms", o.index, id(o.index), o.from_ms));
+        }
+        match &self.next {
+            Some((n, Ok(_))) => w.push_str(&format!("; next {n} ({}) opened", id(*n))),
+            Some((n, Err(why))) => w.push_str(&format!("; next {n} ({}) would not open: {why}", id(*n))),
+            None => {}
+        }
+        if let Some((n, _, why)) = &self.failed {
+            w.push_str(&format!("; {n} ({}) failed: {why}", id(*n)));
+        }
+        if let Some(n) = self.stopped {
+            w.push_str(&format!("; stopped at {n}"));
+        }
+        if let Some(n) = self.stop_after {
+            w.push_str(&format!("; stopping after {n}"));
+        }
+        if self.source_ended {
+            w.push_str("; the queue read to its end");
+        }
+        if self.hungry {
+            w.push_str("; hungry");
+        }
+        w.push_str(&format!("; transition engine {}", self.engine.words()));
+        w
     }
 
     /// The queue index of the song being read (or opening): past the song playing near its end.
@@ -1673,6 +1791,9 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
 
     fn render(&mut self) {
         self.hungry = false;
+        if self.read_held {
+            return;
+        }
         for k in 0..BUFFERS_PER_TURN {
             if !self.ensure_buffer() {
                 break;
@@ -1776,6 +1897,23 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
             self.periods.push(Period { index: n, offset_us: end, duration_us, gain });
         }
     }
+}
+
+/// How far short of the place a song was opened at ahead of time the ear may be when it is taken, ms:
+/// that much of the song is not heard. The one opening it times the switch for the ear to be there.
+const OPENED_EARLY_MS: i64 = 40;
+
+/// A song opened ahead from `at` ms, taken to be read from `from_ms` (where the ear is): from `at` when
+/// the ear is at most a moment short of it, from `from_ms` when it is past it and the reading can drop what
+/// comes before. None when it cannot be taken.
+fn taken_from<R: Reading>(mut r: R, at: i64, from_ms: i64) -> Option<(R, i64)> {
+    if from_ms < at - OPENED_EARLY_MS {
+        return None;
+    }
+    if from_ms <= at {
+        return Some((r, at));
+    }
+    r.skip_to_ms(from_ms).then_some((r, from_ms))
 }
 
 /// Where the song at index `i` of `old` is in `new`: the same id, nearest to where it was (a song can

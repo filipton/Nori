@@ -14,13 +14,12 @@
 //! `quit`. With `--wav` it renders the queue to a file, as a sound card would have played it, and
 //! exits at the end.
 
-use std::future::Future;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll, Waker};
+use crate::backend::block_on;
 use std::time::Duration;
 
 use nori_engine::core::{settings, CoreApp, CoreLibrary, CoreOrder, CoreQueue, Downloader, Measurer};
@@ -32,18 +31,6 @@ use nori_core::settings::StoredPrefs;
 use nori_core::settings_store::{settings_open, settings_put, APPLY_AUDIO, APPLY_GAIN, REPLAN, SOUND};
 use nori_core::transport::Transport;
 use nori_core::{Core, Param, ServerConfig, Song};
-
-/// The core's calls are async over a transport that answers at once: polling them once finishes them.
-fn block_on<F: Future>(f: F) -> F::Output {
-    let mut f = std::pin::pin!(f);
-    let mut cx = Context::from_waker(Waker::noop());
-    loop {
-        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-            return v;
-        }
-        std::thread::yield_now();
-    }
-}
 
 struct Args {
     url: String,
@@ -272,7 +259,7 @@ pub fn main(argv: Vec<String>) {
     // With AutoMix on, the songs coming up that are on the disk are measured ahead.
     let app = CoreApp::new().measuring(Measurer::new(core.clone(), client.clone(), store.clone())).per_device(core.clone());
     let library = CoreLibrary { client: client.clone(), bytes: audio.clone(), metered: false, store: Some(store) };
-    let engine = Engine::start(library, app, CoreQueue, output, Config { memory_mb: 256, settings: settings(&prefs), ..Config::default() }, move |e| {
+    let engine = Engine::start(library, app, CoreQueue, output, None, Config { memory_mb: 256, settings: settings(&prefs), ..Config::default() }, move |e| {
         let _ = tx.send(e);
     });
     let mut cli = Cli { core, http, prefs, engine: Arc::new(engine), songs: Vec::new(), downloader };
@@ -327,7 +314,8 @@ pub fn main(argv: Vec<String>) {
     let shown = songs.clone();
     // The desktop's media controls, when asked for.
     let desktop = a.mpris.then(|| {
-        let controls = Arc::new(desktop::Desktop { engine: cli.engine.clone(), titles: songs.clone() });
+        let titles = songs.clone();
+        let controls = Arc::new(crate::backend::Desktop { engine: cli.engine.clone(), song: Box::new(move |s| s.index.and_then(|i| titles.song(i))) });
         nori_mpris::Mpris::start("nori", controls).map_err(|e| println!("no media controls: {e}")).ok()
     });
     let desktop = desktop.flatten();
@@ -480,54 +468,6 @@ mod shown {
 
         pub fn song(&self, index: usize) -> Option<nori_core::Song> {
             self.0.lock().unwrap().get(index).cloned()
-        }
-    }
-}
-
-/// The desktop's media controls drive the engine, and read what plays from it.
-mod desktop {
-    use std::sync::Arc;
-
-    use nori_engine::{Engine, State};
-    use nori_mpris::{Controls, Now};
-
-    pub struct Desktop {
-        pub engine: Arc<Engine>,
-        pub titles: Arc<super::shown::Titles>,
-    }
-
-    impl Controls for Desktop {
-        fn play(&self) {
-            self.engine.play();
-        }
-        fn pause(&self) {
-            self.engine.pause();
-        }
-        fn toggle(&self) {
-            self.engine.toggle();
-        }
-        fn next(&self) {
-            self.engine.next();
-        }
-        fn previous(&self) {
-            self.engine.previous();
-        }
-        fn seek(&self, ms: i64) {
-            self.engine.seek(ms);
-        }
-        fn now(&self) -> Now {
-            let s = self.engine.status();
-            let song = s.index.and_then(|i| self.titles.song(i)).unwrap_or_default();
-            Now {
-                playing: s.state == State::Playing,
-                loaded: s.state == State::Paused,
-                index: s.index,
-                title: song.title,
-                artist: song.artist,
-                album: song.album,
-                length_ms: song.duration as i64 * 1000,
-                position_ms: s.position_now(),
-            }
         }
     }
 }

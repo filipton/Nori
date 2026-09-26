@@ -48,6 +48,7 @@ uniffi-bindgen-kotlin-jni-runtime = { path = "../uniffi-jni-runtime" }
 [dev-dependencies]
 # track.rs's tests run the engine end to end with the simulated player's transition planner.
 nori-player = { path = "../player", features = ["synth"] }
+nori-testdir = { path = "../testdir" }
 
 [build-dependencies]
 uniffi-bindgen-kotlin-jni = { workspace = true }

@@ -97,7 +97,8 @@ pub fn radio_fallback(seed: Song, random: Vec<Song>) -> Vec<Song> {
 }
 
 /// What the debug test bridge names: `album:<id>`, `song:<id>`, `search:<text>` (the first song found),
-/// `downloaded:<n>` (the n-th finished download, from 0), or nothing it knows.
+/// `downloaded:<n>` (the n-th finished download, newest first, from 0), `downloaded:<song id>` (that song,
+/// if it is a finished download), or nothing it knows.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum TestRef {
@@ -105,6 +106,7 @@ pub enum TestRef {
     Song { id: String },
     Search { text: String },
     Downloaded { index: u32 },
+    DownloadedSong { id: String },
     Nothing,
 }
 
@@ -116,7 +118,11 @@ pub fn test_ref(text: String) -> TestRef {
         "album" => TestRef::Album { id: arg },
         "song" => TestRef::Song { id: arg },
         "search" => TestRef::Search { text: arg },
-        "downloaded" => TestRef::Downloaded { index: arg.parse().unwrap_or(0) },
+        "downloaded" => match arg.parse() {
+            Ok(index) => TestRef::Downloaded { index },
+            Err(_) if arg.is_empty() => TestRef::Downloaded { index: 0 },
+            Err(_) => TestRef::DownloadedSong { id: arg },
+        },
         _ => TestRef::Nothing,
     }
 }
@@ -180,7 +186,8 @@ mod tests {
     fn test_refs() {
         assert_eq!(test_ref("album:a:1".into()), TestRef::Album { id: "a:1".into() });
         assert_eq!(test_ref("search:dogs".into()), TestRef::Search { text: "dogs".into() });
-        assert_eq!(test_ref("downloaded:x".into()), TestRef::Downloaded { index: 0 });
+        assert_eq!(test_ref("downloaded:x".into()), TestRef::DownloadedSong { id: "x".into() });
+        assert_eq!(test_ref("downloaded:".into()), TestRef::Downloaded { index: 0 });
         assert_eq!(test_ref("downloaded:2".into()), TestRef::Downloaded { index: 2 });
         assert_eq!(test_ref("song".into()), TestRef::Nothing);
     }

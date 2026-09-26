@@ -119,6 +119,15 @@ fn centred(area: Rect, w: u16, h: u16) -> Rect {
     Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
 }
 
+/// A box in the accent colour over whatever is under `r`, titled `title`: the area inside it.
+fn popup(f: &mut Frame, r: Rect, title: Span, t: &Theme) -> Rect {
+    let block = Block::default().borders(Borders::ALL).title(title).border_style(Style::default().fg(t.accent));
+    let inner = block.inner(r);
+    f.render_widget(Clear, r);
+    f.render_widget(block, r);
+    inner
+}
+
 fn status_line(f: &mut Frame, area: Rect, text: &str, style: Style) {
     f.render_widget(Paragraph::new(Span::styled(fit(text, area.width as usize).into_owned(), style)), area);
 }
@@ -937,9 +946,9 @@ fn settings(f: &mut Frame, area: Rect, app: &mut App) {
     app.settings.own = settings_view::Own { mouse: app.mouse, images: app.images, volume: app.volume, protocol: app.protocol.to_string(), data: own.data.clone(), device: own.device.clone() };
     let [left, right] = Layout::horizontal([Constraint::Length(30.min(area.width / 3)), Constraint::Min(10)]).areas(area);
     let App { settings: v, hits, .. } = app;
-    let groups: Vec<(&str, &str)> = v.groups().iter().map(|g| (g.title, g.summary)).collect();
+    let groups: Vec<&str> = v.groups().iter().map(|g| g.title).collect();
     let pane = v.pane;
-    list(f, left, &mut v.group, groups.len(), ListRef::Groups, hits, &t, pane == 0, &|i, w| Line::from(Span::raw(fit(groups[i].0, w).into_owned())));
+    list(f, left, &mut v.group, groups.len(), ListRef::Groups, hits, &t, pane == 0, &|i, w| Line::from(Span::raw(fit(groups[i], w).into_owned())));
     let page = v.page(&prefs).clone();
     let lines = SettingsView::lines(&page);
     let len = lines.len();
@@ -1006,10 +1015,7 @@ fn login(f: &mut Frame, area: Rect, app: &mut App) {
     let servers = app.prefs.servers.len() as u16;
     let h = 15 + if servers > 0 { servers + 2 } else { 0 };
     let r = centred(area, 64, h);
-    let block = Block::default().borders(Borders::ALL).title(Span::styled(" nori · connect to a server ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))).border_style(Style::default().fg(t.accent));
-    let inner = block.inner(r);
-    f.render_widget(Clear, r);
-    f.render_widget(block, r);
+    let inner = popup(f, r, Span::styled(" nori · connect to a server ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)), &t);
     let l = &app.login;
     let mut y = inner.y + 1;
     for (i, label) in LOGIN_FIELDS.iter().enumerate() {
@@ -1054,10 +1060,7 @@ fn overlay(f: &mut Frame, area: Rect, app: &mut App) {
     match o {
         Overlay::Help { scroll } => {
             let r = centred(area, 84, area.height.saturating_sub(4));
-            let block = Block::default().borders(Borders::ALL).title(Span::styled(" Keys · any key closes ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD))).border_style(Style::default().fg(t.accent));
-            let inner = block.inner(r);
-            f.render_widget(Clear, r);
-            f.render_widget(block, r);
+            let inner = popup(f, r, Span::styled(" Keys · any key closes ", Style::default().fg(t.accent).add_modifier(Modifier::BOLD)), &t);
             let mut lines = Vec::new();
             for scope in [Scope::Global, Scope::List, Scope::Queue, Scope::Lyrics, Scope::Values] {
                 lines.push(Line::from(Span::styled(scope.title(), Style::default().fg(t.accent).add_modifier(Modifier::BOLD))));
@@ -1075,20 +1078,14 @@ fn overlay(f: &mut Frame, area: Rect, app: &mut App) {
             let h = (options.len() as u16 + 2).min(area.height.saturating_sub(4));
             let w = options.iter().map(|o| o.0.width()).max().unwrap_or(10).max(title.width()) as u16 + 8;
             let r = centred(area, w, h);
-            let block = Block::default().borders(Borders::ALL).title(Span::styled(format!(" {title} "), Style::default().fg(t.accent))).border_style(Style::default().fg(t.accent));
-            let inner = block.inner(r);
-            f.render_widget(Clear, r);
-            f.render_widget(block, r);
+            let inner = popup(f, r, Span::styled(format!(" {title} "), Style::default().fg(t.accent)), &t);
             hits.push((r, Hit::List(ListRef::Picker)));
             let opts = options.clone();
             list(f, inner, sel, opts.len(), ListRef::Picker, hits, &t, true, &|i, w| Line::from(fit(&format!(" {}", opts[i].0), w).into_owned()));
         }
         Overlay::Input { title, text, secret, .. } => {
             let r = centred(area, 60, 3);
-            let block = Block::default().borders(Borders::ALL).title(Span::styled(format!(" {title} · enter keeps, esc drops "), Style::default().fg(t.accent))).border_style(Style::default().fg(t.accent));
-            let inner = block.inner(r);
-            f.render_widget(Clear, r);
-            f.render_widget(block, r);
+            let inner = popup(f, r, Span::styled(format!(" {title} · enter keeps, esc drops "), Style::default().fg(t.accent)), &t);
             let shown = if *secret { "•".repeat(text.chars().count()) } else { text.clone() };
             f.render_widget(Paragraph::new(format!("{shown}▌")), inner);
         }

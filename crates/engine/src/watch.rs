@@ -9,7 +9,7 @@
 use std::sync::OnceLock;
 
 /// What the engine's thread saw at the end of one wake.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Seen {
     /// The engine's clock, ms: only differences between two looks mean anything.
     pub now_ms: i64,
@@ -23,6 +23,9 @@ pub struct Seen {
     pub position_ms: i64,
     /// Music written to the output and not yet heard, ms: what it holds.
     pub in_output_ms: i64,
+    /// Where the engine stands, in words (the song, what it reads and waits for, the transition engine,
+    /// the loaders): what a client quotes when it finds the music stalled. Made only when wanted.
+    pub state: String,
 }
 
 /// What a client hands the engine to be told what it sees.

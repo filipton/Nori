@@ -253,6 +253,8 @@ class Say(private val r: Resources) {
     fun albums(n: Int): String = counted(albumsMade, R.plurals.albums, n)
     fun releases(n: Int): String = r.getQuantityString(R.plurals.releases, n, n)
     fun selected(n: Int): String = r.getString(R.string.selected_count, n)
+    /** The count alone, where "12 selected" does not fit. */
+    fun selectedShort(n: Int): String = r.getString(R.string.selected_count_short, n)
 
     /** A folder's caption: "2 folders · 14 songs". */
     fun folderCaption(folders: Int, songs: Int): String = r.getQuantityString(R.plurals.folders, folders, folders) + " · " + songs(songs)

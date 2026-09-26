@@ -374,6 +374,32 @@ impl<C: Clone> TransitionEngine<C> {
         matches!(self.phase, Phase::Hold)
     }
 
+    /// Where it stands, in words, for a perf report's invariant break: its phase, the songs, the plan,
+    /// what it holds and what it has queued for the output.
+    pub fn words(&self) -> String {
+        let phase = match self.phase {
+            Phase::Pass => "passing",
+            Phase::Hold => "holding an ending",
+            Phase::Mix => "mixing",
+        };
+        let mut w = format!("{phase}, flowing {}, arriving {}", self.playing_id.as_deref().unwrap_or("-"), self.current_id.as_deref().unwrap_or("-"));
+        if let (Some(p), Some(of)) = (&self.plan, &self.plan_for) {
+            w.push_str(&format!(", plan {of} -> {} from {} ms for {} ms", p.incoming_id, p.out_start_us / 1000, p.duration_us / 1000));
+        }
+        if matches!(self.phase, Phase::Hold) {
+            w.push_str(&format!(", held {} of {} of {} ({} ms)", self.tail_len, self.tail_limit, self.held_id.as_deref().unwrap_or("-"), self.held_us / 1000));
+        }
+        if let Some((p, _)) = &self.awaiting_incoming {
+            w.push_str(&format!(", awaiting {}", p.incoming_id));
+        }
+        if self.fresh {
+            w.push_str(", fresh");
+        }
+        let queued: usize = self.queue.iter().map(|c| c.data.len() - c.pos).sum();
+        w.push_str(&format!(", {} chunks ({queued} bytes) for the output", self.queue.len()));
+        w
+    }
+
     // ---- configuration ----
 
     /// The decoder announces a stream. `config` is handed to [`Downstream::configure`] if and when

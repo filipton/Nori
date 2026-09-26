@@ -36,7 +36,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -230,3 +233,42 @@ fun <T : Any> NoriSheet(
 @Composable
 fun NoriSheet(visible: Boolean, onDismissRequest: () -> Unit, skipPartiallyExpanded: Boolean = true, content: @Composable ColumnScope.() -> Unit) =
     NoriSheet(if (visible) Unit else null, onDismissRequest, skipPartiallyExpanded) { content() }
+
+/**
+ * A bar that takes its place in the layout while [value] is not null - the selection bar over the mini
+ * player. It opens its own height and fades in on the app's clock (in: 240 ms, out: 170 ms, a 120 ms
+ * fade with motion reduced, like [NoriDialog]), rising from behind what is under it, and closes the
+ * same way, showing the last value while it leaves; what is under it moves with the room it takes
+ * rather than jumping. A leaving bar takes no taps. Closed, it is one remembered state and an early return.
+ */
+@Composable
+fun <T : Any> NoriBar(value: T?, modifier: Modifier = Modifier, content: @Composable (T) -> Unit) {
+    var held by remember { mutableStateOf<T?>(null) }
+    SideEffect { if (value != null && held !== value) held = value }
+    val shown = value ?: held ?: return
+    val open = value != null
+    val shownAt = remember { Animatable(0f) }
+    LaunchedEffect(open) {
+        val plain = AppMotion.reduce
+        val ms = if (plain) PLAIN_MS else if (open) ENTER_MS else EXIT_MS
+        withContext(AppMotion) {
+            shownAt.animateTo(if (open) 1f else 0f, tween(ms, easing = if (plain) LinearEasing else Settle))
+        }
+        if (!open) held = null
+    }
+    Box(
+        modifier
+            .clipToBounds()
+            // As much of its height as it has opened, read at layout: the bar's top edge rises with it.
+            .layout { measurable, constraints ->
+                val p = measurable.measure(constraints)
+                layout(p.width, (p.height * shownAt.value).roundToInt()) { p.placeRelative(0, 0) }
+            }
+            .graphicsLayer { alpha = shownAt.value }
+            .pointerInput(open) {
+                if (!open) awaitPointerEventScope {
+                    while (true) awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+                }
+            },
+    ) { content(shown) }
+}

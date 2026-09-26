@@ -41,9 +41,13 @@ pub struct Stage {
     pub spinner_after_ms: i64,
     /// How long the artwork, the lyrics and the queue take to dissolve into one another.
     pub panel_ms: i32,
-    /// How long a skip keeps the old picture on the sleeve before letting it go to the plate.
+    /// How long a song whose cover is not at hand yet keeps the last picture on the sleeve before it fades
+    /// to the placeholder: long enough for a cover read from the disk to arrive without the placeholder
+    /// blinking in first, short enough that the last song's cover never reads as the new song's.
     pub sleeve_hold_ms: i64,
-    /// A song with no colours of its own gets the plain page once it has had this long to find some.
+    /// The same grace for the page's colours: a song whose colours are not worked out yet keeps the last
+    /// song's this long, then the page fades to the plain page until its own come (or for good, when it has
+    /// no artwork).
     pub colour_wait_ms: i64,
     /// How long the page's colours take to cross-fade to a song's (as long as a record takes to slide).
     pub colour_fade_ms: i32,
@@ -80,8 +84,8 @@ pub fn stage() -> Stage {
         lyrics_mask: stops(&sleeve::LYRICS_MASK),
         spinner_after_ms: 300,
         panel_ms: 360,
-        sleeve_hold_ms: 600,
-        colour_wait_ms: 1_200,
+        sleeve_hold_ms: 180,
+        colour_wait_ms: 180,
         colour_fade_ms: 420,
         lyrics_reading_ms: nori_look::lyrics::READING_MS,
         lyrics_rise_min_ms: nori_look::lyrics::RISE_MIN_MS,

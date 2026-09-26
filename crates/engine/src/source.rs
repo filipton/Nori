@@ -319,6 +319,37 @@ impl Loader {
         s.announced.take()
     }
 
+    /// Where it stands, in words, for a perf report's invariant break: the bytes it holds of the song,
+    /// where its reader is and wants to be, readers blocked, an engine waiting on it, and how it ended.
+    pub fn words(&self) -> String {
+        let s = self.0.state.lock();
+        let len = s.len.map_or("?".to_string(), |l| l.to_string());
+        let mut w = format!("{}..{} of {len} bytes, reader at {}", s.base, s.base + s.data.len() as u64, s.reader_at);
+        if s.done {
+            w.push_str(", loaded to its end");
+        }
+        if let Some(at) = s.restart {
+            w.push_str(&format!(", wanted from {at}"));
+        }
+        if s.blocked > 0 {
+            w.push_str(&format!(", {} readers blocked", s.blocked));
+        }
+        if s.waiter.is_some() {
+            w.push_str(", the engine waits on it");
+        }
+        if !s.ready() {
+            w.push_str(", not ready");
+        }
+        if let Some(e) = &s.error {
+            w.push_str(&format!(", gave up: {e}"));
+        }
+        if s.closed {
+            w.push_str(", closed");
+        }
+        w.push_str(&format!(", {} bursts", s.bursts));
+        w
+    }
+
     /// Times the network was opened for this song: one per burst.
     pub fn bursts(&self) -> u32 {
         self.0.state.lock().bursts

@@ -80,6 +80,11 @@ android {
     sourceSets {
         getByName("debug").kotlin.srcDir("src/bench/kotlin")
         getByName("perf").kotlin.srcDir("src/bench/kotlin")
+        // The test bridge (TestBridge over adb, what it drives) is the debug build's alone (src/debug); the
+        // release and perf builds get its empty twin, so they carry none of it. The perf build's self test
+        // drives the app by itself and needs none of the bridge.
+        getByName("release").kotlin.srcDir("src/noTest/kotlin")
+        getByName("perf").kotlin.srcDir("src/noTest/kotlin")
         // The self test's plain logic (no Android in it): built into the perf build, and tested on the JVM
         // with the unit tests, which AGP runs for the debug build only.
         getByName("perf").kotlin.srcDir("src/perf/logic")

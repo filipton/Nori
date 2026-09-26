@@ -30,19 +30,18 @@ pub enum Opened {
 pub struct Group {
     pub id: &'static str,
     pub title: &'static str,
-    pub summary: &'static str,
 }
 
 /// The groups, in the order they are listed.
 pub const GROUPS: [Group; 8] = [
-    Group { id: OWN, title: "Terminal", summary: "Mouse, covers, colours, output" },
-    Group { id: "sound", title: "Sound", summary: "Equalizer, levelling, mixing, tempo" },
-    Group { id: "playback", title: "Playback", summary: "Queue, skipping, offline" },
-    Group { id: "library", title: "Library", summary: "Index, search, history" },
-    Group { id: "lyrics", title: "Lyrics", summary: "Display, online lookups, sources" },
-    Group { id: "server", title: "Server", summary: "Accounts, music folder" },
-    Group { id: "storage", title: "Storage", summary: "Quality, downloads, cache" },
-    Group { id: "about", title: "About", summary: "Version and credits" },
+    Group { id: OWN, title: "Terminal" },
+    Group { id: "sound", title: "Sound" },
+    Group { id: "playback", title: "Playback" },
+    Group { id: "library", title: "Library" },
+    Group { id: "lyrics", title: "Lyrics" },
+    Group { id: "server", title: "Server" },
+    Group { id: "storage", title: "Storage" },
+    Group { id: "about", title: "About" },
 ];
 
 /// One row of a page.

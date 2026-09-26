@@ -22,8 +22,7 @@ given; **[inferred]** = my reasoning or estimate, not confirmed.
   89.1 % and 78.3 %), where classical trackers of the kind Nori uses score 55-66 %. **[verified]** The switch is
   off by default; on, it runs the small model (4.2 MB of fp16 weights) through tract (pure Rust, no second native
   runtime) over the first and last 30 s of the song playing and the next one, in nori-engine's measurer. The
-  Android debug and perf builds carry the feature and the model's graph; a release build leaves it out unless
-  asked (section 5). The weights are made on the device from the authors' own checkpoint, fetched from their
+  Android builds, release included, carry the feature and the model's graph (`-PrustFeatures=` leaves it out; section 5). The weights are made on the device from the authors' own checkpoint, fetched from their
   server when the switch goes on (7.1). Its grid replaces the classical one at an end when it is confident and its bar is settled
   (section 7). On the synthetic set the mix windows that are right and trusted go from 24 to 27 of 32 and none is
   trusted and wrong. **[measured]**
@@ -307,8 +306,8 @@ the NDK build of September 2026 (`./gradlew :app:assemblePerf -PrustTargets=arm6
 `libnorimusic.so` 9,615,584 bytes without the feature and 25,314,080 with it (the graph's 186 kB and the checkpoint
 reader included), the APK 14,150,663 and 29,849,159 bytes. While the weights were bundled, the same build was
 34,705,148 bytes (the library 25,099,776 and the 5,069,707-byte model stored beside it). **[measured]** So the
-debug and perf builds have the feature, for testing, and a release build leaves it out unless asked (`core/build.gradle.kts`: `-PrustFeatures=neural-beats` puts them in, an empty
-`-PrustFeatures=` takes them out of any build). The setting is only shown by a build that has it: without it nothing of tract is compiled or linked. In a build with it, nothing else is paid while the
+every Android build has the feature, release included (the owner's call, 2026-09-26; `core/build.gradle.kts`: an empty
+`-PrustFeatures=` takes it out of any build). The setting is only shown by a build that has it: without it nothing of tract is compiled or linked. In a build with it, nothing else is paid while the
 switch is off: the code is mapped, not run, and the model is never loaded; the dynamic linker does relocate 0.5 MB
 more of read-only data when the library opens. Keeping tract in a second library loaded only when the switch is on
 would not shrink the APK, which is where the cost is; NNEF would save a quarter of it, once tract can write the
@@ -371,8 +370,7 @@ What was built follows these rules:
      (`beat_model.rs`): the pins and where the file is, deleted when the switch goes off. nori-settings: the two
      switches and their rows, shown only in a build with the model. No Kotlin besides the two fields its copy of
      the settings carries.
-   - The Android debug and perf builds have `neural-beats`; a release build leaves it out unless asked (section
-     5). `cargo build -p nori-cli --features neural-beats` for the desktop. Every client takes the same path, and
+   - Every Android build has `neural-beats`, release included (section 5). `cargo build -p nori-cli --features neural-beats` for the desktop. Every client takes the same path, and
      no one ships or hosts a copy of the weights.
    - The graph is made by `tools/beat-this/export.py` from the MIT code and checkpoint (7.1):
      `crates/player/models/beat-this-small0.graph.onnx`, 186,116 bytes, every initializer external data with the

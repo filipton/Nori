@@ -12,3 +12,6 @@ mod radio;
 mod tempo;
 #[path = "estimated.rs"]
 mod estimated;
+#[cfg(feature = "core")]
+#[path = "replan.rs"]
+mod replan;

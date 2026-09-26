@@ -293,7 +293,7 @@ private fun LyricsBody(vm: PlayerViewModel, found: dev.nori.music.data.FoundLyri
             } else { delay(wait.toLong()); drawnAt = 0L }
             val read = vm.positionIn(song) ?: break
             step = clock.at(read, sweep, lively, force = false)
-            if (dev.nori.music.app.TestHooks.traceLyrics) android.util.Log.d("norilyrics", "${android.os.SystemClock.uptimeMillis()} read=$read shown=${clock.shownMs()} mixing=${vm.mixing.value} player=${vm.playerPositionMs}")
+            if (dev.nori.music.app.traceLyrics) android.util.Log.d("norilyrics", "${android.os.SystemClock.uptimeMillis()} read=$read shown=${clock.shownMs()} mixing=${vm.mixing.value} player=${vm.playerPositionMs}")
             if (LyricsClock.redraw(step)) {
                 show(LyricsClock.frame(step))
                 shownMs = clock.shownMs()

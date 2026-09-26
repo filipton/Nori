@@ -247,6 +247,8 @@
         <item quantity="other">%d folders</item>
     </plurals>
     <string name="selected_count">%1$d selected</string>
+    <!-- The selection bar's count where "%1$d selected" does not fit on one line. -->
+    <string name="selected_count_short">%1$d</string>
     <string name="download_queue_to_go">%1$d to go</string>
     <string name="decade_name">%1$ds</string>
     <string name="folder_untitled">Folder</string>

@@ -167,6 +167,9 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
     }
 
     private fun songs(done: Boolean): List<Song> = runCatching { core.downloads(done) }.getOrDefault(emptyList())
+
+    /** Every downloaded song, newest first, read from the core now (never on the main thread). */
+    fun doneSongs(): List<Song> = songs(true)
     private fun ids(done: Boolean): List<String> = runCatching { core.downloadIds(done) }.getOrDefault(emptyList())
 
     /** Downloads that finished (true) or left the queue (false) and are not written down yet, in order. */

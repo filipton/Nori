@@ -58,8 +58,10 @@ if want automix; then section "one AutoMix transition"
   sounds 20
   wait_for durationMs ">30000" 10 >/dev/null
   leaving=$(field title); dur=$(field durationMs)
-  "$app" do "seek $((dur - 15000))" >/dev/null
-  check "the mix is heard as the song ends" wait_for mixing True 30
+  # 30 s before the end: a song with a long outro plans its mix up to about 20 s early, and a seek past
+  # the planned start rightly goes straight on to the next song, with no mix to see.
+  "$app" do "seek $((dur - 30000))" >/dev/null
+  check "the mix is heard as the song ends" wait_for mixing True 45
   check "and the next song plays out of it" wait_for title "!$leaving" 30
   check "with the track still sounding" sounds 10
   plain
@@ -137,8 +139,11 @@ if want offline; then section "a download plays offline"
   check "the download finishes" wait_until 60 dl_done
   offline
   adb shell am force-stop "$pkg" >/dev/null 2>&1; "$app" launch >/dev/null
-  # From the device's own list: looking the song up by id would need the network and prove nothing.
-  "$app" play "downloaded:0" >/dev/null
+  # From the device's own list: looking the song up by id would need the network and prove nothing. This
+  # song, not the newest in the list (a song downloaded by an earlier run was queued before the others),
+  # once the restarted app has read its downloads.
+  check "the download is still there after the restart" wait_for downloaded ">0" 20
+  "$app" play "downloaded:$id" >/dev/null
   check "a downloaded song plays with the network off" sounds 20
   online
 fi

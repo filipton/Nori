@@ -121,6 +121,9 @@ struct Server {
     slow: Mutex<Vec<(String, Duration)>>,
     /// Songs whose connection breaks after this many bytes, and cannot be had again past them.
     cut: Mutex<Vec<(String, u64)>>,
+    /// Every request for a song after its first takes this long on the test's clock: the network asked
+    /// again, as a phone asks for a song whose first bytes have gone from memory.
+    lag: Mutex<Option<(Virtual, Duration)>>,
 }
 
 /// A body that breaks off: the bytes up to the cut, then an error.
@@ -139,7 +142,15 @@ impl std::io::Read for Broken {
 
 impl ByteSource for Server {
     fn open(&self, url: &str, from: u64) -> Result<Body, nori_engine::OpenError> {
-        self.requests.lock().push((url.to_string(), from));
+        let again = {
+            let mut asked = self.requests.lock();
+            asked.push((url.to_string(), from));
+            asked.iter().filter(|(u, _)| u == url).count() > 1
+        };
+        let lag = self.lag.lock().clone();
+        if let Some((clock, d)) = lag.filter(|_| again) {
+            clock.wait_until(clock.now_ns() + d.as_nanos() as i64);
+        }
         let slow = self.slow.lock().iter().find(|(u, _)| u == url).map(|s| s.1);
         if let Some(d) = slow {
             std::thread::sleep(d);
@@ -202,6 +213,8 @@ struct Extra {
     resizes: bool,
     /// What the device says it needs while shallow (`AudioOutput::shallow_depth`): a Bluetooth output.
     depth: Option<ShallowDepth>,
+    /// The app's memory class, which sizes how much of a song is held in memory: 256 MB unless set.
+    memory_mb: Option<u32>,
 }
 
 struct Songs {
@@ -404,7 +417,7 @@ impl Rig {
 
     /// Songs as (id, file, length ms), played through a device that takes float or 16-bit samples.
     fn build(files: Vec<(String, Vec<u8>, i64)>, app: impl App + Send + 'static, settings: Settings, extra: Extra) -> Rig {
-        let Extra { float, skip, server, store, idle_release_ms, pace, resizes, depth } = extra;
+        let Extra { float, skip, server, store, idle_release_ms, pace, resizes, depth, memory_mb } = extra;
         for (id, f, _) in &files {
             server.files.lock().push((id.clone(), Arc::new(f.clone())));
         }
@@ -437,7 +450,7 @@ impl Rig {
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = events.clone();
         let library = Songs { server: server.clone(), lengths, store };
-        let mut config = Config { memory_mb: 256, settings, ..Config::default() };
+        let mut config = Config { memory_mb: memory_mb.unwrap_or(256), settings, ..Config::default() };
         config.idle_release_ms = idle_release_ms.unwrap_or(config.idle_release_ms);
         let engine = Engine::start_on(library, app, queue, Box::new(out), None, config, clock.clone(), move |e| seen.lock().push(e));
         let time = Stepper::new(clock, card.clone());
@@ -1285,6 +1298,103 @@ fn a_slider_dragged_while_playing_is_made_heard_once_per_moment() {
     rig.engine.stop();
 }
 
+/// A song as a phone plays one it must fetch again to open again: longer than the memory cap, so its first
+/// bytes have gone from memory a minute in, and every request after the first takes `lag_ms` of the test's
+/// clock. Opening it again there asks twice (its start, then where it is opened), and reading the bytes
+/// that come takes some of the test's time too: well over half a second in all. Played a minute in with
+/// `settings`, its place said every 100 ms; the song itself too.
+fn slow_to_open_again(settings: Settings, lag_ms: u64) -> (Rig, Vec<i16>) {
+    let a = music(120.0, 47);
+    let files = vec![("a".to_string(), wav(&a), 120_000)];
+    let extra = Extra { pace: Some(1.0), memory_mb: Some(64), ..Extra::default() };
+    let server = extra.server.clone();
+    let rig = Rig::build(files, sim::App::new(), settings, extra);
+    *server.lag.lock() = Some((rig.time.clock.clone(), Duration::from_millis(lag_ms)));
+    rig.engine.position_updates(Some(Duration::from_millis(100)));
+    rig.engine.play_at(0, 0);
+    assert!(rig.wait_for(80, |r| r.heard.lock().len() > RATE as usize * 2 * 60), "a minute in");
+    (rig, a)
+}
+
+/// Milliseconds of `samples` stereo samples.
+fn ms_of(samples: usize) -> i64 {
+    samples as i64 * 1000 / 2 / RATE as i64
+}
+
+/// The places said since event `from`: each on from the one before (but for the 100 ms a report may be
+/// late by), the last within 150 ms of `heard_ms`, the music the card played.
+fn places_run_on(rig: &Rig, from: usize, heard_ms: i64) {
+    let places: Vec<i64> = rig.events.lock()[from..].iter().filter_map(|e| if let Event::Position { ms, .. } = e { Some(*ms) } else { None }).collect();
+    assert!(places.len() >= 5, "{places:?}");
+    assert!(places.windows(2).all(|w| w[1] >= w[0] && w[1] - w[0] <= 250), "on and on: {places:?}");
+    let last = *places.last().expect("some");
+    assert!((heard_ms - last).abs() <= 150, "the place {last} ms is the music heard, {heard_ms} ms: {places:?}");
+}
+
+/// The first change of the sound over a song slow to open again (the phone's "long pause" the first time
+/// the equalizer went on): the song is opened ahead of the ear while what the output holds plays on, and
+/// swapped in behind the dip once it is open, where the ear has got to. No gap, and the equalizer heard
+/// once the song is open. It was a silence as long as the opening, and longer.
+#[test]
+fn the_equalizer_switched_on_over_a_song_slow_to_open_again_plays_on_without_a_gap() {
+    let (rig, a) = slow_to_open_again(Settings::default(), 300);
+    let asked = rig.server.requests.lock().len();
+    let (at, waits, t0, seen) = (rig.heard.lock().len(), rig.waits(), rig.now_ms(), rig.events.lock().len());
+    rig.engine.set_settings(loud_eq());
+    rig.run(2_000);
+    assert!(rig.server.requests.lock().len() > asked, "the song was fetched again to open it: {:?}", rig.server.requests.lock());
+    let heard = rig.heard.lock().clone();
+    let elapsed = rig.now_ms() - t0;
+    let got = ms_of(heard.len() - at);
+    assert!(rig.waits() <= waits + 2, "no gap: the card found nothing to play {} times ({} ms of music in {elapsed} ms)", rig.waits() - waits, got);
+    assert!(elapsed - got <= 10, "{got} ms heard in {elapsed} ms");
+    // As it was until the change is heard: the dip, then the song through the equalizer.
+    let changed = (at..heard.len()).find(|&k| heard[k] != a[k]).expect("the equalizer is heard");
+    let after = ms_of(changed - at);
+    assert!(after <= 3_000, "the dip began {after} ms after the change, once the song was open again");
+    assert!(heard[heard.len() - 2 * RATE as usize..] != a[heard.len() - 2 * RATE as usize..heard.len()], "through the equalizer after");
+    // The ear went on where it was: the places said run on with the music heard.
+    places_run_on(&rig, seen, ms_of(heard.len()));
+    rig.engine.stop();
+}
+
+/// The equalizer taken out over a song slow to open again: after the dip, the song itself from exactly
+/// where the ear was, with no gap.
+#[test]
+fn the_equalizer_switched_off_over_a_song_slow_to_open_again_goes_on_where_the_ear_was() {
+    let (rig, a) = slow_to_open_again(quieter(-12.0), 300);
+    let (at, waits, t0) = (rig.heard.lock().len(), rig.waits(), rig.now_ms());
+    rig.engine.set_settings(Settings::default());
+    rig.run(2_000);
+    let heard = rig.heard.lock().clone();
+    let elapsed = rig.now_ms() - t0;
+    assert!(rig.waits() <= waits + 2, "no gap: the card found nothing to play {} times", rig.waits() - waits);
+    assert!(elapsed - ms_of(heard.len() - at) <= 10, "{} ms heard in {elapsed} ms", ms_of(heard.len() - at));
+    let (k, shift) = as_the_song(&heard, &a, at).expect("the song itself, untouched, after the change");
+    assert!(ms_of(k - at) <= 3_000, "heard {} ms after the change", ms_of(k - at));
+    assert!(shift.unsigned_abs() <= 2 * RATE as usize / 1000 * 2, "on from where the ear was: {:.1} ms off", shift as f64 * 1000.0 / 2.0 / RATE as f64);
+    rig.engine.stop();
+}
+
+/// Every switch of the sound, and AutoMix, while the song plays, over a song slow to open again: each
+/// is heard behind its dip, the music never stops, and the place runs on with what was heard.
+#[test]
+fn the_sound_switched_again_and_again_over_a_song_slow_to_open_again_never_stops_the_music() {
+    let (rig, _) = slow_to_open_again(Settings::default(), 200);
+    let limiter = |on: bool| Settings { sound: nori_engine::Sound { limiter: on, threshold_db: -1.0, ..Default::default() }, ..Settings::default() };
+    let steps = [loud_eq(), Settings::default(), limiter(true), limiter(false), Settings { auto_mix: true, ..Settings::default() }, Settings::default(), quieter(-6.0)];
+    for s in steps {
+        let (at, waits, t0, seen) = (rig.heard.lock().len(), rig.waits(), rig.now_ms(), rig.events.lock().len());
+        rig.engine.set_settings(s.clone());
+        rig.run(2_000);
+        let (heard, elapsed) = (rig.heard.lock().len(), rig.now_ms() - t0);
+        assert!(rig.waits() <= waits + 2, "no gap for {s:?}: the card found nothing to play {} times", rig.waits() - waits);
+        assert!(elapsed - ms_of(heard - at) <= 10, "{} ms heard in {elapsed} ms for {s:?}", ms_of(heard - at));
+        places_run_on(&rig, seen, ms_of(heard));
+    }
+    rig.engine.stop();
+}
+
 #[test]
 fn high_quality_output_switched_on_while_playing_takes_the_next_song_untouched() {
     // a long enough that b is opened well after the change.
@@ -1909,6 +2019,72 @@ fn a_song_played_next_after_the_player_read_on_gaplessly_into_the_old_next_one_i
 /// songs measured ahead are; the reader the player needs of the same song must still be woken by its
 /// bytes, and the next song is heard out of the fade and plays on, rather than the music sitting at the
 /// end of the first while its reader sleeps out its timeout.
+/// The S22's report on the engine itself: the equalizer and AutoMix on, songs some whole in the stream
+/// cache, some in it in part and some slow to come from the server, and next pressed ten to fifteen times
+/// a few to two hundred milliseconds apart, now and then from inside a planned mix's held ending. Songs
+/// are opened and let go faster than they load and the transition engine is left mid-plan: the music must
+/// still come out of the last song pressed to, and the place move on in it. (The phone's silence was its
+/// output's, crates/android track.rs; this holds the engine to its part.)
+#[test]
+fn next_pressed_fast_and_long_with_the_equalizer_and_automix_on_leaves_the_music_playing() {
+    const SECS: f64 = 40.0;
+    let songs = many(16, SECS, 900);
+    let ms = (SECS * 1000.0) as i64;
+    for round in 0..4u64 {
+        let mut rng = Rng(0x9E37_79B9 + round * 7919);
+        let mut roll = |max: u64| ((rng.next() + 1.0) / 2.0 * max as f64) as u64;
+        let dir = nori_testdir::TempDir::new("skips");
+        let store = Store::open(dir.path(), 256 << 20, Box::new(Recent::default())).unwrap();
+        let extra = Extra { store: Some(store.clone()), ..Extra::default() };
+        for (k, (id, s)) in songs.iter().enumerate() {
+            let bytes = wav(s);
+            match k % 3 {
+                // Whole in the stream cache.
+                0 => {
+                    let mut w = store.writer(&format!("{id}:0")).unwrap();
+                    assert!(w.write(0, &bytes));
+                    assert!(w.finish(bytes.len() as u64));
+                }
+                // In it in part, left for the player to go on with.
+                1 => {
+                    let mut w = store.writer(&format!("{id}:0")).unwrap();
+                    assert!(w.write(0, &bytes[..bytes.len() / 3]));
+                    w.leave();
+                }
+                // Slow to come.
+                _ => extra.server.slow.lock().push((id.clone(), Duration::from_millis(200))),
+            }
+        }
+        let mut app = sim::App::new();
+        app.prefs = TransitionPrefs { auto_mix: true, auto_mix_max_s: 12, keep_albums: false, ..prefs_off() };
+        for (id, _) in &songs {
+            app.analyses.insert(id.clone(), measured(id, 120.0, ms));
+        }
+        let files = songs.iter().map(|(id, s)| (id.clone(), wav(s), ms)).collect();
+        let rig = Rig::build(files, app, Settings { auto_mix: true, ..loud_eq() }, extra);
+        rig.engine.play_at(0, 0);
+        assert!(rig.wait_for(10, |r| r.heard.lock().len() > RATE as usize * 2 * 2), "round {round}: a plays");
+        if round % 2 == 1 {
+            // Into the held ending of a planned mix: the presses begin from inside it.
+            rig.engine.seek(ms - 18_000);
+            rig.run(300 + roll(1_500));
+        }
+        let presses = 10 + roll(5) as usize;
+        for k in 1..=presses {
+            // As the app skips: a jump to the song after the one on the screen.
+            rig.engine.go_to(k, 0);
+            rig.run(5 + roll(195));
+        }
+        let heard = rig.heard.lock().len();
+        let plays = |r: &Rig| r.heard.lock().len() > heard + RATE as usize * 2 * 3;
+        assert!(rig.wait_for(1, plays), "round {round}, {presses} presses: music after them: {:?} {:?}", rig.engine.status(), rig.events.lock());
+        assert!(rig.wait_for(1, |r| r.engine.status().index == Some(presses)), "round {round}: on the song the last press asked for: {:?}", rig.engine.status());
+        let at = rig.engine.status().position_ms;
+        assert!(rig.wait_for(1, |r| r.engine.status().position_ms >= at + 2_000), "round {round}: and the place moves on from {at} ms: {:?}", rig.engine.status());
+        rig.engine.stop();
+    }
+}
+
 #[test]
 fn a_seek_near_the_end_goes_on_through_the_fade_while_songs_opened_for_nothing_give_up() {
     // Which reader wakes last decides it: a few rounds, side by side (source.rs's
@@ -2002,7 +2178,7 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn a_client_keeping_watch_is_told_what_each_wake_saw_and_nothing_while_it_does_not_want_it() {
-    nori_engine::watch::install(nori_engine::watch::Hook { wanted: || WATCHING.load(Ordering::Relaxed), seen: |s| SEEN.lock().push((std::thread::current().id(), *s)) });
+    nori_engine::watch::install(nori_engine::watch::Hook { wanted: || WATCHING.load(Ordering::Relaxed), seen: |s| SEEN.lock().push((std::thread::current().id(), s.clone())) });
     let a = music(90.0, 71);
     let songs: [(&str, &[i16]); 1] = [("a", &a)];
     let rig = Rig::new(&songs, prefs_off(), Settings::default());
@@ -2014,11 +2190,13 @@ fn a_client_keeping_watch_is_told_what_each_wake_saw_and_nothing_while_it_does_n
     WATCHING.store(false, Ordering::Relaxed);
     // Other tests' engines may be told too while it is on, each on its own thread: only this one's looks count.
     let me = rig.time.clock.engine_thread().expect("the engine slept on the test's clock");
-    let mine = || SEEN.lock().iter().filter(|s| s.0 == me).map(|s| s.1).collect::<Vec<_>>();
+    let mine = || SEEN.lock().iter().filter(|s| s.0 == me).map(|s| s.1.clone()).collect::<Vec<_>>();
     let played: Vec<_> = mine().into_iter().filter(|s| s.playing && s.index == Some(0) && !s.offloaded).collect();
     assert!(played.windows(2).all(|w| w[1].now_ms >= w[0].now_ms), "in the engine's own time: {played:?}");
     let moved = played.len() >= 2 && played.last().unwrap().position_ms > played[0].position_ms && played.iter().any(|s| s.in_output_ms > 0);
     assert!(moved, "the ear moved on between wakes, with music waiting in the output: {played:?}");
+    let state = &played.last().unwrap().state;
+    assert!(state.starts_with("Playing; playing on 0 (a) at ") && state.contains("reading 0 (a)") && state.contains("transition engine passing") && state.contains("loaders: a: "), "and says where it stands: {state}");
     let told = mine().len();
     rig.run(3_000);
     assert_eq!(mine().len(), told, "not wanted, nothing is made or told");

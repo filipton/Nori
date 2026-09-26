@@ -174,7 +174,7 @@ runs, on one thread that sleeps between bursts (its wakeups are listed in `crate
 
 The engine also plays what the Android player plays around the sound chain, each off unless asked for:
 - **Audio offload** (`offload.rs`): given an output that decodes compressed songs itself
-  (`nori_engine::OffloadOutput`, `Engine::start_with`) and settings with nothing that needs the samples
+  (`nori_engine::OffloadOutput`, `Engine::start`) and settings with nothing that needs the samples
   (`nori_player::policy`), songs go there as their packets (MP3, AAC-LC, Opus in Ogg pages), joined
   without a gap on one track with each song's delay and padding, the ReplayGain and the fades as its
   volume; the thread sleeps minutes between top-ups. An output without gapless offload still gets a song
@@ -656,7 +656,7 @@ What stays in the client with no twin:
 - **The perf build's counters**: reading `/proc`, `BatteryManager`, `Debug.MemoryInfo`, `TrafficStats`,
   the AudioTrack the player opened (`PlaybackService.track`) and `FrameMetrics`, and counting frames as they
   are drawn. What a stretch is, which threads it names and how it is said are the core's (`perf_log`).
-- **The debug build's tools**: the test bridge's verbs (`ActionsViewModel.testAction`, `TestBridge.kt`) and
+- **The debug build's tools**: the test bridge's verbs (`app/src/debug`: `TestBridge.kt`, `TestActions.kt`, `TestDriver.kt`; release and perf get the empty `app/src/noTest`) and
   the benchmarks (`app/src/bench`), which measure Android's own crossings and Bitmaps.
 - **Drawing**: layout, glyph widths, gradients' brushes, slider widget geometry, the player's sleeve box
   and the interface's scale.

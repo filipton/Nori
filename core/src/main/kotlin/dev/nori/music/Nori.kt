@@ -17,6 +17,7 @@ import dev.nori.music.playback.MediaSources
 import dev.nori.music.playback.PlayerConnection
 import dev.nori.music.settings.ServerProfile
 import dev.nori.music.settings.Settings
+import dev.nori.music.settings.profile
 import dev.nori.music.settings.serverList
 import dev.nori.music.settings.stored
 import dev.nori.music.settings.withServers
@@ -31,6 +32,7 @@ import java.io.File
  */
 @OptIn(UnstableApi::class)
 class Nori private constructor(private val context: Context) {
+    init { dev.nori.music.ffi.migrate034(context.filesDir.path) } // Remove with migrate_034 once 0.3.4 users have updated
     val settings = Settings(context)
 
     // Everything below is built on first use. The application warms it up from a background thread, so by the
@@ -134,7 +136,10 @@ class Nori private constructor(private val context: Context) {
      * Checks the profile against the server before keeping it; the core tries the second address and, for
      * servers without token auth (error 41), legacy auth, which is then remembered.
      */
-    suspend fun login(draft: ServerProfile): ServerProfile = withContext(Dispatchers.IO) {
+    suspend fun login(form: ServerProfile): ServerProfile = withContext(Dispatchers.IO) {
+        // A server and user already saved is that profile logged in to again, not a copy with an empty
+        // library and no downloads (the core's `servers_login`).
+        val draft = dev.nori.music.ffi.settings.serverForLogin(settings.value.serverList(), form.stored()).profile()
         val old = settings.value.server
         val accepted = try {
             http.configure(draft)

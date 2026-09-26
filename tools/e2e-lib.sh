@@ -12,6 +12,11 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; app="$here/app.sh"
 export ANDROID_SERIAL=${ANDROID_SERIAL:-emulator-5554}
 pkg=${NORI_PKG:-dev.nori.music}
+# Other Nori builds on the same device (perf, an old release) play and log under the same tag: a second
+# player takes the audio focus and its lines read as this build's. Only the build under test runs.
+for other in dev.nori.music dev.nori.music.perf dev.nori.music.old; do
+  [ "$other" != "$pkg" ] && adb shell am force-stop "$other" >/dev/null 2>&1
+done
 pass=0; fail=0; ONLY=""; LIST=0; t0=$(date +%s)
 
 # ---- arguments -------------------------------------------------------------------------------------------
