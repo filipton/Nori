@@ -35,12 +35,6 @@ pub const ALBUM_TRIES: usize = 6;
 /// An album shorter than this is a single: taken only if nothing longer is on offer.
 pub const ALBUM_MIN: usize = 3;
 
-/// `AutoFillKind` and `AutoFillBasis`, by ordinal (see settings.rs).
-pub const ALBUMS: i32 = 1;
-pub const ARTIST: i32 = 1;
-pub const GENRE: i32 = 2;
-pub const ERA: i32 = 3;
-
 /// What a fetch from the server gives.
 pub type Got<T> = Result<T, NetError>;
 

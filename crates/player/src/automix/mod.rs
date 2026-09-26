@@ -26,23 +26,28 @@ pub mod resample;
 pub mod stretch;
 pub mod structure;
 pub mod tempo;
+pub mod vocal;
 #[cfg(feature = "neural-beats")]
 pub mod weights;
 
 #[cfg(any(test, feature = "synth"))]
 pub mod synth;
-#[cfg(test)]
-mod eval;
+#[cfg(any(test, feature = "synth"))]
+pub mod eval;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod plan_fuzz;
 
 use crate::types::TrackAnalysis;
 #[cfg(any(test, feature = "synth"))]
 use analysis::Analyzer;
 use analysis::Features;
 
-/// Bump when the analysis changes enough that stored rows should be redone.
-pub const ANALYSIS_VERSION: i32 = 9;
+/// Bump when the analysis changes enough that stored rows should be redone. 10: the vocal activity curve
+/// (`vocal`) is measured with it, so songs measured before get one. 11: the curve is measured in a narrower
+/// band with a looser peak test (vocal.rs, tuned on a real library), so curves of 10 are measured again.
+pub const ANALYSIS_VERSION: i32 = 11;
 /// How much music at each end the intro and outro grids are measured over: long enough for a steady
 /// tempo estimate (dozens of beats at any tempo), short enough that a live band's drift inside it is
 /// a fraction of a beat.

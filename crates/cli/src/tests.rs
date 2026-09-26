@@ -332,6 +332,11 @@ fn the_queue_is_listed_in_play_order_and_edited_with_keys() {
     key(&mut a, KeyCode::Char('j'));
     key(&mut a, KeyCode::Char('d'));
     assert_eq!(a.cmds.last(), Some(&Cmd::Remove(2)));
+    key(&mut a, KeyCode::Char('u'));
+    assert_eq!(a.cmds.last(), Some(&Cmd::Restore("s2".into())), "u puts it back");
+    let sent = a.cmds.len();
+    key(&mut a, KeyCode::Char('u'));
+    assert_eq!(a.cmds.len(), sent, "once");
     key(&mut a, KeyCode::Char('K'));
     assert_eq!(a.cmds.last(), Some(&Cmd::Move(2, 1)));
     key(&mut a, KeyCode::Enter);
@@ -377,7 +382,7 @@ fn lyrics_follow_the_song_word_by_word() {
         LyricLine { start_ms: 1000, end_ms: 2000, text: "Hello world".into(), words, ..Default::default() },
         LyricLine { start_ms: 3000, end_ms: 4000, text: "Second line".into(), ..Default::default() },
     ];
-    let pick = nori_core::race::LyricsPick { lyrics: Lyrics { synced: true, word_timed: true, lines, key: 0 }, origin: nori_core::lyrics_sources::LyricsOrigin::Server };
+    let pick = nori_core::race::LyricsPick { lyrics: Lyrics { synced: true, word_timed: true, lines, key: 0, offset_ms: 0 }, origin: nori_core::lyrics_sources::LyricsOrigin::Server };
     a.handle(Msg::Lyrics { song: "s1".into(), pick });
     let l = a.lyrics.as_ref().unwrap();
     l.advance(1250, true, true);

@@ -25,7 +25,18 @@ use parking_lot::Mutex;
 pub struct Key(pub [u8; 16]);
 
 impl Key {
+    /// The key of the cover at `url`: the server, the endpoint and the cover's id and size, never what
+    /// signs the request (nori-core's `cover_key_parts`). The same cover fetched under another token or
+    /// salt, or at the server's other address, is the same file.
     pub fn of(url: &str) -> Key {
+        let mut h = Md5::new();
+        nori_core::covers::cover_key_parts(url, |p| h.update(p));
+        Key(h.finalize().into())
+    }
+
+    /// The key covers were kept under before [`Key::of`]: the whole address, signature and all. Looked
+    /// for once when a cover is not found under its key, and moved.
+    pub fn of_address(url: &str) -> Key {
         Key(Md5::digest(url.as_bytes()).into())
     }
 

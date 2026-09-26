@@ -12,7 +12,7 @@ name = "nori_library"
 [features]
 # The uniffi exports the Android app's Kotlin bindings are generated from. A Rust client links the
 # crate without them.
-ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi"]
+ffi = ["dep:uniffi", "nori-model/ffi", "nori-db/ffi", "nori-net/ffi", "nori-settings/ffi"]
 
 [dependencies]
 uniffi = { workspace = true, optional = true }
@@ -27,3 +27,5 @@ nori-db = { path = "../db" }
 nori-net = { path = "../net" }
 # The "For you" tiles take their colours from the look crate's colour maths.
 nori-look = { path = "../look" }
+# What a row swipe set in the settings does.
+nori-settings = { path = "../settings" }

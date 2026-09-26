@@ -50,7 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.HomeViewModel
-import dev.nori.music.settings.HomeRow
+import dev.nori.music.ffi.settings.HomeRow
 import dev.nori.music.ffi.model.Album
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -99,7 +99,7 @@ fun HomeScreen(actions: ActionsViewModel, vm: HomeViewModel = viewModel()) {
                 // it, so their shelf is filled from there - but it stands where the user put it in the
                 // order. It used to be drawn above every shelf whatever the order said, which is why it
                 // could be at the bottom of the list and at the top of the page at the same time.
-                val s = if (shelf.row == dev.nori.music.settings.HomeRow.PINNED) dev.nori.music.app.vm.Shelf.Playlists(shelf.row, ui.pinned) else shelf
+                val s = if (shelf.row == dev.nori.music.ffi.settings.HomeRow.PINNED) dev.nori.music.app.vm.Shelf.Playlists(shelf.row, ui.pinned) else shelf
                 if (s.isEmpty) return@forEach
                 when (s) {
                     is dev.nori.music.app.vm.Shelf.Albums -> shelf(say.homeRow(s.row), s.albums, vm, arrival, place++, rise)

@@ -148,6 +148,11 @@ impl ByteStretcher {
         self.s.latency_frames()
     }
 
+    /// The song time handed out since this was last asked, in input frames ([`Stretcher::take_content`]).
+    pub fn take_content(&mut self) -> f64 {
+        self.s.take_content()
+    }
+
     /// Runs `input` through into `output`; returns (bytes consumed, bytes produced). Staged through
     /// float in the blocks reserved at creation, for either encoding: nothing is allocated here.
     pub fn process(&mut self, input: &[u8], output: &mut [u8], enc: Encoding) -> (usize, usize) {

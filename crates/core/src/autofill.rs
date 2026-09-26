@@ -7,6 +7,7 @@ use futures_util::future::join_all;
 
 use crate::cache_policy::{Page, Read};
 use crate::client::Client;
+use crate::settings::{AutoFillBasis, AutoFillKind};
 use crate::{queue, Song};
 
 pub use nori_queue::autofill::*;
@@ -38,11 +39,11 @@ impl Client {
     }
 
     /// Loose songs to carry on with. Whatever the basis, the order they come back in is kept.
-    async fn next_songs(&self, seed: &Song, basis: i32) -> Got<Vec<Song>> {
+    async fn next_songs(&self, seed: &Song, basis: AutoFillBasis) -> Got<Vec<Song>> {
         Ok(match basis {
             // The artist's best-known songs first, then the rest of their records, so a long evening
             // does not stop after ten tracks.
-            ARTIST => {
+            AutoFillBasis::Artist => {
                 let top = match self.first(Read::TopSongs { artist: seed.artist.clone() }).await? {
                     Page::Songs { v } => v,
                     _ => Vec::new(),
@@ -59,12 +60,12 @@ impl Client {
                 }
                 all
             }
-            GENRE => match &seed.genre {
+            AutoFillBasis::Genre => match &seed.genre {
                 Some(g) => shuffled(self.songs(Read::SongsByGenre { genre: g.clone(), count: 100 }).await?),
                 None => Vec::new(),
             },
             // Out of the offline index rather than the server: nothing in Subsonic asks for a decade of songs.
-            ERA => match era(seed) {
+            AutoFillBasis::Era => match era(seed) {
                 Some((from, to)) => shuffled(self.core.browse_songs("playCount".into(), true, false, from, to, 0, 100).unwrap_or_default()),
                 None => Vec::new(),
             },
@@ -73,21 +74,21 @@ impl Client {
     }
 
     /// The albums one whole record is picked from, by the same four bases.
-    async fn album_candidates(&self, seed: &Song, basis: i32) -> Got<Vec<String>> {
+    async fn album_candidates(&self, seed: &Song, basis: AutoFillBasis) -> Got<Vec<String>> {
         let ids = |v: Vec<crate::Album>| v.into_iter().filter(|a| !a.is_external).map(|a| a.id).collect::<Vec<_>>();
         let albums = |p: Page| match p {
             Page::Albums { v } => v,
             _ => Vec::new(),
         };
         Ok(match basis {
-            ARTIST => ids(self.artist_albums(seed).await?),
-            GENRE => match &seed.genre {
+            AutoFillBasis::Artist => ids(self.artist_albums(seed).await?),
+            AutoFillBasis::Genre => match &seed.genre {
                 Some(g) => shuffled(ids(albums(
                     self.first(Read::AlbumList { kind: "byGenre".into(), size: 30, offset: 0, genre: Some(g.clone()) }).await?,
                 ))),
                 None => Vec::new(),
             },
-            ERA => match era(seed) {
+            AutoFillBasis::Era => match era(seed) {
                 Some((from, to)) => shuffled(ids(albums(self.first(Read::AlbumsByYear { from: from as i32, to: to as i32, size: 30, offset: 0 }).await?))),
                 None => Vec::new(),
             },
@@ -111,7 +112,7 @@ impl Client {
     /// "carry on with albums" means: the first record with a side to it wins, and a short one is only
     /// taken if nothing else is on offer. The records picked or played lately go to the back, so the
     /// same single does not lead to the same album every time (see nori-queue's `rank`).
-    async fn next_album(&self, seed: &Song, basis: i32, queued: &HashSet<&str>, played: &HashSet<String>) -> Vec<Song> {
+    async fn next_album(&self, seed: &Song, basis: AutoFillBasis, queued: &HashSet<&str>, played: &HashSet<String>) -> Vec<Song> {
         let candidates = self.album_candidates(seed, basis).await.unwrap_or_default();
         let pool: Vec<String> = candidates.into_iter().filter(|a| seed.album_id.as_ref() != Some(a) && !played.contains(a)).collect();
         let ranked = self.turns(Picked::Album, pool);
@@ -165,22 +166,22 @@ impl Client {
     /// chosen by what). Nothing for a provider's song or one the queue does not know; a failed read is
     /// nothing too.
     pub async fn autofill(&self) -> Vec<Song> {
-        let (kind, basis) = crate::settings_store::current().map_or((0, 0), |p| (p.auto_fill_kind, p.auto_fill_basis));
+        let (kind, basis) = crate::settings_store::current().map_or((AutoFillKind::Songs, AutoFillBasis::Similar), |p| (p.auto_fill_kind, p.auto_fill_basis));
         self.autofill_as(kind, basis).await
     }
 }
 
 impl Client {
-    async fn autofill_as(&self, kind: i32, basis: i32) -> Vec<Song> {
+    async fn autofill_as(&self, kind: AutoFillKind, basis: AutoFillBasis) -> Vec<Song> {
         let began = std::time::Instant::now();
         let fresh = self.autofill_from(kind, basis).await;
         // The perf report's word on how long the end of the queue waited (a server asking Last.fm for
         // similar songs takes seconds).
-        crate::alog::info(&format!("autofill: {} songs in {} ms (kind {kind}, basis {basis})", fresh.len(), began.elapsed().as_millis()));
+        crate::alog::info(&format!("autofill: {} songs in {} ms (kind {kind:?}, basis {basis:?})", fresh.len(), began.elapsed().as_millis()));
         fresh
     }
 
-    async fn autofill_from(&self, kind: i32, basis: i32) -> Vec<Song> {
+    async fn autofill_from(&self, kind: AutoFillKind, basis: AutoFillBasis) -> Vec<Song> {
         let (_, ids) = crate::playlist::snapshot();
         // Carried on from the queue's last song, not the one playing: the fetch starts a song or two
         // ahead of the end, and what comes follows the end.
@@ -189,7 +190,7 @@ impl Client {
             return Vec::new();
         }
         let queued: HashSet<&str> = ids.iter().map(String::as_str).collect();
-        let fresh = if kind == ALBUMS {
+        let fresh = if kind == AutoFillKind::Albums {
             let played: HashSet<String> = queue::queue_albums(ids.clone()).into_iter().collect();
             self.next_album(&seed, basis, &queued, &played).await
         } else {
@@ -236,7 +237,7 @@ pub(crate) mod tests {
         let _g = crate::playlist::tests::hold(&["af-seed", "af-q"], 0);
         // s1 was queued by the last refill: it takes its turn after s2.
         note(&c.core.db.lock(), Picked::Songs, &["s1".to_string()], crate::db::now_ms()).unwrap();
-        let got = block(c.autofill_as(0, 0));
+        let got = block(c.autofill_as(AutoFillKind::Songs, AutoFillBasis::Similar));
         assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s2", "s1"]);
         assert!(fake.asked.lock()[0].0.contains("getSimilarSongs2"));
         let used = song_use(&c.core.db.lock(), crate::db::now_ms()).unwrap();
@@ -251,7 +252,7 @@ pub(crate) mod tests {
         fake.answer(&songs_json(&[("x1", "first"), ("x2", "second")]));
         fake.answer(&album_json("second", &["b1", "b2", "b3"]));
         let _g = crate::playlist::tests::hold(&["af3-seed"], 0);
-        let got = block(c.autofill_as(ALBUMS, 0));
+        let got = block(c.autofill_as(AutoFillKind::Albums, AutoFillBasis::Similar));
         assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["b1", "b2", "b3"]);
         let used = album_use(&c.core.db.lock(), crate::db::now_ms()).unwrap();
         assert!(used["second"] >= used["first"], "the album queued is the one picked last");
@@ -268,7 +269,7 @@ pub(crate) mod tests {
         fake.answer(&album_json("single", &["t1"]));
         fake.answer(&album_json("record", &["r1", "r2", "r3"]));
         let _g = crate::playlist::tests::hold(&["af2-seed"], 0);
-        let got = block(c.autofill_as(ALBUMS, 0));
+        let got = block(c.autofill_as(AutoFillKind::Albums, AutoFillBasis::Similar));
         assert_eq!(got.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["r1", "r2", "r3"]);
         assert_eq!(fake.asked.lock().len(), 3, "the seed's own album is never fetched");
     }
@@ -277,7 +278,7 @@ pub(crate) mod tests {
     fn nothing_for_a_song_the_queue_does_not_know() {
         let (c, fake) = client(NetProfile { url: "h".into(), ..Default::default() });
         let _g = crate::playlist::tests::hold(&["af-unknown"], 0);
-        assert!(block(c.autofill_as(0, 0)).is_empty());
+        assert!(block(c.autofill_as(AutoFillKind::Songs, AutoFillBasis::Similar)).is_empty());
         assert!(fake.asked.lock().is_empty());
     }
 }

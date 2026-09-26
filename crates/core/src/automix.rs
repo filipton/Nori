@@ -3,7 +3,7 @@
 
 use nori_automix::beats::{EndGrid, MixEnd};
 use nori_automix::analysis::Analyzer;
-use nori_automix::store::{get, missing, neural_missing, put, put_measured, AnalysisStream};
+use nori_automix::store::{get, get_voice, missing, neural_missing, put, put_measured, put_voice, AnalysisStream};
 
 use crate::{Core, Result, TrackAnalysis};
 
@@ -22,6 +22,7 @@ impl Core {
     pub fn analysis_clear(&self) -> Result<u32> {
         let c = self.db.lock();
         let n = c.execute("DELETE FROM track_analysis WHERE server=sid()", [])? as u32;
+        c.execute("DELETE FROM vocal_curve WHERE server=sid()", [])?;
         Ok(n)
     }
 
@@ -62,9 +63,19 @@ impl Core {
         }
         let f = a.take_features();
         let a = finish(song_id, &f).track;
-        let stored = put_measured(&self.db.lock(), a)?;
+        let stored = {
+            let c = self.db.lock();
+            let stored = put_measured(&c, a)?;
+            put_voice(&c, song_id, &f.voice_curve())?;
+            stored
+        };
         nori_automix::planner::analyses_changed();
         Ok(Some(stored))
+    }
+
+    /// The song's vocal activity curve, measured with its analysis: what synced lyrics are checked against.
+    pub fn analysis_voice(&self, song_id: &str) -> Result<Option<nori_player::automix::vocal::VocalCurve>> {
+        Ok(get_voice(&self.db.lock(), song_id)?)
     }
 }
 

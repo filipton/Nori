@@ -10,8 +10,10 @@ import dev.nori.music.ffi.settings.SettingKind
 import dev.nori.music.ffi.settings.SettingsState
 import dev.nori.music.ffi.settings.settingSpecs
 import dev.nori.music.playback.DacState
-import dev.nori.music.settings.Prefs
+import dev.nori.music.ffi.settings.StoredPrefs
 import kotlin.math.roundToInt
+import dev.nori.music.settings.label
+import dev.nori.music.settings.server
 
 /*
  * The settings screen: its groups, pages, sections and rows, what each says and which are shown. The
@@ -273,7 +275,7 @@ class SettingsSearch(private val res: Resources, private val beatModel: Boolean)
 // ---- the pages ----
 
 /** One group's page for these settings, facts and the core's state; null for a group there is not. */
-fun settingsPage(res: Resources, id: String, p: Prefs, f: SettingsFacts, s: SettingsState): SettingsPage? {
+fun settingsPage(res: Resources, id: String, p: StoredPrefs, f: SettingsFacts, s: SettingsState): SettingsPage? {
     val title = pageTitle(id) ?: return null
     val b = PageBuilder(res, p, f, s)
     val sections = when (id) {
@@ -323,7 +325,7 @@ fun settingsActionAsks(res: Resources, action: String, f: SettingsFacts): Action
     else -> null
 }
 
-private class PageBuilder(val res: Resources, val p: Prefs, val f: SettingsFacts, val s: SettingsState) {
+private class PageBuilder(val res: Resources, val p: StoredPrefs, val f: SettingsFacts, val s: SettingsState) {
     fun str(id: Int) = res.getString(id)
     fun str(id: Int, vararg args: Any) = res.getString(id, *args)
     fun value(name: String) = s.values[name].orEmpty()
@@ -474,7 +476,7 @@ private class PageBuilder(val res: Resources, val p: Prefs, val f: SettingsFacts
         val volume = mutableListOf<SettingRow>(
             named("replayGain", R.string.settings_replay_gain, R.string.settings_off, R.string.settings_replay_gain_track, R.string.settings_replay_gain_album, R.string.settings_replay_gain_auto),
         )
-        if (p.replayGain.ordinal != 0) {
+        if (p.replayGain != dev.nori.music.ffi.model.GainMode.OFF) {
             val r = dev.nori.music.settings.EQ.eqRanges.replayGainPreamp
             volume += SettingRow.Slider("preampDb", str(R.string.settings_overall_level, signedDb(p.preampDb)), p.preampDb, r.min, r.max, true, EqLevel.REPLAY_GAIN_PREAMP)
             volume += choice("untaggedGainDb", R.string.settings_untagged_gain, fallback = ::float) { str(R.string.settings_db, minus(it)) }

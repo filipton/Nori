@@ -10,7 +10,10 @@
 //! - the service's own reliability (`LyricsService::prior`);
 //! - less for junk: lines repeated over and over, few lines, words in another script than every other
 //!   answer's, disagreeing with every other answer while they agree among themselves, credits or
-//!   placeholders left in the middle, and a service naming another title.
+//!   placeholders left in the middle, and a service naming another title;
+//! - once the song has been measured (its vocal activity curve, with the AutoMix analysis), whether the
+//!   times fit where the voice is heard ([`with_sync`], sync.rs): a term of its own, and less for timing
+//!   made for another version of the song or fitting the voice nowhere. Before that the score is as above.
 
 use std::collections::HashSet;
 
@@ -21,6 +24,7 @@ use crate::credits::credits_inside;
 use crate::fit::{agree, norm};
 use crate::formats::timing;
 use crate::lrclib::clean;
+use crate::sync::{SyncCheck, SyncKind};
 
 /// What a service said about the song it found, where it said anything: none of it is known for a
 /// service that answers with the words alone (it matched the song on its own side).
@@ -59,6 +63,8 @@ pub struct Trust {
     pub agreement: f64,
     pub prior: f64,
     pub penalty: f64,
+    /// How well the times fit the voice (sync.rs), where they were checked; None otherwise.
+    pub sync: Option<f64>,
 }
 
 const W_META: f64 = 0.20;
@@ -226,7 +232,34 @@ pub fn score(song: &Song, l: &Lyrics, named: &Named, prior: f64, others: &[(&Lyr
         penalty += OUTVOTED;
     }
     let raw = W_META * meta + W_TIMING * timing + W_AGREE * agreement + W_PRIOR * prior + W_SHAPE * shape - penalty;
-    Trust { score: raw.clamp(0.0, 1.0), meta, timing, shape, agreement, prior, penalty }
+    Trust { score: raw.clamp(0.0, 1.0), meta, timing, shape, agreement, prior, penalty, sync: None }
+}
+
+/// How much of the score the sync check takes, once there is one. Measured on a real library (sync_tune.rs):
+/// with another song's timing put in as a rival trusted 0.05 more than a song's best good answer, the good
+/// one came out on top in 18 of 26 songs at 0.1, 21 at 0.25 and at 0.4; but above 0.25 answers the other
+/// services agreed on lost their place to lone ones more often (19 of 26 on top at 0.25, 17 at 0.3).
+const W_SYNC: f64 = 0.25;
+/// Taken off lyrics timed for another version of the song (the halves want different offsets)...
+const DRIFTS: f64 = 0.1;
+/// ...and off lyrics that fit the voice at no offset.
+const POOR_FIT: f64 = 0.1;
+
+/// `t` with the sync check of its lyrics against the song's vocal curve taken in, when there is one: the
+/// score so far keeps `1 - W_SYNC` of its weight and the check's score (at the offset shown) takes the rest,
+/// less [`DRIFTS`] or [`POOR_FIT`]. An unsure check, or none (not timed, the song not measured yet), leaves
+/// the score as it was.
+pub fn with_sync(mut t: Trust, check: Option<&SyncCheck>) -> Trust {
+    let Some(c) = check.filter(|c| c.kind != SyncKind::Unsure) else { return t };
+    let off = match c.kind {
+        SyncKind::Drifts => DRIFTS,
+        SyncKind::Poor => POOR_FIT,
+        _ => 0.0,
+    };
+    t.sync = Some(c.score);
+    t.penalty += off;
+    t.score = ((1.0 - W_SYNC) * t.score + W_SYNC * c.score - off).clamp(0.0, 1.0);
+    t
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ import dev.nori.music.app.vm.ActionsViewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.ffi.model.Song
+import dev.nori.music.settings.loggedIn
 
 /** Plain screens sit below the status bar; album, artist and playlist pages draw under it. */
 @Composable

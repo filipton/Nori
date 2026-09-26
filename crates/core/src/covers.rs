@@ -16,8 +16,25 @@ const FULL: u32 = 800;
 /// The two sizes the app draws covers at: the list rendition and the player's.
 const SIZES: [u32; 2] = [ROW, FULL];
 
-/// Ids of an octo-fiesta provider's items (songs, albums, artists; playlists).
-const PROVIDER_PREFIXES: [&str; 2] = ["ext-", "pl-"];
+/// Whether cover id `id` is an octo-fiesta provider item's: `ext-<provider>-...` (songs, albums,
+/// artists) or a provider's playlist, `pl-<provider>-<id>`. Navidrome names its own playlists' covers
+/// `pl-<id>_<when it changed>` too; those are the server's, kept and warmed like an album's (they were
+/// taken for a provider's, never kept, and offline a playlist's cover never came). Looks only at the id,
+/// up to the next parameter, and allocates nothing.
+pub fn is_provider_id(id: &str) -> bool {
+    let id = id.split('&').next().unwrap_or(id);
+    if id.starts_with("ext-") {
+        return true;
+    }
+    let Some(rest) = id.strip_prefix("pl-") else { return false };
+    if rest.contains('_') {
+        return false;
+    }
+    match rest.split_once('-') {
+        Some((provider, _)) => !provider.is_empty() && provider.bytes().all(|b| b.is_ascii_lowercase()),
+        None => false,
+    }
+}
 
 /// How the app sizes, names and keeps artwork. Read once; a list asks for thousands of covers and builds
 /// their addresses itself from the signed prefix (`Core::url_prefix`) rather than crossing for each.
@@ -64,7 +81,7 @@ pub struct CoverWant {
 /// Provider artwork is left alone: asking octo-fiesta for it is asking a provider, for a song the user
 /// may never keep.
 fn warmable(art: &str) -> bool {
-    !PROVIDER_PREFIXES.iter().any(|p| art.starts_with(p))
+    !is_provider_id(art)
 }
 
 /// The covers of `arts` (cover ids, in order) to fetch, each at both sizes: provider artwork left out,
@@ -172,17 +189,70 @@ fn around(arts: &[Option<String>], index: i32, previous: i32, next: i32, ahead: 
     CoversAround { near, wants }
 }
 
-/// Whether the cover address `url` is an octo-fiesta provider item's (an id starting `ext-` or `pl-`):
+/// The server addresses that are one server's (a profile's second address, `alt`, and its first,
+/// `primary`), so a cover fetched at one is the cover kept for the other: offline the app falls back to
+/// the second address, and covers kept while at home must still be found. Set with the profile.
+static ALIKE: std::sync::RwLock<Vec<(String, String)>> = std::sync::RwLock::new(Vec::new());
+
+/// A server address with no scheme and no trailing slash or `/rest`: what tells a server's covers from
+/// another's in their keys.
+fn host_of(base: &str) -> &str {
+    let base = base.trim().trim_end_matches('/');
+    let base = base.strip_suffix("/rest").unwrap_or(base);
+    base.split_once("://").map_or(base, |(_, rest)| rest)
+}
+
+/// Says that `alt` is another address of the server at `primary` (the client's two addresses), for the
+/// covers' keys ([`cover_key_parts`]). Blank `alt`: nothing.
+pub fn cover_address_alike(primary: &str, alt: &str) {
+    let (p, a) = (host_of(primary), host_of(alt));
+    if a.is_empty() || p.is_empty() || a == p {
+        return;
+    }
+    let mut alike = ALIKE.write().unwrap_or_else(|e| e.into_inner());
+    alike.retain(|(x, _)| x != a);
+    alike.push((a.to_string(), p.to_string()));
+}
+
+/// The query parameters that sign a request rather than name what it asks for: the user, token, salt,
+/// password or API key, and the API version, client name and format. None of them is part of a cover's
+/// key.
+const SIGNATURE: [&str; 8] = ["u", "t", "s", "p", "apiKey", "v", "c", "f"];
+
+/// What a cover's key is made of, in order, handed to `part` piece by piece (nothing allocated but the
+/// lookup of a second address): the server (its first address, whichever of its addresses `url` is at,
+/// with no scheme), the endpoint, and every parameter but the signature ([`SIGNATURE`]) - for a cover,
+/// its id and size. So a cover is kept under the same key whatever token, salt or address fetched it,
+/// and a new password or the other address still finds it on the disk.
+pub fn cover_key_parts(url: &str, mut part: impl FnMut(&[u8])) {
+    let (head, query) = url.split_once('?').unwrap_or((url, ""));
+    let (base, path) = match head.find("/rest/") {
+        Some(i) => (&head[..i], &head[i..]),
+        None => (head, ""),
+    };
+    let host = host_of(base);
+    {
+        let alike = ALIKE.read().unwrap_or_else(|e| e.into_inner());
+        part(alike.iter().find(|(a, _)| a == host).map_or(host, |(_, p)| p.as_str()).as_bytes());
+    }
+    part(path.as_bytes());
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let name = pair.split_once('=').map_or(pair, |(k, _)| k);
+        if !SIGNATURE.contains(&name) {
+            part(b"&");
+            part(pair.as_bytes());
+        }
+    }
+}
+
+/// Whether the cover address `url` is an octo-fiesta provider item's ([`is_provider_id`]):
 /// such a cover is never stored, since the provider redraws it under the same id once the item is in the
 /// library. Asked for every cover a list draws, so it only looks, and allocates nothing.
 ///
 /// Android asks it through a `@FastNative` door (`CoverPixels.isProvider`), which measured faster than
 /// the same test written in Kotlin and allocates nothing.
 pub fn is_provider_cover(url: &str) -> bool {
-    url.match_indices("&id=").any(|(at, mark)| {
-        let id = &url[at + mark.len()..];
-        PROVIDER_PREFIXES.iter().any(|p| id.starts_with(p))
-    })
+    url.match_indices("&id=").any(|(at, mark)| is_provider_id(&url[at + mark.len()..]))
 }
 
 /// The platform's GET, for a cover loader that runs beside the core's client rather than inside it
@@ -262,7 +332,7 @@ mod tests {
 
     #[test]
     fn wants_skip_providers_repeat_nothing_and_stop_at_the_cap() {
-        let arts = ["a", "ext-1", "b", "a", "pl-2", "c"].map(String::from).to_vec();
+        let arts = ["a", "ext-1", "b", "a", "pl-deezer-2", "c"].map(String::from).to_vec();
         let w = cover_wants(arts.clone(), 500);
         assert_eq!(w.iter().map(|w| (w.id.as_str(), w.size)).collect::<Vec<_>>(), [("a", 320), ("a", 800), ("b", 320), ("b", 800), ("c", 320), ("c", 800)]);
         assert_eq!(cover_wants(arts, 2).len(), 4);
@@ -272,16 +342,45 @@ mod tests {
     fn provider_covers_are_told_by_the_id_alone() {
         for (url, provider) in [
             ("https://m.example/rest/getCoverArt.view?u=a&t=b&s=c&id=ext-deezer-song-1&size=320", true),
-            ("https://m.example/rest/getCoverArt.view?u=a&id=pl-12&size=800", true),
+            ("https://m.example/rest/getCoverArt.view?u=a&id=pl-deezer-12&size=800", true),
+            // Navidrome's own playlists: kept like an album's.
+            ("https://m.example/rest/getCoverArt.view?u=a&id=pl-6b2d0c1e-5f7a-4e21-9d3c-0a1b2c3d4e5f_65f0a1b2&size=800", false),
+            ("https://m.example/rest/getCoverArt.view?u=a&id=pl-abcdefab-5f7a_0&size=800", false),
+            ("&id=pl-12", false),
             ("https://m.example/rest/getCoverArt.view?u=a&id=al-3&size=320", false),
             ("https://m.example/rest/getCoverArt.view?id=ext-1", false),
             ("https://m.example/ext-1?xid=ext-2", false),
-            ("&id=pl-", true),
+            ("&id=pl-", false),
+            ("&id=pl-qobuz-7&size=320", true),
             ("&id=p", false),
             ("", false),
         ] {
             assert_eq!(is_provider_cover(url), provider, "{url}");
         }
+    }
+
+    fn key(url: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        cover_key_parts(url, |p| out.extend_from_slice(p));
+        out
+    }
+
+    #[test]
+    fn a_covers_key_is_its_server_id_and_size_never_its_signature() {
+        let core = crate::Core::new(String::new(), "t".into()).unwrap();
+        core.configure(crate::ServerConfig { url: "https://keys.example".into(), user: "u".into(), password: "one".into(), ..Default::default() }).unwrap();
+        let before = core.cover_address("pl-6b2d_65f0".into(), 320);
+        core.configure(crate::ServerConfig { url: "https://keys.example".into(), user: "u".into(), password: "two".into(), ..Default::default() }).unwrap();
+        let after = core.cover_address("pl-6b2d_65f0".into(), 320);
+        assert_ne!(before, after, "a new password signs it otherwise");
+        assert_eq!(key(&before), key(&after));
+        assert_eq!(key(&before), b"keys.example/rest/getCoverArt&id=pl-6b2d_65f0&size=320");
+        assert_ne!(key(&before), key(&core.cover_address("pl-6b2d_65f0".into(), 800)), "each size its own");
+        assert_ne!(key(&before), key(&core.cover_address("al-1".into(), 320)));
+        // The second address of a server is the first, for its covers; another server stays its own.
+        cover_address_alike("http://keys.lan:4533/", "https://keys.example");
+        assert_eq!(key("http://keys.lan:4533/rest/getCoverArt?u=a&t=x&s=y&id=al-1&size=320"), key("https://keys.example/rest/getCoverArt?u=b&id=al-1&size=320"));
+        assert_ne!(key("https://other.example/rest/getCoverArt?id=al-1&size=320"), key("https://keys.example/rest/getCoverArt?id=al-1&size=320"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ import dev.nori.music.ffi.net.TransportResponse
 import dev.nori.music.ffi.net.netPolicy
 import dev.nori.music.ffi.net.netServer
 import dev.nori.music.ffi.net.requestPolicy
-import dev.nori.music.settings.ServerProfile
+import dev.nori.music.ffi.settings.SavedServer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
@@ -38,6 +38,7 @@ import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import dev.nori.music.settings.server
 
 private val JSON = "application/json".toMediaType()
 
@@ -60,7 +61,7 @@ class Http(private val context: Context) {
     private val pool = ConnectionPool(policy.poolMaxIdle.toInt(), policy.poolKeepAliveMs.toLong(), TimeUnit.MILLISECONDS)
     private val dispatcher = Dispatcher().apply { maxRequestsPerHost = policy.maxRequestsPerHost.toInt(); maxRequests = policy.maxRequests.toInt() }
     private val streamDispatcher = Dispatcher().apply { maxRequestsPerHost = policy.streamMaxRequestsPerHost.toInt(); maxRequests = policy.streamMaxRequests.toInt() }
-    @Volatile private var profile: ServerProfile? = null
+    @Volatile private var profile: SavedServer? = null
 
     /**
      * The core's [requestPolicy] answer per host, for this server profile: every request (each cover, each
@@ -87,7 +88,7 @@ class Http(private val context: Context) {
      */
     val metered: Boolean get() = connectivity.isActiveNetworkMetered
 
-    fun configure(next: ServerProfile?) {
+    fun configure(next: SavedServer?) {
         val old = profile
         // Which requests are the server's, and its Wi-Fi-only rule, are the core's (transport.rs request_policy).
         netServer(next?.url, next?.altUrl, next?.wifiOnly == true)
@@ -107,7 +108,7 @@ class Http(private val context: Context) {
     private fun streamClient(api: OkHttpClient) =
         api.newBuilder().dispatcher(streamDispatcher).readTimeout(0, TimeUnit.MILLISECONDS).addInterceptor(stalls).build()
 
-    private fun build(p: ServerProfile?): OkHttpClient {
+    private fun build(p: SavedServer?): OkHttpClient {
         val b = OkHttpClient.Builder()
             .dispatcher(dispatcher)
             .connectionPool(pool)
@@ -139,7 +140,7 @@ class Http(private val context: Context) {
     }
 
     /** Self-signed servers and client certificates. Both are per profile and opt-in. */
-    private fun tls(b: OkHttpClient.Builder, p: ServerProfile) {
+    private fun tls(b: OkHttpClient.Builder, p: SavedServer) {
         val trust: X509TrustManager = if (p.allowSelfSigned) TrustAll else {
             TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(null as KeyStore?) }.trustManagers.filterIsInstance<X509TrustManager>().first()
         }

@@ -309,6 +309,17 @@ impl Library for CoreLibrary {
     fn taker(&self, id: &str, hint: Option<&str>) -> Option<Listening> {
         measure_as_it_comes(id, hint, false)
     }
+
+    /// The song played nothing and is opened again from scratch: its stream cache entry goes, a download
+    /// stays.
+    fn forget(&mut self, id: &str) {
+        let Some(store) = &self.store else { return };
+        let target = self.client.resolve(id.to_string(), false, self.metered());
+        if store.peek(&target.key).is_some() {
+            nori_core::alog::info(&format!("{id} is fetched anew: its stream cache entry {} goes", target.key));
+            store.drop_cached(&[target.key]);
+        }
+    }
 }
 
 /// The songs to fetch ahead of `fetch` (the core's `precache_targets`, or `nori_core::stream::precache_now`),
@@ -441,6 +452,8 @@ impl Downloader {
             if ok {
                 drop(w);
                 transfers::followed(&id, transfers::COMPLETED, now);
+                // No lyrics are looked up for a download here (Android's are, `lyrics_for_downloads`).
+                transfers::work_done(&id, transfers::Work::Lyrics);
                 let _ = self.core.download_settle(vec![id.clone()], vec![true]);
                 // The streamed copy is the same bytes twice now.
                 self.store.drop_cached(&nori_core::stream_cache::copies(&id));
@@ -844,7 +857,14 @@ impl Measurer {
         }
         let measured = stream.is_some_and(|stream| self.finish(core, id, stream, expected_ms));
         let listened = match (job.model, ends) {
-            (Some(model), Some(mut ends)) => listen(core, id, model, &mut ends),
+            (Some(model), Some(mut ends)) => {
+                let adopted = listen(core, id, model, &mut ends);
+                drop(ends);
+                // The model's run took tens of megabytes a block at a time, all free again now: handed back to
+                // the system, rather than kept by the allocator for a run that may not come for minutes.
+                crate::arriving::give_memory_back();
+                adopted
+            }
             _ => false,
         };
         Some(measured || listened)
@@ -903,7 +923,11 @@ pub fn measure_as_it_comes(id: &str, hint: Option<&str>, wait: bool) -> Option<L
     let expected_ms = nori_core::queue::queue_song(id.to_string()).map_or(0, |s| s.duration as i64 * 1000);
     let heard = Measuring { id: id.to_string(), core, expected_ms, stream: None, cpu_from: None };
     match Listening::start(hint.map(str::to_string), wait, Box::new(heard)) {
-        Some(l) => Some(l),
+        Some(l) => {
+            // A download saved before this is over shows it is still being analysed.
+            nori_core::transfers::analysing(id, true);
+            Some(l)
+        }
         None => {
             ARRIVING.lock().retain(|i| i != id);
             None
@@ -956,6 +980,7 @@ impl Heard for Measuring {
             CAME.fetch_add(1, Ordering::Relaxed);
         }
         ARRIVING.lock().retain(|i| *i != id);
+        nori_core::transfers::analysing(&id, false);
         let measurers: Vec<Arc<Measurer>> = MEASURERS.lock().iter().filter_map(|w| w.upgrade()).collect();
         for m in measurers {
             if stored {
@@ -998,6 +1023,9 @@ struct Job<'m> {
 /// grid was stored.
 fn listen(core: &Core, id: &str, model: &BeatModel, ends: &mut Ends) -> bool {
     let Ok(Some(row)) = core.analysis_get(id.to_string()) else { return false };
+    // One song's windows at a time in the whole process, whichever measurer asks: each run holds tens of megabytes
+    // while it lasts (the model reads 30 s at once; neural.rs), and two at once would hold twice that.
+    let _one = LISTENING.lock();
     let rate = ends.rate();
     let mut adopted = false;
     for end in [MixEnd::Intro, MixEnd::Outro] {
@@ -1041,6 +1069,9 @@ fn listen(core: &Core, id: &str, model: &BeatModel, ends: &mut Ends) -> bool {
     adopted
 }
 
+/// Held while the beat model reads a song's ends: one song at a time, process-wide.
+static LISTENING: Mutex<()> = Mutex::new(());
+
 /// The beat model while the measuring thread lives: fetched and loaded the first time a song needs it, and tried
 /// once per thread, so a model that cannot come costs one attempt per look, not one per song.
 #[derive(Default)]
@@ -1061,6 +1092,15 @@ impl Model {
 
     fn get(&self) -> Option<&BeatModel> {
         self.loaded.as_ref()
+    }
+}
+
+impl Drop for Model {
+    /// The measuring thread is done: the model's weights and plan go, and the pages they were on with them.
+    fn drop(&mut self) {
+        if self.loaded.take().is_some() {
+            crate::arriving::give_memory_back();
+        }
     }
 }
 
@@ -1132,7 +1172,7 @@ fn lower_priority() {
 
 /// The sound and the controls as the core's settings ask for them.
 pub fn settings(s: &StoredPrefs) -> Settings {
-    let bands = if s.eq_enabled { s.eq_bands.iter().map(|b| Band { kind: b.kind, freq: b.freq as f64, gain_db: b.gain_db as f64, q: b.q as f64, channel: b.channel }).collect() } else { Vec::new() };
+    let bands = if s.eq_enabled { s.eq_bands.iter().map(|b| Band { kind: b.kind as i32, freq: b.freq as f64, gain_db: b.gain_db as f64, q: b.q as f64, channel: b.channel as i32 }).collect() } else { Vec::new() };
     let sound = Sound {
         bands,
         preamp_db: nori_core::dsp::effective_preamp_db(s) as f64,

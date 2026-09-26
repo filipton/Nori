@@ -258,7 +258,10 @@ fn finish(mut f: Finished) {
     }
     let features = f.analyzer.take_features();
     let a = super::finish(&f.song_id, &features).track;
-    let stored = nori_db::active().is_some_and(|db| put(&db.lock(), &a).is_ok());
+    let stored = nori_db::active().is_some_and(|db| {
+        let c = db.lock();
+        put(&c, &a).is_ok() && super::store::put_voice(&c, &f.song_id, &features.voice_curve()).is_ok()
+    });
     // A pair that was gapless for want of this analysis may mix now.
     PLANNER.lock().generation += 1;
     alog::info(&format!(

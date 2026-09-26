@@ -182,6 +182,11 @@ impl Virtual {
         self.0.s.lock().engine.as_ref().map(Thread::id)
     }
 
+    /// How many times the engine has gone to sleep so far: each one ends in a wake.
+    pub fn sleeps(&self) -> u64 {
+        self.0.s.lock().sleeps
+    }
+
     /// When the engine asked to be woken, if it did.
     pub fn deadline_ns(&self) -> Option<i64> {
         self.0.s.lock().deadline_ns

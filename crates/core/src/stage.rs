@@ -187,18 +187,29 @@ pub struct QueueRows {
     pub order: Vec<u32>,
     /// A drag moves a song within the list, so reordering is offered only when the two orders are one.
     pub reorderable: bool,
+    /// The rows a sideways swipe does not take out (list indexes): the song playing, as the page shows it
+    /// and as the queue has it (the two differ while a mix hands over). A swipe is quick and easy to make
+    /// by accident, and taking the song playing out cuts the music; the row's × still does it on purpose.
+    pub kept: Vec<u32>,
 }
 
-/// The panel's rows for a queue of `len` songs as the page holds it, in the core's play order; when that
-/// does not cover the page's queue (the change has not reached it yet) the list's own order stands in.
+/// The panel's rows for a queue of `len` songs as the page holds it, in the core's play order, with the
+/// song the page shows playing at `shown` (-1 none); when the core's order does not cover the page's queue
+/// (the change has not reached it yet) the list's own order stands in.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn queue_rows(len: u32, shuffle: bool) -> QueueRows {
-    rows(crate::playlist::with(|p| (p.len() == len as usize).then(|| p.play_order().map(|i| i as u32).collect())), len, shuffle)
+pub fn queue_rows(len: u32, shuffle: bool, shown: i32) -> QueueRows {
+    let (order, current) = crate::playlist::with(|p| {
+        let here = p.len() == len as usize;
+        (here.then(|| p.play_order().map(|i| i as u32).collect()), p.current().filter(|_| here))
+    });
+    rows(order, len, shuffle, shown, current)
 }
 
-fn rows(order: Option<Vec<u32>>, len: u32, shuffle: bool) -> QueueRows {
+fn rows(order: Option<Vec<u32>>, len: u32, shuffle: bool, shown: i32, current: Option<usize>) -> QueueRows {
     let order = order.filter(|o| o.len() == len as usize).unwrap_or_else(|| (0..len).collect());
-    QueueRows { order, reorderable: !shuffle }
+    let mut kept: Vec<u32> = u32::try_from(shown).ok().into_iter().chain(current.map(|c| c as u32)).filter(|&i| i < len).collect();
+    kept.dedup();
+    QueueRows { order, reorderable: !shuffle, kept }
 }
 
 #[cfg(test)]
@@ -227,7 +238,15 @@ mod tests {
 
     #[test]
     fn the_queue_lists_in_play_order_and_reorders_only_unshuffled() {
-        assert_eq!(rows(Some(vec![2, 0, 1]), 3, true), QueueRows { order: vec![2, 0, 1], reorderable: false });
-        assert_eq!(rows(None, 3, false), QueueRows { order: vec![0, 1, 2], reorderable: true });
+        assert_eq!(rows(Some(vec![2, 0, 1]), 3, true, 2, Some(2)), QueueRows { order: vec![2, 0, 1], reorderable: false, kept: vec![2] });
+        assert_eq!(rows(None, 3, false, -1, None), QueueRows { order: vec![0, 1, 2], reorderable: true, kept: vec![] });
+    }
+
+    #[test]
+    fn a_swipe_leaves_the_song_playing() {
+        // The page still on the song a mix is leaving, the queue already on the next: both stay.
+        assert_eq!(rows(None, 4, false, 1, Some(2)).kept, [1, 2]);
+        assert_eq!(rows(None, 4, false, 3, None).kept, [3], "the page's own, before the core has the queue");
+        assert_eq!(rows(None, 2, false, 5, Some(7)).kept, Vec::<u32>::new(), "nothing past the end");
     }
 }

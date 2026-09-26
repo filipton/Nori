@@ -22,6 +22,9 @@
     <string name="add_to_favourites">Add to favourites</string>
     <string name="remove_from_favourites">Remove from favourites</string>
     <string name="remove">Remove</string>
+    <string name="undo">Undo</string>
+    <!-- The queue: a song just taken out, offered back for a few seconds. -->
+    <string name="queue_removed">Removed “%1$s”</string>
     <string name="cancel">Cancel</string>
     <string name="done">Done</string>
     <string name="close">Close</string>
@@ -121,6 +124,9 @@
     <string name="retry_all">Retry all</string>
     <string name="finished">Finished</string>
     <string name="stop_download">Stop download</string>
+    <!-- A downloaded song still being processed, on the downloads screen. -->
+    <string name="finding_lyrics">Finding lyrics…</string>
+    <string name="analysing">Analysing…</string>
     <string name="equalizer">Equalizer</string>
     <string name="eq_hint">Tap a band\'s label to change its frequency, width or type.</string>
     <string name="add_band">Add band</string>

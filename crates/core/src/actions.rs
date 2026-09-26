@@ -17,10 +17,26 @@ impl Client {
         if let Some(s) = crate::queue::queue_song(id.clone()) {
             return Ok(s);
         }
+        // A downloaded song is known without the network.
+        if let Some(s) = self.core.download_song(&id) {
+            return Ok(s);
+        }
         Ok(match self.first(Read::SongById { id: id.clone() }).await? {
             Page::OneSong { v: Some(v) } => v,
             _ => Song::only_id(id),
         })
+    }
+}
+
+/// Asked only in Rust, so not exported to Kotlin.
+impl Core {
+    /// The song downloaded under `id`, as it was kept with its download; None when it is not downloaded
+    /// (or not finished).
+    pub(crate) fn download_song(&self, id: &str) -> Option<Song> {
+        use rusqlite::OptionalExtension;
+        let c = self.db.lock();
+        let json: String = c.query_row("SELECT json FROM downloads WHERE server=sid() AND id=?1 AND done=1", [id], |r| r.get(0)).optional().ok()??;
+        serde_json::from_str(&json).ok()
     }
 }
 

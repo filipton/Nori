@@ -7,6 +7,7 @@
 //!
 //! No settings screen is here: its pages, rows, order, search and every word on it are each client's.
 
+mod codec;
 pub mod credits;
 pub mod dsp;
 pub mod lyrics_sources;

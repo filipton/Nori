@@ -244,6 +244,32 @@ pub(crate) fn lower_priority() {
     }
 }
 
+/// Memory the allocator keeps after a burst of large blocks was freed (the beat model's run) goes back to the
+/// system: on Android the allocator holds freed pages for reuse, and a model run left the perf report's native
+/// heap some 150 MB above what was allocated. A few milliseconds, once per song the model read.
+pub fn give_memory_back() {
+    #[cfg(target_os = "android")]
+    {
+        // bionic's M_PURGE_ALL (API 34 on; every thread's cache and the secondary's), or M_PURGE before it.
+        const M_PURGE: libc::c_int = -101;
+        const M_PURGE_ALL: libc::c_int = -104;
+        extern "C" {
+            fn mallopt(param: libc::c_int, value: libc::c_int) -> libc::c_int;
+        }
+        // SAFETY: mallopt takes plain integers; an option the platform does not know answers 0 and does nothing.
+        unsafe {
+            if mallopt(M_PURGE_ALL, 0) == 0 {
+                mallopt(M_PURGE, 0);
+            }
+        }
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only returns free memory at the heap's top and in its free lists to the system.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// CPU time this thread has used, ms; none where it cannot be read.
 pub fn thread_cpu_ms() -> Option<u64> {
     #[cfg(any(target_os = "linux", target_os = "android"))]

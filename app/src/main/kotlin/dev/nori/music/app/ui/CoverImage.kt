@@ -86,6 +86,11 @@ class CoverImage internal constructor(val url: String?, loader: CoverLoader?) {
         override fun failed(url: String, status: Int, again: Boolean) {
             PerfHooks.recorder?.coverFailed(url, status, again)
         }
+
+        override fun whenBack(run: () -> Unit): CoverFetch.Handle {
+            val remove = loader.whenBack(run)
+            return CoverFetch.Handle { remove() }
+        }
     }
 
     /** No loader (a preview): nothing is ever asked for. */
@@ -94,6 +99,7 @@ class CoverImage internal constructor(val url: String?, loader: CoverLoader?) {
         override fun load(url: String, width: Int, height: Int, done: (Bitmap?, Int) -> Unit) = CoverFetch.Handle {}
         override fun later(ms: Long, run: () -> Unit) = CoverFetch.Handle {}
         override fun failed(url: String, status: Int, again: Boolean) {}
+        override fun whenBack(run: () -> Unit) = CoverFetch.Handle {}
     }
 
     companion object {

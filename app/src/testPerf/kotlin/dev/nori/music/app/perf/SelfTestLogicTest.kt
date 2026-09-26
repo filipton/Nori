@@ -1,5 +1,6 @@
 package dev.nori.music.app.perf
 
+import dev.nori.music.ffi.model.GainMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -199,7 +200,7 @@ class SelfTestLogicTest {
 
     private val user = Knobs(
         eq = true, crossfeedDb = -3f, balance = 0f, mono = false, limiter = true, speed = 1f, pitch = 1f,
-        skipSilence = false, offload = true, crossfadeSec = 4, autoMix = true, replayGain = 3, scrobble = true,
+        skipSilence = false, offload = true, crossfadeSec = 4, autoMix = true, replayGain = GainMode.AUTO, scrobble = true,
         autoFill = true, skipExplicit = false, previousAlwaysSkips = true, fadeMs = 200,
     )
 
@@ -209,7 +210,7 @@ class SelfTestLogicTest {
             listOf("eqEnabled", "crossfeedDb", "limiter", "offload", "crossfadeSec", "autoMix", "scrobble", "autoFill", "previousAlwaysSkips", "fadeMs"),
             knobsDiffer(user, t),
         )
-        assertEquals(3, t.replayGain)
+        assertEquals(GainMode.AUTO, t.replayGain)
         assertEquals(emptyList<String>(), knobsDiffer(user, user.copy()))
     }
 

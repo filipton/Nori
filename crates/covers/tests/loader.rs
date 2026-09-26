@@ -180,6 +180,54 @@ fn covers_are_kept_on_disk_for_the_next_run_but_a_providers_are_not() {
     drop(loader);
 }
 
+/// A playlist's cover, which Navidrome names `pl-<id>_<when it changed>` (octo-fiesta's provider
+/// playlists are `pl-<provider>-<id>`), is kept on disk like an album's and comes offline; and any cover
+/// comes offline asked for under another token and salt (a new password), or at the server's other
+/// address (offline, the app has fallen back to it), but not at another size.
+#[test]
+fn a_playlists_cover_is_kept_and_comes_offline_whatever_signs_it_and_at_either_address() {
+    let d = dir("playlist");
+    nori_core::covers::cover_address_alike("http://lan.test:4533", "https://wan.test");
+    let id = "pl-6b2d0c1e-5f7a-4e21-9d3c-0a1b2c3d4e5f_65f0a1b2";
+    let at = |base: &str, t: &str, s: &str, size: u32| format!("{base}/rest/getCoverArt?u=a&t={t}&s={s}&v=1.16.1&c=nori&f=json&id={id}&size={size}");
+    let first = at("http://lan.test:4533", "tok1", "salt1", 320);
+    {
+        let loader = Loader::new(config(Some(d.to_path_buf()), 2), Server::new(200));
+        loader.load(&first, 8, 8).unwrap();
+        assert!(loader.disk().unwrap().contains(Key::of(&first)), "the playlist's cover is kept");
+    }
+    let down = Server::new(0);
+    let loader = Loader::new(config(Some(d.to_path_buf()), 2), down.clone());
+    for url in [first.clone(), at("http://lan.test:4533", "tok2", "salt2", 320), at("https://wan.test", "tok1", "salt1", 320), at("http://wan.test", "tok3", "salt3", 320)] {
+        assert_eq!(loader.load(&url, 8, 8).map(|p| p.width), Ok(8), "{url}");
+    }
+    assert_eq!(down.calls(), 0);
+    assert!(loader.load(&at("http://lan.test:4533", "tok1", "salt1", 800), 8, 8).is_err(), "another size is another file");
+    assert!(loader.load(&at("http://elsewhere.test", "tok1", "salt1", 320), 8, 8).is_err(), "another server's is its own");
+    // A provider's playlist is still never kept.
+    let provider = "http://lan.test:4533/rest/getCoverArt?u=a&id=pl-deezer-9&size=320";
+    let up = Loader::new(config(Some(d.to_path_buf()), 1), Server::new(200));
+    up.load(provider, 8, 8).unwrap();
+    assert!(!up.disk().unwrap().contains(Key::of(provider)));
+    drop((loader, up));
+}
+
+/// A cover kept before keys left the signature out (under its whole address) is still found, offline,
+/// and moved under its new key.
+#[test]
+fn a_cover_kept_under_its_whole_address_is_still_found() {
+    let d = dir("legacy");
+    let bytes = std::fs::read(format!("{}/testdata/photo.jpg", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    nori_covers::DiskCache::open(d.to_path_buf(), 1 << 20).unwrap().put(Key::of_address(PHOTO), &bytes).unwrap();
+    let down = Server::new(0);
+    let loader = Loader::new(config(Some(d.to_path_buf()), 1), down.clone());
+    assert_eq!(loader.load(PHOTO, 8, 8).map(|p| p.width), Ok(8));
+    assert_eq!(down.calls(), 0);
+    let disk = loader.disk().unwrap();
+    assert!(disk.contains(Key::of(PHOTO)) && !disk.contains(Key::of_address(PHOTO)));
+    drop(loader);
+}
+
 #[test]
 fn an_error_answer_is_an_error_and_is_not_kept() {
     let d = dir("error");

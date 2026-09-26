@@ -31,7 +31,7 @@ platform opens and re-exports every crate below it by its module name (`nori_cor
 | "Better beat detection": Beat This! over the ends of the songs coming up, its graph built in and its weights made from the authors' checkpoint, fetched once (a build with the `neural-beats` feature; the Android debug and perf builds have it) | `nori-engine::core::Measurer`; `nori-player::automix::beats`, `neural`, `checkpoint`, `weights`; `nori-core::beat_download`; `nori-automix::beat_model` |
 | Output devices: naming, ranking, per-device sound profiles, AutoEQ curves, bit-perfect decisions | `nori-player::outputs`, `device`, `dac`; `nori-devices`: `outputs`, `profiles`, `autoeq` |
 | Downloads and stream cache bookkeeping: what is stored, what to fetch next, what to evict | `nori-transfers`: `transfers`, `stream_cache`; `nori-core::cache_policy` (the server's answers kept) |
-| Scrobbling decisions; lyrics: the server's, and sixteen lyrics services asked through the `Transport` (requests, matching, every format they answer in, credits stripped, each answer scored, asking them in waves, remembering the answers and the choice in the app's database, the lyrics cache's size and clearing), the current line, backing vocals and duet sides, and when the page redraws | `nori-queue::scrobble`; `nori-lyrics`: `lyrics`, `formats`, `json`, `html`, `lrclib`, `services`, `credits`, `trust`, `race`, `look`; `nori-core::race` (`Client::lyrics_lookup`); `nori-settings::lyrics_sources`; `nori-look::lyrics` |
+| Scrobbling decisions; lyrics: the server's, and sixteen lyrics services asked through the `Transport` (requests, matching, every format they answer in, credits stripped, each answer scored, asking them in waves, remembering the answers and the choice in the app's database, the lyrics cache's size and clearing), the current line, backing vocals and duet sides, and when the page redraws | `nori-queue::scrobble`; `nori-lyrics`: `lyrics`, `formats`, `json`, `html`, `lrclib`, `services`, `credits`, `trust`, `sync`, `race`, `look`; `nori-core::race` (`Client::lyrics_lookup`); `nori-settings::lyrics_sources`; `nori-look::lyrics` |
 | Why a song will not play, as a kind (`PlaybackError`); the credits (the core's crates, Android's libraries, the typeface and the third parties' data) | `nori-model`; `nori-settings::credits`: `core_credits`, `android_credits`, `data_credits` |
 | A perf recorder's bookkeeping: the state a stretch is filed under, what two readings of the counters make (the threads that woke most among them), the stretches kept, their sums by state, the page's figures, the audio output's line and the shared report | `nori-perf::perf_log` |
 | Cover colours: palette, theme, the page's colour scheme, the wash and melt behind the player | `nori-look::cover`, `palette`, `theme`, `dress` |
@@ -503,7 +503,10 @@ answers; the rule itself is never written again in a client. Android and nori-cl
   and hands nothing on twice. Which answer beats the one shown is the race's (`Race::to_show`, over
   trust.rs's scores); a client holding answers across lookups (Android's `SongAnswers`) asks
   `lyrics_same` / `lyrics_replaces` before showing one again. When finer lyrics replace the ones on
-  screen, `nori_look::lyrics::matching_line` says which new line stands for the old one.
+  screen, `nori_look::lyrics::matching_line` says which new line stands for the old one. Lyrics come with
+  `offset_ms` (the sync check found their times that much late against the song's voice, 0 otherwise): a
+  clock made by `lyrics_clock` / `LyricsJni.kept` applies it, and a client timing lines itself makes its
+  `LyricClock` with `with_offset` (nori-cli) or adds it to the playhead.
 - **A favourite**: `Client::star(kind, id, on, StarsShown)` puts the mark up before asking the server,
   hands the marks over, and puts the one from before back if the server refuses.
 - **A download's covers**: `Core::download_cover_urls(cover ids)` gives the addresses to fetch onto the

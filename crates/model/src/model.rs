@@ -350,6 +350,13 @@ pub struct Lyrics {
     #[cfg_attr(feature = "ffi", uniffi(default))]
     #[serde(skip)]
     pub key: u64,
+    /// How much later than the song these lyrics' times run, ms, as the sync check against the song's vocal
+    /// activity found it with confidence (nori-lyrics sync.rs); 0 when it found no offset or has not looked.
+    /// A clock adds it to the playhead, so the lines come when they are sung. Found again each time the
+    /// lyrics are chosen, never kept with them.
+    #[cfg_attr(feature = "ffi", uniffi(default))]
+    #[serde(skip)]
+    pub offset_ms: i64,
 }
 
 #[derive(Debug, Clone, Default)]

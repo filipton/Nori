@@ -38,6 +38,7 @@ use symphonia::core::packet::Packet;
 use symphonia::core::units::{Time, Timestamp};
 
 use crate::mpeg::Frames;
+use crate::panic_words;
 use crate::source::Loader;
 
 /// What an Opus stream plays in again after a seek, as the decoder drops it (80 ms, RFC 7845).
@@ -289,8 +290,18 @@ impl Stream {
     /// (measuring a song ahead needs no more).
     /// `sized`: the source's length is the song's, so the container reader may measure the song from its
     /// end and seek by bytes; otherwise it is read in order, as one of no known length ([`Unsized`]).
+    ///
+    /// A container reader or decoder that panics on a song's bytes fails the song (said, and skipped as
+    /// the queue's rules say) rather than the thread it was opened on: on the engine's own, that was every
+    /// song after it silent; on a thread of its own, the song waited to open for ever.
     #[allow(clippy::too_many_arguments)]
-    fn open(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, sized: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
+    fn open(source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, sized: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Stream::open_as_is(source, hint, from_ms, duration_ms, encoding, whole, sized, packets, core_only)))
+            .unwrap_or_else(|p| Err(format!("the song would not open: {}", panic_words(&*p))))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_as_is(mut source: Box<dyn MediaSource>, hint: Option<&str>, from_ms: i64, duration_ms: Option<i64>, encoding: Encoding, whole: bool, sized: bool, packets: bool, core_only: bool) -> Result<Stream, String> {
         let gapless = if whole { crate::mp4::gapless(&mut source).ok().flatten() } else { None };
         let byte_len = source.byte_len();
         source.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
@@ -1069,10 +1080,16 @@ impl Reading for Demuxed {
         }
     }
 
+    /// A decoder that panics on the song's bytes fails the song where it got to, as bytes that stopped
+    /// coming would, rather than the engine's thread.
     fn fill(&mut self) -> bool {
-        match &mut self.state {
-            State::Open(s) => s.fill(),
-            _ => false,
+        let State::Open(s) = &mut self.state else { return false };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.fill())) {
+            Ok(more) => more,
+            Err(p) => {
+                self.state = State::Failed(PlaybackError::Other, format!("the song could not be decoded: {}", panic_words(&*p)));
+                false
+            }
         }
     }
 

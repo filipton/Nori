@@ -92,7 +92,10 @@ struct Java {
     open_live: JStaticMethodID,
     kept: JStaticMethodID,
     busy: JStaticMethodID,
+    disk: JStaticMethodID,
+    forget: JStaticMethodID,
     signal: JStaticMethodID,
+    cpu: JStaticMethodID,
     offload_support: JStaticMethodID,
     open_offload: JStaticMethodID,
     body_read: JMethodID,
@@ -174,7 +177,10 @@ fn look_up(env: &mut JNIEnv) -> jni::errors::Result<Java> {
         open_live: env.get_static_method_id(&bridge, "openLive", "(Ljava/lang/String;)Ldev/nori/music/playback/RustBody;")?,
         kept: env.get_static_method_id(&bridge, "kept", "(Ljava/lang/String;)Z")?,
         busy: env.get_static_method_id(&bridge, "busy", "(Ljava/lang/String;)Z")?,
+        disk: env.get_static_method_id(&bridge, "disk", "(Ljava/lang/String;)Ljava/lang/String;")?,
+        forget: env.get_static_method_id(&bridge, "forget", "(Ljava/lang/String;)Ljava/lang/String;")?,
         signal: env.get_static_method_id(&bridge, "signal", "()Z")?,
+        cpu: env.get_static_method_id(&bridge, "cpu", "(Z)V")?,
         offload_support: env.get_static_method_id(&bridge, "offloadSupport", "(III)I")?,
         open_offload: env.get_static_method_id(&bridge, "openOffload", "(IIII)Landroid/media/AudioTrack;")?,
         bridge: env.new_global_ref(&bridge)?,
@@ -1075,6 +1081,33 @@ impl Entry for Counted {
     }
 }
 
+/// `RustBridge.disk(key)` or `forget(key)`: Kotlin's words for what media3's stream cache keeps of `key`
+/// (and, for `forget`, that it went). None when Kotlin could not be asked.
+fn cache_words(key: &str, method: fn(&Java) -> JStaticMethodID) -> Option<String> {
+    let (java, mut env) = env()?;
+    let words = env.with_local_frame(4, |env| -> jni::errors::Result<String> {
+        let key = env.new_string(key)?;
+        // SAFETY: RustBridge.disk(String) / forget(String): String, looked up with this signature.
+        let said = unsafe { env.call_static_method_unchecked(bridge(java), method(java), ReturnType::Object, &[JValue::Object(&key).as_jni()]) }?.l()?;
+        if said.is_null() {
+            return Ok(String::new());
+        }
+        Ok(env.get_string(&JString::from(said))?.into())
+    });
+    cleared(&mut env);
+    words.ok()
+}
+
+/// What the stream cache keeps of song `id`, in words, for the perf build's silent break
+/// (nori_perf::invariants::describe_disk): its entry, length, spans and the length its metadata gives.
+pub(crate) fn disk_words(id: &str) -> String {
+    let Some(target) = nori_core::stream::resolve_now(id) else { return format!("{id}: no server to resolve it") };
+    if target.key == nori_core::stream::download_key(id.to_string()) {
+        return format!("{id}: downloaded");
+    }
+    cache_words(&target.key, |j| j.disk).unwrap_or_else(|| format!("{}: Kotlin could not be asked", target.key))
+}
+
 struct JavaBody {
     body: GlobalRef,
     open: bool,
@@ -1168,6 +1201,20 @@ impl Library for AndroidLibrary {
     fn taker(&self, id: &str, hint: Option<&str>) -> Option<Listening> {
         measure_as_it_comes(id, hint, false)
     }
+
+    /// The song played nothing and is opened again from scratch: its stream cache entry goes (what it
+    /// held is said first), a download stays.
+    fn forget(&mut self, id: &str) {
+        if is_radio(id) {
+            return;
+        }
+        let Some(target) = nori_core::stream::resolve_now(id) else { return };
+        if target.key == nori_core::stream::download_key(id.to_string()) {
+            return;
+        }
+        let said = cache_words(&target.key, |j| j.forget).unwrap_or_else(|| "Kotlin could not be asked".into());
+        log(&format!("{id} is fetched anew: its stream cache entry goes ({said})"));
+    }
 }
 
 
@@ -1197,6 +1244,10 @@ const EVENT_PLACED: i32 = 10;
 
 impl Events {
     fn push(&self, e: Event) {
+        if let Event::Awake(awake) = e {
+            cpu(awake);
+            return;
+        }
         match &e {
             Event::State(s) => log(&format!("{s:?}")),
             Event::Song { index, id, jumps } => log(&format!("song {index} ({id}) is heard, after jump {jumps}")),
@@ -1225,7 +1276,7 @@ impl Events {
             Event::Output { name } => (EVENT_OUTPUT, -1, name),
             Event::Stopped => (EVENT_STOPPED, -1, String::new()),
             Event::Buffering(on) => (EVENT_BUFFERING, on as i32, String::new()),
-            Event::Position { .. } => return,
+            Event::Position { .. } | Event::Awake(_) => return,
         };
         let e = (kind, index, text, jumps);
         let first = {
@@ -1248,6 +1299,17 @@ impl Events {
             }
         }
     }
+}
+
+/// `RustBridge.cpu`: the engine needs the CPU kept awake (the player takes its wake lock, if music is
+/// wanted), or can let it sleep while the chip plays (it lets the lock go, unless a song's bytes are
+/// being fetched). Called on the engine's thread, before it goes on: a lock asked for is held before
+/// the work it is for.
+fn cpu(awake: bool) {
+    let Some((java, mut env)) = env() else { return };
+    // SAFETY: RustBridge.cpu(boolean), looked up with this signature.
+    let _ = unsafe { env.call_static_method_unchecked(bridge(java), java.cpu, ReturnType::Primitive(Primitive::Void), &[JValue::Bool(awake as jboolean).as_jni()]) };
+    cleared(&mut env);
 }
 
 fn state_code(s: State) -> i32 {
@@ -1526,7 +1588,10 @@ extern "system" fn set_output(h: jlong, usb: jboolean, bit_perfect: jboolean) {
 extern "system" fn offload_event(h: jlong, kind: jint) {
     let Some(p) = player(h) else { return };
     match kind {
-        0 => p.offload.wants.store(true, Ordering::Release),
+        0 => {
+            p.offload.wants.store(true, Ordering::Release);
+            nori_perf::perf_log::count_data_request();
+        }
         1 => p.offload.ended.store(true, Ordering::Release),
         2 => {
             log("the offloaded track was torn down");

@@ -9,6 +9,10 @@ use std::collections::HashMap;
 use nori_model::{EqBand, EqKind, EqPreset, NamedPreset, TransitionPrefs};
 use serde_json::{Map, Value};
 
+use crate::codec::{clamped, names, on, within, Choice, Custom, Picks, Preamp, Quality, Raw, Row, FLAG, FLOAT, INT, K, LONG, PICK, PICK_NEAREST, TEXT};
+use crate::lyrics_sources;
+use crate::settings_store::{APPLY_AUDIO, APPLY_GAIN, PLAYER, REPLAN, SOUND};
+
 /// One stored value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrefValue {
@@ -20,21 +24,123 @@ pub enum PrefValue {
     Texts { v: Vec<String> },
 }
 
-/// One equalizer filter. `kind` is an `EqKind` ordinal (the order is the wire format, so it must not
-/// change), `channel` 0 both, 1 left, 2 right.
+/// One equalizer filter. It is stored with its kind's and channel's ordinals (the order of each is the
+/// wire format, so it must not change).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct SoundBand {
-    pub kind: i32,
+    pub kind: EqKind,
     pub freq: f32,
     pub gain_db: f32,
     pub q: f32,
-    pub channel: i32,
+    pub channel: BandChannel,
 }
 
-/// How many kinds of band there are (`EqKind`), and how many channels a band can apply to.
-const BAND_KINDS: i32 = 10;
-const BAND_CHANNELS: i32 = 3;
+/// Which side a band applies to; the client names each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum BandChannel {
+    Both,
+    Left,
+    Right,
+}
+
+/// A band as the platform's plain arrays carry it: its kind's and channel's ordinals, a kind or a channel
+/// out of range the first one.
+pub fn band_from(kind: i32, freq: f32, gain_db: f32, q: f32, channel: i32) -> SoundBand {
+    SoundBand { kind: EqKind::nth(kind).unwrap_or(EqKind::Peaking), freq, gain_db, q, channel: BandChannel::nth(channel).unwrap_or(BandChannel::Both) }
+}
+
+/// ReplayGain: off, the track's gain, the album's, or (auto) the album's while the neighbours in the queue
+/// are from the same album and the track's otherwise.
+pub use nori_model::GainMode;
+
+// The enums the player defines, as settings: stored by their ordinals, in the order they are declared.
+impl Choice for GainMode {
+    const ALL: &'static [Self] = &[GainMode::Off, GainMode::Track, GainMode::Album, GainMode::Auto];
+    const NAMES: &'static [&'static str] = &["OFF", "TRACK", "ALBUM", "AUTO"];
+}
+
+impl Choice for EqKind {
+    const ALL: &'static [Self] = &[
+        EqKind::Peaking,
+        EqKind::LowShelf,
+        EqKind::HighShelf,
+        EqKind::LowPass,
+        EqKind::HighPass,
+        EqKind::BandPass,
+        EqKind::Notch,
+        EqKind::AllPass,
+        EqKind::LowShelfSlope,
+        EqKind::HighShelfSlope,
+    ];
+    const NAMES: &'static [&'static str] =
+        &["PEAKING", "LOW_SHELF", "HIGH_SHELF", "LOW_PASS", "HIGH_PASS", "BAND_PASS", "NOTCH", "ALL_PASS", "LOW_SHELF_SLOPE", "HIGH_SHELF_SLOPE"];
+}
+
+/// The light or dark look: the system's, or always one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum ThemeMode {
+    System,
+    Light,
+    Dark,
+}
+
+/// What a tap on a song in a list does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum TapAction {
+    PlayList,
+    PlayOne,
+    Queue,
+    PlayNext,
+}
+
+/// What dragging a song row sideways does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum SwipeAction {
+    None,
+    Queue,
+    PlayNext,
+    Favourite,
+    Download,
+}
+
+/// What the queue is extended with when the last song starts: songs, or one whole album at a time.
+/// Someone who listens to records wants the next record, not fifteen loose songs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum AutoFillKind {
+    Songs,
+    Albums,
+}
+
+/// What the songs the queue is extended with are chosen by: what the server thinks is similar, or the
+/// artist, genre or decade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum AutoFillBasis {
+    Similar,
+    Artist,
+    Genre,
+    Era,
+}
+
+/// The home page's shelves, stored by name; the client names each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, nori_settings_derive::Choice)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum HomeRow {
+    Pinned,
+    Playlists,
+    Recent,
+    Newest,
+    Frequent,
+    TopSongs,
+    Random,
+    Starred,
+}
 
 /// One saved server. Each profile has its own index database, so switching is instant and nothing is re-synced.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -65,119 +171,268 @@ pub struct SavedQuality {
     pub format: String,
 }
 
-/// Every setting. The enums travel as their ordinals; each is in range once it has been through
-/// `settings_load`. The names and meanings are the platform's `Prefs`.
-#[derive(Debug, Clone, PartialEq)]
+// ---- the settings, one line each (codec.rs says how to read a line) ----
+
+/// The stream qualities offered, the original file first.
+const QUALITIES: &[&str] = &["0:", "320:mp3", "192:opus", "128:opus", "96:opus", "64:opus"];
+
+/// Every setting. Each field's `#[setting(...)]` line is all there is to say about it: the key it is stored
+/// under, its codec, its default, the name it is changed and read by, what a client offers for it and what a
+/// change asks of the player (see nori-settings-derive). The enums are stored as their ordinals.
+#[derive(Debug, Clone, PartialEq, nori_settings_derive::Settings)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
 pub struct StoredPrefs {
+    // The servers.
+    #[setting("servers", SERVERS, default = Vec::new(), hidden)]
     pub servers: Vec<SavedServer>,
+    #[setting("activeServerId", TEXT, default = String::new(), hidden)]
     pub active_server_id: String,
-    pub wifi: SavedQuality,
-    pub mobile: SavedQuality,
-    pub download: SavedQuality,
-    pub parallel_downloads: i32,
-    pub covers_ahead: i32,
-    pub cache_mb: i32,
-    pub replay_gain: i32,
-    pub preamp_db: f32,
-    pub untagged_gain_db: f32,
-    pub fade_ms: i32,
-    pub pitch: f32,
-    pub previous_always_skips: bool,
-    pub precache_wifi: i32,
-    pub precache_mobile: i32,
-    pub skip_on_error: bool,
-    pub crossfade_keep_albums: bool,
-    pub offload: bool,
-    pub bit_perfect: bool,
-    pub hi_res: bool,
-    pub scrobble: bool,
-    pub auto_fill: bool,
-    pub bridge_offline: bool,
-    pub auto_fill_kind: i32,
-    pub auto_fill_basis: i32,
-    pub eq_enabled: bool,
-    pub eq_bands: Vec<SoundBand>,
-    pub eq_preamp_db: Option<f32>,
-    pub crossfeed_db: f32,
-    pub balance: f32,
-    pub mono: bool,
-    pub limiter: bool,
-    pub limiter_threshold_db: f32,
+    // Between songs.
+    #[setting("crossfadeSec", INT, default = 0, show = K::Choice(&["0", "2", "4", "6", "8", "12"]), effect = APPLY_AUDIO | REPLAN)]
     pub crossfade_sec: i32,
+    #[setting("autoMix", FLAG, default = false, show = K::Switch, effect = APPLY_AUDIO | REPLAN)]
     pub auto_mix: bool,
+    #[setting("autoMixMaxS", INT, default = 12, show = K::Choice(&["6", "8", "12", "16", "24"]), effect = REPLAN)]
     pub auto_mix_max_s: i32,
+    #[setting("autoMixBeatMatch", FLAG, default = true, show = K::Switch, effect = REPLAN)]
     pub auto_mix_beat_match: bool,
+    #[setting("autoMixMaxTempoPct", FLOAT, default = 6.0, show = K::Choice(&["2", "4", "6", "8"]), effect = REPLAN)]
     pub auto_mix_max_tempo_pct: f32,
-    pub auto_mix_bass_swap: bool,
-    pub auto_mix_filters: bool,
-    pub auto_mix_echo_out: bool,
+    #[setting("autoMixKeepPitch", FLAG, default = true, show = K::Switch, effect = REPLAN)]
     pub auto_mix_keep_pitch: bool,
+    #[setting("autoMixBassSwap", FLAG, default = true, show = K::Switch, effect = REPLAN)]
+    pub auto_mix_bass_swap: bool,
+    #[setting("autoMixFilters", FLAG, default = true, show = K::Switch, effect = REPLAN)]
+    pub auto_mix_filters: bool,
+    #[setting("autoMixEchoOut", FLAG, default = true, show = K::Switch, effect = REPLAN)]
+    pub auto_mix_echo_out: bool,
     /// "Better beat detection": Beat This!, a neural beat tracker, reads the first and last half minute of the
     /// songs coming up for AutoMix's beat grids, once per song. Only in a build with the `neural-beats` feature;
     /// its model is downloaded once. Off by default.
+    #[setting("autoMixBetterBeats", FLAG, default = false, show = K::Switch)]
     pub auto_mix_better_beats: bool,
     /// The beat model may be downloaded over mobile data; otherwise it waits for Wi-Fi.
+    #[setting("autoMixBeatsMobileData", FLAG, default = false, show = K::Switch)]
     pub auto_mix_beats_mobile_data: bool,
+    #[setting("crossfadeKeepAlbums", FLAG, default = true, show = K::Switch, effect = REPLAN)]
+    pub crossfade_keep_albums: bool,
+    #[setting("fadeMs", within(0, 5000), default = 0, show = K::Choice(&["0", "150", "300", "500", "1000"]), effect = PLAYER)]
+    pub fade_ms: i32,
+    // Controls.
+    #[setting("previousAlwaysSkips", FLAG, default = false, show = K::Switch)]
+    pub previous_always_skips: bool,
+    #[setting("speed", within(RATE.0, RATE.1), default = 1.0, show = K::Choice(&["0.75", "1", "1.25", "1.5", "2"]), effect = APPLY_AUDIO)]
     pub speed: f32,
+    #[setting("pitch", within(RATE.0, RATE.1), default = 1.0, show = K::Choice(&["0.9", "0.95", "1", "1.05", "1.1"]), effect = APPLY_AUDIO)]
+    pub pitch: f32,
+    #[setting("skipSilence", FLAG, default = false, show = K::Switch, effect = APPLY_AUDIO)]
     pub skip_silence: bool,
-    pub scrobble_percent: i32,
-    pub live_search_delay_ms: i32,
-    pub taste_model: bool,
-    /// "Look things up online": the switch over everything the app asks a third party for by itself -
-    /// missing lyrics, the AutoEQ list, moving covers - each of which has its own switch under it. On for a
-    /// new install (lyrics and the AutoEQ list are wanted out of the box; moving covers stay off).
-    pub third_party_lookups: bool,
-    pub profile_per_output: bool,
+    // The queue.
+    #[setting("skipExplicit", FLAG, default = false, show = K::Switch)]
+    pub skip_explicit: bool,
+    #[setting("autoFill", FLAG, default = true, show = K::Switch)]
+    pub auto_fill: bool,
+    #[setting("autoFillKind", PICK, default = AutoFillKind::Songs, show = K::Named(AutoFillKind::NAMES))]
+    pub auto_fill_kind: AutoFillKind,
+    #[setting("autoFillBasis", PICK, default = AutoFillBasis::Similar, show = K::Named(AutoFillBasis::NAMES))]
+    pub auto_fill_basis: AutoFillBasis,
+    #[setting("skipOnError", FLAG, default = true, show = K::Switch)]
+    pub skip_on_error: bool,
+    #[setting("bridgeOffline", FLAG, default = false, show = K::Switch)]
+    pub bridge_offline: bool,
+    // Sound.
+    #[setting("eqEnabled", FLAG, default = false, name = "eq", show = K::Switch, effect = APPLY_AUDIO | SOUND)]
+    pub eq_enabled: bool,
+    #[setting("eqBands", BANDS, default = graphic(), hidden, effect = SOUND)]
+    pub eq_bands: Vec<SoundBand>,
+    #[setting("mono", FLAG, default = false, show = K::Switch, effect = APPLY_AUDIO | SOUND)]
+    pub mono: bool,
+    #[setting("limiter", FLAG, default = false, show = K::Switch, effect = APPLY_AUDIO | SOUND)]
+    pub limiter: bool,
+    #[setting("eqPreampDb", Preamp(EQ_RANGES.preamp), default = None, show = K::Level(EQ_RANGES.preamp.min, EQ_RANGES.preamp.max), effect = SOUND)]
+    pub eq_preamp_db: Option<f32>,
+    #[setting("crossfeedDb", FLOAT, default = 0.0, show = K::Level(EQ_RANGES.crossfeed.min, EQ_RANGES.crossfeed.max), effect = SOUND)]
+    pub crossfeed_db: f32,
+    /// Read by the sound chain as it runs: a change only rebuilds the chain when it starts or stops it.
+    #[setting("balance", FLOAT, default = 0.0, hidden, effect = SOUND)]
+    pub balance: f32,
+    #[setting("limiterThresholdDb", FLOAT, default = -1.0, show = K::Level(EQ_RANGES.limiter.min, EQ_RANGES.limiter.max), effect = SOUND)]
+    pub limiter_threshold_db: f32,
+    #[setting("autoEqAuto", FLAG, default = false, show = K::Switch)]
     pub auto_eq_auto: bool,
     /// Keep the AutoEQ headphone list on the device: fetched on an unmetered network when it is missing
     /// or a month old (`nori_devices::autoeq::index_due`). Needs `third_party_lookups`. On by default.
+    #[setting("autoEqDownload", FLAG, default = true, show = K::Switch, lookups)]
     pub auto_eq_download: bool,
-    pub lyrics_sweep: bool,
+    #[setting("profilePerOutput", FLAG, default = true, show = K::Switch)]
+    pub profile_per_output: bool,
+    #[setting("replayGain", PICK_NEAREST, default = GainMode::Off, show = K::Named(GainMode::NAMES), effect = APPLY_GAIN | REPLAN)]
+    pub replay_gain: GainMode,
+    #[setting("preampDb", within(REPLAY_GAIN_PREAMP.0, REPLAY_GAIN_PREAMP.1), default = 0.0, show = K::Level(EQ_RANGES.replay_gain_preamp.min, EQ_RANGES.replay_gain_preamp.max), effect = APPLY_GAIN)]
+    pub preamp_db: f32,
+    #[setting("untaggedGainDb", FLOAT, default = -6.0, show = K::Choice(&["0", "-3", "-6", "-9", "-12"]), effect = APPLY_GAIN)]
+    pub untagged_gain_db: f32,
+    #[setting("hiRes", FLAG, default = false, show = K::Switch, effect = PLAYER)]
+    pub hi_res: bool,
+    #[setting("bitPerfect", FLAG, default = false, show = K::Switch, effect = APPLY_AUDIO)]
+    pub bit_perfect: bool,
+    #[setting("offload", FLAG, default = true, show = K::Switch, effect = APPLY_AUDIO)]
+    pub offload: bool,
+    // Appearance.
+    #[setting("theme", PICK, default = ThemeMode::System, show = K::Named(ThemeMode::NAMES))]
+    pub theme: ThemeMode,
+    #[setting("amoled", FLAG, default = false, show = K::Switch)]
+    pub amoled: bool,
+    #[setting("playerColours", FLAG, default = true, show = K::Switch)]
+    pub player_colours: bool,
+    #[setting("dynamicColor", FLAG, default = true, show = K::Switch)]
+    pub dynamic_color: bool,
+    #[setting("accent", LONG, default = 0xFF6750A4, show = K::Colour)]
+    pub accent: i64,
+    #[setting("coverColors", FLAG, default = true, show = K::Switch)]
+    pub cover_colors: bool,
+    #[setting("softSleeve", FLAG, default = true, show = K::Switch)]
     pub soft_sleeve: bool,
     /// Moving covers: an album's motion artwork from Apple Music plays in the player's sleeve, where it
     /// has one. Needs `third_party_lookups`. Off by default; off, nothing of it is built.
+    #[setting("motionArtwork", FLAG, default = false, show = K::Switch, lookups)]
     pub motion_artwork: bool,
     /// Moving covers only on unmetered networks: each is a few megabytes.
+    #[setting("motionArtworkWifiOnly", FLAG, default = true, show = K::Switch)]
     pub motion_artwork_wifi_only: bool,
+    #[setting("favouriteNotice", FLAG, default = true, show = K::Switch)]
     pub favourite_notice: bool,
-    pub lyrics_keep_screen_on: bool,
-    pub lyrics_translation: bool,
-    pub lyrics_size: i32,
-    /// Look lyrics up online when the server has no timed ones; needs `third_party_lookups`. Stored as
-    /// "lyricsLrclib", from when LRCLIB was the only place asked.
-    pub lyrics_online: bool,
-    /// Every lyrics service by name, in the order they rank (`lyrics_sources`).
-    pub lyrics_order: Vec<String>,
-    /// The lyrics services switched on, by name.
-    pub lyrics_on: Vec<String>,
-    /// Keep asking past lyrics timed line by line for lyrics timed word by word, whoever ranks higher.
-    pub lyrics_prefer_words: bool,
-    /// The user's own PaxSenix key, for its Spotify and Musixmatch lyrics; empty for none.
-    pub paxsenix_key: String,
-    /// A BetterLyrics key, with which it looks up songs it has not stored yet; empty for none.
-    pub better_lyrics_key: String,
-    pub theme: i32,
-    pub amoled: bool,
-    pub player_colours: bool,
-    pub dynamic_color: bool,
-    pub accent: i64,
-    pub cover_colors: bool,
+    #[setting("uiScale", FLOAT, default = 0.0, show = K::Choice(&["0", "0.9", "1", "1.1"]))]
+    pub ui_scale: f32,
+    #[setting("reduceMotion", FLAG, default = false, show = K::Switch)]
     pub reduce_motion: bool,
     /// Animate even with Android's animations off; on unless the listener turns it off. Stored as
     /// "animateAnyway": the old "ignoreSystemMotion" was written off on every phone before this was the
     /// default, and it would have kept the animations off there.
+    #[setting("animateAnyway", FLAG, default = true, name = "ignoreSystemMotion", show = K::Switch)]
     pub ignore_system_motion: bool,
-    pub ui_scale: f32,
-    pub tap_action: i32,
-    pub swipe_right: i32,
-    pub swipe_left: i32,
-    pub skip_explicit: bool,
-    /// `HomeRow` ordinals, in order; a row that is not listed is hidden.
-    pub home_rows: Vec<i32>,
+    // Lyrics.
+    #[setting("lyricsSweep", FLAG, default = true, show = K::Switch)]
+    pub lyrics_sweep: bool,
+    #[setting("lyricsSize", within(0, 2), default = 1, show = K::Choice(&["0", "1", "2"]))]
+    pub lyrics_size: i32,
+    #[setting("lyricsTranslation", FLAG, default = true, show = K::Switch)]
+    pub lyrics_translation: bool,
+    #[setting("lyricsKeepScreenOn", FLAG, default = true, show = K::Switch)]
+    pub lyrics_keep_screen_on: bool,
+    /// Look lyrics up online when the server has no timed ones; needs `third_party_lookups`. Stored as
+    /// "lyricsLrclib", from when LRCLIB was the only place asked (and still changed by that name).
+    #[setting("lyricsLrclib", FLAG, default = true, name = "lyricsOnline", show = K::Switch, lookups)]
+    pub lyrics_online: bool,
+    /// Every lyrics service by name, in the order they rank (`lyrics_sources`).
+    #[setting("lyricsOrder", LYRICS_ORDER, default = lyrics_sources::default_order())]
+    pub lyrics_order: Vec<String>,
+    /// The lyrics services switched on, by name (changed by `lyricsService:<name>`).
+    #[setting("lyricsOn", LYRICS_ON, default = lyrics_sources::default_on(), hidden)]
+    pub lyrics_on: Vec<String>,
+    /// Keep asking past lyrics timed line by line for lyrics timed word by word, whoever ranks higher.
+    #[setting("lyricsPreferWords", FLAG, default = true, show = K::Switch)]
+    pub lyrics_prefer_words: bool,
+    /// The user's own PaxSenix key, for its Spotify and Musixmatch lyrics; empty for none.
+    #[setting("paxSenixKey", TEXT, default = String::new(), show = K::Text)]
+    pub paxsenix_key: String,
+    /// A BetterLyrics key, with which it looks up songs it has not stored yet; empty for none.
+    #[setting("betterLyricsKey", TEXT, default = String::new(), show = K::Text)]
+    pub better_lyrics_key: String,
+    // The library.
+    #[setting("tapAction", PICK, default = TapAction::PlayList, show = K::Named(TapAction::NAMES))]
+    pub tap_action: TapAction,
+    #[setting("swipeRight", PICK, default = SwipeAction::Queue, show = K::Named(SwipeAction::NAMES))]
+    pub swipe_right: SwipeAction,
+    #[setting("swipeLeft", PICK, default = SwipeAction::Favourite, show = K::Named(SwipeAction::NAMES))]
+    pub swipe_left: SwipeAction,
+    #[setting("liveSearchDelayMs", INT, default = 350, show = K::Choice(&["150", "250", "350", "500", "800"]))]
+    pub live_search_delay_ms: i32,
+    #[setting("tasteModel", FLAG, default = true, show = K::Switch)]
+    pub taste_model: bool,
+    #[setting("scrobble", FLAG, default = true, show = K::Switch)]
+    pub scrobble: bool,
+    #[setting("scrobblePercent", INT, default = 50, show = K::Choice(&["25", "50", "75", "90", "100"]))]
+    pub scrobble_percent: i32,
+    /// "Look things up online": the switch over everything the app asks a third party for by itself -
+    /// missing lyrics, the AutoEQ list, moving covers - each of which has its own switch under it. On for a
+    /// new install (lyrics and the AutoEQ list are wanted out of the box; moving covers stay off).
+    #[setting("thirdPartyLookups", FLAG, default = true, show = K::Switch)]
+    pub third_party_lookups: bool,
+    /// The home page's shelves, in order; a row that is not listed is hidden.
+    #[setting("homeRows", Picks, default = HomeRow::ALL.to_vec(), hidden)]
+    pub home_rows: Vec<HomeRow>,
+    #[setting("pinnedPlaylists", LINES, default = Vec::new(), hidden)]
     pub pinned_playlists: Vec<String>,
+    #[setting("listPrefs", LIST_PREFS, default = HashMap::new(), hidden)]
     pub list_prefs: HashMap<String, String>,
+    // Downloads and storage.
+    #[setting("wifi", Quality, default = SavedQuality::default(), show = K::Choice(QUALITIES))]
+    pub wifi: SavedQuality,
+    #[setting("mobile", Quality, default = SavedQuality { bit_rate: 192, format: "opus".to_string() }, show = K::Choice(QUALITIES))]
+    pub mobile: SavedQuality,
+    #[setting("download", Quality, default = SavedQuality::default(), show = K::Choice(QUALITIES))]
+    pub download: SavedQuality,
+    /// Songs downloaded at the same time; the rest wait their turn in the order they were asked for.
+    #[setting("parallelDownloads", clamped(1, 10), default = 5, show = K::Choice(&["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]))]
+    pub parallel_downloads: i32,
+    #[setting("precacheWifi", INT, default = 2, show = K::Choice(&["1", "2", "3", "5", "10"]))]
+    pub precache_wifi: i32,
+    #[setting("precacheMobile", INT, default = 1, show = K::Choice(&["1", "2", "3", "5"]))]
+    pub precache_mobile: i32,
+    /// Covers of the songs coming up fetched ahead; the one before is always kept.
+    #[setting("coversAhead", clamped(0, 10), default = 3, show = K::Choice(&["0", "1", "2", "3", "5", "8", "10"]))]
+    pub covers_ahead: i32,
+    #[setting("cacheMb", within(256, 16384), default = 1024, show = K::Choice(&["256", "1024", "4096", "16384"]))]
+    pub cache_mb: i32,
 }
+
+/// The settings a client can offer that are not a field of their own: "on mobile data" is "Wi-Fi only"
+/// turned round, and the server in use's own (which music folder it browses, and the cap on its second
+/// address). Read and changed in [`value_of_special`] and [`set_special`].
+pub(crate) const SPECIAL_SPECS: &[(&str, K)] = &[
+    ("motionArtworkMobile", K::Switch),
+    ("musicFolder", K::Choice(&[])),
+    ("altMaxBitRate", K::Choice(&["0", "320", "192", "128", "96"])),
+];
+
+const SERVERS: Custom<Vec<SavedServer>> = Custom {
+    // A list that does not read, or a server without an id, loses the whole list.
+    load: |t, _| {
+        t.and_then(|json| serde_json::from_str::<Value>(json).ok())
+            .and_then(|v| v.as_array().map(|a| a.iter().map(server_from).collect::<Option<Vec<_>>>()))
+            .flatten()
+            .unwrap_or_default()
+    },
+    save: |s| Value::Array(s.iter().map(server_json).collect()).to_string(),
+    set: None,
+    show: None,
+};
+
+/// "kind:freq:gain:q:channel" per band, bands joined by ';'.
+const BANDS: Custom<Vec<SoundBand>> = Custom { load: |t, d| t.and_then(decode_bands).unwrap_or(d), save: |b| encode_bands(b), set: None, show: None };
+
+/// Every service, by name: the stored ranking completed with any service it does not name.
+const LYRICS_ORDER: Custom<Vec<String>> = Custom {
+    load: |t, _| lyrics_sources::complete_order(&t.map(names).unwrap_or_default()),
+    save: |o| o.join(","),
+    set: Some(|v| Some(lyrics_sources::complete_order(&names(v)))),
+    show: Some(|o| o.join(",")),
+};
+
+const LYRICS_ON: Custom<Vec<String>> = Custom { load: |t, d| t.map_or(d, |s| lyrics_sources::known(&names(s))), save: |o| o.join(","), set: None, show: None };
+
+/// One per line, the empty ones left out.
+const LINES: Custom<Vec<String>> =
+    Custom { load: |t, _| t.map_or_else(Vec::new, |s| s.split('\n').filter(|p| !p.is_empty()).map(str::to_string).collect()), save: |l| l.join("\n"), set: None, show: None };
+
+/// A JSON object of texts; anything that does not read is empty.
+const LIST_PREFS: Custom<HashMap<String, String>> = Custom {
+    load: |t, _| t.and_then(|j| serde_json::from_str::<Value>(j).ok()).and_then(|v| string_map(&v)).unwrap_or_default(),
+    save: |m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()),
+    set: None,
+    show: None,
+};
 
 /// The part of the settings a sound profile remembers.
 #[derive(Debug, Clone, PartialEq)]
@@ -191,7 +446,7 @@ pub struct SoundSettings {
     pub mono: bool,
     pub limiter: bool,
     pub limiter_threshold_db: f32,
-    pub replay_gain: i32,
+    pub replay_gain: GainMode,
     pub preamp_db: f32,
     pub crossfade_sec: i32,
     pub hi_res: bool,
@@ -252,7 +507,7 @@ impl StoredPrefs {
             keep_pitch: self.auto_mix_keep_pitch,
             keep_albums: self.crossfade_keep_albums,
             // AutoMix's loudness matching stands down under ReplayGain.
-            replay_gain: self.replay_gain != 0,
+            replay_gain: self.replay_gain != GainMode::Off,
         }
     }
 }
@@ -283,131 +538,17 @@ impl From<nori_model::CoreError> for SoundError {
 
 // ---- ranges, shared by loading and by the test bridge's setter ----
 
-/// Songs downloaded at the same time; the rest wait their turn in the order they were asked for.
-const PARALLEL_DOWNLOADS: (i32, i32) = (1, 10);
-/// Covers of the songs coming up fetched ahead; the one before is always kept.
-const COVERS_AHEAD: (i32, i32) = (0, 10);
-/// `ReplayGainMode`: off, track, album, auto.
-const REPLAY_GAIN: (i32, i32) = (0, 3);
-const CACHE_MB: (i32, i32) = (256, 16384);
+/// Speed and pitch.
 const RATE: (f32, f32) = (0.25, 4.0);
-const FADE_MS: (i32, i32) = (0, 5000);
-/// 0 small, 1 medium, 2 large.
-const LYRICS_SIZE: (i32, i32) = (0, 2);
 /// ReplayGain's overall level, as its slider offers it.
 pub(crate) const REPLAY_GAIN_PREAMP: (f32, f32) = (-12.0, 6.0);
-
-/// Each enum setting's values by name, in ordinal order: `AutoFillKind`, `AutoFillBasis`, `ReplayGainMode`,
-/// `ThemeMode`, `TapAction`, `SwipeAction`. A change by name takes these as well as the ordinals.
-pub(crate) const AUTO_FILL_KINDS: [&str; 2] = ["SONGS", "ALBUMS"];
-pub(crate) const AUTO_FILL_BASES: [&str; 4] = ["SIMILAR", "ARTIST", "GENRE", "ERA"];
-pub(crate) const REPLAY_GAIN_MODES: [&str; 4] = ["OFF", "TRACK", "ALBUM", "AUTO"];
-pub(crate) const THEME_MODES: [&str; 3] = ["SYSTEM", "LIGHT", "DARK"];
-pub(crate) const TAP_ACTION_NAMES: [&str; 4] = ["PLAY_LIST", "PLAY_ONE", "QUEUE", "PLAY_NEXT"];
-pub(crate) const SWIPE_ACTION_NAMES: [&str; 5] = ["NONE", "QUEUE", "PLAY_NEXT", "FAVOURITE", "DOWNLOAD"];
-const THEMES: i32 = THEME_MODES.len() as i32;
-const TAP_ACTIONS: i32 = TAP_ACTION_NAMES.len() as i32;
-const SWIPE_ACTIONS: i32 = SWIPE_ACTION_NAMES.len() as i32;
-/// `HomeRow`, by the names they are stored under, in their order.
-const HOME_ROWS: [&str; 8] = ["PINNED", "PLAYLISTS", "RECENT", "NEWEST", "FREQUENT", "TOP_SONGS", "RANDOM", "STARRED"];
 
 /// The ten default bands: peaking filters an octave apart.
 pub fn graphic() -> Vec<SoundBand> {
     [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]
         .into_iter()
-        .map(|freq| SoundBand { kind: EqKind::Peaking as i32, freq, gain_db: 0.0, q: 1.41, channel: 0 })
+        .map(|freq| SoundBand { kind: EqKind::Peaking, freq, gain_db: 0.0, q: 1.41, channel: BandChannel::Both })
         .collect()
-}
-
-impl Default for StoredPrefs {
-    fn default() -> Self {
-        StoredPrefs {
-            servers: Vec::new(),
-            active_server_id: String::new(),
-            wifi: SavedQuality::default(),
-            mobile: SavedQuality { bit_rate: 192, format: "opus".to_string() },
-            download: SavedQuality::default(),
-            parallel_downloads: 5,
-            covers_ahead: 3,
-            cache_mb: 1024,
-            replay_gain: 0,
-            preamp_db: 0.0,
-            untagged_gain_db: -6.0,
-            fade_ms: 0,
-            pitch: 1.0,
-            previous_always_skips: false,
-            precache_wifi: 2,
-            precache_mobile: 1,
-            skip_on_error: true,
-            crossfade_keep_albums: true,
-            offload: true,
-            bit_perfect: false,
-            hi_res: false,
-            scrobble: true,
-            auto_fill: true,
-            bridge_offline: false,
-            auto_fill_kind: 0,
-            auto_fill_basis: 0,
-            eq_enabled: false,
-            eq_bands: graphic(),
-            eq_preamp_db: None,
-            crossfeed_db: 0.0,
-            balance: 0.0,
-            mono: false,
-            limiter: false,
-            limiter_threshold_db: -1.0,
-            crossfade_sec: 0,
-            auto_mix: false,
-            auto_mix_max_s: 12,
-            auto_mix_beat_match: true,
-            auto_mix_max_tempo_pct: 6.0,
-            auto_mix_bass_swap: true,
-            auto_mix_filters: true,
-            auto_mix_echo_out: true,
-            auto_mix_keep_pitch: true,
-            auto_mix_better_beats: false,
-            auto_mix_beats_mobile_data: false,
-            speed: 1.0,
-            skip_silence: false,
-            scrobble_percent: 50,
-            live_search_delay_ms: 350,
-            taste_model: true,
-            third_party_lookups: true,
-            profile_per_output: true,
-            auto_eq_auto: false,
-            auto_eq_download: true,
-            lyrics_sweep: true,
-            soft_sleeve: true,
-            motion_artwork: false,
-            motion_artwork_wifi_only: true,
-            favourite_notice: true,
-            lyrics_keep_screen_on: true,
-            lyrics_translation: true,
-            lyrics_size: 1,
-            lyrics_online: true,
-            lyrics_order: crate::lyrics_sources::default_order(),
-            lyrics_on: crate::lyrics_sources::default_on(),
-            lyrics_prefer_words: true,
-            paxsenix_key: String::new(),
-            better_lyrics_key: String::new(),
-            theme: 0,
-            amoled: false,
-            player_colours: true,
-            dynamic_color: true,
-            accent: 0xFF6750A4,
-            cover_colors: true,
-            reduce_motion: false,
-            ignore_system_motion: true,
-            ui_scale: 0.0,
-            tap_action: 0,
-            swipe_right: 1,
-            swipe_left: 3,
-            skip_explicit: false,
-            home_rows: (0..HOME_ROWS.len() as i32).collect(),
-            pinned_playlists: Vec::new(),
-            list_prefs: HashMap::new(),
-        }
-    }
 }
 
 // ---- the band list: "kind:freq:gain:q:channel" per band, bands joined by ';' ----
@@ -422,10 +563,10 @@ pub fn decode_bands(s: &str) -> Option<Vec<SoundBand>> {
             if p.len() < 4 {
                 return None;
             }
-            let kind = p[0].parse::<i32>().ok().filter(|k| (0..BAND_KINDS).contains(k))?;
+            let kind = EqKind::nth(p[0].parse().ok()?)?;
             let channel = match p.get(4) {
-                Some(c) => c.parse::<i32>().ok().filter(|c| (0..BAND_CHANNELS).contains(c))?,
-                None => 0,
+                Some(c) => BandChannel::nth(c.parse().ok()?)?,
+                None => BandChannel::Both,
             };
             Some(SoundBand { kind, freq: float(p[1])?, gain_db: float(p[2])?, q: float(p[3])?, channel })
         })
@@ -435,7 +576,7 @@ pub fn decode_bands(s: &str) -> Option<Vec<SoundBand>> {
 
 pub fn encode_bands(bands: &[SoundBand]) -> String {
     let each: Vec<String> =
-        bands.iter().map(|b| format!("{}:{}:{}:{}:{}", b.kind, kotlin_float(b.freq), kotlin_float(b.gain_db), kotlin_float(b.q), b.channel)).collect();
+        bands.iter().map(|b| format!("{}:{}:{}:{}:{}", b.kind as i32, kotlin_float(b.freq), kotlin_float(b.gain_db), kotlin_float(b.q), b.channel as i32)).collect();
     each.join(";")
 }
 
@@ -512,7 +653,7 @@ pub fn sound_from(json: &str) -> Option<SoundSettings> {
         mono: opt_bool(o, "mono"),
         limiter: opt_bool(o, "limiter"),
         limiter_threshold_db: opt_f64(o, "limiterThresholdDb", -1.0) as f32,
-        replay_gain: opt_i32(o, "replayGain").clamp(REPLAY_GAIN.0, REPLAY_GAIN.1),
+        replay_gain: GainMode::ALL[opt_i32(o, "replayGain").clamp(0, GainMode::ALL.len() as i32 - 1) as usize],
         preamp_db: opt_f64(o, "preampDb", 0.0) as f32,
         crossfade_sec: opt_i32(o, "crossfadeSec"),
         hi_res: opt_bool(o, "hiRes"),
@@ -532,7 +673,7 @@ pub fn sound_json(s: &SoundSettings) -> String {
     o.insert("mono".into(), s.mono.into());
     o.insert("limiter".into(), s.limiter.into());
     o.insert("limiterThresholdDb".into(), (s.limiter_threshold_db as f64).into());
-    o.insert("replayGain".into(), s.replay_gain.into());
+    o.insert("replayGain".into(), s.replay_gain.ordinal().into());
     o.insert("preampDb".into(), (s.preamp_db as f64).into());
     o.insert("crossfadeSec".into(), s.crossfade_sec.into());
     o.insert("hiRes".into(), s.hi_res.into());
@@ -573,260 +714,25 @@ fn server_json(s: &SavedServer) -> Value {
     })
 }
 
-// ---- loading and saving ----
-
-struct Raw<'a>(&'a HashMap<String, PrefValue>);
-
-impl Raw<'_> {
-    fn flag(&self, k: &str, d: bool) -> bool {
-        match self.0.get(k) {
-            Some(PrefValue::Flag { v }) => *v,
-            _ => d,
-        }
-    }
-    fn int(&self, k: &str, d: i32) -> i32 {
-        match self.0.get(k) {
-            Some(PrefValue::Number { v }) => *v,
-            _ => d,
-        }
-    }
-    fn long(&self, k: &str, d: i64) -> i64 {
-        match self.0.get(k) {
-            Some(PrefValue::Big { v }) => *v,
-            _ => d,
-        }
-    }
-    fn float(&self, k: &str, d: f32) -> f32 {
-        match self.0.get(k) {
-            Some(PrefValue::Decimal { v }) => *v,
-            _ => d,
-        }
-    }
-    fn text(&self, k: &str) -> Option<&str> {
-        match self.0.get(k) {
-            Some(PrefValue::Text { v }) => Some(v),
-            _ => None,
-        }
-    }
-    /// Names kept as one comma-separated text; none when nothing was stored.
-    fn list(&self, k: &str) -> Option<Vec<String>> {
-        self.text(k).map(names)
-    }
-    /// An enum stored as its ordinal; one out of range (a value from a newer version) is the default.
-    fn ordinal(&self, k: &str, count: i32, d: i32) -> i32 {
-        Some(self.int(k, d)).filter(|i| (0..count).contains(i)).unwrap_or(d)
-    }
-    fn quality(&self, name: &str, d: &SavedQuality) -> SavedQuality {
-        SavedQuality {
-            bit_rate: self.int(&format!("{name}BitRate"), d.bit_rate),
-            format: self.text(&format!("{name}Format")).map_or_else(|| d.format.clone(), str::to_string),
-        }
-    }
-
-    /// The server profiles; a list that does not read, or a server without an id, loses the whole list.
-    fn servers(&self) -> Vec<SavedServer> {
-        let Some(json) = self.text("servers") else { return Vec::new() };
-        let list: Option<Vec<SavedServer>> =
-            serde_json::from_str::<Value>(json).ok().and_then(|v| v.as_array().map(|a| a.iter().map(server_from).collect())).flatten();
-        list.unwrap_or_default()
-    }
-}
+// ---- loading, saving and changing by name, through the table ----
 
 /// Everything stored, as it is, into the settings: defaults for what is missing or of the wrong type,
 /// ranges enforced.
 pub fn load(raw: &HashMap<String, PrefValue>) -> StoredPrefs {
     let r = Raw(raw);
-    let d = StoredPrefs::default();
-    StoredPrefs {
-        servers: r.servers(),
-        active_server_id: r.text("activeServerId").map(str::to_string).unwrap_or_default(),
-        wifi: r.quality("wifi", &d.wifi),
-        mobile: r.quality("mobile", &d.mobile),
-        download: r.quality("download", &d.download),
-        cache_mb: r.int("cacheMb", d.cache_mb),
-        parallel_downloads: r.int("parallelDownloads", d.parallel_downloads).clamp(PARALLEL_DOWNLOADS.0, PARALLEL_DOWNLOADS.1),
-        covers_ahead: r.int("coversAhead", d.covers_ahead).clamp(COVERS_AHEAD.0, COVERS_AHEAD.1),
-        replay_gain: r.int("replayGain", 0).clamp(REPLAY_GAIN.0, REPLAY_GAIN.1),
-        preamp_db: r.float("preampDb", 0.0),
-        untagged_gain_db: r.float("untaggedGainDb", d.untagged_gain_db),
-        fade_ms: r.int("fadeMs", 0),
-        pitch: r.float("pitch", 1.0),
-        previous_always_skips: r.flag("previousAlwaysSkips", false),
-        precache_wifi: r.int("precacheWifi", d.precache_wifi),
-        precache_mobile: r.int("precacheMobile", d.precache_mobile),
-        skip_on_error: r.flag("skipOnError", true),
-        crossfade_keep_albums: r.flag("crossfadeKeepAlbums", true),
-        offload: r.flag("offload", true),
-        bit_perfect: r.flag("bitPerfect", false),
-        hi_res: r.flag("hiRes", false),
-        scrobble: r.flag("scrobble", true),
-        auto_fill: r.flag("autoFill", true),
-        bridge_offline: r.flag("bridgeOffline", false),
-        auto_fill_kind: r.ordinal("autoFillKind", AUTO_FILL_KINDS.len() as i32, d.auto_fill_kind),
-        auto_fill_basis: r.ordinal("autoFillBasis", AUTO_FILL_BASES.len() as i32, d.auto_fill_basis),
-        eq_enabled: r.flag("eqEnabled", false),
-        eq_bands: r.text("eqBands").and_then(decode_bands).unwrap_or(d.eq_bands),
-        eq_preamp_db: match raw.get("eqPreampDb") {
-            Some(PrefValue::Decimal { v }) => Some(*v),
-            _ => None,
-        },
-        crossfeed_db: r.float("crossfeedDb", 0.0),
-        balance: r.float("balance", 0.0),
-        mono: r.flag("mono", false),
-        limiter: r.flag("limiter", false),
-        limiter_threshold_db: r.float("limiterThresholdDb", -1.0),
-        crossfade_sec: r.int("crossfadeSec", 0),
-        auto_mix: r.flag("autoMix", false),
-        auto_mix_max_s: r.int("autoMixMaxS", 12),
-        auto_mix_beat_match: r.flag("autoMixBeatMatch", true),
-        auto_mix_max_tempo_pct: r.float("autoMixMaxTempoPct", 6.0),
-        auto_mix_bass_swap: r.flag("autoMixBassSwap", true),
-        auto_mix_filters: r.flag("autoMixFilters", true),
-        auto_mix_echo_out: r.flag("autoMixEchoOut", true),
-        auto_mix_keep_pitch: r.flag("autoMixKeepPitch", true),
-        auto_mix_better_beats: r.flag("autoMixBetterBeats", false),
-        auto_mix_beats_mobile_data: r.flag("autoMixBeatsMobileData", false),
-        speed: r.float("speed", 1.0),
-        skip_silence: r.flag("skipSilence", false),
-        scrobble_percent: r.int("scrobblePercent", 50),
-        live_search_delay_ms: r.int("liveSearchDelayMs", d.live_search_delay_ms),
-        profile_per_output: r.flag("profilePerOutput", true),
-        auto_eq_auto: r.flag("autoEqAuto", false),
-        auto_eq_download: r.flag("autoEqDownload", true),
-        taste_model: r.flag("tasteModel", true),
-        third_party_lookups: r.flag("thirdPartyLookups", true),
-        lyrics_sweep: r.flag("lyricsSweep", true),
-        soft_sleeve: r.flag("softSleeve", true),
-        motion_artwork: r.flag("motionArtwork", false),
-        motion_artwork_wifi_only: r.flag("motionArtworkWifiOnly", true),
-        favourite_notice: r.flag("favouriteNotice", true),
-        lyrics_keep_screen_on: r.flag("lyricsKeepScreenOn", true),
-        lyrics_translation: r.flag("lyricsTranslation", true),
-        lyrics_size: r.int("lyricsSize", 1),
-        lyrics_online: r.flag("lyricsLrclib", true),
-        lyrics_order: crate::lyrics_sources::complete_order(&r.list("lyricsOrder").unwrap_or_default()),
-        lyrics_on: r.list("lyricsOn").map_or(d.lyrics_on, |on| crate::lyrics_sources::known(&on)),
-        lyrics_prefer_words: r.flag("lyricsPreferWords", true),
-        paxsenix_key: r.text("paxSenixKey").unwrap_or_default().to_string(),
-        better_lyrics_key: r.text("betterLyricsKey").unwrap_or_default().to_string(),
-        theme: r.ordinal("theme", THEMES, 0),
-        amoled: r.flag("amoled", false),
-        dynamic_color: r.flag("dynamicColor", true),
-        accent: r.long("accent", d.accent),
-        cover_colors: r.flag("coverColors", true),
-        reduce_motion: r.flag("reduceMotion", false),
-        ignore_system_motion: r.flag("animateAnyway", true),
-        ui_scale: r.float("uiScale", 0.0),
-        player_colours: r.flag("playerColours", true),
-        tap_action: r.ordinal("tapAction", TAP_ACTIONS, d.tap_action),
-        swipe_right: r.ordinal("swipeRight", SWIPE_ACTIONS, d.swipe_right),
-        swipe_left: r.ordinal("swipeLeft", SWIPE_ACTIONS, d.swipe_left),
-        skip_explicit: r.flag("skipExplicit", false),
-        home_rows: r.text("homeRows").map_or(d.home_rows, |s| {
-            s.split(',').filter_map(|n| HOME_ROWS.iter().position(|r| *r == n)).map(|i| i as i32).collect()
-        }),
-        pinned_playlists: r.text("pinnedPlaylists").map_or_else(Vec::new, |s| s.split('\n').filter(|p| !p.is_empty()).map(str::to_string).collect()),
-        list_prefs: r.text("listPrefs").and_then(|j| serde_json::from_str::<Value>(j).ok()).and_then(|v| string_map(&v)).unwrap_or_default(),
+    let mut p = StoredPrefs::default();
+    for row in ROWS {
+        (row.load)(&mut p, &r);
     }
+    p
 }
 
 /// Everything to write for these settings.
 pub fn save(p: &StoredPrefs) -> HashMap<String, PrefValue> {
     let mut put = HashMap::with_capacity(96);
-    let mut flag = |k: &str, v: bool| put.insert(k.to_string(), PrefValue::Flag { v });
-    flag("previousAlwaysSkips", p.previous_always_skips);
-    flag("skipOnError", p.skip_on_error);
-    flag("crossfadeKeepAlbums", p.crossfade_keep_albums);
-    flag("offload", p.offload);
-    flag("bitPerfect", p.bit_perfect);
-    flag("scrobble", p.scrobble);
-    flag("hiRes", p.hi_res);
-    flag("autoFill", p.auto_fill);
-    flag("bridgeOffline", p.bridge_offline);
-    flag("eqEnabled", p.eq_enabled);
-    flag("mono", p.mono);
-    flag("limiter", p.limiter);
-    flag("autoMix", p.auto_mix);
-    flag("autoMixBeatMatch", p.auto_mix_beat_match);
-    flag("autoMixBassSwap", p.auto_mix_bass_swap);
-    flag("autoMixFilters", p.auto_mix_filters);
-    flag("autoMixEchoOut", p.auto_mix_echo_out);
-    flag("autoMixKeepPitch", p.auto_mix_keep_pitch);
-    flag("autoMixBetterBeats", p.auto_mix_better_beats);
-    flag("autoMixBeatsMobileData", p.auto_mix_beats_mobile_data);
-    flag("skipSilence", p.skip_silence);
-    flag("profilePerOutput", p.profile_per_output);
-    flag("autoEqAuto", p.auto_eq_auto);
-    flag("autoEqDownload", p.auto_eq_download);
-    flag("tasteModel", p.taste_model);
-    flag("thirdPartyLookups", p.third_party_lookups);
-    flag("lyricsSweep", p.lyrics_sweep);
-    flag("softSleeve", p.soft_sleeve);
-    flag("motionArtwork", p.motion_artwork);
-    flag("motionArtworkWifiOnly", p.motion_artwork_wifi_only);
-    flag("favouriteNotice", p.favourite_notice);
-    flag("lyricsKeepScreenOn", p.lyrics_keep_screen_on);
-    flag("lyricsTranslation", p.lyrics_translation);
-    flag("lyricsLrclib", p.lyrics_online);
-    flag("lyricsPreferWords", p.lyrics_prefer_words);
-    flag("amoled", p.amoled);
-    flag("dynamicColor", p.dynamic_color);
-    flag("coverColors", p.cover_colors);
-    flag("reduceMotion", p.reduce_motion);
-    flag("animateAnyway", p.ignore_system_motion);
-    flag("playerColours", p.player_colours);
-    flag("skipExplicit", p.skip_explicit);
-    let mut int = |k: &str, v: i32| put.insert(k.to_string(), PrefValue::Number { v });
-    for (n, q) in [("wifi", &p.wifi), ("mobile", &p.mobile), ("download", &p.download)] {
-        int(&format!("{n}BitRate"), q.bit_rate);
+    for row in ROWS {
+        (row.save)(p, &mut put);
     }
-    int("cacheMb", p.cache_mb);
-    int("parallelDownloads", p.parallel_downloads);
-    int("coversAhead", p.covers_ahead);
-    int("replayGain", p.replay_gain);
-    int("fadeMs", p.fade_ms);
-    int("precacheWifi", p.precache_wifi);
-    int("precacheMobile", p.precache_mobile);
-    int("autoFillKind", p.auto_fill_kind);
-    int("autoFillBasis", p.auto_fill_basis);
-    int("crossfadeSec", p.crossfade_sec);
-    int("autoMixMaxS", p.auto_mix_max_s);
-    int("scrobblePercent", p.scrobble_percent);
-    int("liveSearchDelayMs", p.live_search_delay_ms);
-    int("lyricsSize", p.lyrics_size);
-    int("theme", p.theme);
-    int("tapAction", p.tap_action);
-    int("swipeRight", p.swipe_right);
-    int("swipeLeft", p.swipe_left);
-    let mut float = |k: &str, v: f32| put.insert(k.to_string(), PrefValue::Decimal { v });
-    float("preampDb", p.preamp_db);
-    float("untaggedGainDb", p.untagged_gain_db);
-    float("pitch", p.pitch);
-    float("crossfeedDb", p.crossfeed_db);
-    float("balance", p.balance);
-    float("limiterThresholdDb", p.limiter_threshold_db);
-    float("autoMixMaxTempoPct", p.auto_mix_max_tempo_pct);
-    float("speed", p.speed);
-    float("uiScale", p.ui_scale);
-    if let Some(v) = p.eq_preamp_db {
-        float("eqPreampDb", v);
-    }
-    let mut text = |k: &str, v: String| put.insert(k.to_string(), PrefValue::Text { v });
-    text("servers", Value::Array(p.servers.iter().map(server_json).collect()).to_string());
-    text("activeServerId", p.active_server_id.clone());
-    for (n, q) in [("wifi", &p.wifi), ("mobile", &p.mobile), ("download", &p.download)] {
-        text(&format!("{n}Format"), q.format.clone());
-    }
-    text("eqBands", encode_bands(&p.eq_bands));
-    let rows: Vec<&str> = p.home_rows.iter().filter_map(|i| usize::try_from(*i).ok().and_then(|i| HOME_ROWS.get(i)).copied()).collect();
-    text("homeRows", rows.join(","));
-    text("pinnedPlaylists", p.pinned_playlists.join("\n"));
-    text("listPrefs", serde_json::to_string(&p.list_prefs).unwrap_or_else(|_| "{}".to_string()));
-    text("lyricsOrder", p.lyrics_order.join(","));
-    text("lyricsOn", p.lyrics_on.join(","));
-    text("paxSenixKey", p.paxsenix_key.clone());
-    text("betterLyricsKey", p.better_lyrics_key.clone());
-    put.insert("accent".to_string(), PrefValue::Big { v: p.accent });
     put
 }
 
@@ -842,19 +748,9 @@ pub struct SettingChange {
     pub effect: u32,
 }
 
-/// Comma-separated names, each trimmed, the empty ones left out.
-fn names(value: &str) -> Vec<String> {
-    value.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()
-}
-
-/// Stream quality as a value: "0:" is the original file, "320:mp3" a bitrate and a format.
-pub(crate) fn quality_name(q: &SavedQuality) -> String {
-    format!("{}:{}", q.bit_rate, q.format)
-}
-
-fn quality_named(value: &str) -> Option<SavedQuality> {
-    let (rate, format) = value.split_once(':')?;
-    Some(SavedQuality { bit_rate: rate.trim().parse().ok()?, format: format.trim().to_string() })
+/// The setting a client changes and reads by `name`, from the table.
+pub(crate) fn row(name: &str) -> Option<&'static Row> {
+    ROWS.iter().find(|r| r.name == Some(name))
 }
 
 /// Changes one setting by name: the settings screen's rows (each row says which name it sets) and the
@@ -862,160 +758,89 @@ fn quality_named(value: &str) -> Option<SavedQuality> {
 /// its name or its ordinal; a number that does not read leaves the setting as it is. Anything that is
 /// not a setting is `None`, so a typo in a script fails loudly instead of silently doing nothing.
 pub fn set_by_name(p: &StoredPrefs, name: &str, value: &str) -> Option<SettingChange> {
-    let on = value.eq_ignore_ascii_case("true") || value == "1";
-    let int = value.trim().parse::<i32>().ok();
-    let float = value.trim().parse::<f32>().ok();
-    let clamp = |v: Option<i32>, (lo, hi): (i32, i32), keep: i32| v.map_or(keep, |v| v.clamp(lo, hi));
-    let named = |names: &[&str]| {
-        names.iter().position(|n| n.eq_ignore_ascii_case(value)).map(|i| i as i32).or(int.filter(|i| (0..names.len() as i32).contains(i)))
-    };
     let mut n = p.clone();
     let mut server = false;
-    match name {
-        // "raw" or "<format>:<kbps>" (e.g. "opus:128"): what streams on Wi-Fi, for checks of a codec.
-        "wifiQuality" => {
-            n.wifi = match value.split_once(':') {
-                Some((format, kbps)) => SavedQuality { bit_rate: kbps.parse().ok()?, format: format.to_string() },
-                None if value == "raw" => SavedQuality::default(),
-                None => return None,
+    // Lyrics online still answer to the name they are stored under.
+    let name = if name == "lyricsLrclib" { "lyricsOnline" } else { name };
+    match set_special(p, &mut n, &mut server, name, value) {
+        Some(done) => done?,
+        None => {
+            let row = row(name)?;
+            (row.set)(&mut n, value)?;
+            // A switch over something looked up online switches the lookups on with it; off leaves them.
+            if row.lookups && on(value) {
+                n.third_party_lookups = true;
             }
         }
-        "limiter" => n.limiter = on,
-        "eq" => n.eq_enabled = on,
-        "mono" => n.mono = on,
-        "hiRes" => n.hi_res = on,
-        "bitPerfect" => n.bit_perfect = on,
-        "offload" => n.offload = on,
-        "autoMix" => n.auto_mix = on,
-        "amoled" => n.amoled = on,
-        "ignoreSystemMotion" => n.ignore_system_motion = on,
-        "reduceMotion" => n.reduce_motion = on,
-        "playerColours" => n.player_colours = on,
-        "coverColors" => n.cover_colors = on,
-        "dynamicColor" => n.dynamic_color = on,
-        // The lookups switch covers the lyrics services too, so it takes the lyrics half with it both ways.
-        "thirdPartyLookups" => (n.third_party_lookups, n.lyrics_online) = (on, on),
-        // Lyrics online need lookups, so switching them on switches lookups on; off leaves the lookups
-        // (the AutoEQ list, moving covers) as they are. Stored as "lyricsLrclib", and still answers to it.
-        "lyricsOnline" | "lyricsLrclib" => (n.lyrics_online, n.third_party_lookups) = (on, on || p.third_party_lookups),
-        "lyricsPreferWords" => n.lyrics_prefer_words = on,
-        "paxSenixKey" => n.paxsenix_key = value.trim().to_string(),
-        "betterLyricsKey" => n.better_lyrics_key = value.trim().to_string(),
-        // The whole ranking, by name (the test bridge).
-        "lyricsOrder" => n.lyrics_order = crate::lyrics_sources::complete_order(&names(value)),
-        // Back to how they come out of the box (the test bridge).
-        "lyricsSources" if value.trim().eq_ignore_ascii_case("default") => {
-            n.lyrics_order = crate::lyrics_sources::default_order();
-            n.lyrics_on = crate::lyrics_sources::default_on();
-        }
-        // The services asked, in this order, and no others (the test bridge): `lyricsSources lrclib,unison`.
-        "lyricsSources" => {
-            let on = crate::lyrics_sources::known(&names(value));
-            let rest = p.lyrics_order.iter().filter(|s| !on.contains(s)).cloned();
-            n.lyrics_order = on.iter().cloned().chain(rest).collect();
-            n.lyrics_on = on;
-        }
-        // One service dropped at a place in the ranking, held by its handle and dragged: `NETEASE:3`.
-        "lyricsPlace" => {
-            let (service, to) = value.split_once(':')?;
-            let service = crate::lyrics_sources::LyricsService::named(service)?;
-            n.lyrics_order = crate::lyrics_sources::placed(p, service, to.trim().parse().ok()?);
-        }
-        // One service a place up or down in the ranking (the terminal's keys): `NETEASE:-1`.
-        "lyricsMove" => {
-            let (service, by) = value.split_once(':')?;
-            let service = crate::lyrics_sources::LyricsService::named(service)?;
-            n.lyrics_order = crate::lyrics_sources::moved(p, service, by.trim().parse().ok()?);
-        }
-        "crossfadeKeepAlbums" => n.crossfade_keep_albums = on,
-        "lyricsSweep" => n.lyrics_sweep = on,
-        "lyricsTranslation" => n.lyrics_translation = on,
-        "lyricsKeepScreenOn" => n.lyrics_keep_screen_on = on,
-        "lyricsSize" => n.lyrics_size = clamp(int, LYRICS_SIZE, p.lyrics_size),
-        "softSleeve" => n.soft_sleeve = on,
-        // Moving covers need lookups, so switching them on switches lookups on, as lyrics online do.
-        "motionArtwork" => (n.motion_artwork, n.third_party_lookups) = (on, on || p.third_party_lookups),
-        "motionArtworkWifiOnly" => n.motion_artwork_wifi_only = on,
-        // The row says "on mobile data", the setting "Wi-Fi only": the one is the other turned round.
-        "motionArtworkMobile" => n.motion_artwork_wifi_only = !on,
-        "favouriteNotice" => n.favourite_notice = on,
-        "crossfadeSec" => n.crossfade_sec = int.unwrap_or(p.crossfade_sec),
-        "autoMixMaxS" => n.auto_mix_max_s = int.unwrap_or(p.auto_mix_max_s),
-        "autoMixBeatMatch" => n.auto_mix_beat_match = on,
-        "autoMixMaxTempoPct" => n.auto_mix_max_tempo_pct = float.unwrap_or(p.auto_mix_max_tempo_pct),
-        "autoMixKeepPitch" => n.auto_mix_keep_pitch = on,
-        "autoMixBassSwap" => n.auto_mix_bass_swap = on,
-        "autoMixFilters" => n.auto_mix_filters = on,
-        "autoMixEchoOut" => n.auto_mix_echo_out = on,
-        "autoMixBetterBeats" => n.auto_mix_better_beats = on,
-        "autoMixBeatsMobileData" => n.auto_mix_beats_mobile_data = on,
-        "coversAhead" => n.covers_ahead = clamp(int, COVERS_AHEAD, p.covers_ahead),
-        "cacheMb" => n.cache_mb = clamp(int, CACHE_MB, p.cache_mb),
-        "parallelDownloads" => n.parallel_downloads = clamp(int, PARALLEL_DOWNLOADS, p.parallel_downloads),
-        "precacheWifi" => n.precache_wifi = int.unwrap_or(p.precache_wifi),
-        "precacheMobile" => n.precache_mobile = int.unwrap_or(p.precache_mobile),
-        "wifi" => n.wifi = quality_named(value)?,
-        "mobile" => n.mobile = quality_named(value)?,
-        "download" => n.download = quality_named(value)?,
-        "speed" => n.speed = float.map_or(p.speed, |v| v.clamp(RATE.0, RATE.1)),
-        "pitch" => n.pitch = float.map_or(p.pitch, |v| v.clamp(RATE.0, RATE.1)),
-        "skipSilence" => n.skip_silence = on,
-        "fadeMs" => n.fade_ms = clamp(int, FADE_MS, p.fade_ms),
-        "previousAlwaysSkips" => n.previous_always_skips = on,
-        "crossfeedDb" => n.crossfeed_db = float.unwrap_or(p.crossfeed_db),
-        // The equalizer's own pre-amp, the one in front of the limiter: a number within its range, or "auto".
-        "eqPreampDb" => n.eq_preamp_db = match float {
-            Some(v) => Some(EQ_RANGES.preamp.hold(v)),
-            None if value.trim().eq_ignore_ascii_case("auto") => None,
-            None => p.eq_preamp_db,
-        },
-        "limiterThresholdDb" => n.limiter_threshold_db = float.unwrap_or(p.limiter_threshold_db),
-        "replayGain" => n.replay_gain = named(&REPLAY_GAIN_MODES)?,
-        "preampDb" => n.preamp_db = float.map_or(p.preamp_db, |v| v.clamp(REPLAY_GAIN_PREAMP.0, REPLAY_GAIN_PREAMP.1)),
-        "untaggedGainDb" => n.untagged_gain_db = float.unwrap_or(p.untagged_gain_db),
-        "autoFill" => n.auto_fill = on,
-        "bridgeOffline" => n.bridge_offline = on,
-        "autoFillKind" => n.auto_fill_kind = named(&AUTO_FILL_KINDS)?,
-        "autoFillBasis" => n.auto_fill_basis = named(&AUTO_FILL_BASES)?,
-        "autoEqAuto" => n.auto_eq_auto = on,
-        // The list comes from a third party, so switching it on switches lookups on, as lyrics online do.
-        "autoEqDownload" => (n.auto_eq_download, n.third_party_lookups) = (on, on || p.third_party_lookups),
-        "profilePerOutput" => n.profile_per_output = on,
-        "skipExplicit" => n.skip_explicit = on,
-        "skipOnError" => n.skip_on_error = on,
-        // One lyrics service switched on or off: `lyricsService:NETEASE`.
-        _ if name.starts_with("lyricsService:") => {
-            let service = crate::lyrics_sources::LyricsService::named(&name["lyricsService:".len()..])?;
-            n.lyrics_on.retain(|s| s != service.name());
-            if on {
-                n.lyrics_on.push(service.name().to_string());
-            }
-        }
-        "theme" => n.theme = named(&THEME_MODES)?,
-        "accent" => n.accent = value.trim().parse::<i64>().unwrap_or(p.accent),
-        "uiScale" => n.ui_scale = float.unwrap_or(p.ui_scale),
-        "tapAction" => n.tap_action = named(&TAP_ACTION_NAMES)?,
-        "swipeRight" => n.swipe_right = named(&SWIPE_ACTION_NAMES)?,
-        "swipeLeft" => n.swipe_left = named(&SWIPE_ACTION_NAMES)?,
-        "liveSearchDelayMs" => n.live_search_delay_ms = int.unwrap_or(p.live_search_delay_ms),
-        "tasteModel" => n.taste_model = on,
-        "scrobble" => n.scrobble = on,
-        "scrobblePercent" => n.scrobble_percent = int.unwrap_or(p.scrobble_percent),
-        // The active server's own settings: which music folder it browses, and the bitrate cap on its
-        // second address.
-        "musicFolder" | "altMaxBitRate" => {
-            let s = n.servers.iter_mut().find(|s| s.id == p.active_server_id)?;
-            if name == "musicFolder" {
-                s.music_folder_id = value.to_string();
-            } else {
-                s.alt_max_bit_rate = int.map_or(s.alt_max_bit_rate, |v| v.max(0));
-            }
-            server = true;
-        }
-        _ => return None,
     }
     // "Space for streamed music" is applied at once instead of at the next track.
     Some(SettingChange { prefs: n, apply_cache_limit: name == "cacheMb", server, effect: 0 })
+}
+
+/// The changes by name the table cannot say line by line: `None` for a name that is the table's, else
+/// whether the value was taken.
+fn set_special(p: &StoredPrefs, n: &mut StoredPrefs, server: &mut bool, name: &str, value: &str) -> Option<Option<()>> {
+    let service = |v: &str| {
+        let (service, at) = v.split_once(':')?;
+        Some((lyrics_sources::LyricsService::named(service)?, at.trim().to_string()))
+    };
+    Some(match name {
+        // "raw" or "<format>:<kbps>" (e.g. "opus:128"): what streams on Wi-Fi, for checks of a codec.
+        "wifiQuality" => match value.split_once(':') {
+            Some((format, kbps)) => kbps.parse().ok().map(|bit_rate| n.wifi = SavedQuality { bit_rate, format: format.to_string() }),
+            None if value == "raw" => Some(n.wifi = SavedQuality::default()),
+            None => None,
+        },
+        // The lookups switch covers the lyrics services too, so it takes the lyrics half with it both ways.
+        "thirdPartyLookups" => Some((n.third_party_lookups, n.lyrics_online) = (on(value), on(value))),
+        // Back to how they come out of the box (the test bridge).
+        "lyricsSources" if value.trim().eq_ignore_ascii_case("default") => {
+            n.lyrics_order = lyrics_sources::default_order();
+            Some(n.lyrics_on = lyrics_sources::default_on())
+        }
+        // The services asked, in this order, and no others (the test bridge): `lyricsSources lrclib,unison`.
+        "lyricsSources" => {
+            let on = lyrics_sources::known(&names(value));
+            let rest = p.lyrics_order.iter().filter(|s| !on.contains(s)).cloned();
+            n.lyrics_order = on.iter().cloned().chain(rest).collect();
+            Some(n.lyrics_on = on)
+        }
+        // One service dropped at a place in the ranking, held by its handle and dragged: `NETEASE:3`.
+        "lyricsPlace" => service(value).and_then(|(s, to)| Some(n.lyrics_order = lyrics_sources::placed(p, s, to.parse().ok()?))),
+        // One service a place up or down in the ranking (the terminal's keys): `NETEASE:-1`.
+        "lyricsMove" => service(value).and_then(|(s, by)| Some(n.lyrics_order = lyrics_sources::moved(p, s, by.parse().ok()?))),
+        // One lyrics service switched on or off: `lyricsService:NETEASE`.
+        _ if name.starts_with("lyricsService:") => lyrics_sources::LyricsService::named(&name["lyricsService:".len()..]).map(|s| {
+            n.lyrics_on.retain(|x| x != s.name());
+            if on(value) {
+                n.lyrics_on.push(s.name().to_string());
+            }
+        }),
+        // The row says "on mobile data", the setting "Wi-Fi only": the one is the other turned round.
+        "motionArtworkMobile" => Some(n.motion_artwork_wifi_only = !on(value)),
+        // The active server's own settings: which music folder it browses, and the bitrate cap on its
+        // second address.
+        "musicFolder" | "altMaxBitRate" => n.servers.iter_mut().find(|s| s.id == p.active_server_id).map(|s| {
+            if name == "musicFolder" {
+                s.music_folder_id = value.to_string();
+            } else {
+                s.alt_max_bit_rate = value.trim().parse::<i32>().map_or(s.alt_max_bit_rate, |v| v.max(0));
+            }
+            *server = true;
+        }),
+        _ => return None,
+    })
+}
+
+/// The values by name the table cannot say line by line ([`SPECIAL_SPECS`]).
+pub(crate) fn value_of_special(p: &StoredPrefs, name: &str) -> Option<String> {
+    let server = || p.servers.iter().find(|s| s.id == p.active_server_id);
+    Some(match name {
+        "motionArtworkMobile" => (!p.motion_artwork_wifi_only).to_string(),
+        "musicFolder" => server().map(|s| s.music_folder_id.clone()).unwrap_or_default(),
+        "altMaxBitRate" => server().map_or(0, |s| s.alt_max_bit_rate).to_string(),
+        _ => return None,
+    })
 }
 
 /// What a server is called in lists: its name, or else the host of its address.
@@ -1034,7 +859,7 @@ fn with_bands(s: SoundSettings, eq_bands: Vec<SoundBand>) -> SoundSettings {
 }
 
 fn band_of(b: &nori_model::EqBand) -> SoundBand {
-    SoundBand { kind: b.kind as i32, freq: b.freq, gain_db: b.gain_db, q: b.q, channel: 0 }
+    SoundBand { kind: b.kind, freq: b.freq, gain_db: b.gain_db, q: b.q, channel: BandChannel::Both }
 }
 
 /// A built-in curve, switched on. Its pre-amp of 0 means automatic; "Flat" has no bands and gets the
@@ -1062,7 +887,7 @@ pub fn import(s: SoundSettings, text: &str) -> Result<SoundSettings, SoundError>
 /// A new band: a neutral peak in the middle of the range.
 pub fn add_band(s: SoundSettings) -> SoundSettings {
     let mut bands = s.eq_bands.clone();
-    bands.push(SoundBand { kind: EqKind::Peaking as i32, freq: 1000.0, gain_db: 0.0, q: 1.0, channel: 0 });
+    bands.push(SoundBand { kind: EqKind::Peaking, freq: 1000.0, gain_db: 0.0, q: 1.0, channel: BandChannel::Both });
     with_bands(s, bands)
 }
 
@@ -1082,7 +907,7 @@ pub struct Span {
 }
 
 impl Span {
-    fn hold(self, v: f32) -> f32 {
+    pub(crate) fn hold(self, v: f32) -> f32 {
         if v.is_nan() { self.min.max(0.0).min(self.max) } else { v.clamp(self.min, self.max) }
     }
 }
@@ -1140,11 +965,9 @@ pub struct EqModel {
 
 pub fn eq_model() -> EqModel {
     EqModel {
-        band_kinds: (0..BAND_KINDS)
-            .map(|k| BandKindInfo {
-                uses_gain: nori_player::dsp::uses_gain(k),
-                slope: k == EqKind::LowShelfSlope as i32 || k == EqKind::HighShelfSlope as i32,
-            })
+        band_kinds: EqKind::ALL
+            .iter()
+            .map(|k| BandKindInfo { uses_gain: nori_player::dsp::uses_gain(*k as i32), slope: matches!(k, EqKind::LowShelfSlope | EqKind::HighShelfSlope) })
             .collect(),
         eq_ranges: EQ_RANGES,
     }
@@ -1155,11 +978,11 @@ pub fn eq_model() -> EqModel {
 fn held(b: SoundBand) -> SoundBand {
     let r = EQ_RANGES;
     SoundBand {
-        kind: if (0..BAND_KINDS).contains(&b.kind) { b.kind } else { EqKind::Peaking as i32 },
+        kind: b.kind,
         freq: r.freq.hold(b.freq),
         gain_db: r.gain.hold(b.gain_db),
         q: r.q.hold(b.q),
-        channel: if (0..BAND_CHANNELS).contains(&b.channel) { b.channel } else { 0 },
+        channel: b.channel,
     }
 }
 
@@ -1177,7 +1000,7 @@ impl SoundSettings {
     /// The pre-amp in effect: the one set, or the automatic one for these bands; none with the
     /// equalizer off.
     pub fn effective_preamp_db(&self) -> f32 {
-        effective_preamp_db(self.eq_enabled, self.eq_preamp_db, self.eq_bands.iter().map(|b| (b.kind, b.gain_db)))
+        effective_preamp_db(self.eq_enabled, self.eq_preamp_db, self.eq_bands.iter().map(|b| (b.kind as i32, b.gain_db)))
     }
 }
 
@@ -1457,6 +1280,18 @@ pub fn server_label(name: String, url: String) -> String {
     label(&name, &url)
 }
 
+/// The part of the settings a sound profile remembers ([`StoredPrefs::sound`]).
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn prefs_sound(prefs: StoredPrefs) -> SoundSettings {
+    prefs.sound()
+}
+
+/// The settings with the part a sound profile remembers taken from `sound` ([`StoredPrefs::with_sound`]).
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn prefs_with_sound(prefs: StoredPrefs, sound: SoundSettings) -> StoredPrefs {
+    prefs.with_sound(sound)
+}
+
 /// A saved profile's sound; `None` when the JSON is not one.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn sound_from_json(json: String) -> Option<SoundSettings> {
@@ -1540,12 +1375,28 @@ mod tests {
     }
 
     #[test]
+    fn each_setting_is_stored_under_its_own_key_and_read_by_its_own_name() {
+        let saved = save(&StoredPrefs { eq_preamp_db: Some(0.0), ..StoredPrefs::default() });
+        let mut keys: Vec<&str> = ROWS.iter().map(|r| r.key).collect();
+        let mut names: Vec<&str> = ROWS.iter().filter_map(|r| r.name).chain(SPECIAL_SPECS.iter().map(|(n, _)| *n)).collect();
+        for k in &keys {
+            assert!(saved.contains_key(*k) || saved.contains_key(&format!("{k}BitRate")), "{k} is not stored under its key");
+        }
+        keys.sort_unstable();
+        names.sort_unstable();
+        let (k, n) = (keys.len(), names.len());
+        keys.dedup();
+        names.dedup();
+        assert_eq!((keys.len(), names.len()), (k, n), "each key and name once");
+    }
+
+    #[test]
     fn nothing_stored_is_the_defaults() {
         let p = load(&HashMap::new());
         assert_eq!(p, StoredPrefs::default());
         assert_eq!(p.eq_bands.len(), 10);
-        assert_eq!(p.home_rows, (0..8).collect::<Vec<_>>());
-        assert_eq!(p.swipe_left, 3, "the left swipe favourites");
+        assert_eq!(p.home_rows, HomeRow::ALL);
+        assert_eq!(p.swipe_left, SwipeAction::Favourite, "the left swipe favourites");
     }
 
     #[test]
@@ -1562,12 +1413,12 @@ mod tests {
         }];
         p.active_server_id = "a1".into();
         p.eq_preamp_db = Some(-3.5);
-        p.eq_bands = vec![SoundBand { kind: 2, freq: 1234.5, gain_db: -2.25, q: 0.7, channel: 1 }];
-        p.home_rows = vec![5, 0];
+        p.eq_bands = vec![band_from(2, 1234.5, -2.25, 0.7, 1)];
+        p.home_rows = vec![HomeRow::TopSongs, HomeRow::Pinned];
         p.pinned_playlists = vec!["p1".into(), "p2".into()];
         p.list_prefs = [("albums".to_string(), "grid".to_string())].into();
         p.accent = 0xFF112233;
-        p.theme = 2;
+        p.theme = ThemeMode::Dark;
         assert_eq!(load(&save(&p)), p);
         assert!(!save(&StoredPrefs { eq_preamp_db: None, ..p }).contains_key("eqPreampDb"));
     }
@@ -1577,10 +1428,10 @@ mod tests {
         let p = load(&raw(&[("parallelDownloads", n(40)), ("coversAhead", n(-1)), ("replayGain", n(9)), ("theme", n(7)), ("tapAction", n(-2)), ("swipeLeft", n(5))]));
         assert_eq!(p.parallel_downloads, 10);
         assert_eq!(p.covers_ahead, 0);
-        assert_eq!(p.replay_gain, 3);
-        assert_eq!(p.theme, 0);
-        assert_eq!(p.tap_action, 0);
-        assert_eq!(p.swipe_left, 3);
+        assert_eq!(p.replay_gain, GainMode::Auto, "ReplayGain takes the nearest");
+        assert_eq!(p.theme, ThemeMode::System);
+        assert_eq!(p.tap_action, TapAction::PlayList);
+        assert_eq!(p.swipe_left, SwipeAction::Favourite);
         assert_eq!(load(&raw(&[("parallelDownloads", n(0))])).parallel_downloads, 1);
         // A value of the wrong type is as good as missing.
         assert_eq!(load(&raw(&[("cacheMb", t("big"))])).cache_mb, 1024);
@@ -1600,7 +1451,7 @@ mod tests {
     #[test]
     fn home_rows_pins_and_list_prefs() {
         let p = load(&raw(&[("homeRows", t("RANDOM,NOPE,PINNED")), ("pinnedPlaylists", t("a\n\nb")), ("listPrefs", t(r#"{"x":"1","y":2}"#))]));
-        assert_eq!(p.home_rows, [6, 0]);
+        assert_eq!(p.home_rows, [HomeRow::Random, HomeRow::Pinned]);
         assert_eq!(p.pinned_playlists, ["a", "b"]);
         assert_eq!(p.list_prefs.get("y").map(String::as_str), Some("2"));
         assert!(load(&raw(&[("homeRows", t(""))])).home_rows.is_empty(), "every row hidden");
@@ -1609,11 +1460,11 @@ mod tests {
 
     #[test]
     fn bands_keep_their_wire_format() {
-        let b = [SoundBand { kind: 0, freq: 1000.0, gain_db: -2.5, q: 1.41, channel: 0 }, SoundBand { kind: 9, freq: 31.0, gain_db: 0.0, q: 0.00001, channel: 2 }];
+        let b = [band_from(0, 1000.0, -2.5, 1.41, 0), band_from(9, 31.0, 0.0, 0.00001, 2)];
         assert_eq!(encode_bands(&b), "0:1000.0:-2.5:1.41:0;9:31.0:0.0:1.0E-5:2");
         assert_eq!(decode_bands(&encode_bands(&b)).unwrap(), b);
         // Four fields is a band on both channels; anything that does not read is dropped.
-        assert_eq!(decode_bands("1:100:3:0.7").unwrap(), [SoundBand { kind: 1, freq: 100.0, gain_db: 3.0, q: 0.7, channel: 0 }]);
+        assert_eq!(decode_bands("1:100:3:0.7").unwrap(), [band_from(1, 100.0, 3.0, 0.7, 0)]);
         assert_eq!(decode_bands("1:100:3:0.7;12:1:1:1;x:1:1:1;1:1:1;2:1:1:1:3").unwrap().len(), 1);
         assert_eq!(decode_bands(""), None);
         assert_eq!(decode_bands("1:1:1"), None);
@@ -1625,14 +1476,14 @@ mod tests {
     fn a_sound_round_trips_through_its_json() {
         let s = SoundSettings {
             eq_enabled: true,
-            eq_bands: vec![SoundBand { kind: 1, freq: 105.0, gain_db: -3.5, q: 0.7, channel: 0 }],
+            eq_bands: vec![band_from(1, 105.0, -3.5, 0.7, 0)],
             eq_preamp_db: Some(-6.2),
             crossfeed_db: 3.0,
             balance: -0.25,
             mono: true,
             limiter: true,
             limiter_threshold_db: -2.0,
-            replay_gain: 2,
+            replay_gain: GainMode::Album,
             preamp_db: 1.5,
             crossfade_sec: 4,
             hi_res: true,
@@ -1648,8 +1499,8 @@ mod tests {
         assert_eq!(s.eq_bands, graphic());
         assert_eq!(s.limiter_threshold_db, -1.0);
         assert_eq!(s.eq_preamp_db, None);
-        assert_eq!(sound_from(r#"{"replayGain":7}"#).unwrap().replay_gain, 3);
-        assert_eq!(sound_from(r#"{"replayGain":-1}"#).unwrap().replay_gain, 0);
+        assert_eq!(sound_from(r#"{"replayGain":7}"#).unwrap().replay_gain, GainMode::Auto);
+        assert_eq!(sound_from(r#"{"replayGain":-1}"#).unwrap().replay_gain, GainMode::Off);
         assert_eq!(sound_from(r#"{"eqPreampDb":"x"}"#), None, "a pre-amp that is not a number");
         assert_eq!(sound_from(r#"{"eqPreampDb":null}"#), None);
         assert_eq!(sound_from("not json"), None);
@@ -1680,8 +1531,8 @@ mod tests {
         assert!(!set_by_name(&p, "speed", "9").unwrap().apply_cache_limit);
         assert_eq!(set_by_name(&p, "speed", "9").unwrap().prefs.speed, 4.0);
         assert_eq!(set_by_name(&p, "fadeMs", "-5").unwrap().prefs.fade_ms, 0);
-        assert_eq!(set_by_name(&p, "autoFillKind", "albums").unwrap().prefs.auto_fill_kind, 1);
-        assert_eq!(set_by_name(&p, "autoFillBasis", "era").unwrap().prefs.auto_fill_basis, 3);
+        assert_eq!(set_by_name(&p, "autoFillKind", "albums").unwrap().prefs.auto_fill_kind, AutoFillKind::Albums);
+        assert_eq!(set_by_name(&p, "autoFillBasis", "era").unwrap().prefs.auto_fill_basis, AutoFillBasis::Era);
         assert_eq!(set_by_name(&p, "autoFillBasis", "mood"), None);
         assert_eq!(set_by_name(&p, "nope", "1"), None);
     }
@@ -1690,12 +1541,12 @@ mod tests {
     fn every_row_of_the_settings_screen_sets_by_name() {
         let p = StoredPrefs::default();
         let set = |name: &str, v: &str| set_by_name(&p, name, v).unwrap().prefs;
-        assert_eq!(set("replayGain", "ALBUM").replay_gain, 2);
-        assert_eq!(set("replayGain", "3").replay_gain, 3);
+        assert_eq!(set("replayGain", "ALBUM").replay_gain, GainMode::Album);
+        assert_eq!(set("replayGain", "3").replay_gain, GainMode::Auto);
         assert_eq!(set_by_name(&p, "replayGain", "9"), None, "an ordinal out of range is not a value");
-        assert_eq!(set("theme", "dark").theme, 2);
-        assert_eq!(set("tapAction", "PLAY_NEXT").tap_action, 3);
-        assert_eq!(set("swipeLeft", "DOWNLOAD").swipe_left, 4);
+        assert_eq!(set("theme", "dark").theme, ThemeMode::Dark);
+        assert_eq!(set("tapAction", "PLAY_NEXT").tap_action, TapAction::PlayNext);
+        assert_eq!(set("swipeLeft", "DOWNLOAD").swipe_left, SwipeAction::Download);
         assert_eq!(set("wifi", "320:mp3").wifi, SavedQuality { bit_rate: 320, format: "mp3".into() });
         assert_eq!(set("mobile", "0:").mobile, SavedQuality::default());
         assert_eq!(set_by_name(&p, "download", "flac"), None);
@@ -1793,9 +1644,9 @@ mod tests {
     #[test]
     fn a_band_edit_stays_in_range() {
         let s = sound();
-        let b = set_band(s.clone(), 3, SoundBand { kind: 42, freq: 5.0, gain_db: 30.0, q: 0.0, channel: 7 });
-        assert_eq!(b.eq_bands[3], SoundBand { kind: 0, freq: 20.0, gain_db: 12.0, q: 0.2, channel: 0 });
-        let ok = SoundBand { kind: 1, freq: 120.0, gain_db: -3.5, q: 0.7, channel: 2 };
+        let b = set_band(s.clone(), 3, band_from(42, 5.0, 30.0, 0.0, 7));
+        assert_eq!(b.eq_bands[3], band_from(0, 20.0, 12.0, 0.2, 0));
+        let ok = band_from(1, 120.0, -3.5, 0.7, 2);
         assert_eq!(set_band(s.clone(), 0, ok).eq_bands[0], ok);
         assert_eq!(set_band(s.clone(), 99, ok), s, "no such band");
     }
@@ -1915,14 +1766,14 @@ mod tests {
         let bass = NamedPreset { kind: nori_model::PresetKind::BassBoost, preamp_db: -6.0, bands: vec![nori_model::EqBand { kind: EqKind::LowShelf, freq: 100.0, gain_db: 6.0, q: 0.7 }] };
         let s = apply_preset(sound(), &bass);
         assert_eq!(s.eq_preamp_db, Some(-6.0));
-        assert_eq!(s.eq_bands, [SoundBand { kind: 1, freq: 100.0, gain_db: 6.0, q: 0.7, channel: 0 }]);
+        assert_eq!(s.eq_bands, [band_from(1, 100.0, 6.0, 0.7, 0)]);
 
         let added = add_band(sound());
         assert_eq!(added.eq_bands.len(), 11);
-        assert_eq!(added.eq_bands[10], SoundBand { kind: 0, freq: 1000.0, gain_db: 0.0, q: 1.0, channel: 0 });
+        assert_eq!(added.eq_bands[10], band_from(0, 1000.0, 0.0, 1.0, 0));
         assert_eq!(remove_band(added.clone(), 10).eq_bands, graphic());
         assert_eq!(remove_band(added, 99).eq_bands.len(), 11);
-        let one = SoundSettings { eq_bands: vec![SoundBand { kind: 2, freq: 5.0, gain_db: 1.0, q: 1.0, channel: 0 }], ..sound() };
+        let one = SoundSettings { eq_bands: vec![band_from(2, 5.0, 1.0, 1.0, 0)], ..sound() };
         assert_eq!(remove_band(one, 0).eq_bands, graphic(), "never an empty equalizer");
     }
 

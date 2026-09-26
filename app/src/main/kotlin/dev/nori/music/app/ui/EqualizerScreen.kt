@@ -40,11 +40,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.ffi.settings.EqLevel
 import dev.nori.music.ffi.queue.equalizerTuning
-import dev.nori.music.settings.Band
-import dev.nori.music.settings.BandChannel
-import dev.nori.music.settings.BandKind
+import dev.nori.music.ffi.settings.SoundBand
+import dev.nori.music.ffi.settings.BandChannel
+import dev.nori.music.ffi.model.EqKind
 import dev.nori.music.settings.EqBands
 import dev.nori.music.settings.EQ
+import dev.nori.music.settings.effectivePreampDb
+import dev.nori.music.settings.usesGain
+import dev.nori.music.settings.slope
 
 /** The limiter's gain reduction, sampled while this screen is resumed and dropped the moment it is not. */
 @Composable
@@ -62,7 +65,7 @@ private fun limiterMeter(): Float {
 }
 
 /** A band's label, its frequency and a mark for its channel or kind (nori-core's `settings::band_label`). */
-private fun bandLabel(b: Band): String = say.band(b.freq, dev.nori.music.ffi.settings.BandMark.entries[EqBands.mark(b.kind.ordinal, b.channel.ordinal)])
+private fun bandLabel(b: SoundBand): String = say.band(b.freq, dev.nori.music.ffi.settings.BandMark.entries[EqBands.mark(b.kind.ordinal, b.channel.ordinal)])
 
 /** How far each control goes: the core's, the same ranges it holds every edit in. */
 private val ranges get() = EQ.eqRanges
@@ -247,7 +250,7 @@ private fun ImportDialog(vm: SettingsViewModel, onDone: () -> Unit) {
 }
 
 @Composable
-private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
+private fun BandDialog(band: SoundBand, onChange: (SoundBand) -> Unit, onRemove: () -> Unit, onDone: () -> Unit) {
     // Asked again only when what they say changes, not on every recomposition a drag makes.
     val title = remember(band.freq) { say.hzTitle(band.freq) }
     val shape = remember(band.kind.slope, band.q) { say.shape(band.kind.slope, band.q) }
@@ -256,7 +259,7 @@ private fun BandDialog(band: Band, onChange: (Band) -> Unit, onRemove: () -> Uni
         text = {
             Column {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(BandKind.entries) { k ->
+                    items(EqKind.entries) { k ->
                         TextButton({ onChange(band.copy(kind = k)) }) { Text(say.bandKind(k), color = if (band.kind == k) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                     }
                 }

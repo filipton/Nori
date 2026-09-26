@@ -72,12 +72,15 @@ fn switched_on_it_measures_what_comes_up_and_mixes_on_the_beat() {
     assert!(p.run_until(70_000, |p| p.mixing()), "the mix is heard");
     assert!(p.app.logged("mixing: the next track arrived"), "{:?}", p.app.log);
     assert!(p.run_until(30_000, |p| p.current() == Some(1)), "b plays out of the mix");
-    // After the mix b is back at its own tempo, on its own timestamps: the clock runs at one second a
-    // second, and it runs on into the next mix, out of b into c.
+    // The clock runs in b's own time: slowed to a's tempo through the mix and eased back to its own
+    // after (a 2.4 % change eases back over 32 beats, most of what is left of b), so five seconds heard
+    // are between 4.88 and 5 of b's - never five seconds of the output's own, which fell behind the music
+    // and leapt where b's timestamps came back. It runs on into the next mix, out of b into c.
     p.run_for(9_000);
     let a = p.position_ms();
     p.run_for(5_000);
-    assert!((p.position_ms() - a - 5_000).abs() <= 20, "{} ms in 5 s", p.position_ms() - a);
+    let moved = p.position_ms() - a;
+    assert!((4_878 - 20..=5_020).contains(&moved) && moved < 4_990, "{moved} ms of b in 5 s");
     assert!(p.run_to_end(120_000), "the queue plays to its end");
     assert_eq!(p.app.log.iter().filter(|l| l.contains("mixing: the next track arrived")).count(), 2, "{:?}", p.app.log);
     assert!(!p.app.logged("letting the ending play"), "{:?}", p.app.log);

@@ -15,15 +15,14 @@ import dev.nori.music.playback.BitPerfect
 import dev.nori.music.playback.Outputs
 import dev.nori.music.playback.MediaSources
 import dev.nori.music.playback.PlayerConnection
-import dev.nori.music.settings.ServerProfile
+import dev.nori.music.ffi.settings.SavedServer
 import dev.nori.music.settings.Settings
-import dev.nori.music.settings.profile
 import dev.nori.music.settings.serverList
-import dev.nori.music.settings.stored
 import dev.nori.music.settings.withServers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import dev.nori.music.settings.server
 
 /**
  * The object graph, built by hand: there are a dozen long-lived objects and a DI
@@ -85,7 +84,7 @@ class Nori private constructor(private val context: Context) {
     }
 
     val library = Library(::core, ::client)
-    val downloads = Downloads(context, ::core, lazySources, settings)
+    val downloads = Downloads(context, ::core, ::client, lazySources, settings)
     val dac = BitPerfect(context)
     val outputs = Outputs(context)
     /** A player for the moving cover; the screen's view model makes one when it first shows one. */
@@ -97,17 +96,17 @@ class Nori private constructor(private val context: Context) {
     /** True while requests go to the profile's second address; stream quality is capped then. */
     val onSecondAddress: Boolean get() = opened?.client?.onSecondAddress() ?: false
 
-    private fun open(id: String, profile: ServerProfile?): Core =
+    private fun open(id: String, profile: SavedServer?): Core =
         Core(File(context.filesDir, dev.nori.music.ffi.db.dbFileName()).path, id).also { c -> profile?.let { c.configure(it.config()) } }
 
-    private fun ServerProfile.config() = ServerConfig(url, user, password, apiKey.ifEmpty { null }, legacyAuth)
-    private fun ServerProfile.net() = NetProfile(url, altUrl, musicFolderId, altMaxBitRate.coerceAtLeast(0).toUInt())
+    private fun SavedServer.config() = ServerConfig(url, user, password, apiKey.ifEmpty { null }, legacyAuth)
+    private fun SavedServer.net() = NetProfile(url, altUrl, musicFolderId, altMaxBitRate.coerceAtLeast(0).toUInt())
 
     /** Called off the main thread at process start. */
     fun warmUp() {
         val t = android.os.SystemClock.elapsedRealtime()
         core; http; sources
-        android.util.Log.i("nori", "core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms")
+        dev.nori.music.NoriLog.i("core ready in ${android.os.SystemClock.elapsedRealtime() - t} ms")
     }
 
     /**
@@ -118,7 +117,7 @@ class Nori private constructor(private val context: Context) {
      */
     suspend fun keepAutoEqList(): UInt? = withContext(Dispatchers.IO) {
         runCatching { client.autoeqUpdate(false, http.metered) }
-            .onFailure { android.util.Log.w("nori", "autoeq list: ${it.message}") }
+            .onFailure { dev.nori.music.NoriLog.w("autoeq list: ${it.message}") }
             .getOrNull()
     }
 
@@ -136,10 +135,10 @@ class Nori private constructor(private val context: Context) {
      * Checks the profile against the server before keeping it; the core tries the second address and, for
      * servers without token auth (error 41), legacy auth, which is then remembered.
      */
-    suspend fun login(form: ServerProfile): ServerProfile = withContext(Dispatchers.IO) {
+    suspend fun login(form: SavedServer): SavedServer = withContext(Dispatchers.IO) {
         // A server and user already saved is that profile logged in to again, not a copy with an empty
         // library and no downloads (the core's `servers_login`).
-        val draft = dev.nori.music.ffi.settings.serverForLogin(settings.value.serverList(), form.stored()).profile()
+        val draft = dev.nori.music.ffi.settings.serverForLogin(settings.value.serverList(), form)
         val old = settings.value.server
         val accepted = try {
             http.configure(draft)
@@ -160,18 +159,18 @@ class Nori private constructor(private val context: Context) {
     }
 
     /** Makes [profile] the active server (adding or replacing it in the saved list). */
-    fun activate(profile: ServerProfile) {
+    fun activate(profile: SavedServer) {
         player.clear()
         // The old core is dropped, not closed: a request may still be using it, and the cleaner frees it.
         synchronized(lock) { opened = null }
-        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversActivated(p.serverList(), profile.stored())) }
+        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversActivated(p.serverList(), profile)) }
         http.configure(profile)
         library.onServerChanged()
     }
 
     /** Settings that do not need the server asked again: headers, Wi-Fi only, music folder, name. */
-    fun updateServer(profile: ServerProfile) {
-        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversUpdated(p.serverList(), profile.stored())) }
+    fun updateServer(profile: SavedServer) {
+        settings.update { p -> p.withServers(dev.nori.music.ffi.settings.serversUpdated(p.serverList(), profile)) }
         if (profile.id == settings.value.activeServerId) {
             http.configure(profile)
             opened?.takeIf { it.key == profile.id }?.client?.setProfile(profile.net())

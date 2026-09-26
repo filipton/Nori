@@ -39,6 +39,11 @@ pub use source::{Body, ByteSource, Cancel, Loader, OpenError, Window};
 pub use store::{Order, Recent, Store};
 pub use wav::WavOutput;
 
+/// A panic's own words: its message, when it gave one.
+pub(crate) fn panic_words(p: &(dyn std::any::Any + Send)) -> String {
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic with no message".into())
+}
+
 /// A playlist kept by the client and shared with the engine: edit it, then [`Engine::queue_changed`].
 #[derive(Clone, Default)]
 pub struct SharedQueue(pub std::sync::Arc<parking_lot::Mutex<nori_player::playlist::Playlist>>);

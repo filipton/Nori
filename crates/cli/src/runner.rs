@@ -336,7 +336,7 @@ impl Runner {
             }
             let changed = st.id.as_deref() != self.heard.as_deref();
             (
-                Some(crate::app::Now { state: st.state, position_ms: st.position_ms, at: st.at, speed: st.speed, mixing: st.mixing, buffering: app.now.buffering }),
+                Some(crate::app::Now { state: st.state, position_ms: st.position_ms, at: st.at, speed: st.pace, mixing: st.mixing, buffering: app.now.buffering }),
                 changed.then(|| st.id.clone()),
                 true,
             )
@@ -499,6 +499,7 @@ impl Runner {
                 s.engine.play_at(i, 0);
             }
             Cmd::Remove(i) => s.remove(i),
+            Cmd::Restore(id) => s.put_back(&id),
             Cmd::Move(from, to) => s.move_song(from, to),
             Cmd::Shuffle(on) => s.shuffle(on),
             Cmd::Repeat(m) => {

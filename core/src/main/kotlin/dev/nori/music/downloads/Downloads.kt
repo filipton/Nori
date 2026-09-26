@@ -27,7 +27,14 @@ import androidx.media3.exoplayer.scheduler.Scheduler
 import dalvik.annotation.optimization.CriticalNative
 import dev.nori.music.Nori
 import dev.nori.music.core.R
+import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.Core
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import dev.nori.music.ffi.transfers.DownloadKnown
 import dev.nori.music.ffi.transfers.DownloadQueued
 import dev.nori.music.ffi.model.Song
@@ -85,8 +92,11 @@ class DownloadState internal constructor(
  * index says something is unfinished (see [resume]).
  */
 @UnstableApi
-class Downloads(private val context: Context, private val coreOf: () -> Core, lazySources: Lazy<MediaSources>, private val settings: Settings) {
+class Downloads(private val context: Context, private val coreOf: () -> Core, private val clientOf: () -> Client, lazySources: Lazy<MediaSources>, private val settings: Settings) {
     private val core get() = coreOf()
+    /** Songs just downloaded get their lyrics looked up, one batch after another (`Client::lyrics_for_downloads`). */
+    private val lyrics = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val lyricsInTurn = Mutex()
     private val sources by lazySources
     /** The index's bookkeeping. Downloads never run here: see [TrackedDownloaders]. */
     private val io = Executors.newFixedThreadPool(2)
@@ -198,6 +208,25 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         for (i in ids.indices) if (done[i]) sources.dropStreamCopies(ids[i])
         runCatching { core.downloadSettle(ids, done) }.onFailure { Log.w(TAG, "could not write ${ids.size} settled downloads", it) }
         publish()
+        val got = ids.filterIndexed { i, _ -> done[i] }
+        if (got.isEmpty()) return
+        // Each shows as processing until its lyrics and analysis are over, or its time is up.
+        main.post { main.removeCallbacks(expire); expire.run() }
+        lyrics.launch {
+            lyricsInTurn.withLock { runCatching { clientOf().lyricsForDownloads(got) } }
+            main.post(::refreshMarks)
+            runCatching { clientOf().downloadsProcessed(got) }
+            main.post(::refreshMarks)
+        }
+    }
+
+    /** Ends the processing that has run its time (`download_processing_expire`), and comes back for the next. */
+    private val expire = object : Runnable {
+        override fun run() {
+            val next = runCatching { dev.nori.music.ffi.transfers.downloadProcessingExpire(SystemClock.elapsedRealtime()) }.getOrDefault(-1)
+            refreshMarks()
+            if (next >= 0) main.postDelayed(this, next)
+        }
     }
 
     /**
@@ -270,7 +299,7 @@ class Downloads(private val context: Context, private val coreOf: () -> Core, la
         val next = HashMap(_marks.value)
         for (i in m.ids.indices) {
             val id = m.ids[i]
-            val phase = when (m.phases[i]) { 0 -> null; 1 -> DownloadPhase.DOWNLOADING; 2 -> DownloadPhase.FAILED; else -> DownloadPhase.DONE }
+            val phase = DownloadPhase.entries.getOrNull(m.phases[i]).takeIf { m.phases[i] > 0 }
             if (phase != null) next[id] = DownloadMark(phase, progressOf(id), m.at[i])
             else if (next.remove(id) != null && DownloadsJni.held(id) != DownloadsJni.PENDING) progress.remove(id)
         }

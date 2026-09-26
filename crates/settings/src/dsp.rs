@@ -9,7 +9,7 @@ pub fn effective_preamp_db(s: &crate::settings::StoredPrefs) -> f32 {
     if !s.eq_enabled {
         return 0.0;
     }
-    s.eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(s.eq_bands.iter().map(|b| (b.kind, b.gain_db))))
+    s.eq_preamp_db.unwrap_or_else(|| nori_player::dsp::auto_preamp_db(s.eq_bands.iter().map(|b| (b.kind as i32, b.gain_db))))
 }
 
 /// The built-in curves, as data, so the UI (and the settings store) never holds a frequency of its own.

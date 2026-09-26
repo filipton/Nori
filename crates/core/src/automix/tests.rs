@@ -34,6 +34,13 @@ fn a_measurement_finishes_into_the_store() {
     let t = core.analysis_finish("x", a).unwrap().unwrap();
     assert!((t.bpm - 128.0).abs() < 0.05);
     assert_eq!(core.analysis_get("x".into()).unwrap(), Some(t));
+    // The vocal activity curve is kept beside it, a byte per curve frame, and goes with the analyses.
+    let voice = core.analysis_voice("x").unwrap().expect("a curve");
+    let secs = x.len() as f64 / s.rate as f64;
+    assert!((voice.seconds() - secs).abs() < 0.5, "{} s of curve for {secs} s", voice.seconds());
+    assert_eq!(core.analysis_voice("none").unwrap(), None);
+    core.analysis_clear().unwrap();
+    assert_eq!(core.analysis_voice("x").unwrap(), None, "cleared with the analyses");
 }
 
 /// What the app no longer asks of the core, only its tests: a row put straight in, a whole track measured.

@@ -230,9 +230,9 @@ fun MiniPlayer(vm: PlayerViewModel, actions: ActionsViewModel, onOpen: () -> Uni
     val settings: dev.nori.music.app.vm.SettingsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val prefs by settings.prefs.collectAsStateWithLifecycle()
     val dark = when (prefs.theme) {
-        dev.nori.music.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
-        dev.nori.music.settings.ThemeMode.DARK -> true
-        dev.nori.music.settings.ThemeMode.LIGHT -> false
+        dev.nori.music.ffi.settings.ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
+        dev.nori.music.ffi.settings.ThemeMode.DARK -> true
+        dev.nori.music.ffi.settings.ThemeMode.LIGHT -> false
     }
     // The colours of what is playing and of the songs either side, worked out before they are reached. Their covers are
     // already fetched ahead (PlayerViewModel); this is the other half of that, and it is what stops the

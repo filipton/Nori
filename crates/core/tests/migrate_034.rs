@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use nori_core::migrate_034::{migrate_034, parse_prefs, MARKER, PARKED};
-use nori_core::settings::PrefValue;
+use nori_core::settings::{AutoFillBasis, AutoFillKind, BandChannel, GainMode, HomeRow, PrefValue, SwipeAction, TapAction, ThemeMode};
 use nori_core::{background, settings_store, Core, ServerConfig};
 use rusqlite::Connection;
 
@@ -137,19 +137,19 @@ fn everything_0_3_4_kept_comes_over() {
     assert_eq!((p.mobile.bit_rate, p.mobile.format.as_str()), (128, "opus"));
     assert_eq!((p.download.bit_rate, p.download.format.as_str()), (320, "mp3"));
     assert_eq!((p.cache_mb, p.parallel_downloads, p.covers_ahead), (2048, 3, 5));
-    assert_eq!((p.replay_gain, p.preamp_db, p.fade_ms), (3, -2.5, 300));
+    assert_eq!((p.replay_gain, p.preamp_db, p.fade_ms), (GainMode::Auto, -2.5, 300));
     assert!(p.eq_enabled);
     assert_eq!(p.eq_bands.len(), 3);
-    assert_eq!((p.eq_bands[1].kind, p.eq_bands[1].freq, p.eq_bands[1].gain_db, p.eq_bands[1].channel), (1, 100.0, -2.5, 1));
+    assert_eq!((p.eq_bands[1].kind as i32, p.eq_bands[1].freq, p.eq_bands[1].gain_db, p.eq_bands[1].channel), (1, 100.0, -2.5, BandChannel::Left));
     assert_eq!((p.eq_preamp_db, p.crossfeed_db, p.balance, p.limiter, p.limiter_threshold_db), (Some(-3.0), 4.5, -0.2, true, -1.5));
     assert_eq!((p.auto_mix, p.auto_mix_max_s, p.auto_mix_beat_match, p.auto_mix_max_tempo_pct, p.auto_mix_keep_pitch), (true, 10, false, 4.0, false));
     assert_eq!((p.crossfade_sec, p.crossfade_keep_albums, p.skip_silence, p.scrobble, p.scrobble_percent), (6, false, true, false, 70));
-    assert_eq!((p.auto_fill_kind, p.auto_fill_basis, p.bridge_offline, p.previous_always_skips), (1, 2, true, true));
-    assert_eq!((p.theme, p.amoled, p.dynamic_color, p.accent, p.player_colours), (2, true, false, 4282557941, false));
+    assert_eq!((p.auto_fill_kind, p.auto_fill_basis, p.bridge_offline, p.previous_always_skips), (AutoFillKind::Albums, AutoFillBasis::Genre, true, true));
+    assert_eq!((p.theme, p.amoled, p.dynamic_color, p.accent, p.player_colours), (ThemeMode::Dark, true, false, 4282557941, false));
     assert!(!p.third_party_lookups, "the listener's own choice, kept");
     assert!(p.ignore_system_motion, "0.3.4's old motion switch is not carried over; the new default stands");
-    assert_eq!((p.tap_action, p.swipe_right, p.swipe_left), (1, 2, 4), "the left swipe from swipeLeft3");
-    assert_eq!(p.home_rows, [2, 0, 3]);
+    assert_eq!((p.tap_action, p.swipe_right, p.swipe_left), (TapAction::PlayOne, SwipeAction::PlayNext, SwipeAction::Download), "the left swipe from swipeLeft3");
+    assert_eq!(p.home_rows, [HomeRow::Recent, HomeRow::Pinned, HomeRow::Newest]);
     assert_eq!(p.pinned_playlists, ["pl-7", "pl-2"]);
     assert_eq!(p.list_prefs.get("albums").map(String::as_str), Some("grid|year"));
     assert_eq!((p.lyrics_size, p.lyrics_sweep, p.favourite_notice), (2, false, false));
@@ -204,7 +204,7 @@ fn a_second_run_does_nothing() {
     let phone = Phone::new("twice").as_034_left_it();
     phone.migrate();
     let mut p = settings_store::settings_open(phone.db()).unwrap();
-    p.theme = 1;
+    p.theme = ThemeMode::Light;
     settings_store::settings_put(p);
     written();
 
@@ -214,7 +214,7 @@ fn a_second_run_does_nothing() {
     fs::write(phone.prefs("nori.xml"), PREFS).unwrap();
     phone.migrate();
     assert!(!phone.prefs("nori.xml").exists(), "tidied away");
-    assert_eq!(settings_store::settings_open(phone.db()).unwrap().theme, 1, "the settings since are kept");
+    assert_eq!(settings_store::settings_open(phone.db()).unwrap().theme, ThemeMode::Light, "the settings since are kept");
     let core = Core::new(phone.db(), "default".into()).unwrap();
     assert_eq!(core.pending_list().unwrap().len(), 1, "a waiting write is not sent twice");
     assert_eq!(core.downloads(true).unwrap().len(), 2);

@@ -66,6 +66,11 @@ pub trait Library: Send + 'static {
     fn taker(&self, _id: &str, _hint: Option<&str>) -> Option<Listening> {
         None
     }
+
+    /// `id` played nothing, and is opened again from scratch: whatever the disk keeps of it as streamed
+    /// (a stream cache entry that may be what kept it silent) goes, and it is fetched anew. A download
+    /// stays. Nothing by default.
+    fn forget(&mut self, _id: &str) {}
 }
 
 /// How many songs' bytes are kept at once: the one playing and the one after. The one before is not:
@@ -158,6 +163,13 @@ impl<L: Library> Sources<L> {
     /// Every song's bytes go (a long pause): they are fetched, or read from the disk, again when needed.
     pub fn let_go(&mut self) {
         self.loaders.clear();
+    }
+
+    /// `id`'s bytes go, the ones kept in memory and the stream cache's: it is fetched anew when opened
+    /// again ([`Library::forget`]).
+    pub fn forget(&mut self, id: &str) {
+        self.loaders.retain(|(i, _)| i != id);
+        self.library.forget(id);
     }
 
     /// Every loader kept, by song, in words ([`Loader::words`]), for a perf report's invariant break.

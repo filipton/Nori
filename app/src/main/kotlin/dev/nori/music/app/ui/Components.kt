@@ -46,7 +46,7 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.HeartBroken
-import dev.nori.music.settings.SwipeAction
+import dev.nori.music.ffi.settings.SwipeAction
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
@@ -85,6 +85,8 @@ import dev.nori.music.ffi.model.Album
 import dev.nori.music.ffi.model.Song
 import dev.nori.music.look.CoverLook
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -143,7 +145,7 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
     // The sheen outlives the load by the length of the picture's fade, so it goes away underneath a
     // picture that is already covering it instead of vanishing from on top of the plate.
     var sheen by remember(cover) { mutableStateOf(loading) }
-    androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(300); sheen = loading }
+    androidx.compose.runtime.LaunchedEffect(loading) { if (!loading) kotlinx.coroutines.delay(SHEEN_LEAVE_MS.toLong()); sheen = loading }
     // Read while drawing, so the fade redraws the picture and recomposes nothing.
     val fade = remember(cover) { androidx.compose.animation.core.Animatable(if (cover.image != null) 1f else 0f) }
     val here = cover.image != null
@@ -167,7 +169,8 @@ fun Cover(url: String?, size: Dp, modifier: Modifier = Modifier, radius: Dp = Ra
                 }
             },
     ) {
-        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true))
+        // A load that ends with no picture (offline, a failure) fades the sheen out as the note fades in.
+        if (sheen && plate) Box(Modifier.matchParentSize().loadingSheen(true, leaving = !loading))
         androidx.compose.animation.AnimatedVisibility(
             missing && plate, Modifier.align(Alignment.Center),
             enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)), exit = androidx.compose.animation.fadeOut(),
@@ -212,32 +215,67 @@ private const val SWIPE_ARM = TURN
  * ticks, so the finger knows before it lifts; letting go then acts and the row springs back. The row
  * paints [fill] under itself only while it is off its place, so the strip never shows through it.
  */
-private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?, fill: Color): Modifier = composed {
+internal fun Modifier.swipeable(
+    s: SwipeState, right: RowSwipe?, left: RowSwipe?, fill: Color?,
+    /** The action takes the row away (a song out of the queue): armed and let go, the row slides off first. */
+    gone: Boolean = false,
+    /** A side with no action still gives a little ([GIVE] of the finger, at most [GIVE_LIMIT] of the width) and comes back: "not this one". */
+    resist: Boolean = false,
+): Modifier = composed {
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val back = remember { spring<Float>(dampingRatio = 0.8f, stiffness = 520f) }
     // The gesture outlives recompositions (it is keyed on which sides act, not on the actions), so it
     // reads the actions as they are now: a favourite swiped once must offer "Remove" the second time.
     val acts by rememberUpdatedState(right to left)
-    pointerInput(right != null, left != null) {
+    pointerInput(right != null, left != null, resist) {
         var x = 0f
+        // The finger's own travel, for a side that only gives.
+        var travel = 0f
         fun settle() {
             s.armed = false
             s.settling = scope.launch { androidx.compose.animation.core.animate(s.offset.floatValue, 0f, animationSpec = back) { v, _ -> s.offset.floatValue = v } }
         }
+        // A row that went but is still here long after (the change did not happen): it comes back rather
+        // than leave a hole. A row that really went has left the composition by then, and this with it.
+        suspend fun comeBackIfStill() {
+            kotlinx.coroutines.delay(SWIPE_GONE_WAIT_MS)
+            s.armed = false
+            androidx.compose.animation.core.animate(s.offset.floatValue, 0f, animationSpec = back) { v, _ -> s.offset.floatValue = v }
+        }
         sidewaysDrag(
-            onDragStart = { s.settling?.cancel(); x = s.offset.floatValue },
+            onDragStart = { s.settling?.cancel(); x = s.offset.floatValue; travel = x },
             onDragEnd = {
-                if (s.armed) (if (x > 0f) acts.first else acts.second)?.action?.invoke()
-                settle()
+                val act = if (s.armed) (if (x > 0f) acts.first else acts.second) else null
+                when {
+                    act == null -> settle()
+                    gone && !AppMotion.reduce -> s.settling = scope.launch {
+                        // Off the side it was going, at the speed of a short slide, and only then acted on:
+                        // the rows under it close up once the queue has changed.
+                        val to = kotlin.math.sign(x) * size.width.toFloat()
+                        androidx.compose.animation.core.animate(s.offset.floatValue, to, animationSpec = tween(SWIPE_GONE_MS, easing = androidx.compose.animation.core.FastOutLinearInEasing)) { v, _ -> s.offset.floatValue = v }
+                        act.action()
+                        comeBackIfStill()
+                    }
+                    gone -> s.settling = scope.launch { s.offset.floatValue = kotlin.math.sign(x) * size.width.toFloat(); act.action(); comeBackIfStill() }
+                    else -> { act.action(); settle() }
+                }
             },
             onDragCancel = { settle() },
         ) { change, delta ->
             val w = size.width.toFloat()
             val arm = w * SWIPE_ARM
+            travel += delta
+            change.consume()
+            val acting = if (travel > 0f) right != null else left != null
+            if (resist && !acting) {
+                x = kotlin.math.sign(travel) * kotlin.math.min(kotlin.math.abs(travel) * GIVE, w * GIVE_LIMIT)
+                s.offset.floatValue = x
+                return@sidewaysDrag
+            }
             val heavy = kotlin.math.abs(x) > arm && (delta > 0f) == (x > 0f)
             x = (x + if (heavy) delta * 0.4f else delta).coerceIn(if (left != null) -w * 0.6f else 0f, if (right != null) w * 0.6f else 0f)
-            change.consume()
+            travel = x
             val armed = kotlin.math.abs(x) > arm
             if (armed != s.armed) { s.armed = armed; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
             // Written, not snapped to from a coroutine: one launch per pointer event was a job per frame.
@@ -245,8 +283,12 @@ private fun Modifier.swipeable(s: SwipeState, right: RowSwipe?, left: RowSwipe?,
         }
     }
         .graphicsLayer { translationX = s.offset.floatValue }
-        .drawBehind { if (s.offset.floatValue != 0f) drawRect(fill) }
+        .then(if (fill != null) Modifier.drawBehind { if (s.offset.floatValue != 0f) drawRect(fill) } else Modifier)
 }
+
+/** How long a row taken away by its swipe takes to leave from where the finger let go. */
+private const val SWIPE_GONE_MS = 200
+private const val SWIPE_GONE_WAIT_MS = 1_500L
 
 /**
  * A drag taken only when it is plainly sideways: once the finger has gone [slop] times the touch slop,
@@ -289,25 +331,52 @@ internal suspend fun androidx.compose.ui.input.pointer.PointerInputScope.sideway
  * a small pop. Composed only while the row is off its place, so a list at rest carries none of it.
  */
 @Composable
-private fun SwipeBackdrop(s: SwipeState, right: RowSwipe?, left: RowSwipe?, modifier: Modifier) {
+internal fun SwipeBackdrop(
+    s: SwipeState, right: RowSwipe?, left: RowSwipe?, modifier: Modifier,
+    /** Its colours: the theme's (a list on a page) unless given (the player's queue, on the cover's colours). */
+    colours: SwipeColours? = null,
+    /** Drawn only where the row has moved off, for a row with no fill of its own to cover the rest. */
+    reveal: Boolean = false,
+    /** The words' and icon's distance from the edge. */
+    inset: Dp = Space.gutter,
+) {
     val side by remember { derivedStateOf { kotlin.math.sign(s.offset.floatValue) } }
     if (side == 0f) return
     val face = (if (side > 0f) right else left) ?: return
     val scheme = MaterialTheme.colorScheme
-    val fill by animateColorAsState(if (s.armed) scheme.primary else scheme.surfaceContainerHighest, tween(140), label = "swipe fill")
-    val ink by animateColorAsState(if (s.armed) scheme.onPrimary else scheme.onSurfaceVariant, tween(140), label = "swipe ink")
+    val c = colours ?: remember(scheme) {
+        SwipeColours({ scheme.surfaceContainerHighest }, { scheme.primary }, { scheme.onSurfaceVariant }, { scheme.onPrimary })
+    }
+    val armed by animateFloatAsState(if (s.armed) 1f else 0f, tween(140), label = "swipe armed")
+    val fill = { androidx.compose.ui.graphics.lerp(c.fill(), c.armedFill(), armed) }
+    val ink = androidx.compose.ui.graphics.ColorProducer { androidx.compose.ui.graphics.lerp(c.ink(), c.armedInk(), armed) }
     val pop by animateFloatAsState(if (s.armed) 1.15f else 1f, spring(dampingRatio = 0.45f, stiffness = 700f), label = "swipe pop")
-    Box(modifier.drawBehind { drawRect(fill) }) {
+    Box(
+        modifier.drawWithContent {
+            val x = s.offset.floatValue
+            // The strip the row has uncovered, or the whole row under a row that paints over the rest itself.
+            val from = if (!reveal) 0f else if (x > 0f) 0f else size.width + x
+            val to = if (!reveal) size.width else if (x > 0f) x else size.width
+            if (to <= from) return@drawWithContent
+            clipRect(left = from, right = to) {
+                drawRect(fill())
+                this@drawWithContent.drawContent()
+            }
+        },
+    ) {
         Row(
-            Modifier.align(if (side > 0f) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = Space.gutter)
+            Modifier.align(if (side > 0f) Alignment.CenterStart else Alignment.CenterEnd).padding(horizontal = inset)
                 .graphicsLayer { alpha = (kotlin.math.abs(s.offset.floatValue) / 64.dp.toPx()).coerceIn(0f, 1f) },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(face.icon, null, Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }, ink)
-            Text(face.label, Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelLarge, color = ink, maxLines = 1)
+            LookIcon(face.icon, null, Modifier.size(22.dp).graphicsLayer { scaleX = pop; scaleY = pop }, ink)
+            LookText(face.label, ink, Modifier.padding(start = 10.dp), style = MaterialTheme.typography.labelLarge, maxLines = 1)
         }
     }
 }
+
+/** A swipe's strip: plain, and once far enough to act; its words and icon the same. Read in the draw phase. */
+internal class SwipeColours(val fill: () -> Color, val armedFill: () -> Color, val ink: () -> Color, val armedInk: () -> Color)
 
 /**
  * One track. Numbered rows (an album) carry no artwork; everywhere else the cover leads. The row ends
@@ -507,7 +576,7 @@ internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel
     val starred = action == SwipeAction.FAVOURITE && LocalStarMarks.current.effectiveStar(dev.nori.music.data.StarKind.SONG, song.id, song.starred)
     // What it does is nori-core's (`row_swipe`); there are ten answers in all, so each is asked once. What
     // it says is one of Say's words, read once per locale: a row allocates no text.
-    val act = SwipeActs.of(action.ordinal, starred) ?: return null
+    val act = SwipeActs.of(action, starred) ?: return null
     // Made once per row and answer: a new one on every pass would make the row compose again with it.
     return remember(act, song, actions) {
         val label = say.rowSwipe(act)
@@ -522,12 +591,12 @@ internal fun rowSwipe(action: SwipeAction, song: Song, actions: ActionsViewModel
 
 /** The core's answer for each swipe setting, hearted or not, asked once each. */
 private object SwipeActs {
-    private val made = arrayOfNulls<Any>(16)
+    private val made = arrayOfNulls<Any>(SwipeAction.entries.size * 2)
     private val NONE = Any()
-    fun of(setting: Int, starred: Boolean): dev.nori.music.ffi.library.RowSwipeAct? {
-        val i = setting * 2 + if (starred) 1 else 0
-        if (i !in made.indices) return null
-        val got = made[i] ?: (dev.nori.music.ffi.library.rowSwipe(setting.toUInt(), starred) ?: NONE).also { made[i] = it }
+    fun of(setting: SwipeAction, starred: Boolean): dev.nori.music.ffi.library.RowSwipeAct? {
+        // A slot per setting and heart: a place to remember the answer in, nothing more.
+        val i = setting.ordinal * 2 + if (starred) 1 else 0
+        val got = made[i] ?: (dev.nori.music.ffi.library.rowSwipe(setting, starred) ?: NONE).also { made[i] = it }
         return got as? dev.nori.music.ffi.library.RowSwipeAct
     }
 }

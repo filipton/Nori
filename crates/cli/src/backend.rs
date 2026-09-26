@@ -603,6 +603,19 @@ impl Session {
         }
     }
 
+    /// Puts the song `id` taken out last back where it was; the song playing stays the one playing.
+    pub fn put_back(&self, id: &str) {
+        let was_empty = playlist::with(|p| p.is_empty());
+        if playlist::playlist_restore(id.to_string()).at < 0 {
+            self.note("Nothing to put back".to_string(), false);
+            return;
+        }
+        self.edited();
+        if was_empty {
+            self.engine.go_to(0, 0);
+        }
+    }
+
     /// Moves the song at list index `from` to `to`.
     pub fn move_song(&self, from: usize, to: usize) {
         playlist::playlist_move(from as u32, from as u32 + 1, to as u32);

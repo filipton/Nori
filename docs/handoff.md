@@ -139,6 +139,20 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   than 2 s from it (`drifted`, `EnginePlayer.reanchor`). The controller's place stands for half a
   second after a seek and on another song than the engine's. The perf build's "place" invariant says
   when the bar or a controller is more than 2 s from the engine for over a second.
+- **A tempo-stretched mix keeps the song's own time.** The incoming song of a beat-matched mix is
+  played at the mix's tempo (x1.071 on the S22: 84 to 90 BPM) through it and eased back after. Its
+  mixed audio was stamped with a clock that ran at one times, so the place fell behind the music by
+  ~1.7 s over a 22 s mix and leapt ahead where the song's own timestamps came back - or, from the ear's
+  reading (which did run at the tempo), fell back 2 s as the player's clock took over: "0:32 came back
+  to 0:30". Now every chunk the transition engine hands down says the song time a frame of it stands
+  for (`Downstream::media_pace`, from `Stretcher::take_content`), the sink counts played music and its
+  clock in that time, the running clock moves on by it, and `Status::pace` (the speed times the tempo
+  heard) is what a place is run on at between readings. The session is told the place again once the
+  song is back at its own tempo (`Event::Placed`). crates/engine tests/stretch.rs reads the true place
+  off the sound heard, through the mix, a seek into it and at 1.25x.
+- **Buffering is not starving.** The perf build's "starved" watch on the CPU's track waits while the
+  engine says it plays nothing (a provider's song still coming, a jump's dip): the report's false alarm
+  on a qobuz song buffering (`Watch::track`).
 - **One soft bottom, the sleeve's.** Every record - flat, lifted, sliding or flying in from the now
   playing bar or the lyrics thumbnail - used to carry its own blurred bottom, which travelled and
   changed size with it, and two records side by side met at a seam between two blurs. Now the records
@@ -443,6 +457,41 @@ Apple's own App Store screenshots and the differences closed. What is left is li
   count for a join only where the clock says the ear can be, and hands the song to the CPU when the
   head keeps making no sense. Its reasons reach the perf report as `offload:` events ("… ended by
   the play head …", "the play head read …"). The next report says which of these it was.
+- **Offload on a small track, with the screen off (S21 FE and S22, Android 16).** Not confirmed on the
+  phones yet. The S21 FE grants an offloaded track 32 KB of the 8 MB asked (819 ms of a 320 kbps song),
+  the S22 64 KB; the engine topped them up on a timer worked out from those bytes (every ~409 ms), and
+  its watchdog gave the chip up when the count stood still for what the track holds and two seconds
+  (2.8 s): with the screen off the S21 FE's timestamp and play head stood that long while it played, so
+  the CPU took over and offload was given up for the song. Now: a full track waits for the platform's
+  `onDataRequest` once the platform has asked once (media3 sleeps for offload the same way), each wake
+  writes all the track takes, and the next song is written once less than 30 s is left however small
+  the track. On the simulated chips (crates/engine tests/paths.rs `on_a_small_grant_…`) the engine wakes
+  exactly as often as the platform asks: 2.40/s on 32 KB and 1.20/s on 64 KB when the chip buffers
+  nothing of its own (the platform's own pace: no fewer is possible without risking a gap), 0.27/s and
+  0.22/s with a DSP buffering 256 KB (before: 0.55/s and 0.47/s). The watchdog gives a chip up only when
+  its count has not moved and the platform has asked for nothing for longer than the music written past
+  the count and a slack of 10 s (twice the longest the count was seen standing, up to a minute), and the
+  CPU then plays on from where the chip's count last put the ear, never from the clock. A count that
+  stands while the platform keeps asking is one it does not keep: the play head is tried, then the
+  clock (the platform played what it asked for). Note on the report: "left at 245306 ms (chip said 94130
+  ms …)" was most likely no 150 s skip: the first is the place in the song, the others the track's own
+  count, which starts where offload took the song over (part way in, at ~150 s, if the two agree); what
+  the old watchdog put the ear past was the 867 ms written beyond the count.
+  The `nori:engine` wake lock is let go while the songs are offloaded, the track fed, the platform has
+  shown it asks for more, and nothing else is due (nori-engine's `Event::Awake(false)`, RustPlayer.kt
+  `holdCpu`); it is taken again (on the engine's thread, before it goes on) for a control, a song
+  starting, its bytes awaited or fetched (any open body), a fade, a count to look at again, the CPU path,
+  and from a few seconds before the ear reaches the next song or the end of the music (half again the
+  longest the platform went between two asks, and a second: the song's event and its ReplayGain volume
+  come on time). What that relies on, as media3 does (`ExoPlayerImpl` lets its lock go while it sleeps
+  for offload): the audio HAL and audioserver keep the offloaded track playing from the DSP with the CPU
+  asleep, and wake it (with their own wake lock) to pull more, which is when `StreamEventCallback.
+  onDataRequest` reaches the app's callback thread, which unparks the engine. Nothing in the app polls
+  meanwhile: the engine's own timers do not run while the phone sleeps, which is why the lock comes back
+  before a join. The media session needs no lock: it changes only on the engine's events, which come
+  with it held. To check on the phones: a perf report of a playlist with the screen off for 5+ minutes.
+  Its offloaded stretch should say the wake lock was held a few % of the time, nori-engine's wakeups/s
+  about the chip's asks/s, no "offload given up", and every song's "ended by the play head".
 - **The player against Apple's.** The sleeve runs to all three edges — **including up under the
   status bar**, which is the point: Apple's artwork has no top edge, and stopping ours below the
   handle drew a line across the screen. The handle and the close button float over it, with the same

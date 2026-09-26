@@ -33,7 +33,7 @@ pub fn local_offset_s(at_s: i64) -> i64 {
 /// The lyrics of nothing playing: no lines, untimed, as if the server had said so.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_none() -> nori_model::Lyrics {
-    nori_model::Lyrics { synced: false, word_timed: false, lines: Vec::new(), key: 0 }
+    nori_model::Lyrics { synced: false, word_timed: false, lines: Vec::new(), key: 0, offset_ms: 0 }
 }
 
 /// What a press on "Resume from server" does with the queue the server kept.

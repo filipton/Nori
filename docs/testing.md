@@ -170,7 +170,7 @@ as its slowest test or its total over the cores, whichever is more. The binaries
 
 | Binary | Tests | Time | Its slowest |
 | --- | --- | --- | --- |
-| crates/engine `--test engine` (engine.rs, paths.rs, radio.rs, tempo.rs, estimated.rs, hung.rs) | 138 | 10 s | offload tests of a few ffmpeg songs, 4-7 s each, and next pressed fast through four queues, 6 s |
+| crates/engine `--test engine` (engine.rs, paths.rs, radio.rs, tempo.rs, stretch.rs, estimated.rs, hung.rs, silent.rs) | 141 | 10 s | offload tests of a few ffmpeg songs, 4-7 s each, and next pressed fast through four queues, 6 s |
 | crates/player `--test pipeline` | 67 | 4.6 s | levels.rs, 3-4 s each: every kind of transition through two 60 s songs |
 | crates/player lib | 262 | 3.6 s | automix/tests.rs, the synthetic songs analysed side by side |
 | crates/android lib | 31 | 6 s | track.rs's two tests of the real engine thread on the wall clock, the rapid skips over a phone-like track 6 s |
@@ -181,18 +181,18 @@ as its slowest test or its total over the cores, whichever is more. The binaries
 
 | Crate | What is checked |
 | --- | --- |
-| player | the sound chain sample by sample (decoders, ReplayGain, equalizer, limiter, speed, silence skipping), AutoMix's analysis on synthetic songs with a known tempo, key and structure, the planner, the mixer, and the whole player on a simulated output and virtual clock (`sim`, tests/pipeline): gapless joins, crossfades, levels through a mix, controls, the output |
-| engine | the player for platforms without one, on the virtual clock of tests/common: loading and the loader (source.rs), fetching ahead (ahead.rs), the stream cache, offload onto a simulated chip (paths.rs), radio, tempo, a transcode's estimated length and its 416 (estimated.rs), one fetch per song with AutoMix measuring (one_fetch.rs), transition settings changed while playing (replan.rs), an album kept gapless under AutoMix or a crossfade heard to every sample, the core's planner and measurer included (album.rs), downloads and the core (core.rs) |
+| player | the sound chain sample by sample (decoders, ReplayGain, equalizer, limiter, speed, silence skipping), AutoMix's analysis on synthetic songs with a known tempo, key and structure, the planner (never panicking over any stored row: automix/plan_fuzz.rs), the mixer, and the whole player on a simulated output and virtual clock (`sim`, tests/pipeline): gapless joins, crossfades, levels through a mix, controls, the output |
+| engine | the player for platforms without one, on the virtual clock of tests/common: loading and the loader (source.rs), fetching ahead (ahead.rs), the stream cache, offload onto a simulated chip (paths.rs), radio, tempo, the place said through a tempo-stretched mix measured against the song heard (stretch.rs), a transcode's estimated length and its 416 (estimated.rs), a player that never plays silent (silent.rs: a panic on its thread, a loader that dies, an output that stops taking music), one fetch per song with AutoMix measuring (one_fetch.rs), transition settings changed while playing (replan.rs), an album kept gapless under AutoMix or a crossfade heard to every sample, the core's planner and measurer included (album.rs), downloads and the core (core.rs) |
 | core | the FFI surface over the real SQLite: the index and search, smart playlists, mixes, history, lyrics' race, covers, AutoEQ and device profiles, the Subsonic client against a fake transport, stream addresses, transfers, the Kotlin twins (tests/twins.rs), the active client (tests/active_client.rs) |
-| lyrics | every lyrics format, the services' answers, trust and fitting, the race between services |
+| lyrics | every lyrics format, the services' answers, trust and fitting, the race between services, synced times checked against synthetic sung songs (sync.rs; `sync_eval` prints the table) |
 | covers | decoders against Pillow's references, the scaler, the disk and memory caches, the loader's workers |
 | look | colours from a cover (the AndroidX palette port), Compose's colour maths, the lyrics and motion layout |
-| library, queue, settings, transfers, devices, perf | pages, menus, the queue's rules, settings and their store, the download table, AutoEQ, the perf log's report |
+| library, queue, settings, transfers, devices, perf | pages, menus, the queue's rules, settings and their store (tests/stored_format.rs: the stored keys and encodings against a golden copy), the download table, AutoEQ, the perf log's report |
 | cli, android, mpris, net, http, db | each client's own glue: the terminal's drawing, the AudioTrack model (track.rs), media controls, requests |
 | testdir | the tests' temp directories, and tests/registered.rs: every file under a crate's `tests/` is in a test binary |
 
 The Kotlin unit tests (`./gradlew :core:testDebugUnitTest :app:testDebugUnitTest`, a minute, no device)
-cover what the Kotlin keeps: formatting, the media3 error reading, the frame fades, the player's cover across
+cover what the Kotlin keeps: formatting, the media3 error reading, the frame fades, the queue panel's keys, drag and undo (QueueEditsTest), the player's cover across
 fast skips (CoverTurnTest, CoverFetchTest: loads answered out of order, cancelled, failed and asked again), and InitOrderTest, which
 reads Nori.kt and Downloads.kt and fails when a field a constructor's thread reaches is declared after the
 line that starts the thread (the start-up NPE of 2026-09-25).

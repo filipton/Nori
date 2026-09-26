@@ -11,12 +11,30 @@
 //! the song's ReplayGain (and the controls' fades), never the samples. An Opus stream goes in Ogg pages,
 //! as media3's `OggOpusAudioPacketizer` hands it to the chip.
 //!
-//! The track is asked to hold minutes of music ([`TRACK_US`]), and is topped up when it holds less than
-//! half a minute ([`LOW_US`]), the next song written then too: the engine's thread sleeps minutes between
-//! writes. It wakes only for a top-up, the ear reaching the next song (to say so, and to set its volume),
-//! a fade's steps, the end of what was written, and the output tearing the track down, which the platform
-//! says at once. The top-up's time is worked out from what was written and what the track has played, so
-//! it does not rely on the platform calling back when it has room.
+//! The track is asked to hold minutes of music ([`TRACK_US`]), and the next song is written once less than
+//! half a minute is left ([`LOW_US`]). Each write gives the track as much as it takes. Many phones grant
+//! far less than asked (32 KB on a Galaxy S21 FE, 64 KB on an S22: under two seconds of a song), and their
+//! chip buffers seconds more of its own behind that. So the engine does not work out from the bytes when
+//! to top up: once the platform has asked for more (`onDataRequest`, Android 10's
+//! `StreamEventCallback`, as media3's sink sleeps for), a full track waits for its next word. The thread
+//! then wakes about as often as the platform asks, and no more. Until the platform has asked once, the
+//! top-up's time is worked out from what was written and what the track has played.
+//!
+//! Otherwise the thread wakes only for the ear reaching the next song (to say so, and to set its volume),
+//! a fade's steps, the end of what was written, the output tearing the track down (which the platform
+//! says at once), and the watchdog. [`Offload::lets_cpu_sleep`] says when nothing but the platform's word
+//! is due: on Android the CPU's wake lock is let go then, as media3 lets its own go while it sleeps for
+//! offload.
+//!
+//! The watchdog: a count of what the chip presented that stands still is no stall by itself. With the
+//! screen off a phone may not move its timestamp (nor its play head) for seconds while the chip plays from
+//! its own buffer, asking for nothing. The CPU takes over only when neither count has moved, and the
+//! platform has asked for nothing, for longer than the music written past the count and a slack that
+//! grows with how long the platform's counts were seen to stand still ([`STUCK_SLACK_MS`] at least). It
+//! then plays on from where the chip's count last put the ear, never from where the clock would put it.
+//! A count that stands while the platform keeps asking for more is one it does not keep: the other count
+//! is followed, or, with neither moving, the CPU takes over where the clock puts the ear, the platform
+//! having played what it asked for.
 
 use std::collections::VecDeque;
 
@@ -183,9 +201,24 @@ const NOTES_AT_ONCE: i64 = 4;
 const STRIKES: u32 = 3;
 /// How soon to look again at a play head that made no sense, or an end of stream still to say, ms.
 const LOOK_AGAIN_MS: i64 = 300;
-/// A playing track whose count of what it presented has not moved for longer than the track can hold,
-/// and this much more, ms, is not followed any more: the other count is tried, or the CPU takes over.
-const STUCK_SLACK_MS: i64 = 2_000;
+/// The least slack of the watchdog, ms: a playing track whose count has not moved, and whose platform
+/// has asked for nothing, for longer than the music written past the count and this, is taken for
+/// stalled. A count that stands this long while the platform asks for more is taken for dead. The tester's
+/// S21 FE stood 2.8 s with the screen off while it played.
+const STUCK_SLACK_MS: i64 = 10_000;
+/// The slack grows to twice the longest a count was seen standing still before it moved on, up to this.
+const STUCK_SLACK_MAX_MS: i64 = 60_000;
+/// Requests for more, since the count last moved, that make a count standing still one the platform does
+/// not keep: it plays, and says so.
+const DEAD_ASKS: u32 = 2;
+/// A full track whose platform says when it has room is looked at on the engine's own no sooner than
+/// this, ms, in case its word never comes: once what was written could have played.
+const BACKSTOP_MS: i64 = 500;
+/// The CPU is kept awake from this long before the ear reaches a song placed after the one heard, or the
+/// end of what was written, ms, at least: the song's volume and its event come on time. More on a
+/// platform that asks for more seldom ([`Offload::awake_before_ms`]).
+const AWAKE_BEFORE_MS: i64 = 3_000;
+const AWAKE_BEFORE_MAX_MS: i64 = 60_000;
 
 /// One song handed to the track: where it starts in the track's frames, and how long it is once all of it
 /// is written.
@@ -323,8 +356,17 @@ pub(crate) struct Offload {
     head_dead: bool,
     /// When the ear last moved on, or the track began playing: none until the next turn says.
     moved_ms: Option<i64>,
-    /// The platform asked for more since the ear last moved on.
-    asked: bool,
+    /// Times the platform asked for more since the ear last moved on, and when it last did.
+    asks: u32,
+    asked_ms: Option<i64>,
+    /// The longest the count stood still before it moved on, ms: how the platform keeps its count, which
+    /// the watchdog's slack grows with.
+    quiet_ms: i64,
+    /// The platform has asked for more on this track: it says when a full track has room.
+    called_back: bool,
+    /// When the platform last asked while the track played, and the longest it went between two asks.
+    last_ask_ms: Option<i64>,
+    ask_gap_ms: i64,
     /// The bytes asked for when the track was opened, until what the platform granted is noted.
     granted: Option<usize>,
     /// The frames presented as last read.
@@ -353,6 +395,11 @@ pub(crate) struct Offload {
     /// When the play head was last read and made sense (or the track began playing), and the frames heard
     /// then: the head cannot be further on than the clock has run since. None before the track plays.
     clock: Option<(i64, u64)>,
+    /// How much less the count moved than the clock ran between the last two readings that moved it, ms:
+    /// the reading that set `clock` may be one from that long before it was read (a platform whose count
+    /// stood still for seconds with the screen off while the chip played, read long after it stopped), and
+    /// the bound from it is loosened by as much. Nought when the count kept up.
+    clock_lag_ms: i64,
     /// When the track last began playing, and the frames heard then: the furthest bound of all, which a
     /// count taken over from one found standing still is held to.
     play_clock: Option<(i64, u64)>,
@@ -408,7 +455,12 @@ impl Offload {
             stamp_dead: false,
             head_dead: false,
             moved_ms: None,
-            asked: false,
+            asks: 0,
+            asked_ms: None,
+            quiet_ms: 0,
+            called_back: false,
+            last_ask_ms: None,
+            ask_gap_ms: 0,
             granted: None,
             heard_at: 0,
             playing: false,
@@ -425,6 +477,7 @@ impl Offload {
             now_ms: 0,
             clock: None,
             play_clock: None,
+            clock_lag_ms: 0,
             raw: None,
             strikes: 0,
             strike_why: String::new(),
@@ -447,6 +500,11 @@ impl Offload {
 
     pub(crate) fn playing(&self) -> bool {
         self.playing && self.active()
+    }
+
+    /// A track plays songs placed on it, and the watchdog here judges whether it stalled ([`Offload::stuck`]).
+    pub(crate) fn watching(&self) -> bool {
+        self.playing && self.started && self.open.is_some() && !self.placed.is_empty()
     }
 
     /// Whether the track is open, and for what: for the perf report and the screen.
@@ -546,12 +604,15 @@ impl Offload {
         self.stamp_dead = false;
         self.head_dead = false;
         self.moved_ms = None;
-        self.asked = false;
+        self.asks = 0;
+        self.asked_ms = None;
+        self.last_ask_ms = None;
         self.heard_at = 0;
         self.waiting = false;
         self.pending_eos = false;
         self.full = false;
         self.clock = None;
+        self.clock_lag_ms = 0;
         self.play_clock = None;
         self.raw = None;
         self.strikes = 0;
@@ -608,6 +669,7 @@ impl Offload {
     pub(crate) fn play(&mut self) {
         self.playing = true;
         self.moved_ms = None;
+        self.last_ask_ms = None;
         self.play_clock = None;
         if self.open.is_some() && !self.placed.is_empty() {
             self.resumed = true;
@@ -622,6 +684,7 @@ impl Offload {
     pub(crate) fn pause(&mut self) {
         self.playing = false;
         self.moved_ms = None;
+        self.last_ask_ms = None;
         if let Some(f) = self.fade.take() {
             // The fade the pause waited for ends at its target, not a step short of it.
             self.gain = f.to;
@@ -674,7 +737,7 @@ impl Offload {
         let rate = self.rate() as f64 * self.out.pace();
         let run = |ms: i64| (ms.max(0) as f64 * rate / 1000.0) as u64;
         match self.clock {
-            Some((t, at)) => at + run(self.now_ms - t + CLOCK_SLACK_MS),
+            Some((t, at)) => at + run(self.now_ms - t + CLOCK_SLACK_MS + self.clock_lag_ms),
             None => self.heard_at + run(CLOCK_SLACK_MS),
         }
     }
@@ -739,12 +802,17 @@ impl Offload {
                     // Only a count that moved says where the ear is by the clock: one that stands still
                     // may be one the platform does not keep (a play head stuck at nought).
                     if self.heard_at > was || self.clock.is_none() {
+                        self.clock_lag_ms = self.clock.map_or(0, |(t, at)| ((self.now_ms - t) - (self.heard_at.saturating_sub(at) as i64 * 1000 / rate)).max(0));
                         self.clock = Some((self.now_ms, self.heard_at));
                     }
                 }
                 if self.heard_at > was {
+                    if let Some(m) = self.moved_ms {
+                        self.quiet_ms = self.quiet_ms.max(self.now_ms - m);
+                    }
                     self.moved_ms = Some(self.now_ms);
-                    self.asked = false;
+                    self.asks = 0;
+                    self.asked_ms = None;
                     if seen == Seen::Fine {
                         self.resumed = false;
                     }
@@ -767,16 +835,31 @@ impl Offload {
         (bytes as i128 * self.written_frames as i128 / self.written_bytes as i128 * 1_000_000 / self.rate() as i128) as i64
     }
 
-    /// How long the count may stand still while the track plays before it is not believed, ms.
-    fn stuck_after_ms(&self) -> i64 {
-        self.holds_us() / 1000 + STUCK_SLACK_MS
+    /// The watchdog's slack, ms: [`STUCK_SLACK_MS`], or twice the longest the platform's count was seen
+    /// standing still before it moved on, up to [`STUCK_SLACK_MAX_MS`]. Scaled to how the platform keeps
+    /// its count, not to what the track holds.
+    fn slack_ms(&self) -> i64 {
+        self.quiet_ms.saturating_mul(2).clamp(STUCK_SLACK_MS, STUCK_SLACK_MAX_MS)
     }
 
-    /// The watchdog: a playing track with music still to present whose count has not moved for longer
-    /// than it could hold is not followed by that count any more. The play head is tried when the
-    /// timestamp stood still; when neither moves, the words of why the CPU takes over, the ear put where
-    /// the clock says it is by now. Never a playing engine over a track starved in silence.
-    fn stuck(&mut self) -> Option<String> {
+    /// When the watchdog is due to look, ms (engine time): the count standing still while the platform
+    /// asks for more ([`DEAD_ASKS`] times) for the slack; or the count standing and the platform silent
+    /// for as long as the music written past the count, and the slack.
+    fn watch_at(&self, since: i64) -> i64 {
+        let slack = self.slack_ms();
+        let heard_from = self.asked_ms.map_or(since, |a| a.max(since));
+        let stall = heard_from + self.in_track_us() / 1000 + slack;
+        if self.asks >= DEAD_ASKS { stall.min(since + slack) } else { stall }
+    }
+
+    /// The watchdog: a playing track with music still to present whose count has not moved, and whose
+    /// platform has said nothing, for longer than the music written past the count and the slack, has
+    /// stalled; one whose count stands while the platform keeps asking for more has a count the platform
+    /// does not keep. The play head is tried when the timestamp stood still; when neither moves, the words
+    /// of why the CPU takes over, and whether the ear was put where the clock says (a platform that asked
+    /// for more played what it asked for) or left where the chip's count last put it (a stall: never
+    /// further than the chip got). Never a playing engine over a track starved in silence.
+    fn stuck(&mut self) -> Option<(String, bool)> {
         if !self.playing || !self.started || self.placed.is_empty() || self.open.is_none() {
             return None;
         }
@@ -787,20 +870,25 @@ impl Offload {
             self.moved_ms = Some(now);
             return None;
         }
-        let still = now - since;
-        if still <= self.stuck_after_ms() {
+        if now < self.watch_at(since) {
             return None;
         }
-        let asked = if self.asked { ", though the platform asked for more" } else { ", and the platform asked for nothing more" };
+        let still = now - since;
+        let dead = self.asks >= DEAD_ASKS;
+        let asked = match self.asks {
+            0 => ", and the platform asked for nothing".to_string(),
+            n => format!(", though the platform asked for more {n} times"),
+        };
         let what = if self.by_stamp { "timestamp" } else { "play head" };
         let raw = self.raw.map_or("nothing".into(), |r| r.to_string());
-        let why = format!("the {what} stood at {raw} for {still} ms while the track played, which holds {} ms{asked}", self.holds_us() / 1000);
+        let why = format!("the {what} stood at {raw} for {still} ms while the track played, {} ms written past it{asked} (slack {} ms)", self.in_track_us() / 1000, self.slack_ms());
         if self.by_stamp && !self.head_dead {
             self.stamp_dead = true;
             self.note(format!("{why}: the play head is followed instead"));
             // Where the timestamp put the ear by the clock was its word: the play head is held only to
             // what the clock allows since the track began playing.
             self.clock = self.play_clock.or(self.clock);
+            self.clock_lag_ms = 0;
             let was = self.heard_at;
             self.read_head();
             if self.heard_at > was {
@@ -809,10 +897,13 @@ impl Offload {
         }
         self.stamp_dead = true;
         self.head_dead = true;
-        // Where the clock says the ear is by now, no further than what was written.
-        let by_clock = self.heard_at + (still.max(0) as u128 * self.rate() as u128 / 1000) as u64;
-        self.heard_at = by_clock.min(self.written_frames);
-        Some(why)
+        if dead {
+            // The platform played what it asked for: where the clock says the ear is by now, no further
+            // than what was written.
+            let by_clock = self.heard_at + (still.max(0) as u128 * self.rate() as u128 / 1000) as u64;
+            self.heard_at = by_clock.min(self.written_frames);
+        }
+        Some((why, dead))
     }
 
     /// A reading that made no sense, or an end of stream refused.
@@ -939,8 +1030,10 @@ impl Offload {
         if self.play_clock.is_none() && self.playing && self.started {
             self.play_clock = Some((now_ms, self.heard_at));
         }
-        self.asked |= asked;
         self.read_head();
+        if asked {
+            self.asked_for_more(now_ms);
+        }
         if self.eos_due && self.playing {
             self.end_stream();
         }
@@ -951,16 +1044,17 @@ impl Offload {
             self.on_cpu = Some(OnCpu::Head(why));
             return step;
         }
-        if let Some(why) = self.stuck() {
+        if let Some((why, by_clock)) = self.stuck() {
             let ms = self.heard().map_or(0, |h| h.1);
-            self.note(format!("offload given up, the CPU plays on from {ms} ms, where the clock puts the ear: {why}"));
+            let place = if by_clock { "where the clock puts the ear, the platform having played what it asked for" } else { "where the chip's count last put the ear" };
+            self.note(format!("offload given up, the CPU plays on from {ms} ms, {place}: {why}"));
             let step = self.fallback(true);
             self.on_cpu = Some(OnCpu::Head(why));
             return step;
         }
         // A turn after the bytes it waited for came (the loader woke the thread) writes them, and so
         // stops waiting.
-        if self.placed.is_empty() || (!asked && !self.waiting && self.in_track_us() >= self.low_us()) {
+        if self.placed.is_empty() || (!asked && !self.waiting && !self.top_up_due()) {
             return Step::Fine;
         }
         match self.fill(asked, tracks, queue, gain) {
@@ -969,8 +1063,76 @@ impl Offload {
         }
     }
 
-    /// The track is topped up when it holds less than this, µs: [`LOW_US`], or half of a track too small
-    /// for that (as its bytes and the songs' bitrate make it), so it is never looked at for nothing.
+    /// The platform asked for more (at `now_ms`): its word that it plays, and that it says when the track
+    /// has room.
+    fn asked_for_more(&mut self, now_ms: i64) {
+        self.called_back = true;
+        self.asks = self.asks.saturating_add(1);
+        self.asked_ms = Some(now_ms);
+        if self.playing && self.started {
+            if let Some(last) = self.last_ask_ms.replace(now_ms) {
+                self.ask_gap_ms = self.ask_gap_ms.max(now_ms - last);
+            }
+        }
+    }
+
+    /// Something is left to write: the song being written, what is staged of it, or the next one.
+    fn more(&self) -> bool {
+        self.writing.is_some() || self.next.is_some() || self.staged < self.stage.len()
+    }
+
+    /// Whether the track is to be written to now without the platform asking: a full one only while the
+    /// platform has not shown it says when there is room (then at [`Offload::low_us`], as the bytes make
+    /// it), one that took everything it was given once the next song's mark ([`LOW_US`]) is reached.
+    fn top_up_due(&self) -> bool {
+        if !self.more() {
+            return false;
+        }
+        if self.full {
+            !self.called_back && self.in_track_us() < self.low_us()
+        } else {
+            self.in_track_us() < LOW_US
+        }
+    }
+
+    /// How long before a boundary (the ear reaching a song placed after the one heard, or the end of what
+    /// was written) the CPU is kept awake, ms: the longest the platform went between two asks and half
+    /// again and a second, [`AWAKE_BEFORE_MS`] to [`AWAKE_BEFORE_MAX_MS`]. A thread asleep on a phone
+    /// asleep wakes only when the platform wakes it, so this is how late it could otherwise be.
+    fn awake_before_ms(&self) -> i64 {
+        (self.ask_gap_ms * 3 / 2 + 1_000).clamp(AWAKE_BEFORE_MS, AWAKE_BEFORE_MAX_MS)
+    }
+
+    /// Whether the offload path needs nothing of the CPU until the platform wakes the thread: the track
+    /// plays, fed, and says when it wants more; no song starts, no bytes are awaited, no fade runs, no
+    /// reading of the count is to be looked at again, and no boundary comes within
+    /// [`Offload::awake_before_ms`]. The CPU may sleep then (Android lets the wake lock go).
+    pub(crate) fn lets_cpu_sleep(&self) -> bool {
+        if !self.playing || !self.started || self.placed.is_empty() || self.open.is_none() || self.starting.is_some() || self.waiting || self.fade.is_some() {
+            return false;
+        }
+        if self.strikes > 0 || self.eos_due || self.head.lower.is_some() || self.stamp.lower.is_some() {
+            return false;
+        }
+        // A platform that has not said it asks for more is topped up on the engine's own time.
+        if self.more() && !self.called_back {
+            return false;
+        }
+        let rate = self.rate() as i64;
+        let ms = |frames: u64| frames as i64 * 1000 / rate;
+        let near = self.awake_before_ms();
+        if self.placed.get(1).is_some_and(|p| ms(p.start.saturating_sub(self.heard_at)) <= near) {
+            return false;
+        }
+        if self.tail.is_some() && !self.more() && ms(self.written_frames.saturating_sub(self.heard_at)) <= near {
+            return false;
+        }
+        true
+    }
+
+    /// The track is topped up when it holds less than this, µs, while the platform has not shown that it
+    /// asks for more: [`LOW_US`], or half of a track too small for that (as its bytes and the songs'
+    /// bitrate make it), so it is never looked at for nothing.
     fn low_us(&self) -> i64 {
         if self.open.is_none() || self.written_bytes == 0 || self.written_frames == 0 {
             return LOW_US;
@@ -1057,15 +1219,21 @@ impl Offload {
             return Some(self.fallback(true));
         }
         if let Some(asked) = self.granted.take() {
-            // What the track holds sets how often the thread wakes to top it up: said, for the battery.
+            // What the track holds: said, for the battery. The platform's asks set how often the thread
+            // wakes to top it up, once it has asked; before that, the bytes do.
             let held = self.open.map_or(0, |o| o.2);
             let (holds, low) = (self.holds_us() / 1000, self.low_us() / 1000);
-            self.note(format!("the platform granted a track of {} KB of the {} KB asked: {holds} ms of this song, topped up about every {low} ms", held / 1024, asked / 1024));
+            self.note(format!(
+                "the platform granted a track of {} KB of the {} KB asked: {holds} ms of this song, topped up when the platform asks for more (about every {low} ms if its chip buffers nothing of its own)",
+                held / 1024,
+                asked / 1024
+            ));
         }
         if self.playing {
             self.out.play();
             self.started = true;
             self.clock = Some((self.now_ms, self.heard_at));
+            self.clock_lag_ms = 0;
             self.play_clock = self.clock;
             if self.eos_due {
                 self.end_stream();
@@ -1139,10 +1307,12 @@ impl Offload {
                 }
                 continue;
             }
-            // The next song is written once the track runs low, so an edit of the queue before then
-            // costs nothing; the whole of it is here by then (fetched as the song before began).
+            // The next song is written once less than half a minute is left, however small the track
+            // (a chip that buffers on its own may not present the last of a song until more comes), so an
+            // edit of the queue before then costs nothing; the whole of it is here by then (fetched as the
+            // song before began).
             let lagging = asked && self.in_track_us() > self.holds_us() * 3 / 2;
-            if self.next.is_none() || (self.in_track_us() >= self.low_us() && !lagging) {
+            if self.next.is_none() || (self.in_track_us() >= LOW_US && !lagging) {
                 return Ok(());
             }
             let (n, opened) = self.next.as_mut().expect("checked");
@@ -1262,20 +1432,27 @@ impl Offload {
         if let Some(p) = self.placed.get(1) {
             at(ms(p.start.saturating_sub(self.heard_at)) + 5);
         }
-        let more = self.writing.is_some() || self.next.is_some() || self.staged < self.stage.len();
-        if more {
-            // A track that refused a write while it seemed low holds more than its bytes say: a second, or
-            // half the time to the low mark in a track too small for that (64 KB on some phones), so it
-            // never runs dry waiting.
-            let floor = if self.full { (self.low_us() / 2000).clamp(1, 1_000) } else { 1 };
-            at(((self.in_track_us() - self.low_us()) / 1000).max(0) + floor);
+        if self.more() {
+            if self.full && self.called_back {
+                // The platform's ask wakes the thread; this only in case it never comes, once what was
+                // written could have played.
+                at((self.in_track_us() / 1000).max(BACKSTOP_MS));
+            } else if self.full {
+                // A track that refused a write while it seemed low holds more than its bytes say: a second,
+                // or half the time to the low mark in a track too small for that (64 KB on some phones), so
+                // it never runs dry waiting.
+                let floor = (self.low_us() / 2000).clamp(1, 1_000);
+                at(((self.in_track_us() - self.low_us()) / 1000).max(0) + floor);
+            } else {
+                at(((self.in_track_us() - LOW_US) / 1000).max(0) + 1);
+            }
         } else if self.tail.is_some() {
             let end = ms(self.written_frames.saturating_sub(self.heard_at));
             at(if end > 0 { end + 5 } else { END_LOOK_MS });
         }
-        // The watchdog, once the count has stood still for longer than the track holds.
+        // The watchdog.
         if let Some(since) = self.moved_ms.filter(|_| self.started && self.in_track_us() > END_SLACK_US) {
-            at((since + self.stuck_after_ms() - self.now_ms).max(0) + 1);
+            at((self.watch_at(since) - self.now_ms).max(0) + 1);
         }
         d
     }

@@ -14,6 +14,10 @@ mod tempo;
 mod estimated;
 #[path = "hung.rs"]
 mod hung;
+#[path = "stretch.rs"]
+mod stretch;
+#[path = "silent.rs"]
+mod silent;
 #[cfg(feature = "core")]
 #[path = "replan.rs"]
 mod replan;

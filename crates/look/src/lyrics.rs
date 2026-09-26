@@ -413,6 +413,9 @@ pub struct LyricClock {
     timing: LyricTiming,
     shown: AtomicI64,
     nudge: AtomicI64,
+    /// How much later than the song the lyrics' times run (the sync check's offset): added to the playhead
+    /// before the nudge, which stays the listener's own.
+    offset: i64,
     /// The start of the line last tapped, while the player lands there ([`NOT_LANDING`] otherwise).
     landing: AtomicI64,
 }
@@ -420,7 +423,13 @@ pub struct LyricClock {
 impl LyricClock {
     /// Starts showing the moment `position_ms`, un-nudged.
     pub fn new(timing: LyricTiming, position_ms: i64) -> Self {
-        LyricClock { timing, shown: AtomicI64::new(position_ms), nudge: AtomicI64::new(0), landing: AtomicI64::new(NOT_LANDING) }
+        Self::with_offset(timing, position_ms, 0)
+    }
+
+    /// Starts showing the moment `position_ms` of lyrics whose times run `offset_ms` later than the song
+    /// (`Lyrics::offset_ms`), un-nudged.
+    pub fn with_offset(timing: LyricTiming, position_ms: i64, offset_ms: i64) -> Self {
+        LyricClock { timing, shown: AtomicI64::new(position_ms + offset_ms), nudge: AtomicI64::new(0), offset: offset_ms, landing: AtomicI64::new(NOT_LANDING) }
     }
 
     pub fn timing(&self) -> &LyricTiming {
@@ -433,7 +442,7 @@ impl LyricClock {
     /// first look after starting or resuming.
     pub fn advance(&self, position_ms: i64, sweep: bool, lively: bool, force: bool) -> Step {
         let sweep = sweep && self.timing.sweeps();
-        let t = self.landed(position_ms + self.nudge.load(Relaxed));
+        let t = self.landed(position_ms + self.offset + self.nudge.load(Relaxed));
         let redraw = force || self.timing.moved(self.shown.load(Relaxed), t, sweep, lively);
         if redraw {
             self.shown.store(t, Relaxed);
@@ -465,7 +474,7 @@ impl LyricClock {
     }
 
     /// A tap on `line`: shows it at once and returns where the player should seek to, which is the line's
-    /// timestamp less the nudge, so the words land where they are drawn. Until the player is clearly
+    /// timestamp less the offset and the nudge, so the words land where they are drawn. Until the player is clearly
     /// playing the line, a reading a little before it (a seek landed early, a playhead set back after
     /// running on) shows what is on screen rather than the line before or its words emptied again: the
     /// tapped line becomes the one sung, its first word fills from the start, and nothing goes back.
@@ -473,7 +482,7 @@ impl LyricClock {
         let Some(&start) = self.timing.starts.get(line) else { return self.shown.load(Relaxed).max(0) };
         self.shown.store(start, Relaxed);
         self.landing.store(start, Relaxed);
-        (start - self.nudge.load(Relaxed)).max(0)
+        (start - self.offset - self.nudge.load(Relaxed)).max(0)
     }
 
     /// The moment to show for a reading `t`, while a tap is being landed: see [`LyricClock::tap`].
@@ -721,6 +730,18 @@ mod tests {
         let c = LyricClock::new(LyricTiming::new(true, false, lines(&[1000, 5000])), 0);
         assert_eq!(c.advance(0, true, false, false).wait, 500);
         assert_eq!(c.advance(4400, true, false, false).wait, 290);
+    }
+
+    #[test]
+    fn lyrics_that_run_late_are_shown_on_time_and_tapped_where_they_are_sung() {
+        // The lines' times run 1.5 s later than the song: the line timed at 5000 is sung at 3500.
+        let c = LyricClock::with_offset(LyricTiming::new(true, false, lines(&[1000, 5000])), 0, 1500);
+        assert_eq!(c.advance(2500, false, false, false).frame.active, 0, "the line timed at 1000 while the song is at 2500");
+        assert_eq!(c.advance(3600, false, false, false).frame.active, 1, "the line timed at 5000 lit as it is sung");
+        assert_eq!(c.tap(1), 3500, "a tap seeks to where the line is sung");
+        c.nudge(0);
+        assert_eq!(c.nudge(1), 250, "the listener's nudge is their own, on top");
+        assert_eq!(c.tap(1), 3250);
     }
 
     #[test]

@@ -117,6 +117,13 @@ internal object RustBridge {
      */
     @JvmStatic fun kept(key: String): Boolean = player?.kept(key) ?: true
     @JvmStatic fun busy(key: String): Boolean = player?.busy(key) ?: true
+    /** What the stream cache keeps of [key], in words: for the perf build's break of a player that plays nothing. */
+    @JvmStatic fun disk(key: String): String = player?.disk(key) ?: "$key: no player"
+    /**
+     * [key] played nothing and is fetched anew (crates/engine `Library::forget`): its stream cache entry goes.
+     * What it kept is answered, in words, for the log.
+     */
+    @JvmStatic fun forget(key: String): String = player?.forget(key) ?: "$key: no player"
     /**
      * Whether the audio chip decodes [encoding] where the music goes now, as the platform answers media3:
      * the call made in the high byte (3 `getDirectPlaybackSupport`, 2 `getPlaybackOffloadSupport`, 1
@@ -127,6 +134,12 @@ internal object RustBridge {
     @JvmStatic fun openOffload(encoding: Int, rate: Int, channels: Int, bytes: Int): AudioTrack? = player?.openOffload(encoding, rate, channels, bytes)
     /** Whether a player took it: none registered yet, the engine signals again with its next event. */
     @JvmStatic fun signal(): Boolean = player?.let { it.signal(); true } ?: false
+    /**
+     * The engine needs the CPU kept awake ([awake]), or can let it sleep while the audio chip plays the
+     * songs (nori-engine's `Event::Awake`). Called on the engine's thread as it changes, before the
+     * engine goes on.
+     */
+    @JvmStatic fun cpu(awake: Boolean) { player?.engineAwake(awake) }
 }
 
 /**
@@ -167,7 +180,7 @@ class RustBody internal constructor(
                 got += n
             }
         } catch (e: Exception) {
-            android.util.Log.w("nori", "rust player: the song's bytes stopped coming: $e")
+            dev.nori.music.NoriLog.w("rust player: the song's bytes stopped coming: $e")
             broke = true
             if (got == 0) return -2
         }
@@ -562,7 +575,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             when ((e ushr 32).toInt()) {
                 EVENT_STATE -> onState(arg)
                 EVENT_SONG -> onSong(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
-                EVENT_ERROR -> RustPlayerJni.eventText(h).let { lastError = it; "rust player error: $it".let { t -> android.util.Log.w("nori", t); PlaybackService.observer?.error(t) } }
+                EVENT_ERROR -> RustPlayerJni.eventText(h).let { lastError = it; "rust player error: $it".let { t -> dev.nori.music.NoriLog.w(t); PlaybackService.observer?.error(t) } }
                 EVENT_STOPPED -> stoppedByItself()
                 EVENT_BUFFERING -> buffering = arg != 0
                 EVENT_LOOPED -> onLoop(arg, RustPlayerJni.eventText(h), RustPlayerJni.eventJumps(h))
@@ -623,7 +636,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
                 if (!lost && network == failedOn) return
                 main.post {
                     if (error?.errorCode != PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED) return@post
-                    android.util.Log.i("nori", "rust player: the network is back, the failure it left goes")
+                    dev.nori.music.NoriLog.i("rust player: the network is back, the failure it left goes")
                     clearError()
                     invalidateState()
                 }
@@ -745,6 +758,26 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
     @Suppress("DEPRECATION")
     private val wakeLock = context.getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "nori:engine").apply { setReferenceCounted(false) }
 
+    /** Music is wanted and can come ([follow]): the CPU lock is held for it, unless the engine lets the CPU sleep. */
+    @Volatile private var wantsCpu = false
+    /**
+     * The engine said it can let the CPU sleep (nori-engine's `Event::Awake(false)`): the songs are on the
+     * audio chip, fed, and nothing but the platform's word is due. The chip plays from its own buffer
+     * without the CPU; when it wants more, the platform's `onDataRequest` wakes the engine's thread
+     * (audioserver holds its own wake lock while it runs the offloaded track and calls back). It is the
+     * rule media3 plays offload by: `ExoPlayerImpl` lets its wake lock go while it sleeps for offload and
+     * waits for the same callback. The engine takes the lock back ([engineAwake] true) before any work of
+     * its own: a control, a song starting or its bytes awaited, a fade, a song or the end of the music
+     * coming up (its volume and its event come on time), a count to look at again, the CPU path.
+     */
+    @Volatile private var engineAsleep = false
+
+    /** The engine's word ([RustBridge.cpu]), on its thread. */
+    internal fun engineAwake(awake: Boolean) {
+        engineAsleep = !awake
+        holdCpu()
+    }
+
     /**
      * The receiver and the CPU lock are held exactly while music is wanted, as ExoPlayer's WAKE_MODE_LOCAL -
      * and can come: an output that would not open leaves the player wanting music it cannot play, and
@@ -760,7 +793,20 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             context.unregisterReceiver(noisy)
             listening = false
         }
-        if (playing && !wakeLock.isHeld) wakeLock.acquire() else if (!playing && wakeLock.isHeld) wakeLock.release()
+        wantsCpu = playing
+        holdCpu()
+    }
+
+    /**
+     * The CPU lock, held while music is wanted, but for while the engine lets the CPU sleep with no song's
+     * bytes being fetched (a fetch runs on the loader's threads, which the engine's word does not cover).
+     * From the main thread, the engine's and the loaders'.
+     */
+    @Synchronized private fun holdCpu() {
+        val hold = wantsCpu && (!engineAsleep || loading > 0)
+        if (hold == wakeLock.isHeld) return
+        if (hold) wakeLock.acquire() else wakeLock.release()
+        PlaybackService.observer?.wakeLock(hold)
     }
 
     // ---- what the Rust side asks for (RustBridge) ----
@@ -797,9 +843,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         if (Quiet.level < 1f) track.setVolume(Quiet.level)
         PlaybackService.track = OpenedTrack(track, frames * channels * width, mode)
         val given = if (track.performanceMode == AudioTrack.PERFORMANCE_MODE_POWER_SAVING) "power saving" else "normal"
-        android.util.Log.i("nori", "rust AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $frames frames (${track.bufferSizeInFrames * 1000L / rate} ms), $given, bitPerfect=$bitPerfect")
+        dev.nori.music.NoriLog.i("rust AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $frames frames (${track.bufferSizeInFrames * 1000L / rate} ms), $given, bitPerfect=$bitPerfect")
         track
-    }.onFailure { android.util.Log.w("nori", "rust AudioTrack would not open", it); PlaybackService.observer?.error("rust AudioTrack would not open: $it") }.getOrNull()
+    }.onFailure { dev.nori.music.NoriLog.w("rust AudioTrack would not open", it); PlaybackService.observer?.error("rust AudioTrack would not open: $it") }.getOrNull()
 
     /**
      * Whether the phone's audio chip decodes [encoding] (`AudioFormat.ENCODING_MP3`, `_AAC_LC`, `_OPUS`)
@@ -843,9 +889,9 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             nori.dac.onTrack(rate, encoding, track.isOffloadedPlayback)
             if (Quiet.level < 1f) track.setVolume(Quiet.level)
             PlaybackService.track = OpenedTrack(track, bytes, AudioTrack.PERFORMANCE_MODE_NONE)
-            android.util.Log.i("nori", "rust offloaded AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $bytes bytes, offloaded=${track.isOffloadedPlayback}")
+            dev.nori.music.NoriLog.i("rust offloaded AudioTrack: $rate Hz x$channels enc=$encoding, ${track.bufferSizeInFrames} of $bytes bytes, offloaded=${track.isOffloadedPlayback}")
             track
-        }.onFailure { android.util.Log.w("nori", "rust offloaded AudioTrack would not open", it); PlaybackService.observer?.error("rust offloaded AudioTrack would not open: $it") }.getOrNull()
+        }.onFailure { dev.nori.music.NoriLog.w("rust offloaded AudioTrack would not open", it); PlaybackService.observer?.error("rust offloaded AudioTrack would not open: $it") }.getOrNull()
     }
 
     /** The offloaded track's stream events, made once, the first time a track is offloaded (Android 10's). */
@@ -856,7 +902,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
         val (source, every) = try {
             nori.sources.openLive(url)
         } catch (e: Exception) {
-            android.util.Log.w("nori", "rust player: the station would not open: $e")
+            dev.nori.music.NoriLog.w("rust player: the station would not open: $e")
             return null
         }
         loaded(+1)
@@ -874,10 +920,10 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             nori.sources.openResolved(url, key, from, ticket)
         } catch (e: MediaSources.PastEnd) {
             // Not a failure: the song ends before [from] (a transcode's estimated length was longer).
-            android.util.Log.i("nori", "rust player: $key from byte $from: past its end (${if (e.whole >= 0) "at ${e.whole}" else "unknown"})")
+            dev.nori.music.NoriLog.i("rust player: $key from byte $from: past its end (${if (e.whole >= 0) "at ${e.whole}" else "unknown"})")
             return RustBody(null, e.whole, past = true) {}
         } catch (e: Exception) {
-            android.util.Log.w("nori", "rust player: $key would not open: $e")
+            dev.nori.music.NoriLog.w("rust player: $key would not open: $e")
             // The server answered, with an error: said as such, since it was reached.
             val status = MediaSources.httpStatus(e)
             return if (status > 0) RustBody(null, -1, status = status) {} else null
@@ -888,6 +934,8 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
 
     internal fun kept(key: String): Boolean = runCatching { MediaSources.isWhole(nori.sources.streamCache, key) }.getOrDefault(true)
     internal fun busy(key: String): Boolean = nori.sources.beingWritten(key)
+    internal fun disk(key: String): String = nori.sources.cacheWords(key)
+    internal fun forget(key: String): String = nori.sources.forgetStream(key)
 
     /** A song's bytes started or stopped coming, on a loader thread: several load at once, so both ends are read under the one lock. */
     private fun loaded(by: Int) {
@@ -896,6 +944,7 @@ class EnginePlayer(private val context: Context, private val nori: Nori) : Simpl
             loading += by
             was != loading > 0
         }
+        if (changed) holdCpu()
         if (changed) main.post { invalidateState() }
     }
 

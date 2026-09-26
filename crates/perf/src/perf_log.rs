@@ -110,6 +110,30 @@ pub struct PerfStretch {
     /// Where the memory was as the stretch ended; none in rows from before it was read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem: Option<PerfMemory>,
+    /// How long the player held its CPU wake lock during the stretch, ms (the one it lets go while the
+    /// songs are offloaded and nothing but the platform's word is due). None in rows from before.
+    #[serde(rename = "wl", default, skip_serializing_if = "Option::is_none")]
+    pub wake_lock_ms: Option<i64>,
+    /// The player engine's thread's wakeups over the stretch (`nori-engine`), none without one alive at
+    /// both ends or in rows from before.
+    #[serde(rename = "ew", default, skip_serializing_if = "Option::is_none")]
+    pub engine_wakeups: Option<i64>,
+    /// Times an offloaded track asked for more (`onDataRequest`) during the stretch: the platform's own
+    /// pace, which the engine's wakes follow. None in rows from before.
+    #[serde(rename = "dr", default, skip_serializing_if = "Option::is_none")]
+    pub data_requests: Option<i64>,
+}
+
+/// The name of the player engine's thread, whose wakeups a stretch keeps apart.
+pub const ENGINE_THREAD: &str = "nori-engine";
+
+/// Every time an offloaded track asked for more since the process started: the platform tells it
+/// ([`count_data_request`]), and a stretch takes the difference.
+static DATA_REQUESTS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// An offloaded track asked for more (`onDataRequest`): counted for the perf report, one atomic add.
+pub fn count_data_request() {
+    DATA_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -331,6 +355,9 @@ pub fn perf_log_clear() {
     if selftest_table(&c).is_ok() {
         let _ = c.execute("DELETE FROM perf_selftest", []);
     }
+    if break_log_table(&c).is_ok() {
+        let _ = c.execute("DELETE FROM perf_break_logs", []);
+    }
     timeline().forget();
 }
 
@@ -401,6 +428,7 @@ pub fn perf_stretch(
             // The next stretch starts where this blink ends; its events wait for it.
             let mut t = timeline();
             t.close(a.wall_ms, b.wall_ms, false);
+            t.kept(a.wall_ms, b.wall_ms, true);
             t.why_at_start = Some(offload_reason());
         }
         return None;
@@ -408,12 +436,15 @@ pub fn perf_stretch(
     let before: HashMap<i32, &PerfThread> = a.threads.iter().map(|t| (t.tid, t)).collect();
     // Only threads alive at both ends: one that ended in between would take its whole count with it.
     let wakeups = b.threads.iter().filter_map(|t| before.get(&t.tid).map(|m| t.switches - m.switches)).sum();
+    let engine: Vec<i64> = b.threads.iter().filter(|t| t.name == ENGINE_THREAD).filter_map(|t| before.get(&t.tid).filter(|m| m.name == t.name).map(|m| t.switches - m.switches)).collect();
+    let engine_wakeups = (!engine.is_empty()).then(|| engine.iter().sum());
     let gauge: Vec<i64> = [a.gauge_ua, b.gauge_ua].into_iter().flatten().collect();
     let gauge_ma = (!gauge.is_empty()).then(|| (gauge.iter().map(|g| g.abs()).sum::<i64>() / gauge.len() as i64) as f64 / 1000.0);
     // What happened meanwhile, and how long the output was really offloaded. A blink's events go on to
     // the stretch after it; the one under way only looks.
     let mut t = timeline();
     let settings_why = offload_reason();
+    let (wake_lock_ms, data_requests) = t.kept(a.wall_ms, b.wall_ms, !live);
     let (ev, evx, off_ms, why) = if live {
         let (ev, evx, off) = t.so_far(a.wall_ms, b.wall_ms);
         (ev, evx, off, t.why_at_start.unwrap_or(settings_why))
@@ -448,6 +479,9 @@ pub fn perf_stretch(
         evx,
         offloaded_ms: Some(off_ms.clamp(0, ms)),
         mem: b.memory,
+        wake_lock_ms: Some(wake_lock_ms.clamp(0, ms)),
+        engine_wakeups,
+        data_requests: Some(data_requests),
     })
 }
 
@@ -492,6 +526,12 @@ struct Totals {
     /// how long those were.
     off_ms: i64,
     off_of_ms: i64,
+    /// The wake lock held, the engine's wakeups and the platform's asks for more, over the stretches that
+    /// counted them and an offloaded output was open in, and how long those were.
+    lock_ms: i64,
+    engine_wakeups: i64,
+    requests: i64,
+    counted_ms: i64,
 }
 
 impl Totals {
@@ -513,13 +553,25 @@ impl Totals {
         if let Some(off) = s.offloaded_ms.filter(|_| s.out.is_some()) {
             self.off_ms += off;
             self.off_of_ms += s.ms;
+            if let (Some(lock), Some(engine), true) = (s.wake_lock_ms, s.engine_wakeups, off > 0) {
+                self.lock_ms += lock;
+                self.engine_wakeups += engine;
+                self.requests += s.data_requests.unwrap_or(0);
+                self.counted_ms += s.ms;
+            }
         }
     }
 
     /// "offloaded 45 min of 1 h 00 min (75 %)": how much of the time the audio chip really played, where
     /// it was counted.
     fn offloaded(&self) -> Option<String> {
-        (self.off_of_ms > 0).then(|| offloaded_words(self.off_ms, self.off_of_ms))
+        (self.off_of_ms > 0).then(|| {
+            let mut out = offloaded_words(self.off_ms, self.off_of_ms);
+            if self.counted_ms > 0 {
+                out.push_str(&format!("; {}", awake_words(self.lock_ms, self.engine_wakeups, self.requests, self.counted_ms)));
+            }
+            out
+        })
     }
 
     fn battery(&self) -> bool {
@@ -771,6 +823,9 @@ fn stretch_line(s: &PerfStretch) -> String {
     }
     if let Some(off) = s.offloaded_ms.filter(|_| s.out.is_some()) {
         out.push_str(&format!(", {}", offloaded_words(off, s.ms)));
+        if let (Some(lock), Some(engine), true) = (s.wake_lock_ms, s.engine_wakeups, off > 0) {
+            out.push_str(&format!(" ({})", awake_words(lock, engine, s.data_requests.unwrap_or(0), s.ms)));
+        }
     }
     out.push_str(&format!(" [{}]", cfg_words(&s.cfg)));
     out
@@ -829,6 +884,7 @@ pub fn perf_report(live: Option<PerfStretch>, device: PerfDevice, calls: String,
     let test = perf_selftest_kept();
     let mut out = report(all(perf_log_rows(0), live), &device, &calls, &covers, test.as_deref());
     out.push('\n');
+    out.push_str(&break_log_section(&break_logs_kept()));
     out.push_str(&log_section(&logs, &perf_crashes_kept()));
     out
 }
@@ -1031,6 +1087,8 @@ pub enum PerfNote {
     /// The offload path's own account of something that matters to it: why a song ended, a play head
     /// that made no sense, offload given up.
     Offload { detail: String },
+    /// The player took its CPU wake lock (`held`), or let it go: counted, not listed.
+    WakeLock { held: bool },
 }
 
 /// What happened since the stretch under way began, and what it takes to say it: the settings as last
@@ -1056,6 +1114,11 @@ struct Timeline {
     offloaded_ms: i64,
     /// Why the settings kept offload off when the stretch under way began (none: they did not).
     why_at_start: Option<Option<&'static str>>,
+    /// Since when the player's wake lock has been held, and how long it was before that in this stretch.
+    lock_from: Option<i64>,
+    lock_ms: i64,
+    /// [`DATA_REQUESTS`] as the stretch under way began.
+    requests_at_start: i64,
 }
 
 static TIMELINE: std::sync::LazyLock<std::sync::Mutex<Timeline>> = std::sync::LazyLock::new(Default::default);
@@ -1116,6 +1179,13 @@ impl Timeline {
             PerfNote::Offload { detail } => {
                 let short: String = detail.chars().take(400).collect();
                 self.push(t, "offload", short);
+            }
+            PerfNote::WakeLock { held } => {
+                if held {
+                    self.lock_from.get_or_insert(t);
+                } else if let Some(from) = self.lock_from.take() {
+                    self.lock_ms += (t - from).max(0);
+                }
             }
         }
     }
@@ -1203,6 +1273,22 @@ impl Timeline {
         (std::mem::take(&mut self.events), std::mem::take(&mut self.dropped), off)
     }
 
+    /// How long the wake lock was held from `start` to `end`, and the platform's asks for more since the
+    /// stretch began; `close`: the stretch ends there, and the next one counts from `end`.
+    fn kept(&mut self, start: i64, end: i64, close: bool) -> (i64, i64) {
+        let held = self.lock_ms + self.lock_from.map_or(0, |f| (end - f.max(start)).max(0));
+        let total = DATA_REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
+        let requests = total - self.requests_at_start;
+        if close {
+            self.lock_ms = 0;
+            if self.lock_from.is_some() {
+                self.lock_from = Some(end);
+            }
+            self.requests_at_start = total;
+        }
+        (held, requests)
+    }
+
     /// The same for the stretch under way, left as it is.
     fn so_far(&self, start: i64, now: i64) -> (Vec<PerfEvent>, i64, i64) {
         let off = self.offloaded_ms + self.offloaded_from.map_or(0, |f| (now - f.max(start)).max(0));
@@ -1215,6 +1301,8 @@ impl Timeline {
         self.dropped = 0;
         self.run = None;
         self.offloaded_ms = 0;
+        self.lock_ms = 0;
+        self.requests_at_start = DATA_REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -1318,6 +1406,20 @@ fn cfg_words(cfg: &str) -> String {
     } else {
         cfg.to_string()
     }
+}
+
+/// "wake lock held 12 s of 10 min 00 s (2 %), nori-engine 0.3 wakeups/s, the chip asked for more 0.3
+/// times/s": what an offloaded stretch cost the CPU, beside the platform's own pace.
+fn awake_words(lock_ms: i64, engine_wakeups: i64, requests: i64, of_ms: i64) -> String {
+    let pct = if of_ms > 0 { lock_ms as f64 * 100.0 / of_ms as f64 } else { 0.0 };
+    format!(
+        "wake lock held {} of {} ({} %), {ENGINE_THREAD} {} wakeups/s, the chip asked for more {} times/s",
+        duration(lock_ms),
+        duration(of_ms),
+        fixed(pct, 0),
+        fixed(per_s(engine_wakeups, of_ms), 2),
+        fixed(per_s(requests, of_ms), 2)
+    )
 }
 
 /// "offloaded 45 min 00 s of 1 h 00 min (75 %)".
@@ -1496,6 +1598,74 @@ pub fn perf_log_text(logs: PerfLogs) -> String {
     log_section(&logs, &perf_crashes_kept())
 }
 
+// ---- the app's own lines as an invariant broke ----
+
+/// How many breaks keep the app's own lines with them: the latest.
+pub const BREAK_LOGS: usize = 3;
+
+fn break_log_table(c: &Connection) -> rusqlite::Result<()> {
+    c.execute_batch("CREATE TABLE IF NOT EXISTS perf_break_logs(at_ms INTEGER NOT NULL, line TEXT NOT NULL, text TEXT NOT NULL)")
+}
+
+/// "21:05:12.345", for a line of the app's own log.
+fn clock_ms(wall_ms: i64) -> String {
+    format!("{}.{:03}", clock(wall_ms), wall_ms.rem_euclid(1000))
+}
+
+/// The app's latest lines (nori_model::alog keeps them, the core's and the Kotlin's under the `nori` tag)
+/// as the break `line` happened at `at_ms`, kept in the app's database with it: logcat's buffer is the
+/// whole system's and turns over in minutes, and the app may be started again before the report is
+/// shared. Only the latest [`BREAK_LOGS`] are kept.
+/// The lines are copied on the calling thread, as they stand at the break; the database is written on a
+/// thread of its own, since a break may be seen on the audio threads.
+pub(crate) fn keep_break_log(at_ms: i64, line: &str) {
+    let lines = nori_model::alog::recent();
+    let line = line.to_string();
+    let write = move || {
+        let text = lines.iter().map(|(t, l)| format!("{} {l}", clock_ms(*t))).collect::<Vec<_>>().join("\n");
+        let Some(db) = settings_store::app_db() else { return };
+        let kept = keep_break(&db.lock(), at_ms, &line, &text);
+        if let Err(e) = kept {
+            nori_model::alog::info(&format!("perf log: could not keep the lines of a break: {e}"));
+        }
+    };
+    if std::thread::Builder::new().name("nori-perf-log".into()).spawn(write).is_err() {
+        nori_model::alog::info("perf log: no thread to keep the lines of a break");
+    }
+}
+
+fn keep_break(c: &Connection, at_ms: i64, line: &str, text: &str) -> rusqlite::Result<()> {
+    break_log_table(c)?;
+    let line: String = line.chars().take(600).collect();
+    c.execute("INSERT INTO perf_break_logs(at_ms, line, text) VALUES(?1, ?2, ?3)", params![at_ms, line, text])?;
+    c.execute("DELETE FROM perf_break_logs WHERE rowid NOT IN (SELECT rowid FROM perf_break_logs ORDER BY at_ms DESC, rowid DESC LIMIT ?1)", [BREAK_LOGS as i64])?;
+    Ok(())
+}
+
+fn break_logs(c: &Connection) -> rusqlite::Result<Vec<(i64, String, String)>> {
+    break_log_table(c)?;
+    let mut st = c.prepare("SELECT at_ms, line, text FROM perf_break_logs ORDER BY at_ms DESC, rowid DESC")?;
+    let out = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect();
+    out
+}
+
+fn break_logs_kept() -> Vec<(i64, String, String)> {
+    let Some(db) = settings_store::app_db() else { return Vec::new() };
+    let read = break_logs(&db.lock());
+    read.unwrap_or_default()
+}
+
+/// The app's own lines as each of the latest breaks happened, newest first; nothing when none was kept.
+fn break_log_section(kept: &[(i64, String, String)]) -> String {
+    let mut out = String::new();
+    for (at, line, text) in kept {
+        out.push_str(&format!("The app's own lines as an invariant broke, {} ({} lines): {line}\n", clock_ms(*at), text.lines().count()));
+        out.push_str(if text.is_empty() { "(none)" } else { text });
+        out.push_str("\n\n");
+    }
+    out
+}
+
 /// The last `chars` characters of `text`, from the start of a line.
 fn tail(text: &str, chars: usize) -> &str {
     let n = text.chars().count();
@@ -1560,6 +1730,9 @@ mod tests {
             evx: 0,
             offloaded_ms: None,
             mem: None,
+            wake_lock_ms: None,
+            engine_wakeups: None,
+            data_requests: None,
         }
     }
 
@@ -2096,6 +2269,47 @@ mod tests {
         assert_eq!(lines[head + 3], "      07:00:05 error: e5");
     }
 
+    /// An offloaded stretch says how long the wake lock was held, how often the engine's thread woke and
+    /// how often the platform asked for more, so a tester's report shows what offload cost the CPU.
+    #[test]
+    fn an_offloaded_stretch_says_the_wake_lock_held_and_the_engine_s_wakeups() {
+        let mut t = Timeline { requests_at_start: DATA_REQUESTS.load(std::sync::atomic::Ordering::Relaxed), ..Timeline::default() };
+        t.note(at(9, 0, 0), PerfNote::WakeLock { held: true }, None);
+        t.note(at(9, 0, 5), PerfNote::WakeLock { held: false }, None);
+        t.note(at(9, 1, 0), PerfNote::WakeLock { held: true }, None);
+        for _ in 0..3 {
+            count_data_request();
+        }
+        assert_eq!(t.kept(at(9, 0, 0), at(9, 0, 30), false), (5_000, 3), "the stretch under way only looks");
+        assert_eq!(t.kept(at(9, 0, 0), at(9, 1, 10), true), (15_000, 3), "held from 9:01:00 on, still held");
+        assert_eq!(t.kept(at(9, 1, 10), at(9, 1, 20), true), (10_000, 0), "the next stretch counts from where it began");
+        let mut s = stretch("off-playing", 600_000);
+        s.out = Some(PerfOutput { offloaded: true, ..output() });
+        s.offloaded_ms = Some(600_000);
+        s.wake_lock_ms = Some(12_000);
+        s.engine_wakeups = Some(180);
+        s.data_requests = Some(150);
+        let back: PerfStretch = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s, "kept with the stretch");
+        let line = stretch_line(&s);
+        assert!(
+            line.contains("offloaded 10 min 00 s of 10 min 00 s (100 %) (wake lock held 12 s of 10 min 00 s (2 %), nori-engine 0.30 wakeups/s, the chip asked for more 0.25 times/s)"),
+            "{line}"
+        );
+        let mut cpu = stretch("off-playing", 300_000);
+        cpu.out = Some(output());
+        cpu.offloaded_ms = Some(0);
+        cpu.wake_lock_ms = Some(300_000);
+        cpu.engine_wakeups = Some(40);
+        cpu.data_requests = Some(0);
+        let by_state = totals(&[s, cpu]);
+        assert_eq!(
+            by_state[0].offloaded().unwrap(),
+            "offloaded 10 min 00 s of 15 min 00 s (67 %); wake lock held 12 s of 10 min 00 s (2 %), nori-engine 0.30 wakeups/s, the chip asked for more 0.25 times/s",
+            "the wake lock and wakeups of the offloaded stretches only"
+        );
+    }
+
     #[test]
     fn the_offload_tag_says_wanted_not_given() {
         assert_eq!(offload_tag(true, None), "offload wanted");
@@ -2104,6 +2318,21 @@ mod tests {
         assert!(offload_tag(false, None).starts_with("offload not wanted: the output"));
         assert_eq!(cfg_words("engine rust, eq off, offloaded"), "engine rust, eq off, offload wanted", "an older row's words");
         assert_eq!(cfg_words("engine rust, offload wanted"), "engine rust, offload wanted");
+    }
+
+    #[test]
+    fn the_apps_own_lines_are_kept_with_the_latest_breaks_newest_first() {
+        let c = Connection::open_in_memory().unwrap();
+        for k in 0..BREAK_LOGS as i64 + 2 {
+            keep_break(&c, 1_000 * k, &format!("silent: break {k}"), &format!("10:00:0{k}.000 nori: said {k}\n10:00:0{k}.500 nori: then {k}")).unwrap();
+        }
+        let kept = break_logs(&c).unwrap();
+        assert_eq!(kept.iter().map(|k| k.0).collect::<Vec<_>>(), [4_000, 3_000, 2_000], "the latest, newest first");
+        let s = break_log_section(&kept);
+        let lines: Vec<&str> = s.lines().collect();
+        assert!(lines[0].starts_with("The app's own lines as an invariant broke, ") && lines[0].ends_with("(2 lines): silent: break 4"), "{}", lines[0]);
+        assert_eq!(lines[1..3], ["10:00:04.000 nori: said 4", "10:00:04.500 nori: then 4"]);
+        assert!(break_log_section(&[]).is_empty(), "nothing when no break kept any");
     }
 
     #[test]

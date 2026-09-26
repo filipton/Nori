@@ -47,6 +47,7 @@ pub enum Action {
     TabRight,
     // The queue
     Remove,
+    Undo,
     MoveUp,
     MoveDown,
     // Lyrics
@@ -149,6 +150,7 @@ pub const BINDINGS: &[Binding] = &[
     b!(List, "", Action::TabRight, "", [(Char(']'), N)]),
     b!(Queue, "enter", Action::Open, "Play this song", [(Enter, N)]),
     b!(Queue, "d / delete", Action::Remove, "Take it out of the queue (a download: off this computer; the equalizer: the band)", [(Char('d'), N), (Delete, N)]),
+    b!(Queue, "u", Action::Undo, "Put back the song just taken out of the queue", [(Char('u'), N)]),
     b!(Queue, "K / J", Action::MoveUp, "Move it up or down", [(Char('K'), S), (Char('K'), N)]),
     b!(Queue, "", Action::MoveDown, "", [(Char('J'), S), (Char('J'), N)]),
     b!(Lyrics, "[ ]", Action::Later, "Words later or sooner, for lyrics timed wrong", [(Char('['), N)]),

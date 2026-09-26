@@ -63,5 +63,41 @@ current trust score is in `crates/lyrics/src/trust.rs`, and the race is in `race
 2. **Sync check:** the vocal activity curve plus line-onset matching, as above. It gives a score, an offset and
    drift, used in `trust.rs` and when showing the lyrics. Measure it on the synthetic set first, then on the
    user's library by hand, with the perf report showing scores and offsets.
+   *Done on the synthetic set, 2026-09-26* (nori-player `automix/vocal.rs`, nori-lyrics `sync.rs`):
+   - The curve is "pitched movement" in 250 Hz-4 kHz: how far the log level moves from frame to frame in the
+     bins around the band's clear spectral peaks (vibrato, glides and syllables move; drums are not peaks, pads
+     do not move). Sung vs unsung frames of the eleven sung AutoMix songs: AUC 0.987 (the band's power share,
+     AutoMix's `vocal`, 0.71). 17 frames a second, a byte each, about 1 KB a minute in `vocal_curve` beside
+     `track_analysis` (analysis version 10). It costs 20 ms per four-minute song on the host (5 ms a minute,
+     about 11 % of the analysis front end).
+   - The check slides the lines' sung spans (words, or line start to end capped by the length of the text)
+     and their starts over the curve within ±3 s: best offset, how clearly it wins, a score (lines that start
+     where the voice is heard and rises, less for spans over instrumental stretches and long unlined singing),
+     and drift (the line cut under which the two parts fit best each at its own offset). On 11 songs × 14
+     made-up timings (invented words): offset median error 19 ms, worst 224 ms, 99 of 110 within 60 ms; 74
+     of 77 shifted timings corrected (the rest left alone as unsure); every exact timing reads Fits; all 11
+     half-edited versions read Drifts; good scores min 0.58 mean 0.93 against wrong songs' max 0.51 mean 0.30
+     (AUC 1.00). `cargo test --release -p nori-lyrics sync_eval -- --ignored --nocapture`.
+   - *Tuned on the owner's library, 2026-09-26* (nori-lyrics `sync_tune.rs`, two ignored tests; timings only,
+     no words kept): 59 songs (pop 9, rock 9, alt 8, metal 8, electronic 9, classical 6, rap/R&B 4, live 5,
+     folk 1), every default service asked, 340 answers. Answers of at least two independent timings with the
+     same line starts (within 150 ms) were taken as good (69, copies of one catalogue counted once), the good
+     ones shifted and half-shifted by hand, and laid on another song's curve as wrong. Electronic and classical
+     had no lyrics; live had no two services agreeing.
+     - Pitched movement hardly tells singing from the rest in real mixes: AUC about 0.7 in pop, rock, rap
+       and alt, 0.5 in metal (guitars read as voice). The timing still works. 300 Hz-3 kHz and a peak five
+       times its surroundings (was 250 Hz-4 kHz, ten times) put the offsets' p90 error from 136 to 38 ms
+       (analysis version 11, curve version 2). No cheap variant fixed metal.
+     - The best score alone hardly told another song's timing from the right one in metal, rap and rock (AUC
+       0.52-0.75): anything fits a restless curve somewhere. How much better the lines fit at their offset than
+       slid 7-23 s away (`LIFT`) does (AUC 0.94 overall). Poor is now `POOR` 0.35 or a lift under 0.06.
+     - Good answers came out 100 ms early (the curve hears a vowel after its consonant), line-timed ones
+       another 140 ms (lines are shown ahead of the voice); both are taken off (`LAG_MS`, `LINE_LEAD_MS`)
+       before an offset is applied. `OFFSET_SURE` 0.4.
+     - Before → after: good answers demoted 5.8 % → 5.8 % (Poor 2.9 → 1.4, Drifts 2.9 → 4.3), shifted 25 % →
+       13 %; another song's timing caught 45 % → 55 %; timings shifted by hand put right 77 % → 84 %;
+       half-shifted ones Drifts 40 % → 44 %. `DRIFT_MS`, the part thresholds and `W_SYNC` were kept.
+     - Uncertain: rock still lets another song's timing through (10 % caught); only 4 rap songs; "good" is
+       agreement, not truth (one metal song's services all agree on a timing 2 s off this file).
 3. **Sources:** survey all 17 on a sample of the user's library (the feature-e2e `lyrics-services` section exists
    and is opt-in): hit rate, sync level, latency and junk. Then choose the default set with numbers.

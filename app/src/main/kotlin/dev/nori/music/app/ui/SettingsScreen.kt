@@ -69,7 +69,7 @@ import dev.nori.music.app.vm.SettingRow
 import dev.nori.music.app.vm.SettingsSection
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
-import dev.nori.music.settings.ServerProfile
+import dev.nori.music.ffi.settings.SavedServer
 
 /**
  * Search lands on a row, not on a page: the group page is told which row to reveal, the row reports
@@ -313,7 +313,7 @@ private fun SettingsSectionRows(vm: SettingsViewModel, section: SettingsSection)
     val nav = LocalNav.current
     val context = LocalContext.current
     val p by vm.prefs.collectAsStateWithLifecycle()
-    var editing by remember { mutableStateOf<ServerProfile?>(null) }
+    var editing by remember { mutableStateOf<SavedServer?>(null) }
     var asking by remember { mutableStateOf<Pair<String, dev.nori.music.app.vm.ActionAsk>?>(null) }
     NoriDialog(editing, { editing = null }, DialogStyle.Page) { e -> LoginScreen(vm, e) { editing = null } }
     val act: (String) -> Unit = { action ->

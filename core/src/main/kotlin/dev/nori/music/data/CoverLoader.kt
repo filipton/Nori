@@ -166,6 +166,39 @@ class CoverLoader private constructor(context: Context) {
         )
     }
 
+    /** Views that gave up on their cover for want of the network, each asked again once it comes back. Main thread. */
+    private val backs = LinkedHashSet<Back>()
+    private var watching = false
+
+    private class Back(val run: () -> Unit)
+
+    /**
+     * Runs [run] on the main thread the next time the phone's network comes up, for a view that settled
+     * on its placeholder for want of the network. Returns what takes it back. The network is watched from
+     * the first such view on; a callback only, nothing polls. Main thread.
+     */
+    fun whenBack(run: () -> Unit): () -> Unit {
+        val b = Back(run)
+        backs += b
+        if (!watching) {
+            watching = true
+            val connectivity = app.getSystemService(android.net.ConnectivityManager::class.java)
+            // Registering calls onAvailable at once for a network already up; views that failed with the
+            // network up are then asked again once, which a server's hiccup deserves anyway.
+            runCatching {
+                connectivity?.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                    // On the main thread (the handler below).
+                    override fun onAvailable(network: android.net.Network) {
+                        val due = backs.toList()
+                        backs.clear()
+                        due.forEach { it.run() }
+                    }
+                }, main)
+            }
+        }
+        return { backs.remove(b) }
+    }
+
     /** Deletes the covers on the disk; they are fetched again as they are shown. Off the main thread. */
     fun clearDisk() = CoverPixels.clear(loader)
 

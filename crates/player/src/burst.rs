@@ -87,11 +87,14 @@ pub struct Fed<'a, D> {
     /// A discontinuity was passed down: the next buffer taken may move the clock (a resync), so it is
     /// read again after it. The transition engine measures that jump to keep the ear's place.
     resynced: bool,
+    /// The song time each frame offered stands for ([`Downstream::media_pace`]): what is written is
+    /// counted in the song's time, as the output's clock moves.
+    pace: f64,
 }
 
 impl<'a, D: Downstream> Fed<'a, D> {
     pub fn new(down: &'a mut D, burst: &'a mut Burst, now_ms: i64) -> Self {
-        Fed { down, burst, now_ms, position: None, resynced: false }
+        Fed { down, burst, now_ms, position: None, resynced: false, pace: 1.0 }
     }
 
     fn clock(&mut self) -> i64 {
@@ -144,13 +147,18 @@ impl<D: Downstream> Downstream for Fed<'_, D> {
         self.after_offer(used);
         self.burst.bytes_written += used as u64;
         if let Some(f) = self.burst.format.filter(|f| f.frame_bytes() > 0 && f.rate > 0) {
-            self.burst.written_us += (used / f.frame_bytes()) as i64 * 1_000_000 / f.rate as i64;
+            self.burst.written_us += ((used / f.frame_bytes()) as f64 * self.pace * 1_000_000.0 / f.rate as f64) as i64;
         }
         if !taken {
             // Full: nothing more until it has drained to the low mark.
             self.burst.filling = false;
         }
         (taken, used)
+    }
+
+    fn media_pace(&mut self, pace: f64) {
+        self.pace = pace;
+        self.down.media_pace(pace);
     }
 
     fn handle_discontinuity(&mut self) {

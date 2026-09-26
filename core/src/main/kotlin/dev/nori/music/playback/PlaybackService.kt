@@ -31,7 +31,7 @@ import com.google.common.util.concurrent.ListenableFuture
 import dev.nori.music.Nori
 import dev.nori.music.data.StarKind
 import dev.nori.music.ffi.model.Song
-import dev.nori.music.settings.Prefs
+import dev.nori.music.ffi.settings.StoredPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -124,7 +124,7 @@ class PlaybackService : MediaLibraryService() {
      */
     private val idleRelease = Runnable {
         if (LongPause.releases(player.playWhenReady, player.playbackState)) {
-            android.util.Log.i("nori", "paused a long while: output released")
+            dev.nori.music.NoriLog.i("paused a long while: output released")
             persistQueue(push = false)
             player.stop()
         }
@@ -319,7 +319,7 @@ class PlaybackService : MediaLibraryService() {
             // The player skips or stops by the core's rules itself; what reaches here is its output or the
             // engine failing to start, which trying again would not change.
             observer?.error(generateSequence<Throwable>(error) { it.cause }.joinToString(" <- "))
-            android.util.Log.w("nori", "rust player: $error")
+            dev.nori.music.NoriLog.w("rust player: $error")
         }
 
         override fun onPlaybackStateChanged(state: Int) {
@@ -390,7 +390,7 @@ class PlaybackService : MediaLibraryService() {
      * of the output (something USB, a DAC playing bit-perfect), and takes offload, speed, silence skipping
      * and the transitions from them.
      */
-    private fun applyAudio(p: Prefs) {
+    private fun applyAudio(p: StoredPrefs) {
         nori.dac.setEnabled(p.bitPerfect)
         player.setOutput(nori.outputs.usb.value, nori.dac.state.value.bitPerfect)
         player.applySettings()
@@ -433,7 +433,9 @@ class PlaybackService : MediaLibraryService() {
             // Where they go (after the playing song when added by hand, else where the controller asked)
             // is the core's; each item says how it came.
             val at = index.coerceIn(0, wrappedPlayer.mediaItemCount).toUInt()
-            val c = dev.nori.music.ffi.queue.playlistTake(at, ids(mediaItems), mediaItems.map { it.queuedAs() ?: Hand.NO })
+            // An undo puts the song back where it was, if the core still has it as the one taken out.
+            val back = mediaItems.singleOrNull()?.takeIf { it.isRestored() }?.let { dev.nori.music.ffi.queue.playlistRestore(it.mediaId) }?.takeIf { it.at >= 0 }
+            val c = back ?: dev.nori.music.ffi.queue.playlistTake(at, ids(mediaItems), mediaItems.map { it.queuedAs() ?: Hand.NO })
             super.addMediaItems(c.at, mediaItems)
         }
 
@@ -630,7 +632,7 @@ class PlaybackService : MediaLibraryService() {
                     val on = !currentStarred(item)
                     // The same path as the app's heart: the mark goes up at once (and redraws both hearts),
                     // the request runs on an IO thread inside Library, and a failure puts the mark back.
-                    scope.launch { runCatching { nori.library.star(StarKind.SONG, item.mediaId, on) }.onFailure { android.util.Log.w("nori", "star from the notification failed: $it") } }
+                    scope.launch { runCatching { nori.library.star(StarKind.SONG, item.mediaId, on) }.onFailure { dev.nori.music.NoriLog.w("star from the notification failed: $it") } }
                 }
             }
             if (command.customAction == CMD_SHUFFLE) controls.shuffleModeEnabled = !player.shuffleModeEnabled
@@ -746,6 +748,9 @@ interface PlaybackObserver {
 
     /** The player arrived on queue place [index]: by itself ([auto], a song that ended) or by a jump; [shuffled] under shuffle. */
     fun arrived(index: Int, auto: Boolean, shuffled: Boolean) {}
+
+    /** The player took its CPU wake lock ([held]) or let it go. From any thread. */
+    fun wakeLock(held: Boolean) {}
 }
 
 /**

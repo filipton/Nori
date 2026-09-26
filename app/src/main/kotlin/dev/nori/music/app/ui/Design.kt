@@ -883,13 +883,21 @@ fun LoadingDots(modifier: Modifier = Modifier, dot: androidx.compose.ui.unit.Dp 
  * A soft sheen gliding across a placeholder while its picture is on the way, so a slow cover reads as
  * loading rather than missing. Like [LoadingDots] it waits a quarter-second before showing and fades
  * in, so a cover that comes from the cache never shimmers. Draw-phase only: a running sheen redraws
- * one layer and recomposes nothing, and when [active] goes false it stops entirely.
+ * one layer and recomposes nothing, and when [active] goes false it stops entirely. [leaving]: the load
+ * is over with nothing to cover the sheen, so it fades out (in [SHEEN_LEAVE_MS]) rather than vanishing;
+ * the caller drops it after that.
  */
-fun Modifier.loadingSheen(active: Boolean): Modifier = if (!active) this else composed {
+/** How long a sheen whose load is over takes to fade out. */
+const val SHEEN_LEAVE_MS = 300
+
+fun Modifier.loadingSheen(active: Boolean, leaving: Boolean = false): Modifier = if (!active) this else composed {
     val appear = remember { androidx.compose.animation.core.Animatable(0f) }
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(250)
-        appear.animateTo(1f, androidx.compose.animation.core.tween(400))
+    androidx.compose.runtime.LaunchedEffect(leaving) {
+        if (leaving) appear.animateTo(0f, androidx.compose.animation.core.tween(SHEEN_LEAVE_MS))
+        else {
+            kotlinx.coroutines.delay(250)
+            appear.animateTo(1f, androidx.compose.animation.core.tween(400))
+        }
     }
     val plain = AppMotion.reduce
     val sweep = if (plain) null else androidx.compose.animation.core.rememberInfiniteTransition(label = "sheen").animateFloat(

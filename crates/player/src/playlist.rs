@@ -36,6 +36,17 @@ pub struct Splice {
     pub seek: Option<usize>,
 }
 
+/// One song as it was before it was taken out: enough to put it back where it was (an undo).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    pub id: String,
+    /// Its list index.
+    pub at: usize,
+    pub hand: Hand,
+    /// Its place in the play order while shuffling; none otherwise.
+    pub turn: Option<usize>,
+}
+
 /// media3's repeat modes, same numbers.
 pub const REPEAT_OFF: u8 = 0;
 pub const REPEAT_ONE: u8 = 1;
@@ -321,6 +332,36 @@ impl Playlist {
         self.rev += 1;
     }
 
+    /// The song at `at` as it is now, to be put back with [`Playlist::restore`] after it is removed.
+    pub fn taken(&self, at: usize) -> Option<Taken> {
+        let id = self.ids.get(at)?.clone();
+        Some(Taken { id, at, hand: self.hand(at), turn: if self.shuffling { self.position(at) } else { None } })
+    }
+
+    /// A song taken out put back where it was: at its list index and, while shuffling, at its place in the
+    /// play order, marked as it came (a song added by hand is again). Where it was is clamped to the queue
+    /// as it is now. The current song stays current: a song that was playing when it went comes back as
+    /// one already played past, since the music moved on without it. Returns where it went in the list.
+    pub fn restore(&mut self, t: &Taken) -> usize {
+        let at = t.at.min(self.ids.len());
+        let was_empty = self.ids.is_empty();
+        self.splice(at, vec![t.id.clone()], t.hand);
+        if self.shuffling {
+            for o in self.order.iter_mut() {
+                if *o >= at {
+                    *o += 1;
+                }
+            }
+            let turn = t.turn.unwrap_or(self.order.len()).min(self.order.len());
+            self.order.insert(turn, at);
+        }
+        if was_empty {
+            self.cur = Some(0);
+        }
+        self.rev += 1;
+        at
+    }
+
     /// Songs `from..to` moved so the first lands at `new_index` (media3's `moveMediaItems`). The play
     /// order under shuffle keeps each song where it was.
     pub fn move_range(&mut self, from: usize, to: usize, new_index: usize) {
@@ -476,6 +517,76 @@ mod tests {
 
     fn played(p: &Playlist) -> Vec<&str> {
         p.play_order().map(|i| p.ids()[i].as_str()).collect()
+    }
+
+    #[test]
+    fn a_song_taken_out_goes_back_where_it_was() {
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b", "c", "d"]), Some(0), false, 0);
+        p.add(ids(&["x"]), Hand::Next);
+        assert_eq!(list(&p), ["a", "x", "b", "c", "d"]);
+        let t = p.taken(1).unwrap();
+        assert_eq!(t, Taken { id: "x".into(), at: 1, hand: Hand::Next, turn: None });
+        p.remove(1, 2);
+        assert_eq!(list(&p), ["a", "b", "c", "d"]);
+        assert_eq!(p.restore(&t), 1);
+        assert_eq!(list(&p), ["a", "x", "b", "c", "d"]);
+        assert_eq!(p.by_hand().collect::<Vec<_>>(), [1], "still one added by hand");
+        assert_eq!(p.current(), Some(0));
+        assert_eq!(p.next(), Some(1), "and it plays next again");
+
+        // After the current song, the current one moves with the list.
+        p.moved_to(3);
+        let t = p.taken(1).unwrap();
+        p.remove(1, 2);
+        assert_eq!(p.current_id(), Some("c"));
+        p.restore(&t);
+        assert_eq!((p.current(), p.current_id()), (Some(3), Some("c")));
+        assert!(p.taken(9).is_none());
+    }
+
+    #[test]
+    fn a_song_taken_out_under_shuffle_goes_back_to_its_turn() {
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b", "c", "d", "e", "f"]), Some(2), true, 11);
+        let before: Vec<String> = played(&p).iter().map(|s| s.to_string()).collect();
+        let at = p.play_order().nth(3).unwrap();
+        let t = p.taken(at).unwrap();
+        assert_eq!(t.turn, Some(3));
+        p.remove(at, at + 1);
+        assert_eq!(p.len(), 5);
+        assert_eq!(p.restore(&t), at);
+        assert_eq!(played(&p), before, "the same play order as before it went");
+        assert_eq!(p.current_id(), Some("c"));
+    }
+
+    #[test]
+    fn the_song_playing_taken_out_comes_back_without_playing() {
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b", "c"]), Some(1), false, 0);
+        let t = p.taken(1).unwrap();
+        p.remove(1, 2);
+        assert_eq!(p.current_id(), Some("c"), "the next one plays");
+        p.restore(&t);
+        assert_eq!(list(&p), ["a", "b", "c"]);
+        assert_eq!(p.current_id(), Some("c"), "the music does not go back to it");
+
+        // The last song gone, it comes back as the queue.
+        let mut p = Playlist::default();
+        p.set(ids(&["only"]), Some(0), false, 0);
+        let t = p.taken(0).unwrap();
+        p.remove(0, 1);
+        assert!(p.is_empty() && p.current().is_none());
+        p.restore(&t);
+        assert_eq!((list(&p), p.current()), (vec!["only"], Some(0)));
+
+        // A queue that shrank meanwhile takes it at its end.
+        let mut p = Playlist::default();
+        p.set(ids(&["a", "b", "c", "d"]), Some(0), false, 0);
+        let t = p.taken(3).unwrap();
+        p.remove(1, 4);
+        assert_eq!(p.restore(&t), 1);
+        assert_eq!(list(&p), ["a", "d"]);
     }
 
     #[test]

@@ -88,7 +88,49 @@ fn blank(kind: TransitionKind, out_start: i64, in_start: i64, duration: i64, rea
 
 /// An analysis only counts when it describes this file: same length within 3 s.
 fn usable(a: Option<&TrackAnalysis>, duration_ms: i64) -> Option<&TrackAnalysis> {
-    a.filter(|a| a.duration_ms <= 0 || duration_ms <= 0 || (a.duration_ms - duration_ms).abs() <= 3000)
+    a.filter(|a| sound(a) && (a.duration_ms <= 0 || duration_ms <= 0 || (a.duration_ms - duration_ms).abs() <= 3000))
+}
+
+/// The fastest tempo a stored grid may have and still be taken for one.
+const MAX_BPM: f64 = 1_000.0;
+/// Further than this from a song's start (ms, a hundred hours) is no place in it.
+const MAX_MS: f64 = 3.6e8;
+
+/// Whether every number of `a` a plan is made of is one: finite, tempos a song can have, places inside a
+/// song's reach. A row that is not (a measurement gone wrong) is planned without, as a song not measured,
+/// rather than into nonsense - or a panic on the engine's thread, which plans (a clamp between one and a
+/// window rounded to nought, a count of beats past the integers).
+fn sound(a: &TrackAnalysis) -> bool {
+    let tempo = |b: f64| b.is_finite() && (0.0..=MAX_BPM).contains(&b);
+    let place = |ms: f64| ms.is_finite() && ms.abs() <= MAX_MS;
+    let whole = |ms: i64| (ms as f64).abs() <= MAX_MS;
+    let share = |v: f32| v.is_finite();
+    [a.bpm, a.intro_bpm, a.outro_bpm].into_iter().all(tempo)
+        && [a.beat_offset_ms, a.intro_beat_offset_ms, a.outro_beat_offset_ms].into_iter().all(place)
+        && [a.duration_ms, a.silence_start_ms, a.silence_end_ms, a.mixramp_start_ms, a.mixramp_end_ms, a.intro_end_ms, a.outro_start_ms, a.drop_ms, a.exit_ms, a.gap_ms, a.gap_end_ms]
+            .into_iter()
+            .all(whole)
+        && [
+            a.bpm_confidence,
+            a.stability,
+            a.downbeat_confidence,
+            a.lufs,
+            a.key_confidence,
+            a.outro_vocal,
+            a.intro_vocal,
+            a.outro_centroid,
+            a.intro_centroid,
+            a.outro_bpm_confidence,
+            a.outro_stability,
+            a.intro_bpm_confidence,
+            a.intro_stability,
+            a.drop_runup_vocal,
+            a.drop_vocal,
+            a.exit_vocal,
+            a.drop_runup_tonal_db,
+        ]
+        .into_iter()
+        .all(share)
 }
 
 /// Beats in a bar of `a`: 3 for a waltz, else 4 (also for rows from before metres were measured).
@@ -790,7 +832,7 @@ fn finish_beat_matched(a: &TrackAnalysis, b: &TrackAnalysis, s: &AutoMixSettings
     p.fade_curve = FadeCurve::SineSquared;
     // The incoming song rises over its run-up (or comes in at once without one); the outgoing one falls after the
     // swap, over whatever tail it has.
-    (p.in_fade_start_ms, p.in_fade_end_ms) = (0, if swap > 0 { swap } else { (beat_ms / 8).clamp(1, dur_ms) });
+    (p.in_fade_start_ms, p.in_fade_end_ms) = (0, if swap > 0 { swap } else { (beat_ms / 8).clamp(1, dur_ms.max(1)) });
     (p.out_fade_start_ms, p.out_fade_end_ms) = (swap.min(dur_ms - 1).max(0), dur_ms);
     if s.bass_swap {
         let len = swap_len(k.beat).round() as i64;

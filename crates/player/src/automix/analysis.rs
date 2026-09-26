@@ -16,6 +16,7 @@ use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 
 use super::loudness::Meter;
+use super::vocal;
 
 pub const TARGET_RATE: f64 = 22050.0;
 /// Hop between onset frames, seconds (256 samples at 22.05 kHz, 86 frames/s).
@@ -76,6 +77,16 @@ pub struct Features {
     pub blocks_k: Vec<f32>,
     pub blocks_raw: Vec<f32>,
     pub duration_s: f64,
+    /// Pitched movement in the voice band, one value per `vocal::CURVE_EVERY` onset frames: what the vocal
+    /// activity curve is made of (`voice_curve`).
+    pub voice: Vec<f32>,
+}
+
+impl Features {
+    /// The song's vocal activity curve, as it is stored beside its analysis.
+    pub fn voice_curve(&self) -> vocal::VocalCurve {
+        vocal::VocalCurve::from_raw(&self.voice, self.fps, self.t0)
+    }
 }
 
 pub struct Analyzer {
@@ -117,6 +128,7 @@ pub struct Analyzer {
     mags: Vec<f32>,
     meter: Meter,
     samples: u64,
+    voice: vocal::Tracker,
     f: Features,
 }
 
@@ -216,6 +228,7 @@ impl Analyzer {
             mags: vec![0.0; cn / 2],
             meter: Meter::new(rate, blocks),
             samples: 0,
+            voice: vocal::Tracker::new(n, sr, 2.0 / wsum, frames),
             f: Features {
                 fps: sr / hop as f64,
                 // Frame k is computed once (k + 1) hops have arrived.
@@ -234,6 +247,7 @@ impl Analyzer {
                 blocks_k: Vec::new(),
                 blocks_raw: Vec::new(),
                 duration_s: 0.0,
+                voice: Vec::new(),
             },
         }
     }
@@ -300,6 +314,7 @@ impl Analyzer {
     fn frame(&mut self) {
         Self::window_into(&self.ring, self.written, &self.win, &mut self.buf);
         self.fft.process_with_scratch(&mut self.buf, &mut self.scratch);
+        self.voice.frame(&self.buf);
 
         let mut total = 0f32;
         let mut low = 0f32;
@@ -415,8 +430,10 @@ impl Analyzer {
                 blocks_k: Vec::new(),
                 blocks_raw: Vec::new(),
                 duration_s: 0.0,
+                voice: Vec::new(),
             },
         );
+        f.voice = self.voice.take();
         f.blocks_k = std::mem::take(&mut self.meter.blocks_k);
         f.blocks_raw = std::mem::take(&mut self.meter.blocks_raw);
         f.duration_s = self.samples as f64 / self.rate;
@@ -429,6 +446,7 @@ impl Analyzer {
         (self.written, self.since_hop, self.hops, self.samples, self.acc, self.acc_n) = (0, 0, 0, 0, 0.0, 0);
         (self.prev, self.prev_low) = ([0.0; BANDS], [0.0; 8]);
         self.meter.reset();
+        self.voice.reset();
         for v in [&mut self.f.onset, &mut self.f.low_onset, &mut self.f.power, &mut self.f.low_power, &mut self.f.vocal, &mut self.f.centroid] {
             v.clear();
         }

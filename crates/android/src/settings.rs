@@ -5,7 +5,7 @@
 use jni::objects::{JClass, JFloatArray};
 use jni::sys::{jfloat, jint, jlong};
 use jni::JNIEnv;
-use nori_core::settings::{BandMark, EqLevel, SoundBand};
+use nori_core::settings::{BandMark, EqLevel};
 
 use crate::{native, Class};
 
@@ -40,9 +40,9 @@ extern "system" fn set_band(env: JNIEnv, _: JClass, index: jint, band: JFloatArr
     if index < 0 || env.get_float_array_region(&band, 0, &mut b).is_err() {
         return -1;
     }
-    let asked = SoundBand { kind: b[0] as i32, freq: b[1], gain_db: b[2], q: b[3], channel: b[4] as i32 };
+    let asked = nori_core::settings::band_from(b[0] as i32, b[1], b[2], b[3], b[4] as i32);
     let Some((effect, kept)) = nori_core::settings_store::edit_band(index as u32, asked) else { return -1 };
-    let out = [kept.kind as f32, kept.freq, kept.gain_db, kept.q, kept.channel as f32];
+    let out = [kept.kind as i32 as f32, kept.freq, kept.gain_db, kept.q, kept.channel as i32 as f32];
     if env.set_float_array_region(&band, 0, &out).is_err() {
         return -1;
     }

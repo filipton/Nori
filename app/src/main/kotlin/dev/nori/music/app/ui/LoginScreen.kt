@@ -33,9 +33,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.settings.ServerProfile
-import dev.nori.music.settings.profile
-import dev.nori.music.settings.stored
+import dev.nori.music.ffi.settings.SavedServer
+import dev.nori.music.settings.server
+import dev.nori.music.settings.serverUrl
 
 @Composable
 private fun Check(title: String, detail: String, value: Boolean, onChange: (Boolean) -> Unit) {
@@ -50,7 +50,7 @@ private fun Check(title: String, detail: String, value: Boolean, onChange: (Bool
 
 /** First run, and "add / edit server" from settings ([initial] and [onClose] set). */
 @Composable
-fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: (() -> Unit)? = null) {
+fun LoginScreen(vm: SettingsViewModel, initial: SavedServer? = null, onClose: (() -> Unit)? = null) {
     val ui by vm.login.collectAsStateWithLifecycle()
     var p by remember { mutableStateOf(initial ?: vm.newProfile()) }
     var advanced by remember { mutableStateOf(initial != null) }
@@ -61,7 +61,7 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
 
     // Reading the form - the headers typed, the addresses trimmed, whether it can be sent, the schemes
     // offered for an address typed without one - is the core's (settings.rs).
-    val ready = remember(p.url, p.user, p.apiKey) { dev.nori.music.ffi.settings.serverReady(p.stored()) }
+    val ready = remember(p.url, p.user, p.apiKey) { dev.nori.music.ffi.settings.serverReady(p) }
     val schemes = remember(p.url) { dev.nori.music.ffi.settings.serverUrlSchemes(p.url) }
 
     Surface(Modifier.fillMaxSize()) {
@@ -82,7 +82,7 @@ fun LoginScreen(vm: SettingsViewModel, initial: ServerProfile? = null, onClose: 
             ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             PillButton(
                 if (ui.busy) say.connecting else say.connect, null,
-                { vm.login(dev.nori.music.ffi.settings.serverFromForm(p.stored(), headers).profile()) },
+                { vm.login(dev.nori.music.ffi.settings.serverFromForm(p, headers)) },
                 Modifier.fillMaxWidth().padding(top = 4.dp), prominent = true,
                 enabled = !ui.busy && ready,
             )

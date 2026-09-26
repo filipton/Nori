@@ -9,6 +9,8 @@
 //! (the device buffer the sink writes into and whose playhead it reads), [`App`] (the transition
 //! planner and the log) and [`Queue`] (the playlist, wherever it is kept).
 
+use std::collections::VecDeque;
+
 use crate::burst::{Burst, Fed, BUFFER_US};
 use crate::dsp::{Band, Equalizer};
 use crate::engine::{Downstream, Heard, Host, StreamFormat, TransitionEngine, POSITION_NOT_SET};
@@ -35,6 +37,9 @@ const LIMITER_RELEASE_MS: f64 = 120.0;
 const LIMITER_LOOKAHEAD_MS: f64 = 5.0;
 /// How many buffers one turn offers at most before it lets the thread do something else.
 const BUFFERS_PER_TURN: usize = 256;
+/// Changes of pace a sink keeps track of while they are in flight: a ramp after a mix changes it on
+/// every buffer, and a deep buffer holds some ten seconds of them.
+const PACES: usize = 512;
 
 /// The sound settings, as the settings store hands them to the chain.
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +147,14 @@ pub struct Sink<T: Track> {
     start_media_us: i64,
     needs_init: bool,
     needs_sync: bool,
-    submitted_frames: u64,
+    /// The song's frames handed in since the clock's reference (a frame of a stretched mix is more or
+    /// less than one: [`Downstream::media_pace`]).
+    submitted_frames: f64,
+    /// The song time each frame offered stands for, as the transition engine last said.
+    pace: f64,
+    /// Where (in the song frames handed in since the last flush) each pace began, for the one under the
+    /// play head ([`Sink::pace_heard`]). Room for a ramp's worth is made once.
+    paces: VecDeque<(f64, f64)>,
     /// Buffers whose timestamp was more than 200 ms off: each is a stutter on a phone.
     pub timestamp_jumps: usize,
     /// A buffer taken only in part: the next offer must be the rest of it, or media3 throws.
@@ -188,7 +200,9 @@ impl<T: Track> Sink<T> {
             start_media_us: 0,
             needs_init: true,
             needs_sync: false,
-            submitted_frames: 0,
+            submitted_frames: 0.0,
+            pace: 1.0,
+            paces: VecDeque::with_capacity(PACES),
             timestamp_jumps: 0,
             owed: None,
             reopen: None,
@@ -225,7 +239,8 @@ impl<T: Track> Sink<T> {
         self.start_media_us = 0;
         self.needs_init = true;
         self.needs_sync = false;
-        self.submitted_frames = 0;
+        self.submitted_frames = 0.0;
+        self.paces.clear();
         self.timestamp_jumps = 0;
         self.owed = None;
         self.reopen = None;
@@ -238,6 +253,31 @@ impl<T: Track> Sink<T> {
         self.meter_db = 0.0;
         self.track.depth(capacity_us);
         self.track.flush();
+    }
+
+    /// The song time per frame of what the track plays now ([`Downstream::media_pace`]): 1, but for a song
+    /// brought into a mix at another tempo. Times the speed, it is how fast the place moves.
+    pub fn pace_heard(&mut self) -> f64 {
+        if self.paces.len() < 2 {
+            return self.paces.front().map_or(1.0, |p| p.1);
+        }
+        let played = self.track.played_media();
+        while self.paces.len() >= 2 && self.paces[1].0 <= played {
+            self.paces.pop_front();
+        }
+        self.paces[0].1
+    }
+
+    /// A pace begins with the song frames handed in so far.
+    fn note_pace(&mut self) {
+        if self.paces.back().is_some_and(|p| p.1 == self.pace) {
+            return;
+        }
+        if self.paces.len() == PACES {
+            // More changes of pace in flight than a ramp makes: the oldest is past hearing anyway.
+            self.paces.pop_front();
+        }
+        self.paces.push_back((self.submitted_frames, self.pace));
     }
 
     /// Frames of the song the track will have played when the clock reads `pts_us`, counted from the
@@ -374,8 +414,8 @@ impl<T: Track> Sink<T> {
 
     /// Runs `input` through the processors in media3's order (equalizer, silence skipping, speed) into
     /// the pending output. Every buffer here is kept between calls.
-    fn process(&mut self, input: &[u8], frames: u64) {
-        self.carry += frames as f64;
+    fn process(&mut self, input: &[u8], media: f64) {
+        self.carry += media;
         let mut data = std::mem::take(&mut self.stage);
         data.clear();
         let float = self.format.is_some_and(|f| f.encoding == Encoding::Float);
@@ -456,7 +496,8 @@ impl<T: Track> Sink<T> {
         self.owed = None;
         self.needs_init = true;
         self.needs_sync = false;
-        self.submitted_frames = 0;
+        self.submitted_frames = 0.0;
+        self.paces.clear();
         self.source_ended = false;
         if let Some(eq) = self.eq.as_mut() {
             eq.reset();
@@ -477,7 +518,7 @@ impl<T: Track> Sink<T> {
         let held = self.eq.as_ref().filter(|e| !e.is_identity()).map_or(0, Equalizer::delay_frames);
         if held > 0 {
             // Once per queue, so the silence is made here rather than kept.
-            self.process(&vec![0u8; held * f.frame_bytes()], 0);
+            self.process(&vec![0u8; held * f.frame_bytes()], 0.0);
         }
         self.drain_stages();
     }
@@ -520,7 +561,8 @@ impl<T: Track> Sink<T> {
         self.build_processors();
         self.needs_init = true;
         self.needs_sync = false;
-        self.submitted_frames = 0;
+        self.submitted_frames = 0.0;
+        self.paces.clear();
         true
     }
 }
@@ -564,7 +606,7 @@ impl<T: Track> Downstream for Sink<T> {
                 self.needs_init = false;
                 self.needs_sync = false;
             } else {
-                let expected = self.start_media_us + (self.submitted_frames as i128 * 1_000_000 / f.rate as i128) as i64;
+                let expected = self.start_media_us + (self.submitted_frames * 1_000_000.0 / f.rate as f64) as i64;
                 if !self.needs_sync && (expected - pts_us).abs() > PTS_TOLERANCE_US {
                     self.timestamp_jumps += 1;
                     self.needs_sync = true;
@@ -582,16 +624,19 @@ impl<T: Track> Downstream for Sink<T> {
         let input = &data[from..];
         self.follow_sound();
         if self.processing() {
-            let frames = (input.len() / fb) as u64;
-            self.submitted_frames += frames;
-            self.process(input, frames);
+            self.note_pace();
+            let media = (input.len() / fb) as f64 * self.pace;
+            self.submitted_frames += media;
+            self.process(input, media);
             self.write_pending();
             return (true, input.len());
         }
         let n = self.room_bytes().min(input.len()) / fb * fb;
         if n > 0 {
-            self.track.write(&input[..n], (n / fb) as f64);
-            self.submitted_frames += (n / fb) as u64;
+            self.note_pace();
+            let media = (n / fb) as f64 * self.pace;
+            self.track.write(&input[..n], media);
+            self.submitted_frames += media;
         }
         if n < input.len() {
             self.owed = Some((key.0 + n, key.1 - n));
@@ -602,6 +647,10 @@ impl<T: Track> Downstream for Sink<T> {
 
     fn handle_discontinuity(&mut self) {
         self.needs_sync = true;
+    }
+
+    fn media_pace(&mut self, pace: f64) {
+        self.pace = if pace.is_finite() && pace > 0.0 { pace } else { 1.0 };
     }
 
     fn position_us(&mut self, _source_ended: bool) -> i64 {
@@ -1424,6 +1473,12 @@ impl<S: Songs, T: Track, A: App, Q: Queue> Player<S, T, A, Q> {
 
     /// Song `i` would not play (`why`): skipped as the platform's error handler does (the app's run of
     /// failures, or `queue::ErrorRun`), or playback stops there.
+    /// Song `i` will not play, whatever its reader says: the queue's rules take it as a song that failed
+    /// (skipped, or playback stopped there), as one that would not open.
+    pub fn give_up(&mut self, i: usize, why: String) {
+        self.fail(i, PlaybackError::Other, why);
+    }
+
     fn fail(&mut self, i: usize, kind: PlaybackError, why: String) {
         let id = self.id_at(i);
         let next = self.next_of(i);

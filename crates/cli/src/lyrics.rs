@@ -34,7 +34,8 @@ impl SongLyrics {
             backing_len: l.backing.encode_utf16().count() as u32,
             backing: l.backing_words.iter().map(word).collect(),
         });
-        let clock = LyricClock::new(LyricTiming::new(lyrics.synced, lyrics.word_timed, lines), position_ms);
+        // The sync check's offset (lyrics that run late or early against the song) is the clock's to apply.
+        let clock = LyricClock::with_offset(LyricTiming::new(lyrics.synced, lyrics.word_timed, lines), position_ms, lyrics.offset_ms);
         let offsets = lyrics
             .lines
             .iter()
@@ -98,7 +99,7 @@ mod tests {
         let words = vec![LyricWord { start_ms: 1000, end_ms: 1500, start: 0, end: 5 }, LyricWord { start_ms: 1500, end_ms: 2000, start: 6, end: 11 }];
         let l1 = LyricLine { start_ms: 1000, end_ms: 2000, text: "Hello world".into(), words, ..Default::default() };
         let l2 = LyricLine { start_ms: 3000, end_ms: 4000, text: "Żółć ok".into(), ..Default::default() };
-        Lyrics { synced: true, word_timed: true, lines: vec![l1, l2], key: 0 }
+        Lyrics { synced: true, word_timed: true, lines: vec![l1, l2], key: 0, offset_ms: 0 }
     }
 
     #[test]

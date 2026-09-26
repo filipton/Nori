@@ -7,12 +7,12 @@ import dev.nori.music.net.said
 import dev.nori.music.playback.DacState
 import dev.nori.music.playback.DeviceSound
 import dev.nori.music.playback.Outputs
-import dev.nori.music.settings.Prefs
-import dev.nori.music.settings.ServerProfile
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.settings.SavedServer
 import dev.nori.music.net.describeConnectionError
 import dev.nori.music.ffi.model.MusicFolder
-import dev.nori.music.settings.Band
-import dev.nori.music.settings.HomeRow
+import dev.nori.music.ffi.settings.SoundBand
+import dev.nori.music.ffi.settings.HomeRow
 import dev.nori.music.ffi.devices.ChoiceKind
 import dev.nori.music.ffi.devices.deviceRows
 import dev.nori.music.ffi.settings.eqPresets
@@ -27,9 +27,7 @@ import dev.nori.music.ffi.model.NamedPreset
 import dev.nori.music.ffi.model.AutoEqEntry
 import dev.nori.music.ffi.settings.SoundException
 import dev.nori.music.ffi.model.SoundProfile
-import dev.nori.music.settings.prefs
 import dev.nori.music.settings.sound
-import dev.nori.music.settings.stored
 import dev.nori.music.settings.withSound
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -41,6 +39,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import dev.nori.music.settings.server
 
 data class LoginUi(val busy: Boolean = false, val error: String? = null, val done: Boolean = false)
 /**
@@ -89,7 +88,7 @@ data class StorageUi(
 )
 
 class SettingsViewModel(app: Application) : NoriViewModel(app) {
-    val prefs: StateFlow<Prefs> = nori.settings.prefs
+    val prefs: StateFlow<StoredPrefs> = nori.settings.prefs
     val dac: StateFlow<DacState> = nori.dac.state
     private val _login = MutableStateFlow(LoginUi())
     val login: StateFlow<LoginUi> = _login
@@ -99,7 +98,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
 
     init { viewModelScope.launch { runCatching { nori.library.indexSize() }.onSuccess { n -> _sync.update { it.copy(indexed = n) } } } }
 
-    fun update(change: (Prefs) -> Prefs) = nori.settings.update(change)
+    fun update(change: (StoredPrefs) -> StoredPrefs) = nori.settings.update(change)
 
     // ---- the settings screen (SettingsPages.kt), on the core's settings model (nori-settings, settings_model.rs) ----
 
@@ -119,7 +118,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
      * One group's page for settings [p] and [facts], in [res]'s language: one call into the core for what
      * its rules make of the settings, asked only when they or [facts] change.
      */
-    fun settingsPage(id: String, p: Prefs, facts: SettingsFacts, res: android.content.res.Resources): SettingsPage? =
+    fun settingsPage(id: String, p: StoredPrefs, facts: SettingsFacts, res: android.content.res.Resources): SettingsPage? =
         settingsPage(res, id, p, facts, dev.nori.music.ffi.settings.settingsState(facts.dac.bitPerfect, facts.dac.device != null))
 
     /** Whether the settings action [action] asks first, and what it says; null for one done at once. */
@@ -161,7 +160,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     private fun apply(change: SettingChange) {
         // The active server's own settings go through the server's update, which connects it again.
         if (change.server) {
-            change.prefs.prefs().server?.let(nori::updateServer)
+            change.prefs.server?.let(nori::updateServer)
             return
         }
         nori.settings.took(change)
@@ -231,9 +230,9 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     /** A blank profile for the "add server" form, with a fresh id from the core. */
-    fun newProfile() = ServerProfile(id = serverNewId())
+    fun newProfile() = dev.nori.music.settings.newServer(serverNewId())
 
-    fun login(profile: ServerProfile) {
+    fun login(profile: SavedServer) {
         if (_login.value.busy) return
         _login.value = LoginUi(busy = true)
         viewModelScope.launch {
@@ -247,12 +246,12 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     }
 
     fun clearLoginResult() { _login.value = LoginUi() }
-    fun switchServer(profile: ServerProfile) = nori.activate(profile)
-    fun updateServer(profile: ServerProfile) = nori.updateServer(profile)
+    fun switchServer(profile: SavedServer) = nori.activate(profile)
+    fun updateServer(profile: SavedServer) = nori.updateServer(profile)
     fun removeServer(id: String) = nori.removeServer(id)
 
     /** Copies a picked PKCS#12 file into the app and returns the profile that uses it. */
-    fun importClientCert(profile: ServerProfile, uri: android.net.Uri, password: String): ServerProfile {
+    fun importClientCert(profile: SavedServer, uri: android.net.Uri, password: String): SavedServer {
         val name = "${profile.id}.p12"
         val dir = java.io.File(getApplication<Application>().filesDir, "certs").apply { mkdirs() }
         getApplication<Application>().contentResolver.openInputStream(uri)?.use { input -> java.io.File(dir, name).outputStream().use { input.copyTo(it) } }
@@ -284,7 +283,7 @@ class SettingsViewModel(app: Application) : NoriViewModel(app) {
     fun applyPreset(p: NamedPreset) { nori.settings.soundTool(SoundTool.Preset(p)) }
 
     /** One band changed, held in the equalizer's ranges by the core; on every step of a drag, so edited in place there. */
-    fun setBand(index: Int, band: Band) = nori.settings.setBand(index, band)
+    fun setBand(index: Int, band: SoundBand) = nori.settings.setBand(index, band)
 
     /** Pre-amp, balance, limiter ceiling or crossfeed moved; the core holds it in range and snaps it, in place like a band. */
     fun setLevel(level: EqLevel, value: Float) = nori.settings.setLevel(level, value)

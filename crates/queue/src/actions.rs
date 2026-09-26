@@ -5,6 +5,7 @@
 
 use nori_library::mixes;
 use nori_model::Song;
+use nori_settings::settings::TapAction;
 
 use crate::autofill::seed_now;
 
@@ -30,21 +31,20 @@ pub enum TapPlan {
     PlayNext,
 }
 
-/// `TapAction` in the settings, by ordinal (see settings.rs).
-fn tap(selecting: bool, tap_action: i32) -> TapPlan {
+fn tap(selecting: bool, tap_action: TapAction) -> TapPlan {
     match tap_action {
         _ if selecting => TapPlan::Select,
-        1 => TapPlan::PlayOne,
-        2 => TapPlan::Queue,
-        3 => TapPlan::PlayNext,
-        _ => TapPlan::PlayList,
+        TapAction::PlayOne => TapPlan::PlayOne,
+        TapAction::Queue => TapPlan::Queue,
+        TapAction::PlayNext => TapPlan::PlayNext,
+        TapAction::PlayList => TapPlan::PlayList,
     }
 }
 
 /// What a tap on a song does, as the settings say; while songs are selected, a tap selects.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn tap_plan(selecting: bool) -> TapPlan {
-    tap(selecting, nori_settings::settings_store::with_prefs(|p| p.tap_action).unwrap_or(0))
+    tap(selecting, nori_settings::settings_store::with_prefs(|p| p.tap_action).unwrap_or(TapAction::PlayList))
 }
 
 /// How to shuffle a list.
@@ -161,8 +161,9 @@ mod tests {
 
     #[test]
     fn a_tap_does_what_the_settings_say_unless_songs_are_selected() {
-        assert_eq!([0, 1, 2, 3, 9].map(|a| tap(false, a)), [TapPlan::PlayList, TapPlan::PlayOne, TapPlan::Queue, TapPlan::PlayNext, TapPlan::PlayList]);
-        assert_eq!(tap(true, 2), TapPlan::Select);
+        let all = [TapAction::PlayList, TapAction::PlayOne, TapAction::Queue, TapAction::PlayNext];
+        assert_eq!(all.map(|a| tap(false, a)), [TapPlan::PlayList, TapPlan::PlayOne, TapPlan::Queue, TapPlan::PlayNext]);
+        assert_eq!(tap(true, TapAction::Queue), TapPlan::Select);
     }
 
     #[test]

@@ -68,7 +68,7 @@ class MotionPlayer(
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            android.util.Log.w("nori", "motion artwork: ${error.errorCodeName}")
+            dev.nori.music.NoriLog.w("motion artwork: ${error.errorCodeName}")
             val gone = loaded
             // Asked again on the next rest rather than never: the screen calls play() when it wants it.
             loaded = null

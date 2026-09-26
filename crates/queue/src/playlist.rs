@@ -4,7 +4,7 @@
 //! planner's window, ReplayGain, the queue as the app lists it, the queue saved for next time - reads
 //! it here, without the player's list crossing over.
 
-use nori_player::playlist::{Playlist, Splice};
+use nori_player::playlist::{Playlist, Splice, Taken};
 use parking_lot::Mutex;
 
 // Public, like model.rs's, since the uniffi scaffolding in crates/android names them by a public path.
@@ -24,9 +24,13 @@ static WINDOW: Mutex<(Vec<String>, bool)> = Mutex::new((Vec::new(), false));
 static ORIGIN: Mutex<Option<PageOrigin>> = Mutex::new(None);
 /// Moves each time a new queue is set, so a page asks again whether it is the one playing only then.
 static ORIGIN_GEN: AtomicU32 = AtomicU32::new(0);
+/// The last song taken out on its own, as it was, for an undo to put back ([`playlist_restore`]). Gone
+/// with a new queue: an undo never reaches into another one.
+static TAKEN: Mutex<Option<Taken>> = Mutex::new(None);
 
 fn set_origin(origin: Option<PageOrigin>) {
     *ORIGIN.lock() = origin;
+    *TAKEN.lock() = None;
     ORIGIN_GEN.fetch_add(1, Ordering::Release);
 }
 
@@ -165,12 +169,27 @@ pub fn playlist_take(at: u32, ids: Vec<String>, hands: Vec<Hand>) -> QueueChange
     edit(|p| Some(p.take(at as usize, ids, &hands)))
 }
 
+/// Songs `from..to` taken out. One song on its own is remembered as it was, so an undo can put it back
+/// ([`playlist_restore`]); the song playing going, the one after it plays (`Playlist::remove`).
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn playlist_remove(from: u32, to: u32) -> QueueChange {
     edit(|p| {
+        *TAKEN.lock() = if to == from + 1 { p.taken(from as usize) } else { None };
         p.remove(from as usize, to as usize);
         p.current()
     })
+}
+
+/// Undo: the song `id` last taken out on its own put back where it was - its list index, its turn under
+/// shuffle and its mark as added by hand - in the queue as it is now. The song playing stays the one
+/// playing, and the queue's origin stays. `at` is where it went, or -1 when that song is not the one to
+/// put back (nothing taken out, another song since, a new queue); the caller then inserts it itself.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn playlist_restore(id: String) -> QueueChange {
+    let mut p = LIST.lock();
+    let t = TAKEN.lock().take_if(|t| t.id == id);
+    let at = t.map(|t| p.restore(&t));
+    change(&p, at)
 }
 
 #[cfg_attr(feature = "ffi", uniffi::export)]
@@ -314,12 +333,7 @@ pub fn playlist_gain_of(index: usize, bit_perfect: bool) -> f32 {
 
 fn gain_at(index: Option<usize>, bit_perfect: bool) -> f32 {
     let Some(s) = nori_settings::settings_store::current() else { return 1.0 };
-    let mode = match s.replay_gain {
-        1 => nori_model::GainMode::Track,
-        2 => nori_model::GainMode::Album,
-        3 => nori_model::GainMode::Auto,
-        _ => nori_model::GainMode::Off,
-    };
+    let mode = s.replay_gain;
     let (preamp_db, untagged_db) = (s.preamp_db, s.untagged_gain_db);
     let (before, current, after, shuffling) = with(|p| {
         let id = |i: Option<usize>| i.map(|i| p.ids()[i].clone());
@@ -572,6 +586,57 @@ pub(crate) mod tests {
         playlist_set(ids(&["radio:1"]), 0, false, None);
         assert_eq!(playlist_origin(), None);
         assert!(!playlist_from(a) && !playlist_from(b) && !playlist_from(album) && !playlist_from(artist));
+    }
+
+    #[test]
+    fn a_song_taken_out_is_put_back_once() {
+        let _g = hold(&["u1", "u2", "u3", "u4"], 1);
+        playlist_take(9, ids(&["mine"]), vec![Hand::Next]);
+        assert_eq!(with(|p| p.ids().to_vec()), ids(&["u1", "u2", "mine", "u3", "u4"]));
+        playlist_remove(2, 3);
+        assert_eq!(playlist_restore("other".into()).at, -1, "not the song taken out");
+        assert_eq!(playlist_restore("mine".into()), QueueChange { at: 2, shuffled: false });
+        assert_eq!(with(|p| (p.ids().to_vec(), p.current(), p.hand(2))), (ids(&["u1", "u2", "mine", "u3", "u4"]), Some(1), Hand::Next));
+        assert_eq!(playlist_restore("mine".into()).at, -1, "put back once");
+
+        // Only the last one, and not several taken out at once.
+        playlist_remove(0, 1);
+        playlist_remove(1, 2);
+        assert_eq!(playlist_restore("u1".into()).at, -1);
+        assert_eq!(playlist_restore("mine".into()).at, 1, "where it was in the queue as it is now");
+        playlist_remove(0, 2);
+        assert_eq!(playlist_restore("u2".into()).at, -1);
+
+        // The song playing: the next one plays, and the undo does not go back to it.
+        playlist_set(ids(&["p1", "p2", "p3"]), 1, false, None);
+        playlist_remove(1, 2);
+        assert_eq!(with(|p| p.current_id().map(str::to_string)).as_deref(), Some("p3"));
+        assert_eq!(playlist_restore("p2".into()).at, 1);
+        let v = playlist_view(0);
+        assert_eq!((v.index, v.len), (2, 3), "p3 still playing, p2 back in its place");
+
+        // A new queue forgets it.
+        playlist_remove(0, 1);
+        playlist_set(ids(&["n1", "p1"]), 0, false, None);
+        assert_eq!(playlist_restore("p1".into()).at, -1);
+    }
+
+    #[test]
+    fn an_undo_keeps_the_origin_and_the_shuffle() {
+        use nori_model::OriginKind::Album;
+        let _g = hold(&["o0"], 0);
+        let album = page(Album, "al");
+        playlist_set(ids(&["s1", "s2", "s3", "s4", "s5"]), 0, true, Some(album.origin()));
+        let gen = playlist_origin_gen();
+        let order = with(|p| p.play_order().collect::<Vec<_>>());
+        let at = order[2];
+        let id = with(|p| p.ids()[at].clone());
+        playlist_remove(at as u32, at as u32 + 1);
+        let back = playlist_restore(id);
+        assert_eq!((back.at, back.shuffled), (at as i32, true));
+        assert_eq!(with(|p| p.play_order().collect::<Vec<_>>()), order, "back in its turn");
+        assert!(playlist_from(album), "removed and put back: still the album's queue");
+        assert_eq!(playlist_origin_gen(), gen, "and the pages are not asked again");
     }
 
     #[test]

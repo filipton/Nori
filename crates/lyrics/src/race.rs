@@ -13,12 +13,17 @@
 //! A failed or too slow service is never remembered as a miss, but it is not asked about the same song
 //! again for a while, and one that keeps failing rests for a while altogether. Provider (`ext-`) songs
 //! are never looked up. Nothing here runs a thread: the lookup is one future, polled by whoever asked.
+//!
+//! Once the song has been measured, every timed answer is also checked against its vocal activity curve
+//! (sync.rs): the check is part of its score, and an offset the check is sure of goes out with the lyrics
+//! shown (`Lyrics::offset_ms`), for the clock to apply.
 
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use nori_model::{Lyrics, Song};
 use nori_net::transport::Transport;
+use nori_player::automix::vocal::VocalCurve;
 use nori_settings::lyrics_sources::{LyricsLookup, LyricsService};
 use nori_settings::lyrics_sources::LyricsOrigin;
 use parking_lot::Mutex;
@@ -28,7 +33,8 @@ use crate::credits::strip_edges;
 use crate::fit::{agree, plausible};
 use crate::formats::{from_cache, timing};
 use crate::services::{self, Ask, Lookup, Shared};
-use crate::trust::{score, Named, Trust};
+use crate::sync::{self, SyncCheck, SyncKind};
+use crate::trust::{score, with_sync, Named, Trust};
 
 /// How many services are asked at once.
 pub const AT_ONCE: usize = 6;
@@ -74,12 +80,12 @@ pub trait LyricsShown: Send + Sync {
     fn show(&self, pick: LyricsPick);
 }
 
-/// Whether `a` and `b` show the same thing: the same words with the same timing from the same place,
+/// Whether `a` and `b` show the same thing: the same words with the same timing (and offset) from the same place,
 /// whatever key their timing was kept under ([`crate::look::keep`] gives each reading a key of its own,
 /// so the same lyrics read again - the lookup run again for a song come back to - come under another).
 pub fn same_lyrics(a: &LyricsPick, b: &LyricsPick) -> bool {
     let (x, y) = (&a.lyrics, &b.lyrics);
-    a.origin == b.origin && x.synced == y.synced && x.word_timed == y.word_timed && x.lines == y.lines
+    a.origin == b.origin && x.synced == y.synced && x.word_timed == y.word_timed && x.offset_ms == y.offset_ms && x.lines == y.lines
 }
 
 /// [`same_lyrics`] for a platform holding the answers itself (Android's lyrics state, kept per song).
@@ -103,6 +109,10 @@ pub trait LyricsCache: Send + Sync {
     /// Whether `key` was kept less than `max_age_ms` ago.
     fn fresh(&self, key: &str, max_age_ms: i64) -> bool;
     fn put(&self, key: &str, body: Vec<u8>);
+    /// The song's vocal activity curve, measured with its AutoMix analysis; None before it is measured.
+    fn voice(&self, _song: &Song) -> Option<VocalCurve> {
+        None
+    }
 }
 
 /// Every lookup's cache entries start with this: what "Clear lyrics cache" empties.
@@ -136,12 +146,32 @@ pub struct Race {
     answers: Vec<Option<(Lyrics, Named)>>,
     /// What is on screen: its rank.
     shown: Option<usize>,
+    /// The song's vocal curve, once measured, and each answer checked against it.
+    voice: Option<VocalCurve>,
+    checks: Vec<Option<SyncCheck>>,
 }
 
 impl Race {
     pub fn new(song: &Song, entries: Vec<Entry>, prefer_words: bool, server_timing: u8) -> Self {
         let n = entries.len();
-        Race { song: song.clone(), entries, prefer_words, server_timing, done: vec![false; n], waiting: (0..n).collect(), answers: vec![None; n], shown: None }
+        Race { song: song.clone(), entries, prefer_words, server_timing, done: vec![false; n], waiting: (0..n).collect(), answers: vec![None; n], shown: None, voice: None, checks: vec![None; n] }
+    }
+
+    /// The song's vocal curve: every timed answer, those in and those to come, is checked against it.
+    pub fn hear(&mut self, curve: VocalCurve) {
+        self.checks = self.answers.iter().map(|a| a.as_ref().and_then(|(l, _)| sync::check(l, &curve))).collect();
+        self.voice = Some(curve);
+    }
+
+    /// How `rank`'s answer fits the song's voice, when it was checked.
+    pub fn check(&self, rank: usize) -> Option<SyncCheck> {
+        self.checks.get(rank).copied().flatten()
+    }
+
+    /// `rank`'s lyrics as they are shown: with the offset their check is sure of.
+    fn to_screen(&self, rank: usize, mut lyrics: Lyrics) -> Lyrics {
+        lyrics.offset_ms = self.check(rank).map_or(0, |c| c.applied_ms());
+        lyrics
     }
 
     /// Every answer's score, none for a rank without one or whose timing is no better than the server's.
@@ -154,7 +184,7 @@ impl Race {
                     return None;
                 }
                 let others: Vec<(&Lyrics, &Named)> = self.answers.iter().enumerate().filter(|(o, _)| *o != r).filter_map(|(_, a)| a.as_ref().map(|a| (&a.0, &a.1))).collect();
-                let mut t = score(&self.song, l, named, self.entries[r].prior, &others, self.prefer_words);
+                let mut t = with_sync(score(&self.song, l, named, self.entries[r].prior, &others, self.prefer_words), self.checks[r].as_ref());
                 t.score = (t.score + RANK_BONUS * (1.0 - r as f64 / n)).min(1.0);
                 Some(t)
             })
@@ -190,6 +220,7 @@ impl Race {
         self.done[rank] = true;
         self.waiting.retain(|w| *w != rank);
         self.answers[rank] = found.filter(|(l, _)| !l.lines.is_empty());
+        self.checks[rank] = self.voice.as_ref().zip(self.answers[rank].as_ref()).and_then(|(v, (l, _))| sync::check(l, v));
     }
 
     /// Lyrics already on screen as `rank`'s answer: the ones chosen last time.
@@ -261,7 +292,7 @@ impl Race {
             return None;
         }
         self.shown = Some(leader);
-        self.answers[leader].as_ref().map(|a| (leader, a.0.clone()))
+        self.answers[leader].as_ref().map(|a| (leader, self.to_screen(leader, a.0.clone())))
     }
 
     /// Whether `rank`'s answer is backed by more than its service's word: the title it named is this
@@ -290,6 +321,18 @@ impl Race {
     }
 }
 
+/// How an answer's sync check is said in the log: "sync 0.93 shifted +500 ms, drift +0 ms".
+pub fn sync_words(c: &SyncCheck) -> String {
+    let kind = match c.kind {
+        SyncKind::Unsure => "unsure",
+        SyncKind::Fits => "fits",
+        SyncKind::Shifted => "shifted",
+        SyncKind::Drifts => "drifts",
+        SyncKind::Poor => "poor",
+    };
+    format!("sync {:.2} {kind} {:+} ms (sure {:.2}), drift {:+} ms", c.score, c.offset_ms, c.confidence, c.drift_ms)
+}
+
 /// How an answer's timing is said in the log.
 pub fn timing_words(l: &Lyrics) -> &'static str {
     match timing(l) {
@@ -308,7 +351,7 @@ fn cache_key(service: LyricsService, song: &Song, lookup: &LyricsLookup) -> Stri
 }
 
 /// What the lyrics chosen for a song are remembered under.
-fn best_key(song: &Song) -> String {
+pub fn best_key(song: &Song) -> String {
     format!("{CACHE_PREFIX}BEST|{}|{}|{}", song.artist, song.title, song.duration)
 }
 
@@ -453,12 +496,24 @@ pub async fn lookup(
     OLD_DROPPED.call_once(|| evict("lrclib2|"));
     let server_timing = u8::from(server_has_lines);
     let mut race = Race::new(song, services.iter().map(|s| Entry::of(*s)).collect(), lookup.prefer_words, server_timing);
-    // The lyrics chosen last time: shown at once, and final unless they scored low and a few days passed.
+    let voice = cache.voice(song);
+    if let Some(v) = voice.clone() {
+        race.hear(v);
+    }
+    // The lyrics chosen last time: shown at once, and final unless they scored low (or, checked against the
+    // song's voice now, do not fit it) and a few days passed.
     let mut before: Option<(usize, f64)> = None;
     if let Some((rank, lyrics, named, was)) = chosen_before(cache, song, &services).filter(|c| timing(&c.1) > server_timing) {
-        shown.show(LyricsPick { lyrics: lyrics.clone(), origin: services[rank].origin() });
-        let line = format!("lyrics: kept {} ({was:.2}, {})", services[rank].title(), timing_words(&lyrics));
-        if was >= LOW || cache.fresh(&best_key(song), LOW_RETRY_MS) {
+        let check = voice.as_ref().and_then(|v| sync::check(&lyrics, v));
+        let mut on_screen = lyrics.clone();
+        on_screen.offset_ms = check.map_or(0, |c| c.applied_ms());
+        shown.show(LyricsPick { lyrics: on_screen, origin: services[rank].origin() });
+        let mut line = format!("lyrics: kept {} ({was:.2}, {})", services[rank].title(), timing_words(&lyrics));
+        if let Some(c) = &check {
+            line.push_str(&format!(", {}", sync_words(c)));
+        }
+        let misfit = check.is_some_and(|c| matches!(c.kind, SyncKind::Drifts | SyncKind::Poor));
+        if (was >= LOW && !misfit) || cache.fresh(&best_key(song), LOW_RETRY_MS) {
             nori_model::alog::info(&line);
             return Some(line);
         }
@@ -511,6 +566,12 @@ pub async fn lookup(
     if let Some((r, was)) = before {
         line.push_str(&format!(", was {} ({was:.2})", services[r].title()));
     }
+    // Each answer's fit to the song's voice, for the perf report: its score, offset and drift.
+    for (r, service) in services.iter().enumerate() {
+        if let Some(c) = race.check(r) {
+            line.push_str(&format!("; {} {}", service.title(), sync_words(&c)));
+        }
+    }
     nori_model::alog::info(&line);
     Some(line)
 }
@@ -558,7 +619,7 @@ mod tests {
 
     fn pick(text: &str, key: u64, origin: LyricsOrigin) -> LyricsPick {
         let line = nori_model::LyricLine { start_ms: 1000, end_ms: 2000, text: text.into(), ..Default::default() };
-        LyricsPick { lyrics: Lyrics { synced: true, word_timed: false, lines: vec![line], key }, origin }
+        LyricsPick { lyrics: Lyrics { synced: true, word_timed: false, lines: vec![line], key, offset_ms: 0 }, origin }
     }
 
     #[test]
@@ -708,6 +769,59 @@ mod tests {
         assert_eq!(r.to_show(false), None, "timed alike and scored alike: no swap");
         r.answer(2, Some((words(&OURS, true), naming("Glass Harbour"))));
         assert_eq!(r.to_show(false).map(|x| x.0), Some(2), "word timing of the same words: strictly better");
+    }
+
+    // ---- checked against the song's voice ----------------------------------------------------------------
+
+    /// A synthetic song with a sung line at known times, its curve, and a song record of its length.
+    fn measured() -> (Song, nori_player::automix::vocal::VocalCurve, Vec<Vec<(f64, f64)>>) {
+        use nori_player::automix::eval::{Song as Synthetic, Style, FULL, SUNG};
+        let synthetic = Synthetic { sections: vec![(4, FULL), (12, SUNG), (6, FULL), (12, SUNG), (4, FULL)], ..Synthetic::new("race", Style::Backbeat, 112.0, 2, false) };
+        let (curve, phrases, secs) = crate::sync::tests::sung(&synthetic);
+        (Song { duration: secs.round() as u32, ..tune() }, curve, phrases)
+    }
+
+    #[test]
+    fn with_the_songs_voice_timing_that_fits_it_beats_timing_that_does_not() {
+        let (s, curve, phrases) = measured();
+        let named = Named::new("Glass Harbour", "The Lanterns", "", s.duration as f64);
+        let fits = crate::sync::tests::lyrics(&phrases, true, false, &|t| t);
+        // The same words, timed by word, but a bar and a half late in the second half: another version's.
+        let mid = phrases[phrases.len() / 2][0].0 - 0.1;
+        let other_version = crate::sync::tests::lyrics(&phrases, true, true, &|t| if t < mid { t } else { t + 3.2 });
+        let race = |voice: bool| {
+            let mut r = Race::new(&s, vec![entry(0.9, true, 3), entry(0.85, true, 3)], true, 0);
+            if voice {
+                r.hear(curve.clone());
+            }
+            r.next(0, 6);
+            r.answer(0, Some((other_version.clone(), named.clone())));
+            r.answer(1, Some((fits.clone(), named.clone())));
+            r
+        };
+        let mut deaf = race(false);
+        assert_eq!(deaf.to_show(true).map(|x| x.0), Some(0), "unmeasured, word timing wins as before");
+        assert!(deaf.scores()[0].unwrap().sync.is_none());
+        let mut hearing = race(true);
+        let scores = hearing.scores();
+        assert_eq!(hearing.check(0).map(|c| c.kind), Some(SyncKind::Drifts), "{:?}", hearing.check(0));
+        assert_eq!(hearing.check(1).map(|c| c.kind), Some(SyncKind::Fits), "{:?}", hearing.check(1));
+        assert!(scores[1].unwrap().score > scores[0].unwrap().score, "{scores:?}");
+        assert_eq!(hearing.to_show(true).map(|x| x.0), Some(1), "the timing that fits the voice");
+    }
+
+    #[test]
+    fn lyrics_that_run_late_go_out_with_their_offset() {
+        let (s, curve, phrases) = measured();
+        let late = crate::sync::tests::lyrics(&phrases, true, false, &|t| t + 1.0);
+        let mut r = Race::new(&s, vec![entry(0.9, true, 3)], true, 0);
+        r.hear(curve);
+        r.next(0, 6);
+        r.answer(0, Some((late, Named::new("Glass Harbour", "The Lanterns", "", s.duration as f64))));
+        let (_, shown) = r.to_show(true).expect("shown");
+        assert!((shown.offset_ms - 1000).abs() < 120, "{}", shown.offset_ms);
+        assert!(sync_words(&r.check(0).unwrap()).starts_with("sync 0."), "{}", sync_words(&r.check(0).unwrap()));
+        assert!(!same_lyrics(&LyricsPick { lyrics: shown.clone(), origin: LyricsOrigin::Lrclib }, &LyricsPick { lyrics: Lyrics { offset_ms: 0, ..shown }, origin: LyricsOrigin::Lrclib }), "another offset is other lyrics to show");
     }
 
     #[test]

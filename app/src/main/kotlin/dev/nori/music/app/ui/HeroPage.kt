@@ -45,7 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
-import dev.nori.music.settings.ThemeMode
+import dev.nori.music.ffi.settings.ThemeMode
 
 /**
  * An album, artist or playlist page, built the way Apple Music builds one: the artwork runs edge to

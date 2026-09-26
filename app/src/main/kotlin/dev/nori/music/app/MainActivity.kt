@@ -15,6 +15,7 @@ import dev.nori.music.downloads.ACTION_OPEN_DOWNLOADS
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import dev.nori.music.app.ui.App
+import dev.nori.music.settings.loggedIn
 
 class MainActivity : ComponentActivity() {
     private var started = false

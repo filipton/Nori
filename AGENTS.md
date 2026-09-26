@@ -19,7 +19,8 @@ crates/player/  Rust, platform-free: how music is played and heard. Decoding com
                 controls sound and when the chain is rebuilt (transport.rs: fades, switches, timings),
                 what mixes where (transitions.rs), the audio policy, ReplayGain and fades (policy.rs), USB
                 DACs (dac.rs), outputs (outputs.rs) and which sound an output device gets (device.rs,
-                sound.rs). No I/O, no uniffi, no JNI. pipeline.rs is the player around the transition
+                sound.rs), and where a voice sings in a song (automix/vocal.rs: the vocal activity curve
+                synced lyrics are checked against, measured with the analysis). No I/O, no uniffi, no JNI. pipeline.rs is the player around the transition
                 engine with the platform left out (the queue walked song by song, one reading at a time, a
                 sink shaped like media3's AudioSink with the processors in it over a device buffer); sim.rs (behind
                 `synth`) runs it on a simulated AudioTrack and a virtual clock, and tests/pipeline asserts
@@ -69,15 +70,16 @@ crates/library/ Rust, platform-free: the music library as the app shows it (pack
                 search (browse.rs, search.rs), this session's stars (stars.rs), how each page is laid out
                 (pages.rs, rows.rs), the song menus (menus.rs), the car's browse tree (car.rs) and the
                 repository's small decisions (library.rs). Depends on nori-model, nori-db,
-                nori-net and nori-look.
+                nori-net, nori-look and nori-settings (what a row swipe set there does).
 crates/automix/ Rust, platform-free: AutoMix over the app's database (package nori-automix): the analysis
                 store and the streaming analyser (store.rs), the transition planner the audio path asks
                 (planner.rs), the transition engine's host (host.rs) and where the
                 optional beat model's weights are and their pins (beat_model.rs).
                 Depends on nori-model, nori-db and nori-player.
-crates/settings/ Rust, platform-free: the settings (package nori-settings): codec, defaults and rules
-                (settings.rs), the live copy kept in the app's database (settings_store.rs), the model a
-                client builds its settings screen on (settings_model.rs: every setting's name, kind,
+crates/settings/ Rust, platform-free: the settings (package nori-settings): each declared once, on its
+                field of `StoredPrefs` (settings.rs, read by crates/settings-derive), the codecs they are
+                stored with (codec.rs), defaults and rules (settings.rs), the live copy kept in the app's
+                database (settings_store.rs), the model a client builds its settings screen on (settings_model.rs: every setting's name, kind,
                 options as values and default, the values now, and what the rules make of them), the
                 lyrics services and which of them are asked (lyrics_sources.rs), the credits (credits.rs),
                 and the sound settings' answers the player asks for (dsp.rs). No settings screen: pages,
@@ -90,7 +92,8 @@ crates/lyrics/  Rust, platform-free: lyrics (package nori-lyrics): the server's 
                 json.rs; html.rs; each tested on a sample in testdata/); the sixteen services, asked
                 through the core's Transport (services.rs, LRCLIB's in lrclib.rs); the credits
                 at an answer's ends stripped (credits.rs); each answer scored against the song and the
-                other answers (trust.rs); the services asked in waves, the best chosen, bounded and remembered in the response
+                other answers (trust.rs), and its times against the song's vocal curve once it is measured
+                (sync.rs: a score, an offset the clock applies, drift); the services asked in waves, the best chosen, bounded and remembered in the response
                 cache with its score (race.rs); and the lyrics page's
                 clock (look.rs). Depends on nori-model, nori-net, nori-settings and nori-look.
 crates/devices/ Rust, platform-free: the output side (package nori-devices): the platform's output devices
@@ -234,12 +237,21 @@ Not in the core, but each client's own:
 - screen structure: settings pages, sections, rows, their order and which are shown, search over them;
 - layout, drawing, gestures and animation.
 
-A new setting is added to the model in nori-settings and to each client's screen: its field, load and
-save and `set_by_name` (settings.rs), its line in `SPECS` and `value_of` (settings_model.rs, whose test
-checks every option is taken and reads back), and what a change of it asks of the player
-(settings_store.rs `effects`); then its row on Android (app/vm `SettingsPages.kt`, its words in
-`res/values/strings.xml`, and a search entry in `INDEX` if people will look for it) and in the terminal
-client if it makes sense there (crates/cli `settings_view.rs`).
+A new setting is one field of `StoredPrefs` (crates/settings/src/settings.rs) with its one
+`#[setting(...)]` line: the key it is stored under, its codec (`Flag`, `INT`, `FLOAT`, `LONG`, `Text`,
+`within(lo, hi)`, `clamped(lo, hi)`, `PICK` for an enum, `Quality`, or a `Custom` one; codec.rs), its
+`default`, `name = "..."` when it is changed and read by another name than its key (`hidden` for none),
+`show = K::...` for what a client offers for it, `effect = ...` for what a change asks of the player
+(settings_store.rs's bits) and `lookups` for a switch that needs the lookups switch.
+`#[derive(Settings)]` (crates/settings-derive) makes its default, loading, saving, change by name, value by
+name, spec and effects from that line; an enum setting is a `#[derive(Choice)]` enum beside it, and the
+Kotlin app uses `StoredPrefs` and the enum as uniffi generates them. The few changes by name that are no
+field of their own (`set_special`, `value_of_special`) are written out by hand. settings_model.rs's test
+checks every option is taken and reads back; tests/stored_format.rs holds the stored format to a golden
+copy, so a key or an encoding that moves by accident fails there (`NORI_BLESS=1` writes it again, for a
+change meant). Then its row on Android (app/vm `SettingsPages.kt`, its words in `res/values/strings.xml`,
+and a search entry in `INDEX` if people will look for it) and in the terminal client if it makes sense
+there (crates/cli `settings_view.rs`).
 
 Where the text lives (nori-words was removed 2026-09-25):
 - The core hands over data and kinds: counts, seconds, which message applies (an enum: `ResumePlan`,
@@ -405,7 +417,7 @@ animation maths) stays in Kotlin. Keep the list current when a job moves across 
 
 `docs/features.md` is the checklist of what is planned, with the owner's decisions at the top. Every
 optional subsystem (casting, FFmpeg decoder, resampler, smart fades, third-party lookups, taste model,
-...) sits behind a switch in `Prefs`, and a switched-off feature must cost nothing: not initialised,
+...) sits behind a switch in `StoredPrefs`, and a switched-off feature must cost nothing: not initialised,
 no listener, no socket, no audio processor. Check with `tools/bench.sh` that the default screen-off
 numbers do not move when a feature is added.
 

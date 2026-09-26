@@ -14,6 +14,18 @@ pub struct Pull {
     due_ns: i64,
     heard: Arc<Mutex<Vec<f32>>>,
     block: Vec<f32>,
+    /// Pulls that came while the card played music and found less than a block in the ring: each a gap
+    /// a sound card that pulls whatever there is would have played as silence (an underrun).
+    pub dry: u64,
+    /// The device took no more music, as a dead one does, until it is opened again.
+    dead: bool,
+}
+
+impl Pull {
+    /// The device stops taking music, as a dead track would, until the engine opens it again.
+    pub fn pause_pulling(&mut self) {
+        self.dead = true;
+    }
 }
 
 /// Frames the card pulls at a time.
@@ -28,7 +40,13 @@ impl super::Device for Pull {
         let rate = self.feed.as_ref().map_or(44_100, |f| f.format().rate);
         self.due_ns = now_ns + (BLOCK as i64 * 1_000_000_000) / rate as i64;
         let Some(feed) = self.feed.as_mut() else { return false };
+        if self.dead {
+            return false;
+        }
         if !self.playing || (feed.available() < BLOCK && !feed.ending()) {
+            if self.playing && !feed.ending() && !self.heard.lock().is_empty() {
+                self.dry += 1;
+            }
             return false;
         }
         let ch = feed.format().channels;
@@ -83,7 +101,9 @@ impl AudioOutput for Card {
     }
 
     fn start(&mut self, feed: Feed) -> Result<(), String> {
-        self.pull.lock().feed = Some(feed);
+        let mut p = self.pull.lock();
+        p.feed = Some(feed);
+        p.dead = false;
         Ok(())
     }
 

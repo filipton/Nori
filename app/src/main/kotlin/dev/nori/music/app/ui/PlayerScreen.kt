@@ -5,6 +5,12 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.filled.PlaylistRemove
+import dev.nori.music.ffi.model.Song
 import androidx.compose.foundation.MarqueeSpacing
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -130,7 +136,7 @@ import androidx.compose.ui.draw.drawWithCache
 import dev.nori.music.app.vm.PlayerViewModel
 import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.playback.Repeat
-import dev.nori.music.settings.ThemeMode
+import dev.nori.music.ffi.settings.ThemeMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.isActive
@@ -2429,18 +2435,24 @@ private fun Queue(vm: PlayerViewModel) {
     val list = rememberLazyListState(initialFirstVisibleItemIndex = state.order.indexOf(state.index).coerceAtLeast(0))
     // Nothing is reordered until the finger lifts. The held row follows it, the rows it passes step out
     // of the way, and the gap travels with it - reordering live would change the keys under the gesture
-    // and cancel it, which is why a row could only ever be moved one place at a time.
-    var from by remember { mutableIntStateOf(-1) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
-    var rowHeight by remember { mutableFloatStateOf(0f) }
+    // and cancel it, which is why a row could only ever be moved one place at a time. All of it is read
+    // where the rows are drawn (QueueDrag), so a frame of the drag recomposes no row.
+    val drag = remember { QueueDrag() }
+    val undo = remember { QueueUndo<Song>() }
     val haptics = LocalHapticFeedback.current
-    val moved = if (from >= 0 && rowHeight > 0f) (dragOffset / rowHeight).roundToInt() else 0
-    val target = (from + moved).coerceIn(0, (state.queue.size - 1).coerceAtLeast(0))
+    val scope = rememberCoroutineScope()
+    val plain = reduceMotion()
     val look = LocalLook.current
     val quiet = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON_VARIANT) }
     val accent = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ACCENT) }
     val ink = androidx.compose.ui.graphics.ColorProducer { look.color(CoverLook.ON) }
+    // A swipe's strip in the page's own colours: the player is dressed in the cover's, not the theme's.
+    val swipeColours = remember(look) {
+        SwipeColours({ look.color(CoverLook.VEIL_13) }, { look.color(CoverLook.ACCENT) }, { look.color(CoverLook.ON_VARIANT) }, { look.color(CoverLook.ON_PRIMARY) })
+    }
+    var listWidth by remember { mutableFloatStateOf(0f) }
 
+  Box(Modifier.fillMaxSize()) {
     // Shuffle and repeat live here, pinned above the list - not in the transport, and never scrolled
     // away (the list opens at the playing row, which used to hide them).
     Column(Modifier.fillMaxSize()) {
@@ -2462,12 +2474,21 @@ private fun Queue(vm: PlayerViewModel) {
         }
     // In the order the songs will play, which under shuffle is not the order of the list itself. A drag
     // moves a song within the list, so reordering is offered only when the two are the same.
-    // Which order, and whether a drag may reorder it, are the core's (`queue_rows`, over the order it keeps).
-    val rows = remember(state.order, state.queue.size, state.shuffle) {
-        dev.nori.music.ffi.queueRows(state.queue.size.toUInt(), state.shuffle)
+    // Which order, whether a drag may reorder it and which rows a swipe leaves are the core's (`queue_rows`).
+    val rows = remember(state.order, state.queue.size, state.shuffle, state.index) {
+        dev.nori.music.ffi.queueRows(state.queue.size.toUInt(), state.shuffle, state.index)
     }
     val order = remember(rows) { rows.order.map { it.toInt() } }
+    val kept = remember(rows) { rows.kept.map { it.toInt() }.toSet() }
+    val keys = remember(state.queue) { queueKeys(state.queue.map { it.id }) }
     val reorderable = rows.reorderable
+    val queueNow by rememberUpdatedState(state.queue)
+    drag.size = state.queue.size
+    // A drop has landed when the queue is no longer the one it was sent against. On that frame the rows
+    // are laid out where they were already drawn: their shifts go (before this frame is laid out) and
+    // they do not also slide there.
+    val landed = drag.landed(state.queue)
+    SideEffect { if (landed) drag.clear() }
     // The last row is cut off dead straight where the list ends, a few pixels above the song's title,
     // and those few pixels are the ones that flickered as a panel came or went: a row half drawn, over
     // a title arriving in the same place. It goes soft over the last stretch instead, the way the
@@ -2476,6 +2497,7 @@ private fun Queue(vm: PlayerViewModel) {
     val fadeOut = with(androidx.compose.ui.platform.LocalDensity.current) { 28.dp.toPx() }
     LazyColumn(
         Modifier.fillMaxSize().weight(1f)
+            .onSizeChanged { listWidth = it.width.toFloat() }
             .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
             .drawWithCache {
                 // One brush per size, not one per frame of a scroll.
@@ -2494,69 +2516,197 @@ private fun Queue(vm: PlayerViewModel) {
             },
         state = list,
     ) {
-        itemsIndexed(order, key = { _, i -> "$i-${state.queue[i].id}" }, contentType = { _, _ -> "song" }) { at, i ->
+        itemsIndexed(order, key = { _, i -> keys[i] }, contentType = { _, _ -> "song" }) { at, i ->
             val s = state.queue[i]
-            val held = at == from
-            val shift = when {
-                from < 0 -> 0f
-                held -> dragOffset
-                at in (from + 1)..target -> -rowHeight
-                at in target until from -> rowHeight
-                else -> 0f
+            val key = keys[i]
+            // Only the row picked up and put down recomposes; the drag itself is read in the layer below.
+            val held by remember(key) { derivedStateOf { drag.liftKey == key } }
+            val place by rememberUpdatedState(at)
+            val back = undo.returning?.takeIf { it.key == key }
+            // A row put back by the undo comes in from the side it left by, and does not fade as well.
+            val swipe = remember { SwipeState().apply { if (back != null && !plain && back.side != 0f) offset.floatValue = back.side * listWidth } }
+            LaunchedEffect(Unit) {
+                if (undo.returning?.key != key) return@LaunchedEffect
+                undo.arrived(key)
+                if (swipe.offset.floatValue != 0f) androidx.compose.animation.core.animate(
+                    swipe.offset.floatValue, 0f, animationSpec = spring(dampingRatio = 0.9f, stiffness = 420f),
+                ) { v, _ -> swipe.offset.floatValue = v }
             }
-            Row(
+            val take = RowSwipe(Icons.Filled.PlaylistRemove, say.remove) {
+                // Where the song is now: the list may have moved under a slow swipe.
+                val now = vm.state.value.queue
+                val index = queueKeys(now.map { it.id }).indexOf(key)
+                if (index >= 0) {
+                    undo.took(now[index], index, key, -1f)
+                    vm.remove(index)
+                }
+            }
+            Box(
                 Modifier.fillMaxWidth()
-                    .zIndex(if (held) 1f else 0f)
-                    .graphicsLayer { translationY = shift; if (held) { shadowElevation = 14f; scaleX = 1.02f; scaleY = 1.02f } }
-                    .onGloballyPositioned { if (rowHeight == 0f) rowHeight = it.size.height.toFloat() }
-                    .clickable { vm.skipTo(i) }
-                    .padding(vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
-                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                    LookText(
-                        s.title, if (i == state.index) accent else ink,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
+                    .animateItem(
+                        fadeInSpec = if (plain || back != null) null else tween(QUEUE_IN_MS),
+                        placementSpec = if (plain || landed) null else tween(QUEUE_MOVE_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                        fadeOutSpec = if (plain) null else tween(QUEUE_OUT_MS),
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Added by hand: plays before the rest of the queue carries on.
-                        if (i in state.queued) LookIcon(Icons.AutoMirrored.Filled.QueueMusic, say.addedByYou, Modifier.padding(end = 4.dp).size(14.dp), accent)
-                        LookText(s.artist, quiet, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                    .zIndex(if (held) 1f else 0f)
+                    .graphicsLayer {
+                        translationY = drag.shift(place)
+                        if (drag.liftKey == key) {
+                            val l = drag.lift.floatValue
+                            shadowElevation = 14f * l; scaleX = 1f + 0.02f * l; scaleY = 1f + 0.02f * l
+                        }
                     }
+                    .onGloballyPositioned { if (drag.rowHeight == 0f) drag.rowHeight = it.size.height.toFloat() },
+            ) {
+                // The song playing only gives a little and comes back: a swipe does not stop the music
+                // (the × does, on purpose). Leftwards only: rightwards from the edge is the back gesture's.
+                SwipeBackdrop(swipe, null, if (i in kept) null else take, Modifier.matchParentSize(), swipeColours, reveal = true, inset = 12.dp)
+                Row(
+                    Modifier.fillMaxWidth()
+                        .swipeable(swipe, null, if (i in kept) null else take, null, gone = true, resist = i in kept)
+                        .clickable { vm.skipTo(i) }
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Cover(vm.cover(s.coverArt, CoverSize.ROW), 44.dp, radius = 6.dp)
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        LookText(
+                            s.title, if (i == state.index) accent else ink,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge,
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // Added by hand: plays before the rest of the queue carries on.
+                            if (i in state.queued) LookIcon(Icons.AutoMirrored.Filled.QueueMusic, say.addedByYou, Modifier.padding(end = 4.dp).size(14.dp), accent)
+                            LookText(s.artist, quiet, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    IconButton({ undo.took(s, i, key, 0f); vm.remove(i) }, Modifier.size(38.dp)) {
+                        LookIcon(Icons.Filled.Close, say.remove, Modifier.size(19.dp), quiet)
+                    }
+                    androidx.compose.animation.AnimatedVisibility(
+                        reorderable,
+                        enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
+                        exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
+                    ) { LookIcon(
+                        Icons.Filled.DragHandle, say.reorder,
+                        tint = { if (drag.liftKey == key) androidx.compose.ui.graphics.lerp(quiet(), accent(), drag.lift.floatValue) else quiet() },
+                        modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
+                            var lifting: kotlinx.coroutines.Job? = null
+                            fun lift(to: Float) {
+                                lifting?.cancel()
+                                lifting = scope.launch {
+                                    if (plain) drag.lift.floatValue = to
+                                    else androidx.compose.animation.core.animate(drag.lift.floatValue, to, animationSpec = tween(QUEUE_LIFT_MS)) { v, _ -> drag.lift.floatValue = v }
+                                    if (to == 0f && drag.liftKey == key) drag.liftKey = null
+                                }
+                            }
+                            // Let go: the row settles into the slot it is over, and only then is the move
+                            // sent; the rows stay drawn where they are until the queue has changed.
+                            fun drop(send: Boolean) {
+                                val from = drag.from
+                                if (from < 0) return
+                                val to = if (send) drag.target() else from
+                                val h = drag.rowHeight
+                                scope.launch {
+                                    val rest = (to - from) * h
+                                    if (plain) drag.offset.floatValue = rest
+                                    else androidx.compose.animation.core.animate(drag.offset.floatValue, rest, animationSpec = tween(QUEUE_DROP_MS, easing = androidx.compose.animation.core.FastOutSlowInEasing)) { v, _ -> drag.offset.floatValue = v }
+                                    lift(0f)
+                                    if (to == from || drag.from != from) { if (drag.from == from) drag.clear(); return@launch }
+                                    drag.landing = queueNow
+                                    vm.move(from, to)
+                                    // A move that never arrives does not hold the rows up for good.
+                                    kotlinx.coroutines.delay(QUEUE_LANDING_MS)
+                                    if (drag.landing != null && drag.from == from) drag.clear()
+                                }
+                            }
+                            detectDragGestures(
+                                onDragStart = {
+                                    drag.clear()
+                                    drag.from = place
+                                    drag.liftKey = key
+                                    lift(1f)
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                },
+                                onDragEnd = { drop(send = true) },
+                                onDragCancel = { drop(send = false) },
+                            ) { change, d -> change.consume(); drag.offset.floatValue += d.y }
+                        },
+                    ) }
                 }
-                IconButton({ vm.remove(i) }, Modifier.size(38.dp)) {
-                    LookIcon(Icons.Filled.Close, say.remove, Modifier.size(19.dp), quiet)
-                }
-                androidx.compose.animation.AnimatedVisibility(
-                    reorderable,
-                    enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.expandHorizontally(),
-                    exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.shrinkHorizontally(),
-                ) { LookIcon(
-                    Icons.Filled.DragHandle, say.reorder,
-                    tint = if (held) accent else quiet,
-                    modifier = Modifier.size(44.dp).padding(11.dp).pointerInput(Unit) {
-                        detectDragGestures(
-                            onDragStart = {
-                                from = at; dragOffset = 0f
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            },
-                            onDragEnd = {
-                                // Worked out here, from the state as it is now: pointerInput(Unit) keeps
-                                // the block it was created with, so anything computed during composition
-                                // is frozen at its first value - which quietly meant "did not move".
-                                val h = rowHeight
-                                val size = vm.state.value.queue.size
-                                val to = if (h > 0f) (from + (dragOffset / h).roundToInt()).coerceIn(0, (size - 1).coerceAtLeast(0)) else from
-                                if (from >= 0 && to != from) vm.move(from, to)
-                                from = -1; dragOffset = 0f
-                            },
-                            onDragCancel = { from = -1; dragOffset = 0f },
-                        ) { change, drag -> change.consume(); dragOffset += drag.y }
-                    },
-                ) }
             }
         }
     }
+    }
+    UndoPill(undo, plain, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp)) { t ->
+        vm.restore(t.item, t.index)
+    }
+  }
+}
+
+/** How the queue's rows come, go and move: a row appearing, a row leaving (after a swipe it is already off the side), the rest closing up. */
+private const val QUEUE_IN_MS = 220
+private const val QUEUE_OUT_MS = 160
+private const val QUEUE_MOVE_MS = 260
+/** A held row lifting and settling, and a dropped row going into its slot. */
+private const val QUEUE_LIFT_MS = 150
+private const val QUEUE_DROP_MS = 140
+/** How long the rows wait for a move to reach the queue before they give it up. */
+private const val QUEUE_LANDING_MS = 1_000L
+/** How long the undo is offered for. */
+private const val UNDO_MS = 5_000L
+private const val UNDO_IN_MS = 240f
+private const val UNDO_OUT_MS = 170f
+
+/**
+ * "Removed “song” · Undo", a small pill over the foot of the queue for a few seconds after a song is taken
+ * out. It rises and fades in, and sinks and fades out showing what it said, taking no taps as it goes. A
+ * second song taken out while it is up replaces the words in place.
+ */
+@Composable
+private fun UndoPill(undo: QueueUndo<Song>, plain: Boolean, modifier: Modifier, restore: (QueueUndo.Taken<Song>) -> Unit) {
+    val now = undo.shown
+    val shown = remember { Animatable(0f) }
+    var last by remember { mutableStateOf(now) }
+    if (now != null) last = now
+    LaunchedEffect(now) {
+        val t = now ?: return@LaunchedEffect
+        kotlinx.coroutines.delay(UNDO_MS)
+        undo.expire(t)
+    }
+    LaunchedEffect(now != null) {
+        val to = if (now != null) 1f else 0f
+        if (shown.value == to) return@LaunchedEffect
+        if (plain) shown.animateTo(to, tween(120, easing = androidx.compose.animation.core.LinearEasing))
+        else shown.fadeByFrames(to, if (to == 1f) UNDO_IN_MS else UNDO_OUT_MS)
+    }
+    val present by remember { derivedStateOf { shown.value > 0f } }
+    val t = last ?: return
+    if (now == null && !present) return
+    val look = LocalLook.current
+    val rise = with(androidx.compose.ui.platform.LocalDensity.current) { 12.dp.toPx() }
+    Row(
+        modifier
+            .graphicsLayer {
+                val v = fadeEase(shown.value)
+                alpha = v
+                if (!plain) translationY = (1f - v) * rise
+            }
+            .clip(RoundedCornerShape(50))
+            // The pill takes every touch on it, as it fades out too: a tap meant for Undo a moment late
+            // must not fall through to the × of the row under it and take another song out.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Final).changes.forEach { it.consume() } } }
+            .drawBehind { drawRect(look.color(CoverLook.SURFACE_CONTAINER_HIGH)) }
+            .padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LookText(
+            say.queueRemoved(t.item.title), { look.color(CoverLook.ON) }, Modifier.widthIn(max = 220.dp),
+            style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        // Taps only while it is there to be read, not as it goes.
+        androidx.compose.material3.TextButton({ if (undo.shown === t) undo.undo()?.let(restore) }, enabled = now != null) {
+            LookText(say.undo, { look.color(CoverLook.ACCENT) }, style = MaterialTheme.typography.labelLarge.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), maxLines = 1)
+        }
     }
 }

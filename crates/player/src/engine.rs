@@ -47,6 +47,11 @@ const HOLD_GRACE_MS: i64 = 10_000;
 /// How long a null plan is trusted before it is asked for again.
 const NULL_PLAN_RETRY_MS: i64 = 2_000;
 
+/// The song time `frames` of output carry at `pace` song frames each, µs.
+fn span_us(frames: usize, pace: f64, out: Format) -> i64 {
+    (frames as f64 * pace * 1_000_000.0 / out.rate as f64).round() as i64
+}
+
 /// How to get out of one track into the next, as the planner hands it over.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
@@ -90,6 +95,12 @@ pub trait Downstream {
     /// recognise it. What the engine hands down is always its own memory, so it can.
     fn handle_buffer(&mut self, data: &[u8], from: usize, pts_us: i64) -> (bool, usize);
     fn handle_discontinuity(&mut self);
+    /// How much of the song each frame offered from now on stands for: 1, but for a song brought into a
+    /// mix at another tempo (1.07: every frame heard is 1.07 frames of the song), until it is back at its
+    /// own. An output counts what it has played in the song's time, and its clock with it, so the place
+    /// said is where in the song the music heard is - never the output's own time run on at one times,
+    /// which fell behind through a stretch and leapt ahead where the song's own timestamps came back.
+    fn media_pace(&mut self, _pace: f64) {}
     /// µs, or [`POSITION_NOT_SET`].
     fn position_us(&mut self, source_ended: bool) -> i64;
 }
@@ -153,6 +164,8 @@ struct Chunk {
     resync: bool,
     measure: bool,
     stream_us: i64,
+    /// The song time each frame stands for ([`Downstream::media_pace`]).
+    pace: f64,
 }
 
 /// Staged decode-ahead formats: which song, its format, and the platform's token for it.
@@ -230,8 +243,16 @@ pub struct TransitionEngine<C: Clone> {
     skip_left: usize,
     resync_next: bool,
     measure_next: bool,
-    /// Mixed and stretched audio carries its own continuous clock; real timestamps resume after a resync.
+    /// Mixed and stretched audio carries its own continuous clock, in the incoming song's own time (a
+    /// stretched frame moves it on by the song time it carries); real timestamps resume after a resync.
     synthetic_pts_us: i64,
+    /// Where in its stream the first sample of the incoming song a stretched mix takes lies (past the
+    /// skip into it): the running clock starts there.
+    mix_in_pts_us: i64,
+    /// The song time per frame of what the stretcher last handed out, and the song time the last frames of
+    /// a stretcher that just finished carried.
+    stretch_pace: f64,
+    last_content: f64,
     /// Mix-time frame cursor when the outgoing hold is looped for longer than it was captured.
     mix_out_frame: usize,
     mix_out_frames: usize,
@@ -322,6 +343,9 @@ impl<C: Clone> TransitionEngine<C> {
             resync_next: false,
             measure_next: false,
             synthetic_pts_us: TIME_UNSET,
+            mix_in_pts_us: TIME_UNSET,
+            stretch_pace: 1.0,
+            last_content: 0.0,
             mix_out_frame: 0,
             mix_out_frames: 0,
             out_loop_frames: 0,
@@ -969,6 +993,9 @@ impl<C: Clone> TransitionEngine<C> {
             );
             self.stretch = Some(s);
             self.stretch_format = Some(s_fmt);
+            self.mix_in_pts_us = TIME_UNSET;
+            self.stretch_pace = p.tempo_ratio as f64;
+            self.last_content = 0.0;
         }
         self.skip_left = s_fmt.bytes(p.in_skip_us + in_late_us);
     }
@@ -976,13 +1003,19 @@ impl<C: Clone> TransitionEngine<C> {
     /// The incoming track, mixed into the held ending of the outgoing one.
     fn mix<H: Host>(&mut self, host: &mut H, buffer: &[u8], pts_us: i64, out: Format) {
         let mut buffer = buffer;
+        let mut first_us = pts_us;
         if self.skip_left > 0 {
             let n = self.skip_left.min(buffer.len());
             buffer = &buffer[n..];
             self.skip_left -= n;
+            first_us += self.conv_in.unwrap_or(out).us(n);
             if buffer.is_empty() {
                 return;
             }
+        }
+        if self.stretch.is_some() && self.synthetic_pts_us == TIME_UNSET && self.mix_in_pts_us == TIME_UNSET {
+            // The first of the incoming song mixed in: the stretcher's first frame out is this one's time.
+            self.mix_in_pts_us = first_us;
         }
         // Through the stretcher in the incoming domain, then converted to the outgoing one the held
         // tail is in.
@@ -1009,6 +1042,7 @@ impl<C: Clone> TransitionEngine<C> {
             None
         };
         let src: &[u8] = converted.as_deref().unwrap_or(buffer);
+        let pace = if stretched.is_some() { self.stretch_pace } else { 1.0 };
         let fb = out.frame_bytes();
         let remaining = if self.out_loop_frames > 0 { self.mix_out_frames.saturating_sub(self.mix_out_frame) } else { usize::MAX };
         let tail_frames = if self.out_loop_frames > 0 { remaining } else { (self.tail_len - self.tail_read) / fb };
@@ -1024,11 +1058,11 @@ impl<C: Clone> TransitionEngine<C> {
                 if let Some(m) = self.mixer.as_mut() {
                     unsafe { mix_raw(m, chunk.as_ptr(), src.as_ptr(), chunk.as_mut_ptr(), frames, out.encoding) };
                 }
-                let at = self.stamp(pts_us, frames, out);
+                let at = self.stamp(pts_us, frames, pace, out);
                 let c = self.copy_of(&chunk);
                 self.loop_buf = chunk;
-                self.enqueue(c, at, TIME_UNSET);
-                self.mixed_end_us = at + frames as i64 * 1_000_000 / out.rate as i64;
+                self.enqueue_paced(c, at, TIME_UNSET, pace);
+                self.mixed_end_us = at + span_us(frames, pace, out);
                 self.mix_out_frame += frames;
             } else {
                 let r = self.tail_read;
@@ -1036,21 +1070,21 @@ impl<C: Clone> TransitionEngine<C> {
                     let t = self.tail[r..r + bytes].as_mut_ptr();
                     unsafe { mix_raw(m, t, src.as_ptr(), t, frames, out.encoding) };
                 }
-                let at = self.stamp(pts_us, frames, out);
+                let at = self.stamp(pts_us, frames, pace, out);
                 let mut c = self.take_pooled(bytes);
                 c.extend_from_slice(&self.tail[r..r + bytes]);
-                self.enqueue(c, at, TIME_UNSET);
-                self.mixed_end_us = at + frames as i64 * 1_000_000 / out.rate as i64;
+                self.enqueue_paced(c, at, TIME_UNSET, pace);
+                self.mixed_end_us = at + span_us(frames, pace, out);
                 self.tail_read += bytes;
             }
             used = bytes;
         }
         if used < src.len() && self.out_loop_frames == 0 {
             let rest = &src[used..];
-            let at = self.stamp(pts_us, rest.len() / fb, out);
+            let at = self.stamp(pts_us, rest.len() / fb, pace, out);
             let c = self.copy_of(rest);
-            self.enqueue(c, at, self.offset_us);
-            self.mixed_end_us = at + (rest.len() / fb) as i64 * 1_000_000 / out.rate as i64;
+            self.enqueue_paced(c, at, self.offset_us, pace);
+            self.mixed_end_us = at + span_us(rest.len() / fb, pace, out);
         }
         if let Some(b) = converted {
             self.recycle(b);
@@ -1118,13 +1152,21 @@ impl<C: Clone> TransitionEngine<C> {
     }
 
     /// Timestamps while mixing and stretching are the engine's own running clock, so a stretch never
-    /// reads as a jump.
-    fn stamp(&mut self, pts_us: i64, frames: usize, out: Format) -> i64 {
+    /// reads as a jump. The clock runs in the incoming song's time, from its first sample mixed in:
+    /// `frames` of stretched audio move it on by the song time they carry (`pace` each), so that it is
+    /// still the song's own where its timestamps come back.
+    fn stamp(&mut self, pts_us: i64, frames: usize, pace: f64, out: Format) -> i64 {
         if self.stretch.is_none() && self.synthetic_pts_us == TIME_UNSET {
             return pts_us;
         }
-        let at = if self.synthetic_pts_us == TIME_UNSET { pts_us } else { self.synthetic_pts_us };
-        self.synthetic_pts_us = at + frames as i64 * 1_000_000 / out.rate as i64;
+        let at = if self.synthetic_pts_us != TIME_UNSET {
+            self.synthetic_pts_us
+        } else if self.mix_in_pts_us != TIME_UNSET {
+            std::mem::replace(&mut self.mix_in_pts_us, TIME_UNSET)
+        } else {
+            pts_us
+        };
+        self.synthetic_pts_us = at + span_us(frames, pace, out);
         at
     }
 
@@ -1136,6 +1178,7 @@ impl<C: Clone> TransitionEngine<C> {
         let s = self.stretch.as_mut()?;
         let mut produced = 0;
         let mut at = 0;
+        let fb = fmt.frame_bytes();
         while at < input.len() {
             let (used, made) = s.process(&input[at..], &mut buf[produced..], fmt.encoding);
             at += used;
@@ -1146,6 +1189,14 @@ impl<C: Clone> TransitionEngine<C> {
         }
         if s.bypassed() {
             produced = self.finish_stretch(&mut buf, produced, fmt);
+        }
+        // The song time the frames out carry, per frame: the finished stretcher's last frames counted in.
+        let content = match self.stretch.as_mut() {
+            Some(s) => s.take_content(),
+            None => std::mem::take(&mut self.last_content),
+        };
+        if produced >= fb {
+            self.stretch_pace = content / (produced / fb) as f64;
         }
         buf.truncate(produced);
         if produced == 0 {
@@ -1176,16 +1227,17 @@ impl<C: Clone> TransitionEngine<C> {
             s
         };
         let frames = o.len() / out.frame_bytes();
+        let pace = self.stretch_pace;
         // Finished: the track's own timestamps begin with the buffer after this audio, and that is where
         // the output takes its new reference.
         let resync = self.stretch.is_none() && std::mem::take(&mut self.resync_next);
-        self.enqueue(o, at, self.offset_us);
+        self.enqueue_paced(o, at, self.offset_us, pace);
         self.resync_next |= resync;
         // Only a running clock moves on: the stretcher may have just finished and handed the track
         // back to its own timestamps. (The Kotlin sink added to the unset marker here, leaving a garbage
         // clock for the next mix to stamp its audio with.)
         if self.synthetic_pts_us != TIME_UNSET {
-            self.synthetic_pts_us += frames as i64 * 1_000_000 / out.rate as i64;
+            self.synthetic_pts_us += span_us(frames, pace, out);
         }
     }
 
@@ -1201,6 +1253,8 @@ impl<C: Clone> TransitionEngine<C> {
             }
             None => 0,
         };
+        // What it carried is asked for once it is gone.
+        self.last_content = self.stretch.as_mut().map_or(0.0, |s| s.take_content());
         self.stretch = None;
         self.stretch_format = None;
         // Back on the track's own timestamps: tell the real output to take the next one as a new reference.
@@ -1298,11 +1352,16 @@ impl<C: Clone> TransitionEngine<C> {
 
     /// Queues `data` at `pts_us`, made of the song on the stream at `stream_us` alone (`TIME_UNSET`: a mix).
     fn enqueue(&mut self, data: Vec<u8>, pts_us: i64, stream_us: i64) {
+        self.enqueue_paced(data, pts_us, stream_us, 1.0);
+    }
+
+    /// [`TransitionEngine::enqueue`], each frame standing for `pace` frames of the song.
+    fn enqueue_paced(&mut self, data: Vec<u8>, pts_us: i64, stream_us: i64, pace: f64) {
         if data.is_empty() {
             self.recycle(data);
             return;
         }
-        self.queue.push_back(Chunk { data, pos: 0, pts_us, resync: self.resync_next, measure: self.measure_next, stream_us });
+        self.queue.push_back(Chunk { data, pos: 0, pts_us, resync: self.resync_next, measure: self.measure_next, stream_us, pace });
         self.resync_next = false;
         self.measure_next = false;
     }
@@ -1338,6 +1397,7 @@ impl<C: Clone> TransitionEngine<C> {
                 down.handle_discontinuity();
             }
             let before = if c.measure { down.position_us(false) } else { 0 };
+            down.media_pace(c.pace);
             let (taken, used) = down.handle_buffer(&c.data, c.pos, c.pts_us);
             c.pos += used;
             if c.measure {
@@ -1392,16 +1452,19 @@ impl<C: Clone> TransitionEngine<C> {
         let was_heard = self.heard.id.is_some();
         // The mix is heard but the incoming song is not the louder yet: the clock below is already the
         // incoming song's, and the ear is still on the ending, where the mix began plus the time since.
+        // That clock runs in the incoming song's time, which a stretched mix moves on faster (or slower)
+        // than the ending is heard: the time since the mix began is the incoming song's over its tempo.
+        let pace = self.heard.next_rate.max(0.01) as f64;
         let taking_over = self.shift_us == 0
             && self.mix_from_us != TIME_UNSET
             && self.held_from_us != TIME_UNSET
             && at >= self.mix_from_us
-            && at < self.mix_from_us + self.takeover_us;
+            && at < self.mix_from_us + (self.takeover_us as f64 * pace) as i64;
         match &self.held_id {
             Some(id) if self.reported > ear + 20_000 || taking_over => {
                 let start = (self.held_from_us != TIME_UNSET).then(|| self.held_from_us - self.held_offset_us);
                 self.heard.us = match start {
-                    Some(start) if taking_over && self.reported <= ear + 20_000 => start + at - self.mix_from_us,
+                    Some(start) if taking_over && self.reported <= ear + 20_000 => start + ((at - self.mix_from_us) as f64 / pace) as i64,
                     _ => ear - self.held_offset_us,
                 };
                 self.heard.until_us = start.map_or(i64::MAX, |start| start + self.takeover_us);
@@ -1519,6 +1582,9 @@ impl<C: Clone> TransitionEngine<C> {
         self.resync_next = false;
         self.measure_next = false;
         self.synthetic_pts_us = TIME_UNSET;
+        self.mix_in_pts_us = TIME_UNSET;
+        self.stretch_pace = 1.0;
+        self.last_content = 0.0;
         self.stretch = None;
         self.stretch_format = None;
         self.pending_stretch = None;

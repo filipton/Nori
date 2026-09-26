@@ -129,48 +129,14 @@ pub const SOUND: u32 = 8;
 /// again.
 pub const PLAYER: u32 = 16;
 
-/// What a change from `a` to `b` asks of the player.
+/// What a change from `a` to `b` asks of the player: each setting's own bits from the table
+/// (settings.rs), and the output chain rebuilt when the sound chain starts or stops being needed.
+/// Balance and crossfeed are read by the chain as it runs, so dragging them matters only then: a drag's
+/// every step used to rebuild the audio policy, the transitions and the track selection.
 fn effects(a: &StoredPrefs, b: &StoredPrefs) -> u32 {
-    // Balance and crossfeed are read by the chain as it runs, so dragging them only matters here when the
-    // chain starts or stops being needed: a drag's every step used to rebuild the audio policy, the
-    // transitions and the track selection.
     let on = |p: &StoredPrefs| nori_player::sound::sound_on(p.eq_enabled, p.crossfeed_db, p.balance, p.mono, p.limiter);
-    let audio = (on(a), a.eq_enabled, a.mono, a.limiter, a.skip_silence, a.offload, a.crossfade_sec, a.auto_mix, a.speed, a.pitch, a.bit_perfect)
-        != (on(b), b.eq_enabled, b.mono, b.limiter, b.skip_silence, b.offload, b.crossfade_sec, b.auto_mix, b.speed, b.pitch, b.bit_perfect);
-    let sound = (a.eq_enabled, a.mono, a.limiter, a.balance, a.crossfeed_db, a.eq_preamp_db, a.limiter_threshold_db, &a.eq_bands)
-        != (b.eq_enabled, b.mono, b.limiter, b.balance, b.crossfeed_db, b.eq_preamp_db, b.limiter_threshold_db, &b.eq_bands);
-    let gain = (a.replay_gain, a.preamp_db, a.untagged_gain_db) != (b.replay_gain, b.preamp_db, b.untagged_gain_db);
-    let player = (a.fade_ms, a.hi_res) != (b.fade_ms, b.hi_res);
-    let plan = (
-        a.auto_mix,
-        a.crossfade_sec,
-        a.auto_mix_max_s,
-        a.auto_mix_beat_match,
-        a.auto_mix_max_tempo_pct,
-        a.auto_mix_bass_swap,
-        a.auto_mix_filters,
-        a.auto_mix_echo_out,
-        a.auto_mix_keep_pitch,
-        a.crossfade_keep_albums,
-        a.replay_gain,
-    ) != (
-        b.auto_mix,
-        b.crossfade_sec,
-        b.auto_mix_max_s,
-        b.auto_mix_beat_match,
-        b.auto_mix_max_tempo_pct,
-        b.auto_mix_bass_swap,
-        b.auto_mix_filters,
-        b.auto_mix_echo_out,
-        b.auto_mix_keep_pitch,
-        b.crossfade_keep_albums,
-        b.replay_gain,
-    );
-    (if audio { APPLY_AUDIO } else { 0 })
-        | (if gain { APPLY_GAIN } else { 0 })
-        | (if plan { REPLAN } else { 0 })
-        | (if sound { SOUND } else { 0 })
-        | (if player { PLAYER } else { 0 })
+    let chain = if on(a) != on(b) { APPLY_AUDIO } else { 0 };
+    crate::settings::ROWS.iter().filter(|r| r.effect != 0 && (r.changed)(a, b)).fold(chain, |e, r| e | r.effect)
 }
 
 /// The settings changed; kept now and written on the core's background thread. Returns what the
@@ -368,10 +334,10 @@ mod tests {
         let a = StoredPrefs::default();
         let theme = StoredPrefs { amoled: !a.amoled, ..a.clone() };
         assert_eq!(effects(&a, &theme), 0, "a screen's setting");
-        let bands = StoredPrefs { eq_bands: vec![crate::settings::SoundBand { kind: 0, freq: 100.0, gain_db: 3.0, q: 1.0, channel: 0 }], ..a.clone() };
+        let bands = StoredPrefs { eq_bands: vec![crate::settings::band_from(0, 100.0, 3.0, 1.0, 0)], ..a.clone() };
         assert_eq!(effects(&a, &bands), SOUND, "the sound chain follows its bands by itself");
         assert_eq!(effects(&a, &StoredPrefs { eq_enabled: true, ..a.clone() }), APPLY_AUDIO | SOUND);
-        assert_eq!(effects(&a, &StoredPrefs { replay_gain: 1, ..a.clone() }), APPLY_GAIN | REPLAN);
+        assert_eq!(effects(&a, &StoredPrefs { replay_gain: crate::settings::GainMode::Track, ..a.clone() }), APPLY_GAIN | REPLAN);
         assert_eq!(effects(&a, &StoredPrefs { crossfade_sec: 6, ..a.clone() }), APPLY_AUDIO | REPLAN);
         assert_eq!(effects(&a, &StoredPrefs { auto_mix_bass_swap: !a.auto_mix_bass_swap, ..a.clone() }), REPLAN);
         // Read once when the player started, these went unheard until the app was started again.

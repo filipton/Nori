@@ -1954,6 +1954,7 @@ dependencies = [
  "nori-look",
  "nori-model",
  "nori-net",
+ "nori-settings",
  "parking_lot",
  "rusqlite",
  "serde",
@@ -1975,12 +1976,15 @@ dependencies = [
  "nori-look",
  "nori-model",
  "nori-net",
+ "nori-player",
  "nori-settings",
  "parking_lot",
  "roxmltree",
+ "rustfft",
  "serde",
  "serde_json",
  "uniffi",
+ "ureq",
  "yaml-rust2",
 ]
 
@@ -2043,6 +2047,7 @@ name = "nori-player"
 version = "0.3.3"
 dependencies = [
  "ebur128",
+ "libc",
  "nori-player",
  "opus-rs",
  "prost",
@@ -2079,12 +2084,22 @@ dependencies = [
  "nori-look",
  "nori-model",
  "nori-player",
+ "nori-settings-derive",
  "nori-testdir",
  "parking_lot",
  "rusqlite",
  "serde_json",
  "thiserror 2.0.20",
  "uniffi",
+]
+
+[[package]]
+name = "nori-settings-derive"
+version = "0.3.3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

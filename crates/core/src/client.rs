@@ -106,6 +106,9 @@ impl Client {
 
     /// The profile's addresses, folder and bitrate cap; called when the profile is opened or edited.
     pub fn set_profile(&self, profile: NetProfile) {
+        if !blank(&profile.alt_url) {
+            crate::covers::cover_address_alike(&profile.url, &profile.alt_url);
+        }
         *self.profile.write() = profile;
     }
 

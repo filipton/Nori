@@ -314,7 +314,9 @@ fn watching() {
 pub const MAX_ASKING: usize = 4;
 
 static ASKING: Asking = Asking(Mutex::new(Vec::new()));
-static CROWDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// On in the app; off in this crate's own unit tests, which run side by side and would otherwise call
+/// each other's requests off (the one about crowding keeps an [`Asking`] of its own).
+static CROWDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(!cfg!(test));
 
 /// For tests that run many engines in one process only: their requests are not counted together. The
 /// most waiting at once is one player's (and one fetching ahead's), not every engine's in a test binary.
@@ -653,9 +655,22 @@ impl Loader {
         let l = loaded.clone();
         std::thread::Builder::new()
             .name("nori-load".into())
-            .spawn(move || l.run(&*source, &url, load, duration_ms, keep, taker))
+            .spawn(move || {
+                // A loader that panicked would leave its song waiting for bytes that never come, with
+                // nobody told: the song fails instead, as one whose bytes stopped coming.
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| l.run(&*source, &url, load, duration_ms, keep, taker))).is_err() {
+                    l.gave_up("the song's loader failed");
+                }
+            })
             .expect("a thread for loading");
         Arc::new(Loader(loaded))
+    }
+
+    /// Whether the song's bytes are still on their way: it is wanted, has not given up, and is not all
+    /// here. A song waiting for its bytes with none of this is waiting for nothing.
+    pub fn fetching(&self) -> bool {
+        let s = self.0.state.lock();
+        !s.closed && s.error.is_none() && !s.at_end()
     }
 
     /// A live stream (internet radio) at `url`, played for as long as it is held: see the module's words.
@@ -1099,6 +1114,20 @@ impl Loaded {
     }
 
     /// Bytes arrived: a blocked reader reads on, and a waiting engine is told once there is enough.
+    /// The loader stopped for good without saying why (its thread panicked): readers waiting are told the
+    /// song failed, and the engine is woken to hear it.
+    fn gave_up(&self, why: &str) {
+        let mut s = self.state.lock();
+        if s.error.is_none() && !s.at_end() {
+            s.error = Some(why.to_string());
+        }
+        // Nothing more comes, nor from anywhere a reader asks: it ends here.
+        s.done = true;
+        s.restart = None;
+        self.cv.notify_all();
+        self.wake(&mut s);
+    }
+
     fn wake(&self, s: &mut State) {
         if s.blocked > 0 {
             self.cv.notify_all();
@@ -1445,6 +1474,12 @@ mod tests {
         let all = read(&mut r, 300_000);
         assert!(all.iter().enumerate().all(|(i, &b)| b == i as u8));
         assert_eq!(r.read(&mut [0u8; 16]).unwrap(), 0, "the end");
+        // The loader lets its copy go on its own thread once the last bytes are in: a moment after the
+        // reader may have read them.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !l.on_disk() && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert!(l.on_disk(), "{}", l.words());
         assert_eq!((l.held(), l.holding()), (0, 0), "nothing kept in memory");
         assert!(l.complete());

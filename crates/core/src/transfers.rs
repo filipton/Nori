@@ -152,7 +152,7 @@ impl Core {
         let pending = self.downloads(false)?;
         // Of the finished songs only this session's are listed, and there are at most [`RECENT`] of those:
         // they are looked up one by one rather than the whole table read for them.
-        let recent: Vec<String> = with(|t| t.marks.iter().filter(|(_, m)| m.0 == Phase::Done).map(|(id, _)| id.clone()).collect());
+        let recent: Vec<String> = with(|t| t.marks.iter().filter(|(_, m)| matches!(m.0, Phase::Done | Phase::Processing { .. })).map(|(id, _)| id.clone()).collect());
         let done: Vec<crate::Song> = {
             let c = self.db.lock();
             let mut st = c.prepare_cached("SELECT json FROM downloads WHERE server=sid() AND id=?1 AND done=1")?;
@@ -217,7 +217,7 @@ pub(crate) mod tests {
         assert_eq!(r.finished, ["rc-a"]);
         assert_eq!(r.failed, [DownloadFailed { id: "rc-b".into(), progress: 0.5 }]);
         assert_eq!(core.downloads(true).unwrap().len(), 1, "recorded as finished");
-        assert_eq!(download_phase("rc-b".into()), Phase::Failed as i32);
+        assert_eq!(download_phase("rc-b".into()), Phase::Failed.code());
     }
 
     #[test]

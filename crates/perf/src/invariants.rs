@@ -11,8 +11,10 @@
 //!   [`STILL_MS`] (an offloaded track that does not is starved: the S22's silent offload);
 //! - an output is given music while it plays: presenting nothing new and given nothing new for
 //!   [`STARVED_MS`] is the music stopped while the player says it plays (the S22's silence after next was
-//!   pressed fast and long). Either break quotes the engine's own account of where it stood at its last
-//!   wake (the song, what it reads and waits for, the transition engine, every loader);
+//!   pressed fast and long) - but not while the engine says it waits: for a song's bytes (a provider's
+//!   song still coming, said to be buffering), or out a jump's dip. Either break quotes the engine's own
+//!   account of where it stood at its last wake (the song, what it reads and waits for, the transition
+//!   engine, every loader);
 //! - one press of a skip moves one song;
 //! - the song on the screen is the one heard, give or take [`DIFFER_MS`];
 //! - the lyrics shown are the song heard's;
@@ -35,6 +37,9 @@ pub const STILL_MS: i64 = 2_000;
 /// Playing, an output that presents nothing new and is given nothing new for longer than this was left
 /// without music: longer than [`STILL_MS`], so a song's first bytes a moment late are not a break.
 pub const STARVED_MS: i64 = 5_000;
+/// Playing, the place heard standing still this long with no output open and no song's bytes on their
+/// way is the engine playing nothing while it says it plays (the S22's classical playlist, 2026-09-26).
+pub const SILENT_MS: i64 = 5_000;
 /// The screen may trail the ear by this much at a song change.
 pub const DIFFER_MS: i64 = 1_000;
 /// Playing, the seek bar's place (or a controller's) further than this from the engine's own for longer
@@ -124,6 +129,12 @@ pub struct Watch {
     /// was said.
     bar_off: Off,
     word_off: Off,
+    /// The engine said at its last wake that it plays nothing now, though its track may be started: it
+    /// waits for a song's bytes, or out a jump's dip, or it is paused. Its CPU track is not expected to
+    /// be given anything meanwhile.
+    engine_quiet: bool,
+    /// The engine playing nothing with no output open was said, for the stretch of silence under way.
+    silent_said: bool,
 }
 
 /// A place far from the engine's: since when, and whether it was said.
@@ -201,6 +212,48 @@ impl Watch {
             ));
         }
         None
+    }
+
+    /// The engine woke and said whether it plays: music it makes reaching its output, not paused, not
+    /// waiting for a song's bytes nor out a jump's dip.
+    pub fn engine(&mut self, playing: bool) {
+        if self.engine_quiet && playing {
+            // The track's count starts again from its next reading.
+            self.outputs.retain(|(k, _)| k != "track");
+        }
+        self.engine_quiet = !playing;
+    }
+
+    /// The engine's own look at whether the music moves: playing, its place heard has stood still for
+    /// `quiet_ms` with no song's bytes on their way (the engine counts none while they are). With no
+    /// output open either for [`SILENT_MS`], nothing can be heard and nothing is coming: said once for each
+    /// stretch of it, with `state`, the engine's own account, and `disk`, what the stream cache keeps of the
+    /// song.
+    pub fn silent(&mut self, quiet_ms: i64, output_open: bool, song: Option<&str>, state: &str, disk: impl FnOnce() -> String) -> Option<Break> {
+        if quiet_ms < SILENT_MS || output_open {
+            if quiet_ms == 0 {
+                self.silent_said = false;
+            }
+            return None;
+        }
+        if self.silent_said {
+            return None;
+        }
+        self.silent_said = true;
+        let song = song.unwrap_or("no song");
+        Some(Break::new(
+            "silent",
+            format!("playing, but {song} stood still for {quiet_ms} ms with no output open and none of its bytes on their way; the engine: {state}; the stream cache: {}", disk()),
+        ))
+    }
+
+    /// The CPU's track, fed by the engine: [`Watch::output`], watched only while the engine says it plays.
+    /// Given nothing while it waits for a song's bytes is buffering, which the player says, not music
+    /// stopped behind its back; once it says it plays again, the output has the whole [`STARVED_MS`] from
+    /// then to be given something.
+    pub fn track(&mut self, m: &Moving) -> Option<Break> {
+        let m = Moving { playing: m.playing && !self.engine_quiet, ..*m };
+        self.output("track", &m)
     }
 
     /// The song heard changed to `id` (the player service's word).
@@ -398,6 +451,8 @@ fn said(t: i64, b: Option<Break>) {
     let line = b.line();
     nori_model::alog::info(&format!("invariant: {line}"));
     crate::perf_log::note_invariant(t, &line);
+    // What the app said as it broke, kept before logcat turns it over.
+    crate::perf_log::keep_break_log(t, &line);
     let mut kept = lock(&BREAKS);
     if kept.len() >= MOST_BREAKS {
         kept.remove(0);
@@ -435,17 +490,57 @@ pub struct PerfEngineSeen {
     pub in_output_ms: i64,
 }
 
-/// The engine's thread woke (nori-engine's watch hook, through the Android library); `state` is where it
-/// stands in its own words, kept to be quoted by a break of the output it feeds.
-pub fn engine_seen(now_ms: i64, playing: bool, offloaded: bool, index: Option<usize>, position_ms: i64, in_output_ms: i64, state: &str) {
+/// What the stream cache keeps of a song (by its id): whether it has an entry, its length, the spans
+/// cached and the length its metadata gives. The platform's, told once ([`describe_disk`]).
+static DISK: std::sync::OnceLock<fn(&str) -> String> = std::sync::OnceLock::new();
+
+/// The platform says how to describe what its stream cache keeps of a song, for a silent break.
+pub fn describe_disk(describe: fn(&str) -> String) {
+    let _ = DISK.set(describe);
+}
+
+fn disk_of(id: Option<&str>) -> String {
+    match (id, DISK.get()) {
+        (Some(id), Some(describe)) => describe(id),
+        (None, _) => "no song".into(),
+        (_, None) => "not known here".into(),
+    }
+}
+
+/// What the engine's thread saw at one wake (nori-engine's `watch::Seen`, handed on by the Android
+/// library): whether it plays, which song and where, what the output holds, how long the music has stood
+/// still while it should move (`quiet_ms`) and whether an output is open, and where it stands in its own
+/// words (`state`).
+#[derive(Debug, Clone, Default)]
+pub struct EngineLook<'a> {
+    pub now_ms: i64,
+    pub playing: bool,
+    pub offloaded: bool,
+    pub index: Option<usize>,
+    pub id: Option<&'a str>,
+    pub position_ms: i64,
+    pub in_output_ms: i64,
+    pub quiet_ms: i64,
+    pub output_open: bool,
+    pub state: &'a str,
+}
+
+/// The engine's thread woke (nori-engine's watch hook, through the Android library); its words for where
+/// it stands are kept to be quoted by a break of the output it feeds. The engine playing nothing with no
+/// output open is a break of its own ([`Watch::silent`]).
+pub fn engine_seen(l: &EngineLook) {
+    let EngineLook { now_ms, playing, offloaded, index, position_ms, in_output_ms, state, .. } = *l;
     let t = wall_ms();
     *lock(&ENGINE) = Some(PerfEngineSeen { wall_ms: t, playing, offloaded, index: index.map_or(-1, |i| i as i64), position_ms, in_output_ms });
+    with(|w| w.engine(playing));
     {
         let mut kept = lock(&ENGINE_STATE);
         kept.0 = t;
         kept.1.clear();
         kept.1.push_str(state);
     }
+    let b = with(|w| w.silent(l.quiet_ms, l.output_open, l.id, state, || disk_of(l.id)));
+    said(t, b);
     // The CPU's output is watched where it is written (the track's own writer, which reads the device);
     // the engine's word counts for the offloaded one, whose play head only the engine reads.
     if !offloaded {
@@ -468,6 +563,16 @@ fn with_engine(mut b: Break, now: i64) -> Break {
     b
 }
 
+/// A thread panicked (`thread`'s name, `what` and where): said as a break, with the app's own lines as it
+/// happened. The platform's panic hook calls this for every panic, caught or not; nothing unless the
+/// watch is on.
+pub fn panicked(thread: &str, what: &str) {
+    if !on() {
+        return;
+    }
+    said(wall_ms(), Some(Break::new("panic", format!("on {thread}: {what}"))));
+}
+
 /// The last thing the engine's thread saw; none before it woke with the watch on.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn perf_engine_seen() -> Option<PerfEngineSeen> {
@@ -478,7 +583,7 @@ pub fn perf_engine_seen() -> Option<PerfEngineSeen> {
 /// `rate` a second, `now_ms` by the monotonic clock.
 pub fn track_seen(now_ms: i64, playing: bool, written: u64, presented: u64, rate: u32) {
     let m = Moving { now_ms, playing, offloaded: false, song: None, written, presented, rate };
-    let b = with(|w| w.output("track", &m));
+    let b = with(|w| w.track(&m));
     let t = wall_ms();
     said(t, b.map(|b| with_engine(b, t)));
 }
@@ -659,9 +764,53 @@ mod tests {
     }
 
     #[test]
+    fn a_track_given_nothing_while_the_engine_waits_for_a_songs_bytes_is_buffering_not_starved() {
+        // The report's: a provider's song still on its way, the engine switching to it and waiting for
+        // its bytes, the track started and given nothing for five seconds and more.
+        let mut w = Watch::default();
+        w.engine(false);
+        w.track(&at(0, 0, 0));
+        assert_eq!(w.track(&at(5_019, 0, 0)), None, "waiting for a song's bytes is buffering");
+        assert_eq!(w.track(&at(12_000, 0, 0)), None, "however long the network takes");
+        // The bytes came and the engine plays: the track has the whole time from then to be given music.
+        w.engine(true);
+        assert_eq!(w.track(&at(13_000, 0, 0)), None);
+        assert_eq!(w.track(&at(17_500, 0, 0)), None, "4.5 s since the engine said it plays");
+        let b = w.track(&at(18_100, 0, 0)).expect("the engine says it plays and gives the track nothing");
+        assert_eq!(b.kind, "starved");
+        // The engine playing, with music in hand, and nothing reaching the output: said as before.
+        let mut w = Watch::default();
+        w.engine(true);
+        w.track(&at(0, 5000, 5000));
+        assert_eq!(w.track(&at(5_100, 5000, 5000)).map(|b| b.kind), Some("starved"));
+        // A track holding music it does not play is a stall once the engine plays: the output's own.
+        let mut w = Watch::default();
+        w.engine(false);
+        w.track(&at(0, 0, 100));
+        w.engine(true);
+        w.track(&at(100, 0, 100));
+        assert_eq!(w.track(&at(2_500, 0, 200)).map(|b| b.kind), Some("stalled"));
+    }
+
+    #[test]
+    fn the_engine_playing_nothing_with_no_output_open_is_said_once_a_stretch() {
+        let mut w = Watch::default();
+        let disk = || "no entry".to_string();
+        assert!(w.silent(SILENT_MS - 1, false, Some("s1"), "Playing", disk).is_none(), "not yet");
+        assert!(w.silent(9_000, true, Some("s1"), "Playing", disk).is_none(), "an open output is the track's own watch");
+        let b = w.silent(SILENT_MS, false, Some("s1"), "Playing; loaders: no loaders", disk).expect("silent");
+        assert_eq!(b.kind, "silent");
+        assert!(b.detail.contains("s1 stood still for 5000 ms") && b.detail.ends_with("loaders: no loaders; the stream cache: no entry"), "{}", b.detail);
+        assert!(w.silent(8_000, false, Some("s1"), "Playing", disk).is_none(), "said once");
+        // The music moved again: the next stretch of it is said again.
+        assert!(w.silent(0, false, Some("s1"), "Playing", disk).is_none());
+        assert!(w.silent(6_000, false, Some("s2"), "Playing", disk).is_some());
+    }
+
+    #[test]
     fn a_stall_of_the_track_quotes_where_the_engine_last_stood() {
         let state = "Playing; playing on 16 (s16) at 51 ms; reading 16 (s16) at 11000 ms; transition engine passing; loaders: s16: 0..90 of 90 bytes";
-        engine_seen(0, true, false, Some(16), 51, 100, state);
+        engine_seen(&EngineLook { playing: true, index: Some(16), position_ms: 51, in_output_ms: 100, state, ..EngineLook::default() });
         track_seen(0, true, 4410, 90_000, 44_100);
         track_seen(6_000, true, 4410, 90_000, 44_100);
         let breaks = perf_invariant_breaks();

@@ -431,6 +431,11 @@ impl RingTrack {
         OutputFormat { rate: format.rate, channels: format.channels, bits: if self.exact { self.bits } else { 0 } }
     }
 
+    /// Whether the device is open.
+    pub(crate) fn opened(&self) -> bool {
+        self.device.is_some()
+    }
+
     /// The device is let go (a long pause); the next stream opens it again.
     pub(crate) fn release(&mut self) {
         if self.device.take().is_some() {

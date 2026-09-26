@@ -17,6 +17,10 @@
 //! the same logits (within 1e-5) with about 100 MB held. Shorter chunks would also have cut the memory, but cost
 //! the model its context: its beats agreed less with the full model's (docs/research/analysis.md, section 7).
 //! Flash attention is kept on the calling thread (`TRACT_FLASH_SDPA_ST`), so the model never spreads over a pool.
+//! Measured on the host (tests/neural_memory.rs): the model holds 7.4 MB loaded, a song's two windows 65 MB more
+//! while they run whatever the song's length, and the song's decode 7-9 MB (its ends and the classical analyser; the
+//! song is never whole in memory). All of the run's memory is free again after it; nori-engine's measurer then hands
+//! it back to the system and runs one song's windows at a time in the whole process.
 
 use std::path::Path;
 use std::sync::Arc;

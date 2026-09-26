@@ -454,7 +454,7 @@ fn sound(b: &Build) -> Vec<Section> {
     let eq = vec![Row::Link { title: "Equalizer, crossfeed, balance, limiter".into(), status: eq_status.into(), action: "equalizer".into() }];
 
     let mut levelling = vec![b.named("replayGain", "ReplayGain", &["off", "track", "album", "auto"])];
-    if p.replay_gain != 0 {
+    if p.replay_gain != nori_core::settings::GainMode::Off {
         let r = EQ_RANGES.replay_gain_preamp;
         levelling.push(Row::Slider {
             name: "preampDb".into(),
@@ -771,8 +771,8 @@ impl EqRow {
             EqRow::AutoPreamp => ("Automatic pre-amp".into(), on(p.eq_preamp_db.is_none())),
             EqRow::Preamp => ("Pre-amp".into(), text::preamp(p.eq_preamp_db.unwrap_or(0.0), false)),
             EqRow::Band(i) => {
-                let b = p.eq_bands.get(i).copied().unwrap_or(SoundBand { kind: 0, freq: 0.0, gain_db: 0.0, q: 1.0, channel: 0 });
-                (text::band(b.freq, nori_core::settings::band_mark(b.kind, b.channel)), format!("{} dB", text::signed_db(b.gain_db)))
+                let b = p.eq_bands.get(i).copied().unwrap_or(nori_core::settings::band_from(0, 0.0, 0.0, 1.0, 0));
+                (text::band(b.freq, nori_core::settings::band_mark(b.kind as i32, b.channel as i32)), format!("{} dB", text::signed_db(b.gain_db)))
             }
             EqRow::AddBand => ("Add a band".into(), "[ Add ]".into()),
             EqRow::Reset => ("Back to flat".into(), "[ Reset ]".into()),
@@ -845,7 +845,7 @@ mod tests {
             auto_mix: true,
             auto_mix_beat_match: true,
             auto_fill: true,
-            replay_gain: 1,
+            replay_gain: nori_core::settings::GainMode::Track,
             scrobble: true,
             lyrics_online: true,
             third_party_lookups: true,

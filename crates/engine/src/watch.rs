@@ -18,11 +18,20 @@ pub struct Seen {
     pub playing: bool,
     /// The songs go to the output's own decoder.
     pub offloaded: bool,
-    /// The song heard (queue index) and where the ear is in it, ms, as the engine last read the output.
+    /// The song heard (queue index, and its id) and where the ear is in it, ms, as the engine last read
+    /// the output.
     pub index: Option<usize>,
+    pub id: Option<String>,
     pub position_ms: i64,
     /// Music written to the output and not yet heard, ms: what it holds.
     pub in_output_ms: i64,
+    /// How long the place heard has stood still while music should be moving (playing, no pause or
+    /// jump under way), ms; 0 while it moves or waits for bytes on their way.
+    pub quiet_ms: i64,
+    /// The song the music waits for has its bytes on their way (its loader still fetching).
+    pub bytes_coming: bool,
+    /// An output is open for the music: the CPU's device, or the offloaded track.
+    pub output_open: bool,
     /// Where the engine stands, in words (the song, what it reads and waits for, the transition engine,
     /// the loaders): what a client quotes when it finds the music stalled. Made only when wanted.
     pub state: String,

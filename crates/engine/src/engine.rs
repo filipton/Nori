@@ -55,6 +55,7 @@ use crate::demux::Demuxed;
 use crate::library::{Library, Sources};
 use crate::offload::{Offload, OffloadOutput, OnCpu, Step, Tail};
 use crate::output::{AudioOutput, Device, RingTrack, SHALLOW_US, WAKE_LOW_US};
+use crate::panic_words;
 
 /// What the settings ask of the sound, as the engine applies it.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,6 +154,13 @@ pub enum Event {
     /// said once the status has it. A client that runs its own clock on from the engine's last word
     /// (media3's controllers do, until a play, pause or seek says the place again) takes it from here.
     Placed { index: usize, ms: i64 },
+    /// Whether the engine needs the CPU kept awake while music plays (`true`, as it starts), or can let
+    /// it sleep (`false`): the songs are offloaded, the track is fed, the platform says when it wants
+    /// more, and nothing else is due before its next word (`Offload::lets_cpu_sleep`). Said on the
+    /// engine's thread as it changes, before the engine goes on: a platform that keeps the CPU awake
+    /// with a lock (Android's wake lock) takes it at `true` before the work it is for, and lets it go at
+    /// `false`. A platform's wake of the engine (the offloaded track asking for more) is its own.
+    Awake(bool),
 }
 
 /// The engine as it last looked, for a screen to read at any time without waking it.
@@ -166,6 +174,10 @@ pub struct Status {
     pub position_ms: i64,
     pub at: Instant,
     pub speed: f32,
+    /// How fast the place moves, in the song's time per the listener's: the playing speed, times the
+    /// tempo a mix brings the song heard in at (1.07 through a beat-matched mix into a faster song,
+    /// easing back to 1 after it). A place run on between readings runs on at this.
+    pub pace: f32,
     pub mixing: bool,
     /// Pulls that found the output's buffer short while music was due: a gap each.
     pub underruns: u64,
@@ -188,22 +200,24 @@ pub struct Status {
     /// nothing loaded, and while offloaded, but for a song offloaded with the encoder's delay and padding
     /// left in (an output without gapless offload, and no song of its album joining it), which says so.
     pub pcm_why: Option<String>,
+    /// The engine needs the CPU kept awake, as last said ([`Event::Awake`]).
+    pub awake: bool,
 }
 
 impl Status {
-    /// The place in the song now: the last reading, moved on at the playing speed.
+    /// The place in the song now: the last reading, moved on at the pace it moves at.
     pub fn position_now(&self) -> i64 {
         match self.state {
-            State::Playing => self.position_ms + (self.at.elapsed().as_secs_f64() * 1000.0 * self.speed as f64) as i64,
+            State::Playing => self.position_ms + (self.at.elapsed().as_secs_f64() * 1000.0 * self.pace as f64) as i64,
             _ => self.position_ms,
         }
     }
 
-    /// The place for a seek bar on screen: the last reading run on at the playing speed for at most
+    /// The place for a seek bar on screen: the last reading run on at its pace for at most
     /// `nori_player::heard::RUN_ON_MS`, and whether it is old enough that the engine is to be asked to
     /// look again ([`Engine::look`]); see `nori_player::heard::screen_place`.
     pub fn screen_now(&self) -> (i64, bool) {
-        nori_player::heard::screen_place(self.position_ms, self.at.elapsed().as_millis() as i64, self.speed, self.state == State::Playing)
+        nori_player::heard::screen_place(self.position_ms, self.at.elapsed().as_millis() as i64, self.pace, self.state == State::Playing)
     }
 }
 
@@ -319,6 +333,7 @@ impl Engine {
             position_ms: 0,
             at: Instant::now(),
             speed: 1.0,
+            pace: 1.0,
             mixing: false,
             underruns: 0,
             releases: 0,
@@ -329,6 +344,7 @@ impl Engine {
             offloaded: false,
             offload_wanted: false,
             pcm_why: None,
+            awake: true,
         }));
         let shared = status.clone();
         let devices = tx.clone();
@@ -569,10 +585,26 @@ struct Worker<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> {
     resounded_at: i64,
     /// The music changed path without a jump asked for: [`Event::Placed`] is said at the next report.
     placed_due: bool,
+    /// The song heard is played at a tempo a mix brought it in at: its place moves at another pace than
+    /// the speed. A client running its place on at the speed alone (media3's controllers) has drifted by
+    /// the time the song is back at its own, so the place is said again then ([`Event::Placed`]).
+    stretched: bool,
     /// The song opened ahead of the ear for the music to be made again there ([`Worker::remake`]).
     remake: Option<Remake>,
     /// Where the volume comes back up from after a dip: from silence on a device just opened.
     up_from: Option<f32>,
+    /// When the turns that panicked did, within the last [`PANICS_WITHIN_MS`].
+    panics: VecDeque<i64>,
+    /// The ear standing still while music should be moving, and since when.
+    quiet: Option<Quiet>,
+    /// The song last made again from scratch ([`Worker::start_again`]): the same song again, with no
+    /// music heard in between, is the song's own failure.
+    healed: Option<String>,
+    /// A jump being made (the queue index and place): a turn that panicked while it was is made again
+    /// there, where the music was asked to go.
+    jumping: Option<(usize, i64)>,
+    /// The engine needs the CPU kept awake, as last said ([`Event::Awake`]).
+    awake: bool,
 }
 
 /// The song the ear is on, opened ahead of it to make the music again from there with a changed sound
@@ -588,6 +620,43 @@ struct Remake {
     dip_at: i64,
     /// It takes the song over from the output's decoder.
     leaving: bool,
+}
+
+/// What a turn of the engine's thread ends in.
+enum Turn {
+    /// A command said so, or the engine was let go.
+    Stop,
+    /// Asleep for this long (ms), or until something wakes it.
+    Sleep(Option<i64>),
+}
+
+/// Panics are counted over this long, ms.
+const PANICS_WITHIN_MS: i64 = 60_000;
+/// This many panics within [`PANICS_WITHIN_MS`] and the engine stops trying: playback stops, said, and the
+/// thread waits for a command rather than panicking turn after turn.
+const PANICS_KEPT_ON: usize = 3;
+
+/// Playing, with the place heard standing still for this long and no song's bytes on their way that
+/// could move it: the music is made again from scratch ([`Worker::start_again`]). A safety net under whatever
+/// left the engine so; a song still coming over a slow network is not it (its request's own stall says
+/// when that fails).
+pub const QUIET_HEAL_MS: i64 = 10_000;
+/// The place heard standing still this long is looked at once more before it is made again: a watching
+/// client (the perf build's invariant watch) sees it at that wake.
+const QUIET_SAY_MS: i64 = 5_000;
+/// Playing on the CPU, the thread wakes at least this often to see that the music moves, should nothing
+/// else wake it: longer than any burst cycle (a deep buffer's ten seconds at half speed), so while music
+/// plays it never fires.
+const QUIET_GUARD_MS: i64 = 30_000;
+
+/// Where the ear stood still since when, while music should have been moving ([`Worker::follow_quiet`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Quiet {
+    since: i64,
+    /// The song (queue index) and the place in it, ms, as it stands.
+    place: (Option<usize>, i64),
+    /// The place did not move at the last look.
+    standing: bool,
 }
 
 /// Less than this left to play while a song's bytes are on their way is a stall a screen shows.
@@ -668,9 +737,15 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             offload_now: false,
             resound_due: None,
             placed_due: false,
+            stretched: false,
             resounded_at: i64::MIN / 2,
             remake: None,
             up_from: None,
+            panics: VecDeque::new(),
+            quiet: None,
+            healed: None,
+            jumping: None,
+            awake: true,
         };
         w.apply(settings);
         w
@@ -680,51 +755,133 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         self.clock.now_ms() + 1_000
     }
 
+    /// The engine's thread: a turn at every wake, and asleep in between. A turn that panics does not end
+    /// the thread: an engine gone with nobody told was a player that said it played and made no sound,
+    /// song after song, until the app was started again (the S22's classical playlist, 2026-09-26). The
+    /// panic is said, the song is opened again from scratch ([`Worker::recover`]), and the music goes on.
     fn run(mut self) {
         loop {
-            self.clock.woke();
-            loop {
-                match self.rx.try_recv() {
-                    Ok(Command::Stop) | Err(TryRecvError::Disconnected) => return,
-                    Ok(c) => self.command(c),
-                    Err(TryRecvError::Empty) => break,
+            let turned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.turn()));
+            let wake = match turned {
+                Ok(Turn::Stop) => return,
+                Ok(Turn::Sleep(w)) => w,
+                Err(p) => {
+                    let mut why = panic_words(&*p);
+                    let now = self.clock.now_ms() + 1_000;
+                    // Made again, the song may panic again as it opens: that is counted too, and the song
+                    // made again a second time is skipped as one that would not play.
+                    let mut recovered = false;
+                    for _ in 0..=PANICS_KEPT_ON {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.recover(now, &why))) {
+                            Ok(go_on) => {
+                                recovered = go_on;
+                                break;
+                            }
+                            Err(p) => why = panic_words(&*p),
+                        }
+                    }
+                    if recovered {
+                        Some(1)
+                    } else {
+                        // Nothing more is tried until someone asks for something; a screen that still says
+                        // it plays is told it stopped.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            self.p.app.log("the engine's thread panicked again and again: it waits for a command");
+                            if self.state == State::Playing {
+                                (self.events)(Event::Stopped);
+                                self.set_state(State::Paused);
+                            }
+                        }));
+                        None
+                    }
                 }
-            }
-            let now = self.now();
-            self.due(now);
-            self.follow_gain();
-            self.follow_depth();
-            if self.p.app.measured() {
-                self.replan();
-            }
-            if self.offloading() {
-                self.turn_offload(now);
-            } else {
-                // The burst's count of what the device holds is kept from the clock it reads, and misses
-                // whatever played before its first reading; the ring knows exactly. At the low mark the
-                // count starts again, so a burst always begins when the ring says it is time.
-                if self.p.playing() && !self.p.source_ended() && self.p.sink.track.filled_us() <= WAKE_LOW_US {
-                    self.p.burst.restart();
-                }
-                // The song opened ahead to make the music again reads its bytes alone while the output
-                // holds enough to play on.
-                self.p.read_held = self.remake.as_ref().is_some_and(|m| !m.leaving) && self.held_us() > REMAKE_HOLD_US;
-                self.p.turn(now);
-                self.follow_offload_now();
-                self.follow_offload_ahead();
-            }
-            self.check();
-            self.announce(now);
-            self.report(now);
-            self.follow_why();
-            self.watch(now);
-            // A flush this turn made is told to the device by now, with the music after it in the ring.
-            self.p.sink.track.told();
-            match self.wake_in(now) {
+            };
+            match wake {
                 Some(0) => continue,
                 w => self.clock.sleep(w.map(|ms| ms as u64), || self.waiting_for_bytes()),
             }
         }
+    }
+
+    /// One wake's work: the commands sent, then the music made and the screen told. What the thread may
+    /// sleep for after it, or that it is to stop.
+    fn turn(&mut self) -> Turn {
+        self.clock.woke();
+        loop {
+            match self.rx.try_recv() {
+                Ok(Command::Stop) | Err(TryRecvError::Disconnected) => return Turn::Stop,
+                Ok(c) => {
+                    // A command is work: the CPU is kept awake for it first, and let sleep again at the
+                    // end of the turn if nothing came of it.
+                    self.stay_awake();
+                    self.command(c)
+                }
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        let now = self.now();
+        self.due(now);
+        self.follow_gain();
+        self.follow_depth();
+        if self.p.app.measured() {
+            self.replan();
+        }
+        if self.offloading() {
+            self.turn_offload(now);
+        } else {
+            // The burst's count of what the device holds is kept from the clock it reads, and misses
+            // whatever played before its first reading; the ring knows exactly. At the low mark the
+            // count starts again, so a burst always begins when the ring says it is time.
+            if self.p.playing() && !self.p.source_ended() && self.p.sink.track.filled_us() <= WAKE_LOW_US {
+                self.p.burst.restart();
+            }
+            // The song opened ahead to make the music again reads its bytes alone while the output
+            // holds enough to play on.
+            self.p.read_held = self.remake.as_ref().is_some_and(|m| !m.leaving) && self.held_us() > REMAKE_HOLD_US;
+            self.p.turn(now);
+            self.follow_offload_now();
+            self.follow_offload_ahead();
+        }
+        self.check();
+        self.announce(now);
+        self.report(now);
+        self.follow_why();
+        self.follow_quiet(now);
+        self.watch(now);
+        self.follow_awake();
+        // A flush this turn made is told to the device by now, with the music after it in the ring.
+        self.p.sink.track.told();
+        Turn::Sleep(self.wake_in(now))
+    }
+
+    /// Whether the CPU may sleep until the platform wakes the engine ([`Event::Awake`]), said as it
+    /// changes: only while the songs are offloaded and the offload path needs nothing but the platform's
+    /// word, with no control, switch, fade or song opened ahead under way here.
+    fn follow_awake(&mut self) {
+        let sleeps = self.state == State::Playing
+            && self.pause_at.is_none()
+            && self.switches.is_empty()
+            && self.switch_at.is_none()
+            && self.remake.is_none()
+            && self.entering.is_none()
+            && self.probe.is_none()
+            && self.handing_over.is_none()
+            && self.held.is_none()
+            && self.off.as_ref().is_some_and(|o| o.active() && o.lets_cpu_sleep());
+        self.say_awake(!sleeps);
+    }
+
+    fn stay_awake(&mut self) {
+        self.say_awake(true);
+    }
+
+    fn say_awake(&mut self, awake: bool) {
+        if awake == self.awake {
+            return;
+        }
+        self.awake = awake;
+        self.status.lock().awake = awake;
+        (self.events)(Event::Awake(awake));
     }
 
     /// The thread sleeps until a song's bytes come: the one being read or read on into, one opened to be
@@ -764,6 +921,13 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
     /// Queue index `i` from `ms`, on the output's decoder when the settings and the output let it (the
     /// song itself decides, once it is open), on the CPU otherwise. Playing or not stays as it was.
     fn jump(&mut self, i: usize, ms: i64) {
+        // Where it was going, should opening the song there panic: made again from scratch there.
+        self.jumping = Some((i, ms));
+        self.jump_now(i, ms);
+        self.jumping = None;
+    }
+
+    fn jump_now(&mut self, i: usize, ms: i64) {
         self.probe = None;
         self.handing_over = None;
         // The music is made anew there, with the sound as it is.
@@ -935,6 +1099,153 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         if let Some((i, ms)) = self.released.take() {
             self.jump(i, ms);
         }
+    }
+
+    /// A turn panicked (`why`): it is said, and the music made again from scratch where the ear was
+    /// ([`Worker::start_again`]). Panicking again and again ([`PANICS_KEPT_ON`] within
+    /// [`PANICS_WITHIN_MS`]), playback stops instead, said as a failure, rather than going round.
+    /// True when the music goes on; false when playback stopped for it, and the thread is to wait for a
+    /// command rather than turn again (a panic in every turn would otherwise spin).
+    fn recover(&mut self, now: i64, why: &str) -> bool {
+        while self.panics.front().is_some_and(|t| now - t > PANICS_WITHIN_MS) {
+            self.panics.pop_front();
+        }
+        self.panics.push_back(now);
+        let on = self.jumping.map(|j| j.0).or_else(|| self.current()).or_else(|| self.p.queue.read(|q| q.current())).map(|i| self.p.id_at(i));
+        let song = on.as_deref().map(|id| format!(" on {id}")).unwrap_or_default();
+        if self.panics.len() >= PANICS_KEPT_ON {
+            self.p.app.log(&format!("the engine's thread panicked{song} ({why}), {} times within a minute: playback stops", self.panics.len()));
+            self.jumping = None;
+            self.let_go_of_everything();
+            self.p.tracks.let_go();
+            (self.events)(Event::Error { id: on.unwrap_or_default(), message: format!("the player failed: {why}") });
+            (self.events)(Event::Stopped);
+            self.set_state(State::Paused);
+            return false;
+        }
+        self.p.app.log(&format!("the engine's thread panicked{song} ({why}): the music is made again from scratch"));
+        (self.events)(Event::Error { id: on.unwrap_or_default(), message: format!("the player panicked ({why}): the song is opened again from scratch") });
+        self.start_again(&format!("a panic: {why}"));
+        true
+    }
+
+    /// Everything the player holds of the music it was making goes: what was opened ahead or waits to
+    /// be switched to, the songs being read, the transition engine's audio, and the output (opened again
+    /// by the next song). The place stays in the queue.
+    fn let_go_of_everything(&mut self) {
+        self.remake = None;
+        self.probe = None;
+        self.entering = None;
+        self.offload_now = false;
+        if self.handing_over.take().is_some() {
+            self.p.pause_at_end(false);
+        }
+        self.switches.clear();
+        self.switch_at = None;
+        self.resound_due = None;
+        self.pause_at = None;
+        self.held = None;
+        self.quiet = None;
+        self.stalled = false;
+        let _ = self.leave_offload();
+        self.p.release();
+        self.p.sink.track.release();
+        self.released = None;
+    }
+
+    /// The music made again from scratch where the ear is (`why` it is): everything the player holds of
+    /// it goes ([`Worker::let_go_of_everything`]), and with it the song's bytes and what the stream cache
+    /// keeps of it ([`Library::forget`]); the song is fetched and opened anew there, on a new output,
+    /// playing as it was. The same song made again with no music heard since is the song's own failure:
+    /// the queue's rules take it as one that would not play (skipped, or playback stopped there).
+    fn start_again(&mut self, why: &str) {
+        let playing = self.state == State::Playing;
+        let (at, ms) = match self.jumping.take() {
+            Some((i, ms)) => (Some(i), ms),
+            None => (self.current().or_else(|| self.p.queue.read(|q| q.current())), self.position_ms().max(0)),
+        };
+        self.let_go_of_everything();
+        let Some(i) = at.filter(|&i| i < self.p.queue.read(|q| q.len())) else {
+            self.p.tracks.let_go();
+            return;
+        };
+        let id = self.p.id_at(i);
+        self.p.tracks.forget(&id);
+        if self.healed.as_deref() == Some(id.as_str()) {
+            self.healed = None;
+            self.p.app.log(&format!("{id} made no music again ({why}): it counts as a song that would not play"));
+            self.p.give_up(i, format!("no music came of it ({why})"));
+        } else {
+            self.healed = Some(id.clone());
+            self.p.app.log(&format!("{id} is opened again from scratch at {ms} ms ({why})"));
+            self.jump(i, ms);
+        }
+        if playing && self.p.stopped_at().is_none() && self.current().is_some() {
+            self.go_on();
+            self.ramp(Some(0.0), 1.0, RESOUND_DIP_MS);
+            self.set_state(State::Playing);
+        }
+    }
+
+    /// Whether the song the music waits for has its bytes on their way: the one being read (or opening),
+    /// or the one after it once that is read to its end. Waiting with nothing on its way is waiting for
+    /// nothing. On the output's decoder, what it waits for is its own to say.
+    fn bytes_coming(&self) -> bool {
+        if self.offloading() {
+            return self.off.as_ref().is_some_and(Offload::waiting_for_bytes);
+        }
+        if !self.p.waiting_for_bytes() {
+            return false;
+        }
+        let Some(r) = self.p.reading_index() else { return false };
+        let next = self.p.queue.read(|q| q.next_of(r, q.repeat()));
+        [Some(r), next].into_iter().flatten().any(|i| self.p.tracks.loading(&self.p.id_at(i)).is_some_and(|l| l.fetching()))
+    }
+
+    /// Music should be moving (playing, no pause or jump under way): the place heard is looked at, and
+    /// when it has stood still for [`QUIET_HEAL_MS`] with no song's bytes on their way that could move
+    /// it, the music is made again from scratch ([`Worker::start_again`]). What left the engine so is
+    /// said in the log with the engine's own account of where it stood.
+    fn follow_quiet(&mut self, now: i64) {
+        let wanted = self.state == State::Playing && self.pause_at.is_none() && self.switch_at.is_none() && self.switches.is_empty() && self.held.is_none() && self.p.queue.read(|q| !q.is_empty());
+        if !wanted {
+            self.quiet = None;
+            return;
+        }
+        let place = (self.current(), self.position_ms());
+        let mut q = match self.quiet.take() {
+            Some(q) if q.place == place => Quiet { standing: true, ..q },
+            Some(_) => {
+                // The music moves: a song made again before is playing.
+                self.healed = None;
+                Quiet { since: now, place, standing: false }
+            }
+            None => Quiet { since: now, place, standing: false },
+        };
+        // A playing offloaded track has its own watchdog, which knows how long the platform's counts may
+        // stand still (seconds, with the screen off, while the chip plays from its own buffer) and hands
+        // the song to the CPU where the chip was: made again from scratch here, a count standing ten
+        // seconds would lose the song.
+        if self.bytes_coming() || self.off.as_ref().is_some_and(Offload::watching) {
+            // Its bytes are on their way (a slow network): their request says when that fails.
+            q.since = now;
+            q.standing = false;
+        }
+        let long = now - q.since;
+        self.quiet = Some(q);
+        if long >= QUIET_HEAL_MS {
+            let words = self.words((self.p.sink.track.filled_us() + self.p.sink.track.latency_us()) / 1000);
+            self.p.app.log(&format!("playing, and the music stood still for {long} ms with nothing on its way: {words}"));
+            let id = self.current().map(|i| self.p.id_at(i)).unwrap_or_default();
+            (self.events)(Event::Error { id, message: format!("no music for {} s while playing: the song is opened again from scratch", long / 1000) });
+            self.start_again(&format!("the music stood still for {long} ms"));
+        }
+    }
+
+    /// How long the place heard has stood still while music should be moving, ms (0 when it moves, or
+    /// when it waits for bytes on their way).
+    fn quiet_ms(&self, now: i64) -> i64 {
+        self.quiet.as_ref().filter(|q| q.standing).map_or(0, |q| now - q.since)
     }
 
     /// The output device changed: the core picks its sound (a profile bound to it), which is applied.
@@ -1944,14 +2255,21 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             };
             let waiting = self.stalled || self.waiting_for_bytes();
             let state = self.words(in_output_ms);
+            let quiet_ms = self.quiet_ms(now);
+            let bytes_coming = self.bytes_coming();
+            let output_open = if offloaded { self.off.as_ref().is_some_and(|o| o.track().is_some()) } else { self.p.sink.track.opened() };
             let s = self.status.lock();
             crate::watch::Seen {
                 now_ms: now,
                 playing: s.state == State::Playing && !s.switching && !waiting,
                 offloaded,
                 index: s.index,
+                id: s.id.clone(),
                 position_ms: s.position_ms,
                 in_output_ms,
+                quiet_ms,
+                bytes_coming,
+                output_open,
                 state,
             }
         });
@@ -2075,6 +2393,14 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         }
         self.loops = self.p.loops;
         let mixing = self.p.mixing();
+        // The pace the place moves at: the speed, and the tempo a mix brings the song heard in at.
+        let tempo = self.p.sink.pace_heard();
+        let pace = self.p.speed().0 * tempo as f32;
+        let stretched = (tempo - 1.0).abs() > 1e-3;
+        if self.stretched && !stretched {
+            self.placed_due = true;
+        }
+        self.stretched = stretched;
         let mixing_was = {
             let mut s = self.status.lock();
             let was = s.mixing;
@@ -2086,6 +2412,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.position_ms = ms;
             s.at = Instant::now();
             s.speed = self.p.speed().0;
+            s.pace = pace;
             s.mixing = mixing;
             s.underruns = self.p.sink.track.underruns();
             s.releases = self.releases;
@@ -2147,6 +2474,7 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
             s.position_ms = ms;
             s.at = Instant::now();
             s.speed = 1.0;
+            s.pace = 1.0;
             s.mixing = false;
             s.releases = self.releases;
             s.switching = self.switch_at.is_some();
@@ -2170,8 +2498,27 @@ impl<L: Library, A: App, Q: Queue, E: FnMut(Event), C: Clock> Worker<L, A, Q, E,
         }
     }
 
-    /// How long the thread may sleep: `None` until a command, `Some(0)` not at all.
+    /// How long the thread may sleep: `None` until a command, `Some(0)` not at all. The music's own
+    /// timers, and while it should be moving, a look at whether it does ([`Worker::follow_quiet`]): when
+    /// the place stood still at this wake, once it has for [`QUIET_SAY_MS`] and for [`QUIET_HEAL_MS`]; on the CPU with nothing
+    /// else to wake the thread, [`QUIET_GUARD_MS`] on, which a burst's wake always comes before.
     fn wake_in(&self, now: i64) -> Option<i64> {
+        let d = self.wake_for_music(now);
+        let look = match &self.quiet {
+            // Looked at once it has stood still for QUIET_SAY_MS (a watching client's break), and again
+            // when it is made again.
+            Some(q) if q.standing && now - q.since < QUIET_SAY_MS => Some((q.since + QUIET_SAY_MS - now).max(1)),
+            Some(q) if q.standing => Some((q.since + QUIET_HEAL_MS - now).max(1)),
+            Some(_) if d.is_none() && !self.offloading() => Some(QUIET_GUARD_MS),
+            _ => None,
+        };
+        match (d, look) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn wake_for_music(&self, now: i64) -> Option<i64> {
         let mut d: Option<i64> = None;
         let mut at = |ms: i64| d = Some(d.map_or(ms, |x| x.min(ms)));
         if let Some(t) = self.pause_at {

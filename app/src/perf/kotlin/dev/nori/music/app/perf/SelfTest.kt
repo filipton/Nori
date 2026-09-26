@@ -24,8 +24,8 @@ import dev.nori.music.playback.OffloadCalls
 import dev.nori.music.playback.PlaybackService
 import dev.nori.music.playback.Quiet
 import dev.nori.music.playback.Repeat
-import dev.nori.music.settings.Prefs
-import dev.nori.music.settings.ReplayGainMode
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.model.GainMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -295,15 +295,15 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
 
         // ---- settings ----
 
-        private fun Prefs.knobs() = Knobs(
+        private fun StoredPrefs.knobs() = Knobs(
             eqEnabled, crossfeedDb, balance, mono, limiter, speed, pitch, skipSilence, offload, crossfadeSec, autoMix,
-            replayGain.ordinal, scrobble, autoFill, skipExplicit, previousAlwaysSkips, fadeMs,
+            replayGain, scrobble, autoFill, skipExplicit, previousAlwaysSkips, fadeMs,
         )
 
-        private fun Prefs.with(k: Knobs) = copy(
+        private fun StoredPrefs.with(k: Knobs) = copy(
             eqEnabled = k.eq, crossfeedDb = k.crossfeedDb, balance = k.balance, mono = k.mono, limiter = k.limiter,
             speed = k.speed, pitch = k.pitch, skipSilence = k.skipSilence, offload = k.offload, crossfadeSec = k.crossfadeSec, autoMix = k.autoMix,
-            replayGain = ReplayGainMode.entries[k.replayGain], scrobble = k.scrobble, autoFill = k.autoFill, skipExplicit = k.skipExplicit,
+            replayGain = k.replayGain, scrobble = k.scrobble, autoFill = k.autoFill, skipExplicit = k.skipExplicit,
             previousAlwaysSkips = k.previousAlwaysSkips, fadeMs = k.fadeMs,
         )
 
@@ -584,12 +584,12 @@ internal class SelfTest(private val app: Application, private val recorder: Reco
         private suspend fun replayGain(s: Step): Outcome {
             val k = queue.indexOfFirst { it.replayGain != null }.takeIf { it >= 0 } ?: 0
             if (!at(k, 5_000)) return fail(s, "could not play queue place $k")
-            val user = knobs?.replayGain ?: 0
+            val user = knobs?.replayGain ?: GainMode.OFF
             try {
-                set { it.copy(replayGain = ReplayGainMode.OFF.ordinal) }
+                set { it.copy(replayGain = GainMode.OFF) }
                 delay(1_200)
                 val gOff = dev.nori.music.ffi.queue.playlistGain(false)
-                set { it.copy(replayGain = ReplayGainMode.TRACK.ordinal) }
+                set { it.copy(replayGain = GainMode.TRACK) }
                 delay(1_200)
                 val gTrack = dev.nori.music.ffi.queue.playlistGain(false)
                 val r = judgeProgress(sample(2_000), written = !(PlaybackService.rustPlayer?.offloaded ?: false))

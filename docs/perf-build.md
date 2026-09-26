@@ -46,6 +46,13 @@ setting that keeps it off>". Wanted is not given: whether the audio chip really 
 output line's "offload given" or "PCM (<why>)", and the time it did is "offloaded 45 min 00 s of 1 h
 00 min (75 %)" on the stretch and, added up, on each state.
 
+A stretch the chip played in also says what it cost the CPU: "wake lock held 12 s of 10 min 00 s
+(2 %), nori-engine 0.30 wakeups/s, the chip asked for more 0.25 times/s". The wake lock is the player's
+`nori:engine` one, which it lets go while the songs are offloaded and nothing but the platform's word is
+due (nori-engine's `Event::Awake`); the engine's wakeups are its thread's own; the chip's asks are the
+offloaded track's `onDataRequest`s, the platform's own pace, which the engine's wakes should match.
+Summed per state in "Really offloaded" over the stretches that were offloaded at all.
+
 For each stretch:
 
 | Figure | What it is |
@@ -82,6 +89,25 @@ go, and the stretch says how many.
 | underruns | the output's underrun count grew, with the reading before, between which and this one they first appeared |
 | error | a song or the output failed, in the player's words |
 | tuning | the equalizer screen's tuning mode (a shallow buffer) on or off; on the Rust engine also the size the track took for the output it plays on and why (`shallow 550 ms for Bluetooth: its latency is 200 ms, its pulls are 200 ms`), and any growth after it ran dry |
+
+**Invariant breaks** head the report (crates/perf/src/invariants.rs says what each one holds to). Two of
+them came of the S22's silent classical playlist (2026-09-26), where the player said it played, no output
+was open, no song was being fetched and nothing was said anywhere:
+
+| Break | When |
+|---|---|
+| silent | the engine plays, the place heard has stood still for 5 s with no output open and none of the song's bytes on their way. Said with the engine's own account of where it stood and what media3's stream cache keeps of the song (its metadata length, the spans cached, whole or not, being written or not) |
+| panic | a thread of the Rust library panicked, caught or not: its name, the message and where. Every build says it in the log (Android sends a Rust thread's standard error nowhere) |
+
+With every break the app's own latest lines (the last 500 under the `nori` tag, the core's and the
+Kotlin's, kept in memory by nori-model's alog) are copied into the database as it happens, the latest three
+breaks' worth, and printed before the log tail: logcat's buffer is the whole system's and a codec's chatter
+turns it over in minutes, so the tail rarely reached back to the moment something broke.
+
+Whatever the build, the engine does not stay silent: a panic on its thread is said and the song opened again
+from scratch, a song that makes it panic again is skipped as one that would not play, and playing with the
+place standing still for 10 s and nothing on its way makes the music again from scratch too (the song's
+bytes and its stream cache entry let go, a new output), said as an error (crates/engine tests/silent.rs).
 
 A buffer much smaller than asked, or power saving asked and not given, is what makes a writer wake more
 often than the design says: the Rust player's writer then tops the track up once per half of what it

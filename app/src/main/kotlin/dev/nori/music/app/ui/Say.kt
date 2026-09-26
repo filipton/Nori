@@ -24,9 +24,9 @@ import dev.nori.music.ffi.model.SmartBuiltin
 import dev.nori.music.ffi.settings.BandMark
 import dev.nori.music.ffi.settings.EqBypass
 import dev.nori.music.ffi.settings.LyricsOrigin
-import dev.nori.music.settings.BandChannel
-import dev.nori.music.settings.BandKind
-import dev.nori.music.settings.HomeRow
+import dev.nori.music.ffi.settings.BandChannel
+import dev.nori.music.ffi.model.EqKind
+import dev.nori.music.ffi.settings.HomeRow
 import dev.nori.music.text.Fmt
 
 /**
@@ -54,6 +54,8 @@ class Say(private val r: Resources) {
     val addToFavourites: String = r.getString(R.string.add_to_favourites)
     val removeFromFavourites: String = r.getString(R.string.remove_from_favourites)
     val remove: String = r.getString(R.string.remove)
+    val undo: String = r.getString(R.string.undo)
+    fun queueRemoved(title: String): String = r.getString(R.string.queue_removed, title)
     val cancel: String = r.getString(R.string.cancel)
     val done: String = r.getString(R.string.done)
     val close: String = r.getString(R.string.close)
@@ -153,6 +155,8 @@ class Say(private val r: Resources) {
     val retryAll: String = r.getString(R.string.retry_all)
     val finished: String = r.getString(R.string.finished)
     val stopDownload: String = r.getString(R.string.stop_download)
+    val findingLyrics: String = r.getString(R.string.finding_lyrics)
+    val analysing: String = r.getString(R.string.analysing)
     val equalizer: String = r.getString(R.string.equalizer)
     val eqHint: String = r.getString(R.string.eq_hint)
     val addBand: String = r.getString(R.string.add_band)
@@ -589,7 +593,7 @@ class Say(private val r: Resources) {
     private val bandChannels: Array<String> = arrayOf(R.string.channel_both, R.string.channel_left, R.string.channel_right).map(r::getString).toTypedArray()
 
     /** A kind of band as the band editor names it: read once, so the list's rows allocate nothing. */
-    fun bandKind(k: BandKind): String = bandKinds[k.ordinal]
+    fun bandKind(k: EqKind): String = bandKinds[k.ordinal]
     fun bandChannel(c: BandChannel): String = bandChannels[c.ordinal]
 
     /** A built-in equalizer curve's name. */

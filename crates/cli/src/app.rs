@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use nori_core::client::Starrable;
 use nori_core::playlist::PlaylistView;
 use nori_core::search::SearchView;
-use nori_core::settings::{EqLevel, SavedServer, SoundBand, StoredPrefs};
+use nori_core::settings::{EqLevel, SavedServer, SoundBand, StoredPrefs, TapAction};
 use nori_core::settings_store::SoundTool;
 use nori_core::{Album, AlbumDetail, Artist, ArtistDetail, OriginKind, PageOrigin, Playlist, PlaylistDetail, Song};
 use nori_engine::{Event, State};
@@ -69,6 +69,8 @@ pub enum Cmd {
     Volume(f32),
     Jump(usize),
     Remove(usize),
+    /// Undo: the song taken out last put back where it was (nori-queue `playlist_restore`).
+    Restore(String),
     Move(usize, usize),
     Shuffle(bool),
     Repeat(u8),
@@ -435,6 +437,8 @@ pub struct App {
     pub search: Search,
     pub queue: Option<PlaylistView>,
     pub queue_sel: Sel,
+    /// The id of the song last taken out of the queue here, for `u` to put back.
+    pub taken: Option<String>,
     pub up_next_sel: Sel,
     pub downloads: Load<Box<Downloads>>,
     pub downloads_sel: Sel,
@@ -493,6 +497,7 @@ impl App {
             search: Search::default(),
             queue: None,
             queue_sel: Sel::default(),
+            taken: None,
             up_next_sel: Sel::default(),
             downloads: Load::Idle,
             downloads_sel: Sel::default(),
@@ -756,7 +761,8 @@ impl App {
             Event::Title(t) => self.say(format!("On air: {t}"), false),
             Event::Bridge => self.say("The network is gone", true),
             Event::Mixing(on) => self.now.mixing = on,
-            Event::Position { .. } | Event::Placed { .. } => {}
+            // A desktop keeps no wake lock: the system does not sleep under playing music.
+            Event::Position { .. } | Event::Placed { .. } | Event::Awake(_) => {}
         }
     }
 
@@ -1209,9 +1215,15 @@ impl App {
             }
             Action::Remove => {
                 if let Some(i) = self.queue_selected_index() {
+                    self.taken = self.queue.as_ref().and_then(|q| q.songs.get(i)).map(|s| s.id.clone());
                     self.cmds.push(Cmd::Remove(i));
                 }
             }
+            Action::Undo if self.screen == Screen::Queue => match self.taken.take() {
+                Some(id) => self.cmds.push(Cmd::Restore(id)),
+                None => self.say("Nothing to put back", false),
+            },
+            Action::Undo => self.dirty = false,
             Action::MoveUp | Action::MoveDown if matches!(self.screen, Screen::Downloads | Screen::Equalizer) => self.dirty = false,
             Action::MoveUp | Action::MoveDown => self.queue_move(a == Action::MoveDown),
             _ => self.list_action(a),
@@ -1510,10 +1522,10 @@ impl App {
     fn tap(&mut self, songs: Vec<Song>, i: usize) {
         match self.prefs.tap_action {
             // One song on its own is no page's queue.
-            1 => self.cmds.push(Cmd::Play { songs: vec![songs[i].clone()], start: 0, shuffle: false, from: None }),
-            2 => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], false)),
-            3 => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], true)),
-            _ => {
+            TapAction::PlayOne => self.cmds.push(Cmd::Play { songs: vec![songs[i].clone()], start: 0, shuffle: false, from: None }),
+            TapAction::Queue => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], false)),
+            TapAction::PlayNext => self.cmds.push(Cmd::Enqueue(vec![songs[i].clone()], true)),
+            TapAction::PlayList => {
                 let from = self.origin_here();
                 self.cmds.push(Cmd::Play { songs, start: i, shuffle: false, from })
             }

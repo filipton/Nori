@@ -39,5 +39,7 @@ ebur128 = "0.1.10"
 rubato = "5.0.0"
 # The beat model's weights, checked against their pin in a test (the core checks them the same way).
 sha2 = "0.11"
+# tests/neural_memory.rs hands freed memory back to the system, as nori-engine's measurer does after a model run.
+libc = "0.2"
 # The pipeline tests under tests/ drive the simulated player in `sim`, which lives behind `synth`.
 nori-player = { path = ".", features = ["synth"] }

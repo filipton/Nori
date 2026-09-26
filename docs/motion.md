@@ -157,7 +157,9 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 
 - Now: content fades in over the loader (260 ms after 60 ms); the dots stay invisible for the first
   quarter-second and never show for a fast load; the cover sheen only runs for a picture that is
-  really on the way.
+  really on the way. A cover that does not come (offline at once, otherwise after its one try again)
+  fades its sheen out over 300 ms as the plate's note fades in; one that comes later (its try again,
+  or the network back) fades in over the note.
 - Should: as is.
 - Status: **leave**
 
@@ -182,7 +184,10 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
 - `SeekBar` (one per-frame loop, eases to the position, done in the last two commits); `VolumeRow`
   (180 ms ease on an outside change); `NoriSwitch` (180 ms); `swipeActions` (spring back, colour and
   pop when armed); `PlayPauseGlyph` (fade + scale, 180/140 ms); `DownloadsScreen` (phase icons,
-  progress ring, rows moving with `animateItem`).
+  progress ring, rows moving with `animateItem`). A song saved but still processing (lyrics, AutoMix
+  analysis; at most 30 s) stays with the downloading ones: its second line cross-fades to "Finding
+  lyrics…"/"Analysing…", its ring turns and the stop square fades; every section's rows are one call, so
+  the line and the trailing mark cross-fade again as it moves to the finished ones.
 - Should: as is; each answers a touch or a state change and does nothing otherwise.
 - Status: **leave**
 
@@ -393,6 +398,35 @@ Status is one of: **todo**, **doing**, **done (commit)**, **leave** (looked at, 
   grey, not the last song's colour; the picture and the colours come in as fades. With the cover on the
   disk (played before, app restarted): no plate shows at all.
 - Status: **doing** (not yet checked frame by frame on a device)
+
+### 25. The queue's rows: swipe to remove, undo, reorder — `PlayerScreen.kt` `Queue`, `UndoPill`; `QueueEdits.kt`; `Components.kt` `swipeable`, `SwipeBackdrop`
+
+- Was: only the × and the drag handle. Rows were keyed by their index, so a song taken out changed the key
+  (and so the content) of every row under it in place, on one frame. Every row read the drag in
+  composition, so each frame of a reorder recomposed every visible row; and on the drop the rows snapped
+  back to their places and then swapped content.
+- Now: a row swiped left, past the same third of the width as a library row (the same strip, words,
+  tick and pop, in the page's colours: the veil, then the accent), slides off that side (200 ms) and is
+  taken out; the rows under it close up (`animateItem`, 260 ms) while it fades where it was (160 ms,
+  already off screen). Only leftwards: rightwards from the edge is the back gesture's, and the drag handle
+  takes its own drags first. The song playing (as shown, and the queue's current while a mix hands over:
+  the core's `QueueRows.kept`) is not swiped away: it gives a little ([GIVE], at most [GIVE_LIMIT] of the
+  width), shows no strip and comes back. The × still takes any row. After either, "Removed “song” · Undo"
+  rises over the foot of the queue for 4 s (240 ms in, 170 ms out, by frames; it keeps its words as it
+  goes and takes no taps); Undo puts the song back through the core (`playlist_restore`: its index, its
+  turn under shuffle, its hand mark) and the row slides back in from the side it left while the rows
+  under it open up. Rows are keyed by song id and occurrence (`queueKeys`), so they keep their place and
+  content through every change. The drag is read in each row's layer (`QueueDrag.shift`); the held row
+  lifts and settles (150 ms), and on letting go settles into its slot (140 ms), the move is sent, and the
+  rows stay where they are drawn until the queue has changed - that frame they are laid out where they
+  were drawn, with no placement animation.
+- Reduced motion: the swipe still follows the finger; a row taken out goes at once, the rows close up
+  and the undo fades (120 ms) with no slide.
+- Check: all three animation scales at 0 and at 5 on the app's clock (item 22's scales), the queue open:
+  swipe a row left slowly past the third (tick, accent), let go; swipe one flicked; swipe the playing row;
+  Undo; take two in a row and undo the second; reorder a row by three places and let go; turn shuffle on
+  and take one out, undo. Frame by frame: no row appears or leaves on one frame, nothing jumps on a drop.
+- Status: **done** (not yet checked on the device)
 
 ## Decisions and traps
 

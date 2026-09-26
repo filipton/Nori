@@ -13,6 +13,12 @@ import dev.nori.music.look.CoverPixels
  * the server, a file cut short, a fetch nobody waited for) waits [RETRY_MS] and asks again, with the view
  * still showing that the picture is on its way; one that cannot be mended (a format that is not decoded)
  * is given up at once. Every failure is told to [Source.failed], which the perf build logs with its reason.
+ *
+ * Offline, a view does not shimmer through the try again: a failure that says the server cannot be
+ * reached at all ([unreachable]: no network, no route, nobody answering) settles on the placeholder at
+ * once (the plate's note fades in), and the try again still runs underneath; a picture it brings fades in
+ * over the note. A view that has given up on a failure the network can mend asks again when the network
+ * comes back ([Source.whenBack]), or when it is shown again.
  */
 internal class CoverFetch<P : Any>(
     val url: String?,
@@ -34,6 +40,9 @@ internal class CoverFetch<P : Any>(
 
         /** A load of [url] failed with [status]; [again]: it is asked again in a moment. */
         fun failed(url: String, status: Int, again: Boolean)
+
+        /** Runs [run] once, on the same thread, the next time the phone's network comes up, unless cancelled first. */
+        fun whenBack(run: () -> Unit): Handle
     }
 
     fun interface Handle {
@@ -45,6 +54,7 @@ internal class CoverFetch<P : Any>(
         private set
     private var request: Handle? = null
     private var retry: Handle? = null
+    private var back: Handle? = null
     private var failures = 0
     private var width = 0
     private var height = 0
@@ -56,6 +66,8 @@ internal class CoverFetch<P : Any>(
         this.height = height
         retry?.cancel()
         retry = null
+        back?.cancel()
+        back = null
         val k = source.kept(url, width, height)
         if (k != null && picture == null) show(k.first)
         if (k != null && k.second) {
@@ -74,9 +86,11 @@ internal class CoverFetch<P : Any>(
         request = null
         retry?.cancel()
         retry = null
+        back?.cancel()
+        back = null
     }
 
-    /** Whether a request or a try again is on its way. */
+    /** Whether a request or a try again is on its way (not a wait for the network to come back). */
     val asking: Boolean get() = request != null || retry != null
 
     private fun answered(url: String, p: P?, status: Int) {
@@ -89,8 +103,14 @@ internal class CoverFetch<P : Any>(
         val again = failures < RETRIES && mendable(status)
         failures++
         source.failed(url, status, again)
-        if (again) retry = source.later(RETRY_MS) { retry = null; want(width, height) }
-        else if (picture == null) missing()
+        if (again) {
+            // Offline the try again will not bring it either: the plate settles now, not after it.
+            if (picture == null && unreachable(status)) missing()
+            retry = source.later(RETRY_MS) { retry = null; want(width, height) }
+            return
+        }
+        if (picture == null) missing()
+        if (mendable(status)) back = source.whenBack { back = null; failures = 0; want(width, height) }
     }
 
     private fun show(p: P) {
@@ -107,5 +127,11 @@ internal class CoverFetch<P : Any>(
 
         /** Whether asking again may bring the picture: not for a format that is not decoded, nor a Bitmap that cannot be made. */
         fun mendable(status: Int): Boolean = status != CoverPixels.UNKNOWN && status != CoverPixels.BAD_BITMAP
+
+        /**
+         * Whether [status] says the server cannot be reached at all, as offline: the transport's
+         * `FailureKind` Metered, UnknownHost, Connect or NoRoute (their ordinals 0 to 3).
+         */
+        fun unreachable(status: Int): Boolean = status in CoverPixels.NETWORK..CoverPixels.NETWORK + 3
     }
 }

@@ -2,6 +2,7 @@
 //! core's calls around the table, on its own database, are the core's (its automix.rs).
 
 use nori_model::TrackAnalysis;
+use nori_player::automix::vocal::VocalCurve;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::analysis::Analyzer;
@@ -134,6 +135,18 @@ pub fn put_measured(c: &Connection, mut a: TrackAnalysis) -> rusqlite::Result<Tr
     }
     put(c, &a)?;
     Ok(a)
+}
+
+/// Keeps a song's vocal activity curve (nori-player automix/vocal.rs) beside its analysis, for checking
+/// synced lyrics against the audio: a byte per 58 ms, about a kilobyte a minute.
+pub fn put_voice(c: &Connection, song_id: &str, curve: &VocalCurve) -> rusqlite::Result<()> {
+    c.prepare_cached("INSERT OR REPLACE INTO vocal_curve(server, song_id, curve) VALUES(sid(), ?1, ?2)")?.execute(params![song_id, curve.encode()]).map(|_| ())
+}
+
+/// A song's vocal activity curve; None when it has none, or one in a form no longer read.
+pub fn get_voice(c: &Connection, song_id: &str) -> rusqlite::Result<Option<VocalCurve>> {
+    let blob: Option<Vec<u8>> = c.prepare_cached("SELECT curve FROM vocal_curve WHERE server=sid() AND song_id=?1")?.query_row([song_id], |r| r.get(0)).optional()?;
+    Ok(blob.and_then(|b| VocalCurve::decode(&b)))
 }
 
 /// Which of `ids` have a current analysis with an end the beat model has not looked at yet, in the order given.

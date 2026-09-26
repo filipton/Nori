@@ -606,8 +606,17 @@ impl<P: Paint> Inner<P> {
 
     /// The cover's file into `out`: from the disk, or fetched and kept there (a provider's is not).
     fn bytes(&self, key: Key, url: &str, out: &mut Vec<u8>, waker: &Waker) -> Result<(), Error> {
-        if self.disk().is_some_and(|d| d.read(key, out)) {
-            return Ok(());
+        if let Some(d) = self.disk() {
+            if d.read(key, out) {
+                return Ok(());
+            }
+            // Kept before keys left the signature out: moved under its key the first time it is read.
+            let whole = Key::of_address(url);
+            if whole != key && d.read(whole, out) {
+                let _ = d.put(key, out);
+                d.remove(whole);
+                return Ok(());
+            }
         }
         let r = block_on(self.transport.get(url.to_owned(), self.timeout_ms), waker)?;
         if !(200..300).contains(&r.status) || r.body.is_empty() {

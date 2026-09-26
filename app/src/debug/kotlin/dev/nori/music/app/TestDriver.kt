@@ -13,6 +13,8 @@ import dev.nori.music.app.vm.SettingsViewModel
 import dev.nori.music.data.FoundLyrics
 import dev.nori.music.ffi.model.Song
 import kotlinx.coroutines.flow.Flow
+import dev.nori.music.settings.server
+import dev.nori.music.settings.loggedIn
 
 /*
  * The debug build's side of the test bridge (TestBridge, TestHooks, TestActions): the handles a command

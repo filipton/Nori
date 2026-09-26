@@ -12,7 +12,7 @@ use nori_look::lyrics::{Line, LyricClock, LyricTiming, Word};
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn lyrics_clock(lyrics: nori_model::Lyrics, position_ms: i64) -> i64 {
     let lines = lyrics.lines.iter().map(timed);
-    Box::into_raw(Box::new(LyricClock::new(LyricTiming::new(lyrics.synced, lyrics.word_timed, lines), position_ms))) as i64
+    Box::into_raw(Box::new(LyricClock::with_offset(LyricTiming::new(lyrics.synced, lyrics.word_timed, lines), position_ms, lyrics.offset_ms))) as i64
 }
 
 fn timed(l: &nori_model::LyricLine) -> Line {
@@ -31,6 +31,7 @@ struct Kept {
     key: u64,
     synced: bool,
     word_timed: bool,
+    offset_ms: i64,
     lines: Vec<Line>,
 }
 
@@ -49,7 +50,7 @@ pub fn keep(lyrics: &mut nori_model::Lyrics) {
     }
     let key = NEXT_KEY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     lyrics.key = key;
-    let kept = Kept { key, synced: lyrics.synced, word_timed: lyrics.word_timed, lines: lyrics.lines.iter().map(timed).collect() };
+    let kept = Kept { key, synced: lyrics.synced, word_timed: lyrics.word_timed, offset_ms: lyrics.offset_ms, lines: lyrics.lines.iter().map(timed).collect() };
     let mut all = KEPT.lock();
     if all.len() == KEEP {
         all.remove(0);
@@ -62,7 +63,7 @@ pub fn keep(lyrics: &mut nori_model::Lyrics) {
 pub fn kept_clock(key: u64, position_ms: i64) -> i64 {
     let all = KEPT.lock();
     let Some(k) = all.iter().find(|k| k.key == key) else { return 0 };
-    Box::into_raw(Box::new(LyricClock::new(LyricTiming::new(k.synced, k.word_timed, k.lines.iter().cloned()), position_ms))) as i64
+    Box::into_raw(Box::new(LyricClock::with_offset(LyricTiming::new(k.synced, k.word_timed, k.lines.iter().cloned()), position_ms, k.offset_ms))) as i64
 }
 
 /// The clock behind a handle from [`lyrics_clock`] or [`kept_clock`]; none for 0.
@@ -95,7 +96,7 @@ use nori_model::Lyrics;
     #[test]
     fn a_clock_from_the_cores_lyrics_counts_utf16_and_frees() {
         let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, ..Default::default() };
-        let h = lyrics_clock(Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0 }, 0);
+        let h = lyrics_clock(Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0, offset_ms: 0 }, 0);
         let c = unsafe { clock(h) }.unwrap();
         assert!(!c.timing().sweeps());
         // A line without words is all lit once reached: seven UTF-16 units, the note being two.
@@ -108,7 +109,7 @@ use nori_model::Lyrics;
     #[test]
     fn lyrics_read_are_kept_for_a_clock_by_key() {
         let line = |start_ms, text: &str| LyricLine { start_ms, end_ms: start_ms + 2000, text: text.into(), words: vec![], translation: None, ..Default::default() };
-        let mut l = Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0 };
+        let mut l = Lyrics { synced: true, word_timed: false, lines: vec![line(1000, "Żółć 🎵"), line(4000, "x")], key: 0, offset_ms: 0 };
         keep(&mut l);
         assert_ne!(l.key, 0);
         let h = kept_clock(l.key, 0);

@@ -91,7 +91,7 @@ class DeviceSound(private val settings: Settings, private val core: () -> Core, 
                 return@repeat
             } catch (e: Exception) {
                 // No network, or GitHub not answering: asking later is better than silently doing nothing.
-                android.util.Log.w("nori", "autoeq for $output: ${e.said}")
+                dev.nori.music.NoriLog.w("autoeq for $output: ${e.said}")
                 post(Offer(output, entry))
                 return
             }

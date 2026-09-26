@@ -73,6 +73,11 @@ fn mp3(dir: &Path, name: &str, secs: u32, hz: u32) -> Vec<u8> {
     made(dir, name, secs, hz, &["-c:a", "libmp3lame", "-b:a", "128k"], "mp3")
 }
 
+/// [`mp3`] at 320 kbps, as the tester's songs were: 32 KB of it is 819 ms.
+fn mp3_320(dir: &Path, name: &str, secs: u32, hz: u32) -> Vec<u8> {
+    made(dir, name, secs, hz, &["-c:a", "libmp3lame", "-b:a", "320k"], "mp3")
+}
+
 fn flac(dir: &Path, name: &str, secs: u32, hz: u32) -> Vec<u8> {
     made(dir, name, secs, hz, &["-c:a", "flac"], "flac")
 }
@@ -320,6 +325,18 @@ struct Chip {
     flushes: u32,
     /// Every frame it played, whichever track.
     played: u64,
+    /// Bytes its own decoder buffers beyond the track the platform granted (a DSP's own buffer): a track
+    /// takes this much more, and asks for more once what it holds falls under half of the whole.
+    dsp: usize,
+    /// Times it asked for more (`onDataRequest`).
+    requests: u64,
+    /// It plays nothing and asks for nothing: a stall.
+    stalled: bool,
+    /// Frames at the end of what it was given that it presents only once more is written or an end of
+    /// stream is said after them (a decoder holding back a partial buffer).
+    holds_back: u64,
+    /// Its play head reads this for ever (a count the platform stopped updating).
+    frozen_head: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -328,7 +345,11 @@ struct Fake(Arc<Mutex<Chip>>);
 impl Chip {
     /// Plays `frames` more of what it holds, as far as it holds: the frames played.
     fn play_frames(&mut self, frames: u64) -> u64 {
-        let to = (self.head + frames).min(self.written);
+        if self.stalled {
+            return 0;
+        }
+        let presentable = if self.ended_at == Some(self.written) { self.written } else { self.written.saturating_sub(self.holds_back) };
+        let to = (self.head + frames).min(presentable).max(self.head);
         let played = to - self.head;
         self.played += played;
         let mut n = played;
@@ -417,9 +438,10 @@ impl Chip {
         if played < frames && self.ended_at != Some(self.written) {
             self.starved += frames - played;
         }
-        if self.armed && self.held_bytes() < self.capacity / 2 {
+        if self.armed && !self.stalled && self.held_bytes() < self.capacity / 2 {
             self.armed = false;
             self.requested = true;
+            self.requests += 1;
             return true;
         }
         false
@@ -541,7 +563,7 @@ impl OffloadOutput for Fake {
         let mut c = self.0.lock();
         c.calls.push(Call::Open(coded));
         let bytes = c.grant.unwrap_or(bytes);
-        c.capacity = bytes * c.takes.max(1);
+        c.capacity = bytes * c.takes.max(1) + c.dsp;
         c.armed = true;
         c.requested = false;
         c.held.clear();
@@ -634,6 +656,7 @@ impl OffloadOutput for Fake {
         c.sync_now();
         match c.readings.pop_front() {
             Some(r) => r,
+            None if c.frozen_head.is_some() => c.frozen_head,
             None if c.head_stuck => Some(0),
             None => Some(c.head - c.offset),
         }
@@ -1792,7 +1815,7 @@ fn plays_through_on_the_phone(rig: &Rig, fake: &Fake, secs: u32) {
     let notes = fake.notes();
     assert!(!notes.iter().any(|n| n.contains("given up")), "{notes:?}");
     // What the platform granted, and how often the thread wakes for it, for the perf report.
-    assert!(notes.iter().any(|n| n.contains("granted a track of 64 KB of the") && n.contains("topped up about every")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("granted a track of 64 KB of the") && n.contains("topped up when the platform asks")), "{notes:?}");
 }
 
 #[test]
@@ -1819,21 +1842,24 @@ fn a_phone_that_grants_64_kb_without_timestamps_plays_by_its_play_head() {
     rig.engine.stop();
 }
 
+/// A count that stands at nought while the platform keeps asking for more is one it does not keep: the
+/// chip plays (it asks for what it played), so once the slack has run out the CPU takes over where the
+/// clock puts the ear.
 #[test]
 fn a_track_whose_play_head_and_timestamp_never_move_hands_the_song_to_the_cpu_where_the_clock_puts_the_ear() {
     let d = dir();
     let Some((rig, fake)) = two_on_a_phone(&d, 30, false, true) else { return };
-    // The track holds about four seconds; its count stands at nought longer than that, and the CPU
-    // takes over where the clock says the ear is.
-    let took = rig.time.until(Duration::from_secs(20), || !rig.engine.status().offloaded && rig.card.heard.lock().len() > 2 * 44_100);
+    // Its count stands at nought for the watchdog's ten seconds while the platform asks for more, and the
+    // CPU takes over where the clock says the ear is.
+    let took = rig.time.until(Duration::from_secs(30), || !rig.engine.status().offloaded && rig.card.heard.lock().len() > 2 * 44_100);
     assert!(took, "the CPU took over: {:?} {:?}", rig.engine.status(), fake.notes());
     let s = rig.engine.status();
     assert!(s.index == Some(0) && !rig.heard_song("b"), "a, on the CPU: {s:?}");
-    // About six seconds in: what the track holds and two seconds more, by the clock the chip played by.
-    assert!((5_000..=8_000).contains(&s.position_ms), "where the clock puts the ear, not at nought: {s:?}");
+    // About twelve seconds in: the slack and what the CPU played since, by the clock the chip played by.
+    assert!((10_000..=14_000).contains(&s.position_ms), "where the clock puts the ear, not at nought: {s:?}");
     let notes = fake.notes();
     let given_up = notes.iter().find(|n| n.starts_with("offload given up, the CPU plays on from")).cloned().unwrap_or_default();
-    assert!(given_up.contains("play head stood at 0") && given_up.contains("asked for more"), "{notes:?}");
+    assert!(given_up.contains("play head stood at 0") && given_up.contains("asked for more") && given_up.contains("where the clock puts the ear"), "{notes:?}");
     // Its requests kept it fed until then: no silence before the CPU took over.
     assert_eq!(fake.starved_ms(), 0, "{notes:?}");
     rig.engine.stop();
@@ -2670,4 +2696,225 @@ fn quiet_start(dir: &Path, name: &str, silent: u32, secs: u32, hz: u32) -> Vec<u
         .is_ok_and(|s| s.success());
     assert!(ok, "ffmpeg made {name}");
     std::fs::read(out).unwrap()
+}
+
+// ---- small grants: a phone that gives the track far less than asked ----
+
+/// A 32 KB track (a Galaxy S21 FE's) and a 64 KB one (a Galaxy S22's).
+const KB32: usize = 32 * 1024;
+const KB64: usize = 64 * 1024;
+/// A DSP that buffers about six seconds of a 320 kbps song beyond the track.
+const DSP: usize = 256 * 1024;
+
+/// Two songs of `secs` at 320 kbps on a phone's chip ([`Fake::phone`]) that grants `grant` bytes and
+/// buffers `dsp` more in its own decoder: true timestamps, a play head that moves.
+fn two_on_a_small_grant(d: &Path, secs: u32, grant: usize, dsp: usize) -> Option<(Rig, Fake)> {
+    if !ffmpeg() {
+        eprintln!("ffmpeg is not installed: nothing to offload");
+        return None;
+    }
+    let (a, b) = (mp3_320(d, "a", secs, 440), mp3_320(d, "b", secs, 660));
+    let server = Arc::new(Server::default());
+    serve(&server, &[("a", &a), ("b", &b)]);
+    let fake = Fake::new(MP3_ONLY);
+    fake.phone(true, false);
+    {
+        let mut c = fake.0.lock();
+        c.grant = Some(grant);
+        c.dsp = dsp;
+    }
+    let ms = secs as i64 * 1000;
+    let rig = Rig::new(server, vec![("a".into(), "mp3".into(), ms), ("b".into(), "mp3".into(), ms)], app(), Some(fake.clone()), offload());
+    rig.engine.play_at(0, 0);
+    Some((rig, fake))
+}
+
+/// The engine's wakes a second against the platform's requests for more a second, over 40 s of steady
+/// playing (5 s to 45 s into a song of a minute) on a track of `grant` bytes with `dsp` more behind it.
+fn wakes_on_a_small_grant(grant: usize, dsp: usize) -> Option<(f64, f64)> {
+    let d = dir();
+    let (rig, fake) = two_on_a_small_grant(&d, 60, grant, dsp)?;
+    assert!(rig.time.until(Duration::from_secs(20), || fake.0.lock().head >= 5 * 44_100), "on the chip: {:?}", fake.notes());
+    let (s0, r0, t0) = (rig.time.clock.sleeps(), fake.0.lock().requests, rig.now_ms());
+    rig.run(40_000);
+    let (s1, r1, t1) = (rig.time.clock.sleeps(), fake.0.lock().requests, rig.now_ms());
+    let secs = (t1 - t0) as f64 / 1000.0;
+    let (wakes, requests) = ((s1 - s0) as f64 / secs, (r1 - r0) as f64 / secs);
+    let notes = fake.notes();
+    eprintln!("grant {} KB, dsp {} KB: the engine woke {wakes:.2}/s, the platform asked {requests:.2}/s", grant / 1024, dsp / 1024);
+    assert_eq!(fake.starved_ms(), 0, "never out of music: {notes:?}");
+    assert!(!notes.iter().any(|n| n.contains("given up")), "{notes:?}");
+    assert!(rig.engine.status().offloaded, "{:?}", rig.engine.status());
+    rig.engine.stop();
+    Some((wakes, requests))
+}
+
+/// The engine wakes for the platform's word that the track has room, not on a timer of its own guessed
+/// from the bytes the track holds: on a track of 32 or 64 KB it wakes as often as the platform asks, and
+/// with a DSP that buffers seconds on its own, as rarely as that lets it.
+#[test]
+fn on_a_small_grant_the_engine_wakes_only_when_the_platform_asks() {
+    let mut measured = Vec::new();
+    for (grant, dsp) in [(KB32, 0), (KB32, DSP), (KB64, 0), (KB64, DSP)] {
+        let Some((wakes, requests)) = wakes_on_a_small_grant(grant, dsp) else { return };
+        measured.push((grant, dsp, wakes, requests));
+    }
+    for (grant, dsp, wakes, requests) in measured {
+        assert!(wakes <= requests * 1.1 + 0.05, "grant {grant}, dsp {dsp}: {wakes:.2} wakes/s for {requests:.2} requests/s");
+        if dsp > 0 {
+            assert!(wakes < 0.5, "grant {grant} with a DSP: {wakes:.2} wakes/s");
+        }
+    }
+}
+
+/// The tester's Galaxy S21 FE with the screen off: its timestamp stood for 2.8 s (and its play head with
+/// it) while the chip played from its own buffer, without asking for more, and the engine took that for
+/// a stall. It is not one: the music plays on the chip, and the ear follows it again once the count
+/// moves. Here the count stands for five seconds, longer than the tester saw.
+fn screen_off_on_a_32_kb_track(head_too: bool) {
+    let d = dir();
+    let secs = 40;
+    let Some((rig, fake)) = two_on_a_small_grant(&d, secs, KB32, DSP) else { return };
+    assert!(rig.time.until(Duration::from_secs(40), || fake.0.lock().head >= 20 * 44_100), "on the chip: {:?}", fake.notes());
+    {
+        let mut c = fake.0.lock();
+        let at = c.head;
+        c.frozen_stamp = Some(at);
+        if head_too {
+            c.frozen_head = Some(at);
+        }
+    }
+    let requests = fake.0.lock().requests;
+    rig.run(5_000);
+    {
+        let mut c = fake.0.lock();
+        c.frozen_stamp = None;
+        c.frozen_head = None;
+    }
+    // The chip played on through it (and whether it asked for more meanwhile is the platform's).
+    let asked = fake.0.lock().requests - requests;
+    let s = rig.engine.status();
+    assert!(s.offloaded, "still on the chip after the count stood 5 s ({asked} requests meanwhile): {s:?} {:?}", fake.notes());
+    plays_through_on_a_small_grant(&rig, &fake, secs);
+    rig.engine.stop();
+}
+
+#[test]
+fn a_timestamp_standing_for_seconds_with_the_screen_off_on_a_32_kb_track_is_no_stall() {
+    screen_off_on_a_32_kb_track(false);
+}
+
+#[test]
+fn a_timestamp_and_play_head_standing_for_seconds_with_the_screen_off_on_a_32_kb_track_is_no_stall() {
+    screen_off_on_a_32_kb_track(true);
+}
+
+/// Both songs play through on a small track, to the end of the queue, on the chip all along.
+fn plays_through_on_a_small_grant(rig: &Rig, fake: &Fake, secs: u32) {
+    let ended = rig.time.until(Duration::from_secs(2 * secs as u64 + 20), || rig.events.lock().contains(&Event::State(State::Ended)));
+    let notes = fake.notes();
+    assert!(ended, "{:?} {notes:?}", rig.engine.status());
+    assert!(rig.heard_song("b"), "{:?}", rig.events.lock());
+    assert_eq!(fake.0.lock().head, 2 * secs as u64 * 44_100, "every frame of both songs played: {notes:?}");
+    assert_eq!(fake.starved_ms(), 0, "never out of music: {notes:?}");
+    assert_eq!(opens(fake), 1, "one track for both");
+    assert!(rig.card.opened.lock().is_empty(), "the CPU's output was never opened");
+    assert!(!notes.iter().any(|n| n.contains("given up")), "{notes:?}");
+}
+
+/// A chip that really stops (it plays nothing and asks for nothing) is given up, and the CPU takes the
+/// song over where the chip's count last put the ear: never ahead of it, whatever the clock says.
+#[test]
+fn a_chip_that_really_stalls_hands_the_song_to_the_cpu_where_the_chip_stopped() {
+    let d = dir();
+    let Some((rig, fake)) = two_on_a_small_grant(&d, 60, KB32, DSP) else { return };
+    assert!(rig.time.until(Duration::from_secs(40), || fake.0.lock().head >= 20 * 44_100), "on the chip: {:?}", fake.notes());
+    rig.run(300);
+    let stopped_ms = {
+        let mut c = fake.0.lock();
+        c.stalled = true;
+        (c.head * 1000 / 44_100) as i64
+    };
+    let took = rig.time.until(Duration::from_secs(60), || !rig.engine.status().offloaded);
+    let notes = fake.notes();
+    assert!(took, "the CPU took over: {:?} {notes:?}", rig.engine.status());
+    let s = rig.engine.status();
+    assert_eq!(s.index, Some(0), "{s:?}");
+    // At the chip's place, a moment back at most: never the clock's (which ran on by the whole wait).
+    assert!(s.position_ms <= stopped_ms + 50 && s.position_ms >= stopped_ms - 1_000, "the CPU at {} ms, the chip stopped at {stopped_ms} ms: {notes:?}", s.position_ms);
+    let given_up = notes.iter().find(|n| n.starts_with("offload given up")).cloned().unwrap_or_default();
+    assert!(given_up.contains("asked for nothing") && given_up.contains("where the chip"), "{notes:?}");
+    rig.engine.stop();
+}
+
+/// A chip that presents the last moments of what it holds only once more comes (or the end of stream is
+/// said after them), as the tester's S21 FE seemed to at the end of a song: the next song is written
+/// long before the one playing runs out, so the chip is never left waiting for it.
+#[test]
+fn a_chip_that_holds_back_the_last_moments_gets_the_next_song_before_it_needs_it() {
+    let d = dir();
+    let secs = 30;
+    let Some((rig, fake)) = two_on_a_small_grant(&d, secs, KB32, DSP) else { return };
+    fake.0.lock().holds_back = 38_235;
+    plays_through_on_a_small_grant(&rig, &fake, secs);
+    rig.engine.stop();
+}
+
+/// The engine lets the CPU sleep while the chip plays from a small track fed on the platform's word,
+/// and keeps it awake where its own work is: the start, the few seconds before the ear reaches the next
+/// song (its event comes on time, with the chip asleep in between), and the end of the music.
+#[test]
+fn the_engine_lets_the_cpu_sleep_while_the_chip_plays_and_keeps_it_awake_for_its_own_work() {
+    let d = dir();
+    let secs = 60;
+    let Some((rig, fake)) = two_on_a_small_grant(&d, secs, KB32, DSP) else { return };
+    // Where the CPU was kept awake, in ms of the test's clock, and where b's song event came.
+    let (mut awake_ms, mut last) = (0i64, (rig.now_ms(), rig.engine.status().awake));
+    let mut b_said = None;
+    let mut awake_at = Vec::new();
+    let ended = rig.time.until(Duration::from_secs(2 * secs as u64 + 20), || {
+        let now = rig.now_ms();
+        let awake = rig.engine.status().awake;
+        if last.1 {
+            awake_ms += now - last.0;
+        }
+        if awake && !last.1 {
+            awake_at.push(fake.0.lock().head * 1000 / 44_100);
+        }
+        last = (now, awake);
+        if b_said.is_none() && rig.heard_song("b") {
+            b_said = Some(fake.0.lock().head * 1000 / 44_100);
+        }
+        rig.events.lock().contains(&Event::State(State::Ended))
+    });
+    let notes = fake.notes();
+    assert!(ended, "{:?} {notes:?}", rig.engine.status());
+    assert_eq!(fake.starved_ms(), 0, "{notes:?}");
+    assert!(!notes.iter().any(|n| n.contains("given up")), "{notes:?}");
+    let total = rig.now_ms();
+    eprintln!("the CPU kept awake {awake_ms} ms of {total} ms, from {awake_at:?} ms of the chip's music");
+    // Two minutes of music: awake for the start, a few seconds before b and before the end, no more.
+    assert!(awake_ms * 100 / total <= 15, "awake {awake_ms} ms of {total} ms, from {awake_at:?} (ms of the chip's music)");
+    assert!(awake_at.iter().any(|&ms| (secs as u64 * 1000 - 8_000..secs as u64 * 1000).contains(&ms)), "awake before b: {awake_at:?}");
+    // b's event came as the chip reached it, not at some later wake.
+    let b = b_said.expect("b said");
+    assert!((secs as u64 * 1000..=secs as u64 * 1000 + 50).contains(&b), "b said at {b} ms of the chip's music");
+    // Said as events too, for a platform to take its lock by.
+    let said: Vec<bool> = rig.events.lock().iter().filter_map(|e| if let Event::Awake(a) = e { Some(*a) } else { None }).collect();
+    assert!(said.len() >= 4 && said.windows(2).all(|w| w[0] != w[1]) && said[0] == false, "{said:?}");
+    rig.engine.stop();
+}
+
+/// On the CPU the engine never lets it sleep: its own bursts feed the output.
+#[test]
+fn on_the_cpu_the_engine_keeps_the_cpu_awake() {
+    let d = dir();
+    let Some((rig, _fake)) = two_on_a_small_grant(&d, 20, KB32, DSP) else { return };
+    rig.engine.set_settings(Settings::default());
+    assert!(rig.wait(10, |r| !r.engine.status().offloaded && r.card.heard.lock().len() > 44_100 * 2), "{:?}", rig.engine.status());
+    rig.events.lock().clear();
+    rig.run(5_000);
+    assert!(rig.engine.status().awake);
+    assert!(!rig.events.lock().iter().any(|e| matches!(e, Event::Awake(false))), "{:?}", rig.events.lock());
+    rig.engine.stop();
 }

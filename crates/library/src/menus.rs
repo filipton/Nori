@@ -3,6 +3,7 @@
 //! action, and do what the action names. Made once each time a menu opens.
 
 use nori_model::Song;
+use nori_settings::settings::SwipeAction;
 
 /// Something the song menu can do. The client draws one icon per kind, words it and does what it says.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,16 +135,16 @@ pub enum RowSwipeAct {
     Download,
 }
 
-/// The swipe set in the settings as stored (0 nothing, 1 add to queue, 2 play next, 3 favourite,
-/// 4 download), on a song whose heart is `starred`; None when that side does nothing.
+/// What the swipe set in the settings does on a song whose heart is `starred`; None when that side does
+/// nothing.
 #[cfg_attr(feature = "ffi", uniffi::export)]
-pub fn row_swipe(setting: u32, starred: bool) -> Option<RowSwipeAct> {
+pub fn row_swipe(setting: SwipeAction, starred: bool) -> Option<RowSwipeAct> {
     match setting {
-        1 => Some(RowSwipeAct::Queue),
-        2 => Some(RowSwipeAct::PlayNext),
-        3 => Some(RowSwipeAct::Favourite { on: !starred }),
-        4 => Some(RowSwipeAct::Download),
-        _ => None,
+        SwipeAction::None => None,
+        SwipeAction::Queue => Some(RowSwipeAct::Queue),
+        SwipeAction::PlayNext => Some(RowSwipeAct::PlayNext),
+        SwipeAction::Favourite => Some(RowSwipeAct::Favourite { on: !starred }),
+        SwipeAction::Download => Some(RowSwipeAct::Download),
     }
 }
 
@@ -159,11 +160,12 @@ pub enum DownloadGlyph {
 }
 
 /// A row's download mark: this session's phase for the song when it has one (as `download_phase`: 0
-/// waiting, 1 downloading, 2 failed, 3 done; -1 none), else whether it is downloaded or in the queue.
+/// waiting, 1 downloading, 2 failed, 3 done, 4 and 5 saved and processing; -1 none), else whether it is
+/// downloaded or in the queue.
 #[cfg_attr(feature = "ffi", uniffi::export)]
 pub fn download_glyph(phase: i32, downloaded: bool, pending: bool) -> DownloadGlyph {
     match phase {
-        3 => DownloadGlyph::Done,
+        3..=5 => DownloadGlyph::Done,
         2 => DownloadGlyph::Failed,
         0 | 1 => DownloadGlyph::Ring,
         _ if downloaded => DownloadGlyph::Done,
@@ -262,12 +264,12 @@ mod tests {
 
     #[test]
     fn a_row_swipe_says_what_letting_go_does() {
-        assert_eq!(row_swipe(0, false), None);
-        assert_eq!(row_swipe(1, false), Some(RowSwipeAct::Queue));
-        assert_eq!(row_swipe(2, true), Some(RowSwipeAct::PlayNext));
-        assert_eq!(row_swipe(3, true), Some(RowSwipeAct::Favourite { on: false }));
-        assert_eq!(row_swipe(3, false), Some(RowSwipeAct::Favourite { on: true }));
-        assert_eq!(row_swipe(4, false), Some(RowSwipeAct::Download));
+        assert_eq!(row_swipe(SwipeAction::None, false), None);
+        assert_eq!(row_swipe(SwipeAction::Queue, false), Some(RowSwipeAct::Queue));
+        assert_eq!(row_swipe(SwipeAction::PlayNext, true), Some(RowSwipeAct::PlayNext));
+        assert_eq!(row_swipe(SwipeAction::Favourite, true), Some(RowSwipeAct::Favourite { on: false }));
+        assert_eq!(row_swipe(SwipeAction::Favourite, false), Some(RowSwipeAct::Favourite { on: true }));
+        assert_eq!(row_swipe(SwipeAction::Download, false), Some(RowSwipeAct::Download));
     }
 
     #[test]

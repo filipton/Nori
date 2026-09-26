@@ -45,7 +45,7 @@ struct Args {
     /// Crossfade between songs of one album played in order too (the setting keeps them gapless).
     mix_albums: bool,
     /// ReplayGain: off, track, album or auto (the setting's own numbering, 0 to 3).
-    replay_gain: Option<i32>,
+    replay_gain: Option<nori_core::settings::GainMode>,
     /// High quality output: float from the decoder to the device (or the file) when it takes it.
     hi_res: bool,
     /// Download the songs found before playing them.
@@ -72,8 +72,9 @@ fn usage() -> ! {
 }
 
 /// A ReplayGain mode as the setting numbers it.
-fn gain_mode(v: &str) -> Option<i32> {
-    ["off", "track", "album", "auto"].iter().position(|m| *m == v).map(|m| m as i32)
+fn gain_mode(v: &str) -> Option<nori_core::settings::GainMode> {
+    use nori_core::settings::GainMode;
+    [("off", GainMode::Off), ("track", GainMode::Track), ("album", GainMode::Album), ("auto", GainMode::Auto)].into_iter().find(|(n, _)| *n == v).map(|(_, m)| m)
 }
 
 fn args(argv: Vec<String>) -> Args {
@@ -340,6 +341,7 @@ pub fn main(argv: Vec<String>) {
                 Event::Bridge => println!("stopped: the network is gone"),
                 Event::Mixing(on) => println!("{}", if on { "mixing" } else { "mixed" }),
                 Event::Placed { index, ms } => println!("  {} at {} (another path)", shown.title(index), clock(ms)),
+                Event::Awake(_) => {}
             }
         }
     });

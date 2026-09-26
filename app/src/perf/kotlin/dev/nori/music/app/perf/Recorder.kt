@@ -271,6 +271,11 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
         handler.post { note(t, PerfNote.Error(message)) }
     }
 
+    override fun wakeLock(held: Boolean) {
+        val t = System.currentTimeMillis()
+        handler.post { note(t, PerfNote.WakeLock(held)) }
+    }
+
     override fun tuning(on: Boolean) {
         val t = System.currentTimeMillis()
         handler.post { note(t, PerfNote.Tuning(on)) }
@@ -300,7 +305,7 @@ internal class Recorder(private val app: Application) : PerfHooks.Recorder, Play
             status == CoverPixels.BAD_BITMAP -> "no Bitmap to draw into"
             else -> "unreadable ($status)"
         }
-        android.util.Log.i("nori", "cover: $which did not load: $why; " + if (again) "asking again in ${dev.nori.music.app.ui.CoverFetch.RETRY_MS} ms" else "the placeholder stays")
+        dev.nori.music.NoriLog.i("cover: $which did not load: $why; " + if (again) "asking again in ${dev.nori.music.app.ui.CoverFetch.RETRY_MS} ms" else "the placeholder stays")
     }
 
     override fun lyricsShown(songId: String) {

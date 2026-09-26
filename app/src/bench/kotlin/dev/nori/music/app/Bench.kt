@@ -40,8 +40,8 @@ object Bench {
         // allocates nothing.
         val say = dev.nori.music.app.ui.Say.current
         val swipes = arrayOf(dev.nori.music.ffi.library.RowSwipeAct.Queue, dev.nori.music.ffi.library.RowSwipeAct.PlayNext, dev.nori.music.ffi.library.RowSwipeAct.Download)
-        val rows = dev.nori.music.settings.HomeRow.entries.toTypedArray()
-        val kinds = dev.nori.music.settings.BandKind.entries.toTypedArray()
+        val rows = dev.nori.music.ffi.settings.HomeRow.entries.toTypedArray()
+        val kinds = dev.nori.music.ffi.model.EqKind.entries.toTypedArray()
         run(out, "say rowSwipe", 200_000) { i -> sink += say.rowSwipe(swipes[i % 3]).length }
         run(out, "say homeRow", 200_000) { i -> sink += say.homeRow(rows[i % rows.size]).length }
         run(out, "say bandKind", 200_000) { i -> sink += say.bandKind(kinds[i % kinds.size]).length }

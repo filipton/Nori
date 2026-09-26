@@ -269,7 +269,7 @@ again on the next unmetered network, since it has no fetch time.
 | Storage screen: sizes, clear image cache / stream cache / downloads / index / pending | x | x | x | sizes, clears stream + covers | clear downloads and the index from here |
 | Image cache: Wi-Fi-only, size, cover quality setting | x | x | x | fixed | add |
 | Offline mode: auto / forced / "metered counts as offline"; hide unavailable | x | x | x | implicit | add |
-| Bridge with downloads while offline (park online queue, resume when back) | | | | yes | done: Prefs `bridgeOffline` (off by default); network errors jump to a download still in the queue or park the rest and play smart picks from full downloads; network callback only while bridging |
+| Bridge with downloads while offline (park online queue, resume when back) | | | | yes | done: StoredPrefs `bridgeOffline` (off by default); network errors jump to a download still in the queue or park the rest and play smart picks from full downloads; network callback only while bridging |
 | Offline write queue (stars, ratings, plays, playlist edits) | x | scrobbles | x | yes | |
 
 ## Lyrics

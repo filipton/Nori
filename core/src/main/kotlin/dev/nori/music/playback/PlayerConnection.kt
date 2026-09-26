@@ -155,7 +155,7 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
         val out = read(PlayheadJni.position(clock, now, c.isPlaying, on, c.nextMediaItemIndex, raw, shown, engine))
         if (c === controller && c.isPlaying && PlayheadJni.drifted(raw, engine) && now - reanchored > REANCHOR_GAP_MS) {
             reanchored = now
-            android.util.Log.i("nori", "seek bar: the controller ran on to $raw ms, the engine is at $engine ms: the session says its place again")
+            dev.nori.music.NoriLog.i("seek bar: the controller ran on to $raw ms, the engine is at $engine ms: the session says its place again")
             engine()?.reanchor()
         }
         if (tracePositions) android.util.Log.d("noripos", "raw=$raw engine=$engine out=$out on=$on shown=$shown heard=$heardIndex c=${c.javaClass.simpleName} t=${Thread.currentThread().name}")
@@ -398,6 +398,11 @@ class PlayerConnection(private val context: Context, private val nori: Nori) {
 
     fun skipTo(index: Int) = with { c -> c.seekToDefaultPosition(index); if (c.playbackState == Player.STATE_IDLE) c.prepare(); c.play() }
     fun remove(index: Int) = with { it.removeMediaItem(index) }
+    /** Undo of [remove]: [song] back where it was (the core's `playlist_restore`), or at [index] if the core no longer has it. */
+    fun restore(song: Song, index: Int) = with { c ->
+        c.addMediaItem(index.coerceIn(0, c.mediaItemCount), items(listOf(song)).single().restored())
+        if (c.playbackState == Player.STATE_IDLE) c.prepare()
+    }
     fun move(from: Int, to: Int) = with { it.moveMediaItem(from, to) }
     fun clear() = with { it.clearMediaItems() }
 

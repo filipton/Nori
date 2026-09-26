@@ -84,6 +84,10 @@ pub struct Stretcher {
     stage: Vec<f32>,
     /// Signalsmith Stretch's analysis hop, frames; 0 for varispeed.
     hop: f64,
+    /// Frames handed out since `configure`, and the song time they stand for (in input frames) not yet
+    /// taken by [`Stretcher::take_content`].
+    given: u64,
+    content: f64,
 }
 
 #[inline]
@@ -181,6 +185,8 @@ impl Stretcher {
             latency,
             stage: vec![0.0; MAX_OUT * ch],
             hop,
+            given: 0,
+            content: 0.0,
         }
     }
 
@@ -190,6 +196,7 @@ impl Stretcher {
         let ratio = if ratio.is_finite() { ratio.clamp(MIN_RATIO, MAX_RATIO) } else { 1.0 };
         (self.ratio0, self.hold, self.ramp, self.out_pos, self.frac) = (ratio, hold, ramp, 0, 0.0);
         (self.pend_read, self.pend_len, self.raw_pos) = (0, 0, 0);
+        (self.given, self.content) = (0, 0.0);
         self.raw.fill(0.0);
         if (ratio - 1.0).abs() < 1e-6 && ramp == 0 {
             self.state = State::Direct;
@@ -220,20 +227,44 @@ impl Stretcher {
         matches!(self.state, State::Bypass | State::Direct)
     }
 
-    /// The schedule runs on the output index the frames synthesised now will have once they leave the stretcher:
-    /// Signalsmith hands back frames it synthesised `output_latency` earlier, so the rate chosen now shows up that
-    /// much later. Indexing by what was emitted would stretch `output_latency` frames too many at the old rate.
-    fn ratio_now(&self) -> f64 {
-        let at = (self.synth + self.lead).saturating_sub(self.drop_total);
-        let r = if at < self.hold {
+    /// The song time handed out since this was last asked, in input frames: output frame `j` carries the
+    /// input at `∫ ratio` (see the module's timing contract), so a stretch of the output stands for more or
+    /// less of the song than its length. What a player counts as played must be this, not the frames.
+    pub fn take_content(&mut self) -> f64 {
+        std::mem::take(&mut self.content)
+    }
+
+    /// `n` more frames handed out: the song time they carry, the ratio each was made at summed in steps
+    /// short enough that a ramp's is exact to a fraction of a frame.
+    fn handed(&mut self, n: usize) {
+        let mut k = self.given;
+        let end = k + n as u64;
+        while k < end {
+            let step = (end - k).min(64);
+            self.content += self.clear(self.schedule(k + step / 2)) * step as f64;
+            k += step;
+        }
+        self.given = end;
+    }
+
+    /// The ratio the schedule gives output frame `at`.
+    fn schedule(&self, at: u64) -> f64 {
+        if at < self.hold {
             self.ratio0
         } else if at < self.hold + self.ramp {
             let x = (at - self.hold) as f64 / self.ramp as f64;
             self.ratio0 + (1.0 - self.ratio0) * x
         } else {
             1.0
-        };
-        self.clear(r)
+        }
+    }
+
+    /// The schedule runs on the output index the frames synthesised now will have once they leave the stretcher:
+    /// Signalsmith hands back frames it synthesised `output_latency` earlier, so the rate chosen now shows up that
+    /// much later. Indexing by what was emitted would stretch `output_latency` frames too many at the old rate.
+    fn ratio_now(&self) -> f64 {
+        let at = (self.synth + self.lead).saturating_sub(self.drop_total);
+        self.clear(self.schedule(at))
     }
 
     /// `r`, or where it is too close to 1 for the engine (see [`SIGNALSMITH_CLEAR_FRAMES`]) the nearer of 1 and the
@@ -351,12 +382,19 @@ impl Stretcher {
             self.run_block(&input[used * ch..(used + n) * ch]);
             used += n;
         }
+        self.handed(made);
         (used, made)
     }
 
     /// Frames still inside the stretcher at the end of the stream (or right after `bypassed()` turns true).
     /// Returns frames written; call again while it returns a full buffer.
     pub fn drain(&mut self, output: &mut [f32]) -> usize {
+        let made = self.drain_out(output);
+        self.handed(made);
+        made
+    }
+
+    fn drain_out(&mut self, output: &mut [f32]) -> usize {
         let ch = self.ch;
         let cap = output.len() / ch;
         let mut made = 0;
@@ -595,6 +633,46 @@ mod tests {
             let jump = tail.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
             // A 220 Hz sine at 0.3 moves at most 0.3 * 2π * 220 / 44100 = 0.0094 per sample.
             assert!(jump < 0.02, "keep_pitch {keep}: discontinuity {jump} at the hand-over");
+        }
+    }
+
+    /// What the frames handed out carry of the song, summed, is the song taken in: at the hand-over the
+    /// stretch has handed out exactly the input it consumed (the plain song follows on from there), and
+    /// part way through, what it handed out carries `∫ ratio` of it. A player counts played music by this.
+    #[test]
+    fn the_song_time_handed_out_is_the_song_taken_in() {
+        for keep in [true, false] {
+            let (rate, ratio) = (48_000usize, 1.071);
+            let mut s = Stretcher::new(rate as u32, 2, keep);
+            s.configure(ratio, 2 * rate as u64, rate as u64);
+            let x: Vec<f32> = (0..rate * 8).flat_map(|i| {
+                let v = (0.3 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / rate as f64).sin()) as f32;
+                [v, v]
+            }).collect();
+            let mut buf = vec![0f32; 2048 * 2];
+            let (mut pos, mut made, mut content) = (0, 0usize, 0.0);
+            let mut checked = false;
+            while pos < x.len() && !s.bypassed() {
+                let end = (pos + 512 * 2).min(x.len());
+                let (u, m) = s.process(&x[pos..end], &mut buf);
+                made += m;
+                content += s.take_content();
+                pos += u * 2;
+                if !checked && made >= rate {
+                    // A second into the hold: every frame out carried `ratio` frames of the song.
+                    checked = true;
+                    assert!((content - made as f64 * ratio).abs() < 2.0, "keep_pitch {keep}: {content} for {made} frames");
+                }
+            }
+            loop {
+                let m = s.drain(&mut buf);
+                content += s.take_content();
+                if m * 2 < buf.len() {
+                    break;
+                }
+            }
+            let taken = (pos / 2) as f64;
+            assert!((content - taken).abs() < 24.0, "keep_pitch {keep}: {content:.1} frames of the song handed out, {taken} taken in");
         }
     }
 

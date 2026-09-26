@@ -1,5 +1,6 @@
 package dev.nori.music.app.perf
 
+import dev.nori.music.ffi.model.GainMode
 import java.util.Locale
 
 /*
@@ -376,7 +377,7 @@ fun plan(o: Options): List<Step> {
 data class Knobs(
     val eq: Boolean, val crossfeedDb: Float, val balance: Float, val mono: Boolean, val limiter: Boolean,
     val speed: Float, val pitch: Float, val skipSilence: Boolean, val offload: Boolean, val crossfadeSec: Int, val autoMix: Boolean,
-    val replayGain: Int, val scrobble: Boolean, val autoFill: Boolean, val skipExplicit: Boolean, val previousAlwaysSkips: Boolean,
+    val replayGain: GainMode, val scrobble: Boolean, val autoFill: Boolean, val skipExplicit: Boolean, val previousAlwaysSkips: Boolean,
     val fadeMs: Int,
 )
 

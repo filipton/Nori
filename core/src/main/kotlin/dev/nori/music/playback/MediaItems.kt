@@ -80,6 +80,15 @@ fun MediaItem.queuedAs(): Hand? = mediaMetadata.extras?.getString(QUEUED)?.let {
 fun MediaItem.queued(how: Hand): MediaItem = withExtra { putString(QUEUED, how.name) }
 
 /**
+ * A song taken out of the queue and put back by its undo: the core puts it where it was - its turn under
+ * shuffle and its mark as added by hand included (nori-queue `playlist_restore`) - rather than where an
+ * insert at its index would.
+ */
+private const val RESTORED = "restored"
+fun MediaItem.isRestored(): Boolean = mediaMetadata.extras?.getBoolean(RESTORED) == true
+fun MediaItem.restored(): MediaItem = withExtra { putBoolean(RESTORED, true) }
+
+/**
  * A list already put in the order it plays (a weighted shuffle, which the player's own shuffle would
  * undo), marked on its first item so the core keeps shuffle shown while the player's is off.
  */

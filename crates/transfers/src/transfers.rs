@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
+use std::task::{Poll, Waker};
 
 use nori_model::{alog, Song};
 use parking_lot::Mutex;
@@ -36,11 +37,42 @@ pub const NEW_BATCH: i32 = 1;
 pub const DRAINED: i32 = 2;
 pub const MARKS: i32 = 4;
 
+/// How long a song may stay [`Phase::Processing`] once its audio is saved: then it is done whatever is left.
+pub const PROCESSING_MS: i64 = 30_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    Downloading = 1,
-    Failed = 2,
-    Done = 3,
+    Downloading,
+    Failed,
+    Done,
+    /// Saved, and its analysis for AutoMix (still being measured as it came) or its lyrics lookup not over yet.
+    Processing { analysing: bool, lyrics: bool },
+}
+
+impl Phase {
+    /// The number the platform gets (`download_phase`): 1 downloading, 2 failed, 3 done, 4 finding lyrics,
+    /// 5 analysing (only once no lyrics are awaited).
+    pub fn code(self) -> i32 {
+        match self {
+            Phase::Downloading => 1,
+            Phase::Failed => 2,
+            Phase::Done => 3,
+            Phase::Processing { lyrics: true, .. } => 4,
+            Phase::Processing { .. } => 5,
+        }
+    }
+
+    /// Done once nothing is left of the processing.
+    fn processing(analysing: bool, lyrics: bool) -> Phase {
+        if analysing || lyrics { Phase::Processing { analysing, lyrics } } else { Phase::Done }
+    }
+}
+
+/// What a saved song is still waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    Analysis,
+    Lyrics,
 }
 
 /// What the screens say about a song being downloaded, read once from the downloads table.
@@ -171,6 +203,11 @@ pub struct Tracker {
     /// The songs whose mark changed since the platform last asked (see [`download_marks_changed`]).
     pub changed: HashSet<String>,
     info: HashMap<String, Info>,
+    /// Songs being measured for AutoMix as their bytes come.
+    analysing: HashSet<String>,
+    /// Whoever waits for songs to leave [`Phase::Processing`] ([`processed`]), woken once a mark changed.
+    wakers: Vec<Waker>,
+    wake: bool,
     download_kbps: i32,
     speed_bps: i64,
     remaining_bytes: i64,
@@ -182,7 +219,14 @@ static TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
 
 /// The one download tracker, lent to `f`.
 pub fn with<R>(f: impl FnOnce(&mut Tracker) -> R) -> R {
-    f(TRACKER.lock().get_or_insert_with(Tracker::default))
+    let mut guard = TRACKER.lock();
+    let t = guard.get_or_insert_with(Tracker::default);
+    let r = f(t);
+    // Woken with the tracker let go: a waiter polled again at once asks it.
+    let wakers = if std::mem::take(&mut t.wake) { std::mem::take(&mut t.wakers) } else { Vec::new() };
+    drop(guard);
+    wakers.into_iter().for_each(Waker::wake);
+    r
 }
 
 /// What a song should weigh once downloaded: its length at the transcoded bitrate, or the file itself at
@@ -264,6 +308,7 @@ impl Tracker {
             Some(p) => {
                 self.marks.insert(id.to_string(), (p, now));
                 self.changed.insert(id.to_string());
+                self.wake = true;
                 if p == Phase::Done {
                     self.recent_only();
                 }
@@ -278,6 +323,7 @@ impl Tracker {
         let had = self.marks.remove(id).is_some();
         if had {
             self.changed.insert(id.to_string());
+            self.wake = true;
         }
         had
     }
@@ -334,7 +380,8 @@ pub fn followed(id: &str, state: i32, now: i64) -> i32 {
         }
         let phase = match state {
             DOWNLOADING => Some(Phase::Downloading),
-            COMPLETED => Some(Phase::Done),
+            // A provider's song has no lyrics looked up (`lyrics_for_downloads`).
+            COMPLETED => Some(Phase::processing(t.analysing.contains(&id), !id.starts_with("ext-"))),
             FAILED => Some(Phase::Failed),
             _ => None,
         };
@@ -354,6 +401,59 @@ pub fn followed(id: &str, state: i32, now: i64) -> i32 {
         }
         flags
     })
+}
+
+/// `id` is being measured for AutoMix as it comes (`on`), or that is over, stored or not: whichever,
+/// a saved song stops waiting for it.
+pub fn analysing(id: &str, on: bool) {
+    if on {
+        with(|t| t.analysing.insert(id.to_string()));
+    } else {
+        with(|t| t.analysing.remove(id));
+        work_done(id, Work::Analysis);
+    }
+}
+
+/// `work` is over for `id`, found or failed; true when its phase changed (read the marks again).
+pub fn work_done(id: &str, work: Work) -> bool {
+    with(|t| {
+        let Some(&(Phase::Processing { analysing, lyrics }, at)) = t.marks.get(id) else { return false };
+        let next = if work == Work::Analysis { Phase::processing(false, lyrics) } else { Phase::processing(analysing, false) };
+        t.mark(id, Some(next), at)
+    })
+}
+
+/// Ends the processing of every song saved [`PROCESSING_MS`] or more before `now`, whatever is left of it.
+/// Returns how long until the next one would be ended, -1 when none is processing.
+#[cfg_attr(feature = "ffi", uniffi::export)]
+pub fn download_processing_expire(now: i64) -> i64 {
+    with(|t| {
+        let due: Vec<(String, i64)> = t.marks.iter().filter(|(_, m)| matches!(m.0, Phase::Processing { .. })).map(|(id, m)| (id.clone(), m.1)).collect();
+        let mut next = -1;
+        for (id, at) in due {
+            if now - at >= PROCESSING_MS {
+                t.mark(&id, Some(Phase::Done), at);
+            } else if next < 0 || at + PROCESSING_MS - now < next {
+                next = at + PROCESSING_MS - now;
+            }
+        }
+        next
+    })
+}
+
+/// Returns once none of `ids` is processing any more.
+pub async fn processed(ids: &[String]) {
+    std::future::poll_fn(|cx| {
+        with(|t| {
+            if ids.iter().any(|id| matches!(t.marks.get(id), Some((Phase::Processing { .. }, _)))) {
+                t.wakers.push(cx.waker().clone());
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+    })
+    .await
 }
 
 /// `id` left the queue for good. Returns flags as [`followed`] does.
@@ -488,12 +588,15 @@ pub fn sections<'a, T: Clone>(pending: &'a [T], done: &'a [T], marks: &HashMap<S
     let (mut active, mut queued, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for song in pending.iter().rev() {
         match marks.get(id(song)).map(|m| m.0) {
-            Some(Phase::Downloading) => active.push(song.clone()),
+            Some(Phase::Downloading | Phase::Processing { .. }) => active.push(song.clone()),
             Some(Phase::Failed) => failed.push(song.clone()),
             Some(Phase::Done) => {}
             None => queued.push(song.clone()),
         }
     }
+    // Saved and still being processed: first, as they were the first to arrive.
+    let saved = done.iter().filter(|s| matches!(marks.get(id(s)), Some((Phase::Processing { .. }, _))));
+    active.splice(0..0, saved.cloned());
     let mut finished: Vec<(i64, &T)> = pending
         .iter()
         .chain(done.iter())
@@ -838,9 +941,9 @@ pub struct DownloadSections {
     pub finished: Vec<Song>,
 }
 
-/// A download's phase for the screen: 0 waiting (or nothing), 1 downloading, 2 failed, 3 done.
+/// A download's phase for the screen: 0 waiting (or nothing), else [`Phase::code`].
 pub fn download_phase(id: String) -> i32 {
-    with(|t| t.marks.get(&id).map_or(0, |m| m.0 as i32))
+    with(|t| t.marks.get(&id).map_or(0, |m| m.0.code()))
 }
 
 /// The ids with a phase, and each one's phase (as [`download_phase`]) and when it began.
@@ -859,7 +962,7 @@ pub fn download_marks_changed() -> DownloadMarks {
     with(|t| {
         let mut m = DownloadMarks { ids: Vec::new(), phases: Vec::new(), at: Vec::new() };
         for id in t.changed.drain() {
-            let (p, at) = t.marks.get(&id).map_or((0, 0), |(p, at)| (*p as i32, *at));
+            let (p, at) = t.marks.get(&id).map_or((0, 0), |(p, at)| (p.code(), *at));
             m.ids.push(id);
             m.phases.push(p);
             m.at.push(at);
@@ -1080,6 +1183,41 @@ mod tests {
         let pending = ["b", "a"].map(String::from);
         let [_, queued, _, finished] = sections(&pending, &[], &marks(&[("a", Phase::Done, 0)]), |s: &String| s.as_str());
         assert_eq!((queued, finished), (vec!["b".to_string()], vec!["a".to_string()]));
+    }
+
+    #[test]
+    fn a_saved_song_is_processing_until_its_analysis_and_lyrics_are_over_or_its_time_is_up() {
+        use std::future::Future;
+        let phase = |id: &str| download_phase(id.into());
+        analysing("pr-a", true);
+        followed("pr-a", DOWNLOADING, 0);
+        assert_eq!(phase("pr-a"), 1);
+        followed("pr-a", COMPLETED, 1_000);
+        assert_eq!(with(|t| t.marks["pr-a"]), (Phase::Processing { analysing: true, lyrics: true }, 1_000));
+        let ids = vec!["pr-a".to_string()];
+        let mut waiting = std::pin::pin!(processed(&ids));
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(phase("pr-a"), 4, "finding lyrics");
+        // The lookup failed: no lyrics, and still being analysed.
+        assert!(work_done("pr-a", Work::Lyrics));
+        assert_eq!(phase("pr-a"), 5, "analysing");
+        analysing("pr-a", false);
+        assert_eq!(with(|t| t.marks["pr-a"]), (Phase::Done, 1_000), "done, where it was saved");
+        assert!(waiting.as_mut().poll(&mut cx).is_ready());
+        assert!(!work_done("pr-a", Work::Lyrics), "done stays done");
+
+        followed("ext-pr-b", COMPLETED, 0);
+        assert_eq!(phase("ext-pr-b"), 3, "a provider's song not measured has nothing to wait for");
+
+        // A lookup that never answers: the song is done once its time is up all the same.
+        followed("pr-c", COMPLETED, 1_000_000);
+        assert_eq!(download_processing_expire(1_010_000), PROCESSING_MS - 10_000);
+        assert_eq!(phase("pr-c"), 4);
+        let saved = ["pr-c".to_string()];
+        assert_eq!(sections(&[], &saved, &with(|t| t.marks.clone()), |s: &String| s.as_str())[0], ["pr-c"], "listed among the active ones");
+        assert_eq!(download_processing_expire(1_000_000 + PROCESSING_MS), -1);
+        assert_eq!(phase("pr-c"), 3);
     }
 
     #[test]

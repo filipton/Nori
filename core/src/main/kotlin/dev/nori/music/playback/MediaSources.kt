@@ -26,7 +26,7 @@ import dev.nori.music.ffi.Client
 import dev.nori.music.ffi.net.StreamQuality
 import dev.nori.music.net.Http
 import dev.nori.music.settings.Settings
-import dev.nori.music.settings.Quality
+import dev.nori.music.ffi.settings.SavedQuality
 import java.io.File
 import java.io.IOException
 
@@ -179,6 +179,32 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     }.getOrDefault(false)
 
     /**
+     * What the stream cache keeps of [key], in words, for the log and the perf build's report: whether it has
+     * an entry, the length its metadata gives, the bytes cached and in which spans, whether that counts as
+     * whole and whether someone writes it now.
+     */
+    fun cacheWords(key: String): String = runCatching {
+        val length = ContentMetadata.getContentLength(streamCache.getContentMetadata(key))
+        val spans = streamCache.getCachedSpans(key).toList()
+        if (spans.isEmpty() && length == C.LENGTH_UNSET.toLong()) return@runCatching "$key: no entry"
+        val shown = spans.take(8).joinToString(", ") { "${it.position}+${it.length}" } + if (spans.size > 8) ", and ${spans.size - 8} more" else ""
+        val said = if (length == C.LENGTH_UNSET.toLong()) "unset" else length.toString()
+        "$key: metadata length $said, ${spans.sumOf { it.length }} bytes cached in ${spans.size} spans ($shown), " +
+            (if (isWhole(streamCache, key)) "whole" else "not whole") + ", " +
+            (if (beingWritten(key)) "being written" else "nobody writing it")
+    }.getOrElse { "$key: could not be read: $it" }
+
+    /**
+     * [key]'s stream cache entry goes (the Rust player makes a song that played nothing again from scratch,
+     * and what the cache kept of it may be why): what it kept is answered first, in words. A download stays.
+     */
+    fun forgetStream(key: String): String {
+        val kept = cacheWords(key)
+        runCatching { streamCache.removeResource(key) }.onFailure { return "$kept; it would not go: $it" }
+        return kept
+    }
+
+    /**
      * The same sources as [cached], over a network whose every OkHttp call [ticket] can cancel: made per
      * request the Rust player may call off, a few builders and nothing else.
      */
@@ -248,7 +274,7 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
             else -> return@runCatching
         }
         streamCache.applyContentMetadataMutations(key, change)
-        android.util.Log.i("nori", "stream cache: $key ends at ${if (whole >= 0) whole else "an unknown byte"}, not the $had first promised")
+        dev.nori.music.NoriLog.i("stream cache: $key ends at ${if (whole >= 0) whole else "an unknown byte"}, not the $had first promised")
     }
 
     /**
@@ -266,7 +292,7 @@ class MediaSources(context: Context, private val clientOf: () -> Client, private
     /** The key [resolve] would give a song that is not downloaded, without building its URL. */
     fun streamKey(id: String): String = settings.value.let { client.streamKey(id, http.metered, it.wifi.ffi(), it.mobile.ffi()) }
 
-    private fun Quality.ffi() = StreamQuality(bitRate.coerceAtLeast(0).toUInt(), format)
+    private fun SavedQuality.ffi() = StreamQuality(bitRate.coerceAtLeast(0).toUInt(), format)
 
     fun downloadKey(id: String) = dev.nori.music.ffi.net.downloadKey(id)
 

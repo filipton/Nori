@@ -40,6 +40,20 @@ class CoverFetchTest {
             failures += Triple(url, status, again)
         }
 
+        val backs = mutableListOf<() -> Unit>()
+
+        override fun whenBack(run: () -> Unit): CoverFetch.Handle {
+            backs += run
+            return CoverFetch.Handle { backs.remove(run) }
+        }
+
+        /** The network comes back: everyone waiting for it is run, once. */
+        fun networkBack() {
+            val due = backs.toList()
+            backs.clear()
+            due.forEach { it() }
+        }
+
         /** The load of [url] (the latest one) answers, unless it was cancelled: then, like CoverLoader.Request, nothing is handed on. */
         fun answer(url: String, picture: String?, status: Int = if (picture != null) CoverPixels.OK else CoverPixels.NETWORK + 4) {
             val l = loads.last { it.url == url && !it.answered }
@@ -165,5 +179,63 @@ class CoverFetchTest {
         none.want(600, 600)
         assertNull(none.picture)
         assertTrue(fake.loads.isEmpty())
+    }
+
+    /** How a row's cover says what it is doing, as [CoverImage] keeps it: loading, a picture, or the plate's note. */
+    private class Row(val fake: Fake, url: String) {
+        var state = "loading"
+        var picture: String? = null
+        val fetch = CoverFetch(url, fake, null, shown = { picture = it; state = "picture" }, missing = { state = "plate" })
+    }
+
+    @Test fun `offline a cover settles on the plate at once, and still comes if the try again brings it`() {
+        val fake = Fake()
+        val row = Row(fake, "P")
+        row.fetch.want(300, 300)
+        fake.answer("P", null, CoverPixels.NETWORK + 1)
+        assertEquals("no shimmer through the try again: the note is shown now", "plate", row.state)
+        assertTrue("the try again still runs", row.fetch.asking)
+        fake.advance(CoverFetch.RETRY_MS)
+        fake.answer("P", "picture P")
+        assertEquals("picture", row.state)
+        assertEquals("picture P", row.picture)
+        assertTrue("nobody waits for the network once it came", fake.backs.isEmpty())
+    }
+
+    @Test fun `a view that gave up asks again when the network comes back, and a failure it cannot mend never does`() {
+        val fake = Fake()
+        val row = Row(fake, "P")
+        row.fetch.want(300, 300)
+        fake.answer("P", null, CoverPixels.NETWORK + 2)
+        fake.advance(CoverFetch.RETRY_MS)
+        fake.answer("P", null, CoverPixels.NETWORK + 2)
+        assertEquals("plate", row.state)
+        assertFalse("nothing is on its way, nothing ticks", row.fetch.asking)
+        assertEquals(1, fake.backs.size)
+        fake.networkBack()
+        assertTrue("asked again with the network", fake.pending("P"))
+        fake.answer("P", "picture P")
+        assertEquals("picture", row.state)
+        // It failed once more, and gets its try again as a fresh start would.
+        val again = Row(fake, "Q")
+        again.fetch.want(300, 300)
+        fake.answer("Q", null, CoverPixels.HTTP + 503)
+        fake.advance(CoverFetch.RETRY_MS)
+        fake.answer("Q", null, CoverPixels.HTTP + 503)
+        assertEquals("a server's failure settles after its try again", "plate", again.state)
+        again.fetch.stop()
+        assertTrue("a view that has gone waits for nothing", fake.backs.isEmpty())
+        val heic = Row(fake, "H")
+        heic.fetch.want(300, 300)
+        fake.answer("H", null, CoverPixels.UNKNOWN)
+        assertEquals("plate", heic.state)
+        assertTrue(fake.backs.isEmpty())
+        fake.networkBack()
+        assertFalse(fake.pending("H"))
+    }
+
+    @Test fun `only the ways of not reaching the server at all count as offline`() {
+        for (kind in 0..3) assertTrue(CoverFetch.unreachable(CoverPixels.NETWORK + kind))
+        for (status in listOf(CoverPixels.NETWORK + 4, CoverPixels.CLOSED, CoverPixels.HTTP + 404, CoverPixels.UNKNOWN)) assertFalse(CoverFetch.unreachable(status))
     }
 }

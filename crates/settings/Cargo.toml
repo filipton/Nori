@@ -25,6 +25,8 @@ nori-db = { path = "../db" }
 nori-automix = { path = "../automix" }
 nori-player = { path = "../player" }
 nori-look = { path = "../look" }
+# The settings table, read off `StoredPrefs`' fields.
+nori-settings-derive = { path = "../settings-derive" }
 
 [dev-dependencies]
 nori-testdir = { path = "../testdir" }

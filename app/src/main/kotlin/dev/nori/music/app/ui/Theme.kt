@@ -13,19 +13,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import dev.nori.music.settings.Prefs
-import dev.nori.music.settings.ThemeMode
+import dev.nori.music.ffi.settings.StoredPrefs
+import dev.nori.music.ffi.settings.ThemeMode
 
 /**
  * Material You: the wallpaper's colours on Android 12+, otherwise a scheme grown from one accent colour.
  * AMOLED replaces every dark surface with true black, so those pixels are simply off.
  */
 @Composable
-fun NoriTheme(prefs: Prefs, content: @Composable () -> Unit) {
+fun NoriTheme(prefs: StoredPrefs, content: @Composable () -> Unit) {
     val context = LocalContext.current
     val system = isSystemInDarkTheme()
     // Light, dark or the phone's: the core's rule (nori_look::theme::is_dark), the same for every screen.
-    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.settings.themeIsDark(prefs.theme.ordinal, system) }
+    val dark = remember(prefs.theme, system) { dev.nori.music.ffi.settings.themeIsDark(prefs.theme, system) }
     val dynamic = prefs.dynamicColor && Build.VERSION.SDK_INT >= 31
     val scheme = remember(dark, dynamic, prefs.accent, prefs.amoled) {
         val base = when {

@@ -103,6 +103,7 @@ pub extern "system" fn JNI_OnLoad(vm: jni::JavaVM, _: *mut c_void) -> jint {
     for class in CLASSES {
         register(&mut env, class);
     }
+    panics();
     watch();
     nori_core::heap::Counting::installed();
     nori_perf::memory::install(engine_memory);
@@ -126,8 +127,39 @@ fn engine_memory() -> nori_perf::memory::EngineMemory {
 fn watch() {
     nori_engine::watch::install(nori_engine::watch::Hook {
         wanted: nori_perf::invariants::on,
-        seen: |s| nori_perf::invariants::engine_seen(s.now_ms, s.playing, s.offloaded, s.index, s.position_ms, s.in_output_ms, &s.state),
+        seen: |s| {
+            nori_perf::invariants::engine_seen(&nori_perf::invariants::EngineLook {
+                now_ms: s.now_ms,
+                playing: s.playing,
+                offloaded: s.offloaded,
+                index: s.index,
+                id: s.id.as_deref(),
+                position_ms: s.position_ms,
+                in_output_ms: s.in_output_ms,
+                quiet_ms: s.quiet_ms,
+                output_open: s.output_open,
+                state: &s.state,
+            })
+        },
     });
+    // A silent break says what media3's stream cache keeps of the song.
+    nori_perf::invariants::describe_disk(player::disk_words);
+}
+
+/// Every panic, on any thread of the library, caught or not, is said in the app's log with where it
+/// happened, and to the perf build's watch as a break. Android sends a Rust thread's standard error
+/// nowhere: before this, the engine's thread could end in a panic with not a line said anywhere (the
+/// S22's silent classical playlist, 2026-09-26).
+fn panics() {
+    let before = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("a thread").to_string();
+        let what = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic with no message".into());
+        let at = info.location().map_or_else(|| "an unknown place".to_string(), |l| format!("{}:{}", l.file(), l.line()));
+        nori_core::alog::info(&format!("panic on {thread}: {what}, at {at}\n{}", std::backtrace::Backtrace::force_capture()));
+        nori_perf::invariants::panicked(&thread, &format!("{what}, at {at}"));
+        before(info);
+    }));
 }
 
 /// Whatever Java threw is written to the log and cleared: a thread of ours has nobody to throw it to.

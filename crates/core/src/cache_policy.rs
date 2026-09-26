@@ -292,8 +292,20 @@ impl Client {
     /// answer that no longer parses is not shown, and the server is asked. Reads that are never stored
     /// come back empty and not fresh.
     pub fn read_stored(&self, read: Read) -> NetResult<Stored> {
+        let fresh_ms = spec(read.clone()).fresh_ms;
+        self.stored_for(read, fresh_ms)
+    }
+
+    /// [`Client::read_stored`] with its own measure of young enough: fresh when stored less than
+    /// `fresh_ms` ago, whatever the read's usual time is (a downloaded song's lyrics stand for longer).
+    pub fn read_stored_within(&self, read: Read, fresh_ms: i64) -> NetResult<Stored> {
+        let stored = spec(read.clone()).fresh_ms.is_some();
+        self.stored_for(read, stored.then_some(fresh_ms))
+    }
+
+    fn stored_for(&self, read: Read, fresh_ms: Option<i64>) -> NetResult<Stored> {
         let sp = spec(read);
-        let Some(fresh_ms) = sp.fresh_ms else { return Ok(Stored { page: None, digest: None, fresh: false }) };
+        let Some(fresh_ms) = fresh_ms else { return Ok(Stored { page: None, digest: None, fresh: false }) };
         let k = key(sp.endpoint, &self.scoped(sp.endpoint, sp.params));
         let row: Option<(Vec<u8>, i64)> = {
             let c = self.core.db.lock();
